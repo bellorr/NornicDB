@@ -93,9 +93,11 @@ func TestHandleGPUEnable(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	server.buildRouter().ServeHTTP(recorder, req)
 
-	// Expect failure since no GPU is available in test environment
-	if recorder.Code != http.StatusInternalServerError {
-		t.Errorf("expected status 500 (no GPU available), got %d", recorder.Code)
+	// GPU may or may not be available depending on test environment
+	// On Apple Silicon: 200 (success)
+	// On machines without GPU: 500 (no GPU available)
+	if recorder.Code != http.StatusOK && recorder.Code != http.StatusInternalServerError {
+		t.Errorf("expected status 200 (GPU available) or 500 (no GPU), got %d", recorder.Code)
 	}
 }
 

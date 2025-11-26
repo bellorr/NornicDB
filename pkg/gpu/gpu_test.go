@@ -53,9 +53,15 @@ func TestNewManager(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewManager() error = %v", err)
 		}
-		// Should fall back to disabled since no GPU available
+		// Either GPU is enabled (if available) or gracefully disabled
+		// This test verifies the fallback mechanism works in both scenarios
 		if m.IsEnabled() {
-			t.Error("should fall back to disabled without GPU")
+			t.Log("GPU available and enabled")
+			if m.Device() == nil {
+				t.Error("should have device when enabled")
+			}
+		} else {
+			t.Log("No GPU available, running in CPU fallback mode")
 		}
 	})
 
@@ -914,4 +920,786 @@ func BenchmarkEmbeddingIndexAdd(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		ei.Add(string(rune(i%65536)), vec)
 	}
+}
+
+// =============================================================================
+// Additional tests for 90%+ coverage
+// =============================================================================
+
+func TestEmbeddingIndexGPUMemoryUsage(t *testing.T) {
+	m, _ := NewManager(nil)
+	config := &EmbeddingIndexConfig{Dimensions: 1024}
+	ei := NewEmbeddingIndex(m, config)
+
+	// GPUMemoryUsageMB should be 0 when not synced
+	mb := ei.GPUMemoryUsageMB()
+	if mb != 0 {
+		t.Errorf("expected 0 GPU memory, got %f", mb)
+	}
+}
+
+func TestEmbeddingIndexRelease(t *testing.T) {
+	m, _ := NewManager(nil)
+	config := &EmbeddingIndexConfig{Dimensions: 3}
+	ei := NewEmbeddingIndex(m, config)
+
+	ei.Add("a", []float32{1, 0, 0})
+
+	// Release should be safe to call
+	ei.Release()
+
+	// Double release should also be safe
+	ei.Release()
+}
+
+func TestEmbeddingIndexClearWithData(t *testing.T) {
+	m, _ := NewManager(nil)
+	config := &EmbeddingIndexConfig{Dimensions: 3}
+	ei := NewEmbeddingIndex(m, config)
+
+	ei.Add("a", []float32{1, 0, 0})
+	ei.Add("b", []float32{0, 1, 0})
+	ei.Add("c", []float32{0, 0, 1})
+
+	if ei.Count() != 3 {
+		t.Fatalf("expected 3 embeddings, got %d", ei.Count())
+	}
+
+	ei.Clear()
+
+	if ei.Count() != 0 {
+		t.Errorf("expected 0 after clear, got %d", ei.Count())
+	}
+
+	// Should be able to add after clear
+	ei.Add("d", []float32{1, 1, 1})
+	if ei.Count() != 1 {
+		t.Errorf("expected 1 after add, got %d", ei.Count())
+	}
+}
+
+func TestNewManagerWithEnabledNoFallback(t *testing.T) {
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: false,
+	}
+
+	// This test depends on GPU availability
+	m, err := NewManager(config)
+	if err != nil {
+		// Expected on systems without GPU
+		if err != ErrGPUNotAvailable {
+			t.Errorf("expected ErrGPUNotAvailable, got %v", err)
+		}
+	} else {
+		// GPU is available
+		if !m.IsEnabled() {
+			t.Error("should be enabled when GPU is available")
+		}
+	}
+}
+
+func TestProbeBackendUnknown(t *testing.T) {
+	// Test that unknown backend returns error
+	_, err := probeBackend(Backend("unknown"), 0)
+	if err != ErrGPUNotAvailable {
+		t.Errorf("expected ErrGPUNotAvailable, got %v", err)
+	}
+}
+
+func TestDetectGPUWithPreferredBackend(t *testing.T) {
+	// Test with a non-existent preferred backend
+	config := &Config{
+		Enabled:          true,
+		PreferredBackend: Backend("nonexistent"),
+		FallbackOnError:  true,
+	}
+
+	m, _ := NewManager(config)
+	// Should either find a real GPU or gracefully disable
+	t.Logf("GPU enabled: %v", m.IsEnabled())
+}
+
+func TestVectorIndexSearchGPU(t *testing.T) {
+	// Create manager with GPU enabled
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	m, _ := NewManager(config)
+
+	vi := NewVectorIndex(m, 3)
+	vi.Add("a", []float32{1, 0, 0})
+	vi.Add("b", []float32{0, 1, 0})
+
+	// This will fall back to CPU since VectorIndex GPU isn't fully implemented
+	results, err := vi.Search([]float32{1, 0, 0}, 2)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestEmbeddingIndexSearchWithGPU(t *testing.T) {
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	m, _ := NewManager(config)
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 4}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	ei.Add("a", []float32{1, 0, 0, 0})
+	ei.Add("b", []float32{0, 1, 0, 0})
+	ei.Add("c", []float32{0.9, 0.1, 0, 0})
+
+	// Try to sync to GPU
+	if m.IsEnabled() {
+		err := ei.SyncToGPU()
+		if err != nil {
+			t.Logf("SyncToGPU() error = %v (expected if GPU kernels not loaded)", err)
+		} else {
+			// If sync succeeded, search should use GPU
+			results, err := ei.Search([]float32{1, 0, 0, 0}, 2)
+			if err != nil {
+				t.Fatalf("Search() error = %v", err)
+			}
+			if len(results) != 2 {
+				t.Errorf("expected 2 results, got %d", len(results))
+			}
+
+			stats := ei.Stats()
+			t.Logf("Stats: GPU=%d, CPU=%d", stats.SearchesGPU, stats.SearchesCPU)
+		}
+	} else {
+		// SyncToGPU should fail when disabled
+		err := ei.SyncToGPU()
+		if err != ErrGPUDisabled {
+			t.Errorf("expected ErrGPUDisabled, got %v", err)
+		}
+	}
+}
+
+func TestCosineSimilarityFlatEdgeCases(t *testing.T) {
+	t.Run("different lengths", func(t *testing.T) {
+		result := cosineSimilarityFlat([]float32{1, 0}, []float32{1, 0, 0})
+		if result != 0 {
+			t.Errorf("expected 0 for different lengths, got %f", result)
+		}
+	})
+
+	t.Run("zero vector", func(t *testing.T) {
+		result := cosineSimilarityFlat([]float32{0, 0, 0}, []float32{1, 0, 0})
+		if result != 0 {
+			t.Errorf("expected 0 for zero vector, got %f", result)
+		}
+	})
+
+	t.Run("both zero vectors", func(t *testing.T) {
+		result := cosineSimilarityFlat([]float32{0, 0, 0}, []float32{0, 0, 0})
+		if result != 0 {
+			t.Errorf("expected 0 for both zero vectors, got %f", result)
+		}
+	})
+}
+
+func TestPartialSortEdgeCases(t *testing.T) {
+	t.Run("k equals n", func(t *testing.T) {
+		scores := []float32{0.5, 0.9, 0.1}
+		indices := []int{0, 1, 2}
+
+		partialSort(indices, scores, 3)
+
+		// Should be fully sorted
+		if scores[indices[0]] != 0.9 {
+			t.Errorf("expected first score 0.9, got %f", scores[indices[0]])
+		}
+	})
+
+	t.Run("k greater than n", func(t *testing.T) {
+		scores := []float32{0.5, 0.9}
+		indices := []int{0, 1}
+
+		partialSort(indices, scores, 10) // k > n
+
+		if scores[indices[0]] != 0.9 {
+			t.Errorf("expected first score 0.9, got %f", scores[indices[0]])
+		}
+	})
+
+	t.Run("single element", func(t *testing.T) {
+		scores := []float32{0.5}
+		indices := []int{0}
+
+		partialSort(indices, scores, 1)
+
+		if indices[0] != 0 {
+			t.Errorf("expected index 0, got %d", indices[0])
+		}
+	})
+}
+
+func TestManagerEnableWithGPU(t *testing.T) {
+	m, _ := NewManager(nil) // Disabled by default
+
+	err := m.Enable()
+	if err == nil {
+		// GPU is available
+		if !m.IsEnabled() {
+			t.Error("should be enabled after Enable()")
+		}
+
+		m.Disable()
+		if m.IsEnabled() {
+			t.Error("should be disabled after Disable()")
+		}
+
+		// Can re-enable
+		err = m.Enable()
+		if err != nil {
+			t.Errorf("re-Enable() error = %v", err)
+		}
+	} else {
+		// GPU not available
+		if err != ErrGPUNotAvailable {
+			t.Errorf("expected ErrGPUNotAvailable, got %v", err)
+		}
+	}
+}
+
+func TestEmbeddingIndexSyncToGPUEmpty(t *testing.T) {
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	m, _ := NewManager(config)
+
+	if !m.IsEnabled() {
+		t.Skip("GPU not available")
+	}
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 3}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	// Sync empty index
+	err := ei.SyncToGPU()
+	if err != nil {
+		t.Errorf("SyncToGPU(empty) error = %v", err)
+	}
+}
+
+func TestAcceleratorWithPreferredBackend(t *testing.T) {
+	t.Run("prefer metal on darwin", func(t *testing.T) {
+		config := &Config{
+			Enabled:          true,
+			PreferredBackend: BackendMetal,
+			FallbackOnError:  true,
+		}
+		accel, _ := NewAccelerator(config)
+		defer accel.Release()
+
+		// On macOS should use Metal, otherwise should gracefully fallback
+		if accel.IsEnabled() {
+			if accel.Backend() != BackendMetal {
+				t.Logf("Backend is %s (may not be Metal on non-macOS)", accel.Backend())
+			}
+		}
+	})
+
+	t.Run("prefer opencl", func(t *testing.T) {
+		config := &Config{
+			Enabled:          true,
+			PreferredBackend: BackendOpenCL,
+			FallbackOnError:  true,
+		}
+		accel, _ := NewAccelerator(config)
+		defer accel.Release()
+
+		// OpenCL not implemented, should fallback
+		t.Logf("Backend: %s, Enabled: %v", accel.Backend(), accel.IsEnabled())
+	})
+
+	t.Run("prefer cuda", func(t *testing.T) {
+		config := &Config{
+			Enabled:          true,
+			PreferredBackend: BackendCUDA,
+			FallbackOnError:  true,
+		}
+		accel, _ := NewAccelerator(config)
+		defer accel.Release()
+
+		// CUDA not implemented, should fallback
+		t.Logf("Backend: %s, Enabled: %v", accel.Backend(), accel.IsEnabled())
+	})
+
+	t.Run("prefer vulkan", func(t *testing.T) {
+		config := &Config{
+			Enabled:          true,
+			PreferredBackend: BackendVulkan,
+			FallbackOnError:  true,
+		}
+		accel, _ := NewAccelerator(config)
+		defer accel.Release()
+
+		// Vulkan not implemented, should fallback
+		t.Logf("Backend: %s, Enabled: %v", accel.Backend(), accel.IsEnabled())
+	})
+}
+
+func TestGPUEmbeddingIndexSearchEmpty(t *testing.T) {
+	accel, _ := NewAccelerator(nil)
+	defer accel.Release()
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+
+	// Search on empty index
+	results, err := idx.Search([]float32{1, 0, 0}, 5)
+	if err != nil {
+		t.Fatalf("Search(empty) error = %v", err)
+	}
+	if results != nil {
+		t.Errorf("expected nil results for empty index, got %v", results)
+	}
+}
+
+func TestGPUEmbeddingIndexSearchKGreaterThanN(t *testing.T) {
+	accel, _ := NewAccelerator(nil)
+	defer accel.Release()
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+	idx.Add("a", []float32{1, 0, 0})
+	idx.Add("b", []float32{0, 1, 0})
+
+	// k > n
+	results, err := idx.Search([]float32{1, 0, 0}, 100)
+	if err != nil {
+		t.Fatalf("Search(k>n) error = %v", err)
+	}
+	if len(results) != 2 {
+		t.Errorf("expected 2 results (capped at n), got %d", len(results))
+	}
+}
+
+func TestGPUEmbeddingIndexSyncNoGPU(t *testing.T) {
+	accel, _ := NewAccelerator(nil) // GPU disabled
+	defer accel.Release()
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+	idx.Add("a", []float32{1, 0, 0})
+
+	err := idx.SyncToGPU()
+	if err != ErrGPUDisabled {
+		t.Errorf("expected ErrGPUDisabled, got %v", err)
+	}
+}
+
+func TestGPUEmbeddingIndexSyncEmpty(t *testing.T) {
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	accel, _ := NewAccelerator(config)
+	defer accel.Release()
+
+	if !accel.IsEnabled() {
+		t.Skip("GPU not available")
+	}
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+
+	// Sync empty index should succeed
+	err := idx.SyncToGPU()
+	if err != nil {
+		t.Errorf("SyncToGPU(empty) error = %v", err)
+	}
+	if !idx.IsGPUSynced() {
+		t.Error("should be synced after SyncToGPU(empty)")
+	}
+}
+
+func TestAcceleratorDeviceInfoNoGPU(t *testing.T) {
+	accel, _ := NewAccelerator(nil) // GPU disabled
+	defer accel.Release()
+
+	name := accel.DeviceName()
+	if name != "CPU" {
+		t.Errorf("expected 'CPU' when disabled, got '%s'", name)
+	}
+
+	mem := accel.DeviceMemoryMB()
+	if mem != 0 {
+		t.Errorf("expected 0 memory when disabled, got %d", mem)
+	}
+}
+
+func TestGPUEmbeddingIndexAddBatchMismatch(t *testing.T) {
+	accel, _ := NewAccelerator(nil)
+	defer accel.Release()
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+
+	// Mismatched lengths
+	err := idx.AddBatch([]string{"a", "b"}, [][]float32{{1, 0, 0}})
+	if err == nil {
+		t.Error("expected error for mismatched lengths")
+	}
+}
+
+func TestGPUEmbeddingIndexAddBatchWrongDimensions(t *testing.T) {
+	accel, _ := NewAccelerator(nil)
+	defer accel.Release()
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+
+	// Wrong dimensions
+	err := idx.AddBatch([]string{"a"}, [][]float32{{1, 0}}) // Only 2 dims
+	if err != ErrInvalidDimensions {
+		t.Errorf("expected ErrInvalidDimensions, got %v", err)
+	}
+}
+
+func TestGPUEmbeddingIndexUpdate(t *testing.T) {
+	accel, _ := NewAccelerator(nil)
+	defer accel.Release()
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+
+	idx.Add("a", []float32{1, 0, 0})
+	idx.Add("a", []float32{0, 1, 0}) // Update
+
+	if idx.Count() != 1 {
+		t.Errorf("expected count 1 after update, got %d", idx.Count())
+	}
+}
+
+func TestGPUEmbeddingIndexBatchUpdate(t *testing.T) {
+	accel, _ := NewAccelerator(nil)
+	defer accel.Release()
+
+	idx := accel.NewGPUEmbeddingIndex(3)
+
+	idx.Add("a", []float32{1, 0, 0})
+
+	// Batch with existing key
+	err := idx.AddBatch([]string{"a", "b"}, [][]float32{{0, 1, 0}, {0, 0, 1}})
+	if err != nil {
+		t.Fatalf("AddBatch() error = %v", err)
+	}
+
+	if idx.Count() != 2 { // a updated, b added
+		t.Errorf("expected count 2, got %d", idx.Count())
+	}
+}
+
+// =============================================================================
+// EmbeddingIndex (gpu.go) GPU path tests
+// =============================================================================
+
+func TestEmbeddingIndexWithGPUManager(t *testing.T) {
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	m, _ := NewManager(config)
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 4}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	// Add embeddings
+	ei.Add("a", []float32{1, 0, 0, 0})
+	ei.Add("b", []float32{0, 1, 0, 0})
+	ei.Add("c", []float32{0.9, 0.1, 0, 0})
+
+	if m.IsEnabled() {
+		t.Run("sync and GPU search", func(t *testing.T) {
+			err := ei.SyncToGPU()
+			if err != nil {
+				t.Logf("SyncToGPU() error = %v (may be expected)", err)
+				return
+			}
+
+			stats := ei.Stats()
+			if !stats.GPUSynced {
+				t.Error("should be synced")
+			}
+
+			results, err := ei.Search([]float32{1, 0, 0, 0}, 2)
+			if err != nil {
+				t.Fatalf("Search() error = %v", err)
+			}
+			if len(results) != 2 {
+				t.Errorf("expected 2 results, got %d", len(results))
+			}
+
+			// Check GPU was used
+			newStats := ei.Stats()
+			if newStats.SearchesGPU == 0 {
+				t.Log("GPU search count is 0 - may have fallen back to CPU")
+			}
+		})
+
+		t.Run("update invalidates GPU sync", func(t *testing.T) {
+			ei.SyncToGPU()
+			ei.Add("d", []float32{0, 0, 1, 0})
+
+			stats := ei.Stats()
+			if stats.GPUSynced {
+				t.Error("should not be synced after add")
+			}
+		})
+
+		t.Run("remove invalidates GPU sync", func(t *testing.T) {
+			ei.SyncToGPU()
+			ei.Remove("d")
+
+			stats := ei.Stats()
+			if stats.GPUSynced {
+				t.Error("should not be synced after remove")
+			}
+		})
+
+		t.Run("GPU memory usage", func(t *testing.T) {
+			ei.SyncToGPU()
+			gpuMB := ei.GPUMemoryUsageMB()
+			t.Logf("GPU memory: %f MB", gpuMB)
+			// With 3 embeddings of 4 floats = 48 bytes, should be small
+		})
+	}
+
+	t.Run("release cleans up", func(t *testing.T) {
+		ei.Release()
+		// Double release should be safe
+		ei.Release()
+	})
+}
+
+func TestEmbeddingIndexClearReleasesGPU(t *testing.T) {
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	m, _ := NewManager(config)
+
+	if !m.IsEnabled() {
+		t.Skip("GPU not available")
+	}
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 4}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	ei.Add("a", []float32{1, 0, 0, 0})
+	ei.SyncToGPU()
+
+	// Clear should release GPU buffer
+	ei.Clear()
+
+	stats := ei.Stats()
+	if stats.GPUSynced {
+		t.Error("should not be synced after clear")
+	}
+
+	gpuMB := ei.GPUMemoryUsageMB()
+	if gpuMB != 0 {
+		t.Errorf("expected 0 GPU memory after clear, got %f", gpuMB)
+	}
+}
+
+func TestEmbeddingIndexSearchGPUPathWithBackend(t *testing.T) {
+	config := &Config{
+		Enabled:          true,
+		PreferredBackend: BackendMetal,
+		FallbackOnError:  true,
+	}
+	m, _ := NewManager(config)
+
+	if !m.IsEnabled() {
+		t.Skip("GPU not available")
+	}
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 128}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	// Add enough embeddings to make GPU worthwhile
+	for i := 0; i < 1000; i++ {
+		vec := make([]float32, 128)
+		for j := range vec {
+			vec[j] = float32(i*j%100) / 100
+		}
+		ei.Add(string(rune('a'+i%26))+string(rune(i)), vec)
+	}
+
+	err := ei.SyncToGPU()
+	if err != nil {
+		t.Fatalf("SyncToGPU() error = %v", err)
+	}
+
+	query := make([]float32, 128)
+	for i := range query {
+		query[i] = 0.5
+	}
+
+	results, err := ei.Search(query, 10)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	if len(results) != 10 {
+		t.Errorf("expected 10 results, got %d", len(results))
+	}
+
+	stats := ei.Stats()
+	t.Logf("GPU searches: %d, CPU searches: %d", stats.SearchesGPU, stats.SearchesCPU)
+}
+
+func TestEmbeddingIndexSearchCPUPath(t *testing.T) {
+	// With GPU disabled, should use CPU path
+	m, _ := NewManager(nil)
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 4}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	ei.Add("a", []float32{1, 0, 0, 0})
+	ei.Add("b", []float32{0, 1, 0, 0})
+
+	results, err := ei.Search([]float32{1, 0, 0, 0}, 2)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+
+	stats := ei.Stats()
+	if stats.SearchesCPU == 0 {
+		t.Error("expected CPU search to be counted")
+	}
+	if stats.SearchesGPU != 0 {
+		t.Error("expected no GPU searches")
+	}
+}
+
+func TestProbeBackendVariants(t *testing.T) {
+	// Test all backend variants
+	backends := []Backend{
+		BackendNone,
+		BackendOpenCL,
+		BackendCUDA,
+		BackendVulkan,
+		Backend("unknown"),
+	}
+
+	for _, b := range backends {
+		_, err := probeBackend(b, 0)
+		if err == nil && b != BackendMetal {
+			t.Errorf("probeBackend(%s) should fail (not implemented)", b)
+		}
+	}
+}
+
+func TestDetectGPUWithDifferentConfigs(t *testing.T) {
+	t.Run("with preferred backend that doesn't exist", func(t *testing.T) {
+		config := &Config{
+			Enabled:          true,
+			PreferredBackend: Backend("nonexistent"),
+			FallbackOnError:  true,
+		}
+		m, _ := NewManager(config)
+		// Should either find Metal or gracefully disable
+		t.Logf("GPU enabled: %v, backend: %v", m.IsEnabled(), m.device)
+	})
+
+	t.Run("with OpenCL preferred", func(t *testing.T) {
+		config := &Config{
+			Enabled:          true,
+			PreferredBackend: BackendOpenCL,
+			FallbackOnError:  true,
+		}
+		m, _ := NewManager(config)
+		// OpenCL not implemented, should try Metal
+		t.Logf("GPU enabled: %v", m.IsEnabled())
+	})
+}
+
+func TestEmbeddingIndexSearchGPUFallback(t *testing.T) {
+	// Test the searchGPU fallback path when GPU is "enabled" but no backend works
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	m, _ := NewManager(config)
+
+	if !m.IsEnabled() {
+		t.Skip("Need GPU enabled to test fallback")
+	}
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 4}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	ei.Add("a", []float32{1, 0, 0, 0})
+	ei.Add("b", []float32{0, 1, 0, 0})
+
+	// Without syncing to GPU, search should still work via CPU
+	results, err := ei.Search([]float32{1, 0, 0, 0}, 2)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+}
+
+func TestEmbeddingIndexSyncToGPUWithNoBackend(t *testing.T) {
+	// Create a manager that's "enabled" but force no backend
+	m := &Manager{
+		config: &Config{Enabled: true},
+	}
+	m.enabled.Store(true)
+	// No device set
+
+	eiConfig := &EmbeddingIndexConfig{Dimensions: 4}
+	ei := NewEmbeddingIndex(m, eiConfig)
+
+	ei.Add("a", []float32{1, 0, 0, 0})
+
+	// Sync should fail gracefully
+	err := ei.SyncToGPU()
+	if err != ErrGPUNotAvailable {
+		t.Errorf("expected ErrGPUNotAvailable, got %v", err)
+	}
+}
+
+func TestVectorIndexSearchGPUPath(t *testing.T) {
+	config := &Config{
+		Enabled:         true,
+		FallbackOnError: true,
+	}
+	m, _ := NewManager(config)
+
+	if !m.IsEnabled() {
+		t.Skip("GPU not available")
+	}
+
+	vi := NewVectorIndex(m, 4)
+	vi.Add("a", []float32{1, 0, 0, 0})
+	vi.Add("b", []float32{0, 1, 0, 0})
+
+	// VectorIndex.searchGPU falls back to CPU (TODO in implementation)
+	results, err := vi.Search([]float32{1, 0, 0, 0}, 2)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+
+	if len(results) != 2 {
+		t.Errorf("expected 2 results, got %d", len(results))
+	}
+
+	// Should have recorded fallback
+	stats := m.Stats()
+	t.Logf("Fallback count: %d", stats.FallbackCount)
 }

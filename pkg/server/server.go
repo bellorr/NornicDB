@@ -1,6 +1,127 @@
-// Package server provides an HTTP REST API server for NornicDB.
-// Implements Neo4j-compatible HTTP endpoints with JWT authentication and RBAC.
-// Compatible with Neo4j Browser and drivers using HTTP transport.
+// Package server provides a Neo4j-compatible HTTP REST API server for NornicDB.
+//
+// This package implements the Neo4j HTTP API specification, making NornicDB compatible
+// with existing Neo4j tools, drivers, and browsers while adding NornicDB-specific
+// extensions for memory decay, vector search, and compliance features.
+//
+// Neo4j Compatibility:
+//   - Discovery endpoint (/) returns Neo4j-compatible service information
+//   - Transaction API (/db/{name}/tx) supports implicit and explicit transactions
+//   - Cypher query execution with Neo4j response format
+//   - Basic Auth and Bearer token authentication
+//   - Error codes follow Neo4j conventions (Neo.ClientError.*)
+//
+// NornicDB Extensions:
+//   - JWT authentication with RBAC
+//   - Vector search endpoints (/nornicdb/search, /nornicdb/similar)
+//   - Memory decay information (/nornicdb/decay)
+//   - GDPR compliance endpoints (/gdpr/export, /gdpr/delete)
+//   - Admin endpoints (/admin/stats, /admin/config)
+//   - GPU acceleration control (/admin/gpu/*)
+//
+// Example Usage:
+//
+//	// Create server
+//	db, _ := nornicdb.Open("./data", nil)
+//	auth, _ := auth.NewAuthenticator(auth.DefaultAuthConfig())
+//	config := server.DefaultConfig()
+//
+//	server, err := server.New(db, auth, config)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Start server
+//	if err := server.Start(); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Server listening on %s\n", server.Addr())
+//
+//	// Use with Neo4j Browser
+//	// Open: http://localhost:7474
+//	// Connect URI: bolt://localhost:7687 (if Bolt server is running)
+//	// Or use HTTP: http://localhost:7474/db/neo4j/tx/commit
+//
+//	// Use with Neo4j drivers
+//	driver := neo4j.NewDriver("http://localhost:7474", neo4j.BasicAuth("admin", "password"))
+//	session := driver.NewSession(neo4j.SessionConfig{})
+//	result, _ := session.Run("MATCH (n) RETURN count(n)", nil)
+//
+//	// Graceful shutdown
+//	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+//	defer cancel()
+//	server.Stop(ctx)
+//
+// Authentication:
+//
+// The server supports multiple authentication methods:
+//
+// 1. **Basic Auth** (Neo4j compatible):
+//    Authorization: Basic base64(username:password)
+//
+// 2. **Bearer Token** (JWT):
+//    Authorization: Bearer eyJhbGciOiJIUzI1NiIs...
+//
+// 3. **Cookie** (browser sessions):
+//    Cookie: token=eyJhbGciOiJIUzI1NiIs...
+//
+// 4. **Query Parameter** (for SSE/WebSocket):
+//    ?token=eyJhbGciOiJIUzI1NiIs...
+//
+// Neo4j HTTP API Endpoints:
+//
+//	GET  /                           - Discovery (service information)
+//	GET  /db/{name}                  - Database information
+//	POST /db/{name}/tx/commit       - Execute Cypher (implicit transaction)
+//	POST /db/{name}/tx              - Begin explicit transaction
+//	POST /db/{name}/tx/{id}         - Execute in transaction
+//	POST /db/{name}/tx/{id}/commit  - Commit transaction
+//	DELETE /db/{name}/tx/{id}       - Rollback transaction
+//
+// NornicDB Extension Endpoints:
+//
+//	POST /auth/token                - OAuth 2.0 token endpoint
+//	GET  /auth/me                   - Current user info
+//	GET  /nornicdb/search           - Hybrid search (vector + BM25)
+//	GET  /nornicdb/similar          - Vector similarity search
+//	GET  /admin/stats               - System statistics
+//	GET  /gdpr/export               - GDPR data export
+//	POST /gdpr/delete               - GDPR erasure request
+//
+// Security Features:
+//
+//   - CORS support with configurable origins
+//   - Request size limits (default 10MB)
+//   - Rate limiting (planned)
+//   - Audit logging integration
+//   - Panic recovery middleware
+//   - TLS/HTTPS support
+//
+// Compliance:
+//   - GDPR Art.15 (right of access) via /gdpr/export
+//   - GDPR Art.17 (right to erasure) via /gdpr/delete
+//   - HIPAA audit logging for all data access
+//   - SOC2 access controls via RBAC
+//
+// ELI12 (Explain Like I'm 12):
+//
+// Think of this server like a restaurant:
+//
+// 1. **Neo4j compatibility**: We speak the same "language" as Neo4j, so existing
+//    customers (tools/drivers) can order from our menu without learning new words.
+//
+// 2. **Authentication**: Like checking IDs at the door - we make sure you're allowed
+//    to be here and what you're allowed to do.
+//
+// 3. **Endpoints**: Different "counters" for different services - one for regular
+//    food (Cypher queries), one for special orders (vector search), one for the
+//    manager's office (admin functions).
+//
+// 4. **Middleware**: Like security guards, cashiers, and cleaners who help every
+//    customer but do different jobs (logging, auth, error handling).
+//
+// The server makes sure everyone gets served safely and efficiently!
 package server
 
 import (
@@ -34,7 +155,31 @@ var (
 	ErrInternalError    = fmt.Errorf("internal server error")
 )
 
-// Config holds HTTP server configuration.
+// Config holds HTTP server configuration options.
+//
+// All settings have sensible defaults via DefaultConfig(). The server follows
+// Neo4j conventions where applicable (default port 7474, timeouts, etc.).
+//
+// Example:
+//
+//	// Production configuration
+//	config := &server.Config{
+//		Address:           "0.0.0.0",
+//		Port:              7474,
+//		ReadTimeout:       30 * time.Second,
+//		WriteTimeout:      60 * time.Second,
+//		MaxRequestSize:    50 * 1024 * 1024, // 50MB for large imports
+//		EnableCORS:        true,
+//		CORSOrigins:       []string{"https://myapp.com"},
+//		EnableCompression: true,
+//		TLSCertFile:       "/etc/ssl/server.crt",
+//		TLSKeyFile:        "/etc/ssl/server.key",
+//	}
+//
+//	// Development configuration
+//	config = server.DefaultConfig()
+//	config.Port = 8080
+//	config.CORSOrigins = []string{"*"} // Allow all origins
 type Config struct {
 	// Address to bind to (default: "0.0.0.0")
 	Address string
@@ -60,7 +205,27 @@ type Config struct {
 	TLSKeyFile string
 }
 
-// DefaultConfig returns default server configuration.
+// DefaultConfig returns Neo4j-compatible default server configuration.
+//
+// Defaults match Neo4j HTTP server settings:
+//   - Port 7474 (Neo4j HTTP default)
+//   - 30s read timeout
+//   - 60s write timeout
+//   - 120s idle timeout
+//   - 10MB max request size
+//   - CORS enabled for browser compatibility
+//   - Compression enabled
+//
+// Example:
+//
+//	config := server.DefaultConfig()
+//	server, err := server.New(db, auth, config)
+//
+//	// Or customize
+//	config = server.DefaultConfig()
+//	config.Port = 8080
+//	config.EnableCORS = false
+//	server, err = server.New(db, auth, config)
 func DefaultConfig() *Config {
 	return &Config{
 		Address:           "0.0.0.0",
@@ -75,7 +240,42 @@ func DefaultConfig() *Config {
 	}
 }
 
-// Server is the HTTP API server for NornicDB.
+// Server is the HTTP API server providing Neo4j-compatible endpoints.
+//
+// The server is thread-safe and handles concurrent requests. It maintains
+// metrics, supports graceful shutdown, and integrates with audit logging.
+//
+// Lifecycle:
+//  1. Create with New()
+//  2. Optionally set audit logger with SetAuditLogger()
+//  3. Start with Start()
+//  4. Handle requests automatically
+//  5. Stop with Stop() for graceful shutdown
+//
+// Example:
+//
+//	server := server.New(db, auth, config)
+//
+//	// Set up audit logging
+//	auditLogger, _ := audit.NewLogger(audit.DefaultConfig())
+//	server.SetAuditLogger(auditLogger)
+//
+//	// Start server
+//	if err := server.Start(); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Server is now handling requests
+//	fmt.Printf("Listening on %s\n", server.Addr())
+//
+//	// Get metrics
+//	stats := server.Stats()
+//	fmt.Printf("Requests: %d, Errors: %d\n", stats.RequestCount, stats.ErrorCount)
+//
+//	// Graceful shutdown
+//	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+//	defer cancel()
+//	server.Stop(ctx)
 type Server struct {
 	config *Config
 	db     *nornicdb.DB
@@ -95,7 +295,35 @@ type Server struct {
 	activeRequests atomic.Int64
 }
 
-// New creates a new HTTP server.
+// New creates a new HTTP server with the given database, authenticator, and configuration.
+//
+// The server is created but not started. Call Start() to begin accepting connections.
+//
+// Parameters:
+//   - db: NornicDB database instance (required)
+//   - authenticator: Authentication handler (can be nil to disable auth)
+//   - config: Server configuration (uses DefaultConfig() if nil)
+//
+// Returns:
+//   - Server instance ready to start
+//   - Error if database is nil or configuration is invalid
+//
+// Example:
+//
+//	// With authentication
+//	db, _ := nornicdb.Open("./data", nil)
+//	auth, _ := auth.NewAuthenticator(auth.DefaultAuthConfig())
+//	server, err := server.New(db, auth, nil) // Uses default config
+//
+//	// Without authentication (development)
+//	server, err = server.New(db, nil, nil)
+//
+//	// Custom configuration
+//	config := &server.Config{
+//		Port: 8080,
+//		EnableCORS: false,
+//	}
+//	server, err = server.New(db, auth, config)
 func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*Server, error) {
 	if config == nil {
 		config = DefaultConfig()
@@ -120,7 +348,33 @@ func (s *Server) SetAuditLogger(logger *audit.Logger) {
 	s.audit = logger
 }
 
-// Start begins listening for HTTP connections.
+// Start begins listening for HTTP connections on the configured address and port.
+//
+// The server starts in a separate goroutine, so this method returns immediately
+// after successfully binding to the port. Use Addr() to get the actual listening
+// address after starting.
+//
+// Returns:
+//   - nil if server started successfully
+//   - Error if failed to bind to port or server is already closed
+//
+// Example:
+//
+//	server := server.New(db, auth, config)
+//
+//	if err := server.Start(); err != nil {
+//		log.Fatalf("Failed to start server: %v", err)
+//	}
+//
+//	fmt.Printf("Server started on %s\n", server.Addr())
+//
+//	// Server is now accepting connections
+//	// Keep main goroutine alive
+//	select {}
+//
+// TLS Support:
+//   If TLSCertFile and TLSKeyFile are configured, the server automatically
+//   starts with HTTPS. Otherwise, it uses HTTP.
 func (s *Server) Start() error {
 	if s.closed.Load() {
 		return ErrServerClosed
@@ -182,7 +436,28 @@ func (s *Server) Addr() string {
 	return ""
 }
 
-// Stats returns server statistics.
+// Stats returns current server runtime statistics.
+//
+// Statistics are updated in real-time by middleware and include:
+//   - Uptime since server start
+//   - Total request count
+//   - Total error count
+//   - Currently active requests
+//
+// Example:
+//
+//	stats := server.Stats()
+//	fmt.Printf("Server uptime: %v\n", stats.Uptime)
+//	fmt.Printf("Total requests: %d\n", stats.RequestCount)
+//	fmt.Printf("Error rate: %.2f%%\n", float64(stats.ErrorCount)/float64(stats.RequestCount)*100)
+//	fmt.Printf("Active requests: %d\n", stats.ActiveRequests)
+//
+//	// Use for monitoring/alerting
+//	if stats.ErrorCount > 1000 {
+//		alert("High error count detected")
+//	}
+//
+// Thread-safe: Can be called concurrently from multiple goroutines.
 func (s *Server) Stats() ServerStats {
 	return ServerStats{
 		Uptime:         time.Since(s.started),
@@ -1073,6 +1348,17 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed", ErrMethodNotAllowed)
+		return
+	}
+
+	// If auth is disabled, return anonymous admin user
+	if s.auth == nil || !s.auth.IsSecurityEnabled() {
+		s.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"id":       "anonymous",
+			"username": "anonymous",
+			"roles":    []string{"admin"},
+			"enabled":  true,
+		})
 		return
 	}
 

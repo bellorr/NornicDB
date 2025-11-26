@@ -1,5 +1,50 @@
 // Package storage provides the storage engine interface and implementations for NornicDB.
-// This package follows testability-first design with dependency injection.
+//
+// The storage layer is designed for Neo4j compatibility while adding NornicDB-specific
+// extensions for memory decay, vector embeddings, and automatic relationship inference.
+//
+// Design Principles:
+//   - Neo4j JSON export/import compatibility
+//   - Testability through dependency injection
+//   - Thread-safe implementations
+//   - Property graph model (labeled property graph)
+//
+// Example Usage:
+//
+//	// Create storage engine
+//	engine := storage.NewMemoryEngine()
+//	defer engine.Close()
+//
+//	// Create nodes
+//	node := &storage.Node{
+//		ID:     storage.NodeID("user-123"),
+//		Labels: []string{"User", "Person"},
+//		Properties: map[string]any{
+//			"name":  "Alice",
+//			"email": "alice@example.com",
+//		},
+//		CreatedAt: time.Now(),
+//	}
+//	engine.CreateNode(node)
+//
+//	// Create relationships
+//	edge := &storage.Edge{
+//		ID:        storage.EdgeID("follows-1"),
+//		StartNode: storage.NodeID("user-123"),
+//		EndNode:   storage.NodeID("user-456"),
+//		Type:      "FOLLOWS",
+//		CreatedAt: time.Now(),
+//	}
+//	engine.CreateEdge(edge)
+//
+//	// Export to Neo4j format
+//	nodes, _ := engine.AllNodes()
+//	edges, _ := engine.AllEdges()
+//	export := storage.ToNeo4jExport(nodes, edges)
+//
+//	// Save as JSON
+//	data, _ := json.MarshalIndent(export, "", "  ")
+//	os.WriteFile("graph-export.json", data, 0644)
 package storage
 
 import (
@@ -14,32 +59,135 @@ var (
 	ErrAlreadyExists  = errors.New("already exists")
 	ErrInvalidID      = errors.New("invalid id")
 	ErrInvalidData    = errors.New("invalid data")
+	ErrInvalidEdge    = errors.New("invalid edge: start or end node not found")
 	ErrStorageClosed  = errors.New("storage closed")
 )
 
-// NodeID is a strongly-typed node identifier.
+// NodeID is a strongly-typed unique identifier for graph nodes.
+//
+// Using a custom type provides:
+//   - Type safety (can't accidentally use EdgeID where NodeID is expected)
+//   - Clear API semantics
+//   - Future extensibility (could add methods)
+//
+// Example:
+//
+//	id := storage.NodeID("user-123")
+//	node, err := engine.GetNode(id)
 type NodeID string
 
-// EdgeID is a strongly-typed edge identifier.
+// EdgeID is a strongly-typed unique identifier for graph edges (relationships).
+//
+// Similar to NodeID, provides type safety and API clarity.
+//
+// Example:
+//
+//	id := storage.EdgeID("follows-456")
+//	edge, err := engine.GetEdge(id)
 type EdgeID string
 
-// Node represents a graph node in Neo4j-compatible format.
-// This matches Neo4j's internal node structure for import/export compatibility.
+// Node represents a graph node (vertex) in the labeled property graph.
+//
+// Nodes follow the Neo4j data model:
+//   - Unique ID
+//   - Multiple labels (type tags)
+//   - Key-value properties
+//   - Optional metadata
+//
+// NornicDB Extensions (stored separately, not in Neo4j export):
+//   - CreatedAt, UpdatedAt: Timestamps for auditing
+//   - DecayScore: Memory decay score (0.0-1.0)
+//   - LastAccessed: For decay calculation
+//   - AccessCount: Frequency tracking
+//   - Embedding: Vector representation for semantic search
+//
+// These extensions are stored with "_" prefix when exported to Neo4j format
+// for compatibility with Neo4j's system property convention.
+//
+// Example:
+//
+//	// Create a person node
+//	node := &storage.Node{
+//		ID:     storage.NodeID("person-123"),
+//		Labels: []string{"Person", "User"},
+//		Properties: map[string]any{
+//			"name":     "Alice",
+//			"age":      30,
+//			"email":    "alice@example.com",
+//			"verified": true,
+//		},
+//		CreatedAt:   time.Now(),
+//		DecayScore:  1.0, // Fresh memory
+//		AccessCount: 0,
+//	}
+//
+// Neo4j Compatibility:
+//   Labels map to Neo4j labels (e.g., :Person:User)
+//   Properties map to Neo4j properties
+//   ID must be unique across all nodes
 type Node struct {
 	ID         NodeID            `json:"id"`
 	Labels     []string          `json:"labels"`
 	Properties map[string]any    `json:"properties"`
 	
-	// NornicDB extensions (stored in properties for Neo4j compat)
+	// NornicDB extensions
 	CreatedAt    time.Time `json:"-"`
 	UpdatedAt    time.Time `json:"-"`
 	DecayScore   float64   `json:"-"`
 	LastAccessed time.Time `json:"-"`
 	AccessCount  int64     `json:"-"`
-	Embedding    []float32 `json:"-"`
+	Embedding    []float32 `json:"-"` // Vector embedding for semantic search
 }
 
-// Edge represents a graph relationship in Neo4j-compatible format.
+// Edge represents a directed graph relationship (arc) between two nodes.
+//
+// Edges follow the Neo4j relationship model:
+//   - Unique ID
+//   - Start node (source)
+//   - End node (target)
+//   - Relationship type
+//   - Properties
+//
+// NornicDB Extensions:
+//   - CreatedAt: When relationship was created
+//   - Confidence: Confidence score for inferred relationships (0.0-1.0)
+//   - AutoGenerated: Whether relationship was auto-detected by inference engine
+//
+// Example:
+//
+//	// Manual relationship
+//	edge := &storage.Edge{
+//		ID:         storage.EdgeID("knows-1"),
+//		StartNode:  storage.NodeID("alice"),
+//		EndNode:    storage.NodeID("bob"),
+//		Type:       "KNOWS",
+//		Properties: map[string]any{
+//			"since": "2020-01-15",
+//			"strength": "close_friend",
+//		},
+//		CreatedAt:     time.Now(),
+//		Confidence:    1.0, // Manually created = certain
+//		AutoGenerated: false,
+//	}
+//
+//	// Auto-detected relationship
+//	autoEdge := &storage.Edge{
+//		ID:         storage.EdgeID("relates-to-42"),
+//		StartNode:  storage.NodeID("note-1"),
+//		EndNode:    storage.NodeID("note-2"),
+//		Type:       "RELATES_TO",
+//		Confidence:    0.85, // 85% confidence
+//		AutoGenerated: true,
+//		Properties: map[string]any{
+//			"reason": "High embedding similarity",
+//			"method": "similarity",
+//		},
+//	}
+//
+// Neo4j Compatibility:
+//   Type maps to Neo4j relationship type (e.g., -[:KNOWS]->)
+//   StartNode/EndNode map to Neo4j node IDs
+//   Properties map to Neo4j relationship properties
 type Edge struct {
 	ID         EdgeID            `json:"id"`
 	StartNode  NodeID            `json:"startNode"`
@@ -49,12 +197,54 @@ type Edge struct {
 	
 	// NornicDB extensions
 	CreatedAt     time.Time `json:"-"`
+	UpdatedAt     time.Time `json:"-"`
 	Confidence    float64   `json:"-"`
 	AutoGenerated bool      `json:"-"`
 }
 
-// Engine defines the storage engine interface.
-// All implementations must be safe for concurrent use.
+// Engine defines the storage engine interface for graph database operations.
+//
+// All Engine implementations MUST be:
+//   - Thread-safe: Safe for concurrent access from multiple goroutines
+//   - ACID-like: Operations are atomic within their scope
+//   - Idempotent where appropriate: CreateNode fails if ID exists
+//
+// The interface provides standard graph database operations:
+//   - CRUD for nodes and edges
+//   - Label-based queries
+//   - Graph traversal (outgoing/incoming edges)
+//   - Bulk operations for import/export
+//   - Statistics
+//
+// Implementations:
+//   - MemoryEngine: In-memory storage for testing and small datasets
+//   - BadgerEngine: Persistent disk storage (planned)
+//
+// Example Usage:
+//
+//	var engine storage.Engine
+//	engine = storage.NewMemoryEngine()
+//	defer engine.Close()
+//
+//	// Create data
+//	node := &storage.Node{
+//		ID:     "n1",
+//		Labels: []string{"Person"},
+//		Properties: map[string]any{"name": "Alice"},
+//	}
+//	if err := engine.CreateNode(node); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Query
+//	people, _ := engine.GetNodesByLabel("Person")
+//	fmt.Printf("Found %d people\n", len(people))
+//
+//	// Traversal
+//	outgoing, _ := engine.GetOutgoingEdges("n1")
+//	for _, edge := range outgoing {
+//		fmt.Printf("%s -> %s [%s]\n", edge.StartNode, edge.EndNode, edge.Type)
+//	}
 type Engine interface {
 	// Node operations
 	CreateNode(node *Node) error
@@ -73,6 +263,17 @@ type Engine interface {
 	GetOutgoingEdges(nodeID NodeID) ([]*Edge, error)
 	GetIncomingEdges(nodeID NodeID) ([]*Edge, error)
 	GetEdgesBetween(startID, endID NodeID) ([]*Edge, error)
+	GetEdgeBetween(startID, endID NodeID, edgeType string) *Edge
+	AllNodes() ([]*Node, error)
+	AllEdges() ([]*Edge, error)
+	GetAllNodes() []*Node
+	
+	// Degree operations (for graph algorithms)
+	GetInDegree(nodeID NodeID) int
+	GetOutDegree(nodeID NodeID) int
+	
+	// Schema operations
+	GetSchema() *SchemaManager
 	
 	// Bulk operations (for import)
 	BulkCreateNodes(nodes []*Node) error
@@ -122,7 +323,27 @@ type Neo4jRelationship struct {
 	End        Neo4jNodeRef      `json:"end,omitempty"`
 }
 
-// GetStartID returns the start node ID regardless of format.
+// GetStartID returns the start node ID supporting both Neo4j export formats.
+//
+// Neo4j exports can use two formats:
+//   1. Flat format: startNode/endNode as strings (neo4j-admin dump)
+//   2. APOC format: start/end as objects (apoc.export.json)
+//
+// This method abstracts the difference, always returning the start node ID.
+//
+// Example:
+//
+//	// Flat format
+//	rel := &Neo4jRelationship{
+//		StartNode: "user-123",
+//	}
+//	fmt.Println(rel.GetStartID()) // "user-123"
+//
+//	// APOC format
+//	rel = &Neo4jRelationship{
+//		Start: Neo4jNodeRef{ID: "user-456"},
+//	}
+//	fmt.Println(rel.GetStartID()) // "user-456"
 func (r *Neo4jRelationship) GetStartID() string {
 	if r.Start.ID != "" {
 		return r.Start.ID
@@ -138,7 +359,38 @@ func (r *Neo4jRelationship) GetEndID() string {
 	return r.EndNode
 }
 
-// ToNeo4jExport converts internal nodes and edges to Neo4j export format.
+// ToNeo4jExport converts NornicDB nodes and edges to Neo4j JSON export format.
+//
+// This function prepares data for export that can be imported into Neo4j
+// using neo4j-admin or APOC procedures. NornicDB-specific fields (decay score,
+// embeddings, access counts) are stored with "_" prefix to mark them as
+// system properties.
+//
+// The output is compatible with:
+//   - `neo4j-admin database import`
+//   - `CALL apoc.import.json()`
+//   - Standard Neo4j JSON format
+//
+// Example:
+//
+//	// Get all data
+//	nodes, _ := engine.GetNodesByLabel("") // All nodes
+//	edges, _ := engine.AllEdges()
+//
+//	// Convert to Neo4j format
+//	export := storage.ToNeo4jExport(nodes, edges)
+//
+//	// Save as JSON
+//	data, _ := json.MarshalIndent(export, "", "  ")
+//	err := os.WriteFile("neo4j-export.json", data, 0644)
+//
+//	// Import into Neo4j
+//	// $ neo4j-admin database import --nodes=neo4j-export.json full
+//	// Or in Cypher:
+//	// CALL apoc.import.json("file:///neo4j-export.json")
+//
+// NornicDB extensions are preserved as properties:
+//   _decayScore, _lastAccessed, _accessCount, _confidence, _autoGenerated
 func ToNeo4jExport(nodes []*Node, edges []*Edge) *Neo4jExport {
 	export := &Neo4jExport{
 		Nodes:         make([]Neo4jNode, len(nodes)),
@@ -181,7 +433,37 @@ func ToNeo4jExport(nodes []*Node, edges []*Edge) *Neo4jExport {
 	return export
 }
 
-// FromNeo4jExport converts Neo4j export format to internal nodes and edges.
+// FromNeo4jExport converts Neo4j JSON export format to NornicDB nodes and edges.
+//
+// This function imports data exported from Neo4j, extracting NornicDB-specific
+// properties (those with "_" prefix) back into their dedicated fields.
+//
+// Supports both export formats:
+//   - neo4j-admin database dump (flat format)
+//   - apoc.export.json (nested format)
+//
+// Example:
+//
+//	// Load Neo4j export file
+//	data, _ := os.ReadFile("neo4j-export.json")
+//
+//	var export storage.Neo4jExport
+//	json.Unmarshal(data, &export)
+//
+//	// Convert to NornicDB format
+//	nodes, edges := storage.FromNeo4jExport(&export)
+//
+//	// Import into NornicDB
+//	if err := engine.BulkCreateNodes(nodes); err != nil {
+//		log.Fatal(err)
+//	}
+//	if err := engine.BulkCreateEdges(edges); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Imported %d nodes, %d edges\n", len(nodes), len(edges))
+//
+// Returns nodes and edges ready for storage engine insertion.
 func FromNeo4jExport(export *Neo4jExport) ([]*Node, []*Edge) {
 	nodes := make([]*Node, len(export.Nodes))
 	edges := make([]*Edge, len(export.Relationships))

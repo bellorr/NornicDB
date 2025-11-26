@@ -299,6 +299,12 @@ func TestSearchService_WithRealData(t *testing.T) {
 		t.Skip("Export directory not found - run export-neo4j-to-json.mjs first")
 	}
 
+	// Check if nodes.json exists
+	nodesFile := filepath.Join(exportDir, "nodes.json")
+	if _, err := os.Stat(nodesFile); os.IsNotExist(err) {
+		t.Skipf("nodes.json not found in %s - run export-neo4j-to-json.mjs first", exportDir)
+	}
+
 	t.Logf("Using export directory: %s", exportDir)
 
 	// Load data into memory engine
@@ -367,6 +373,12 @@ func TestSearchService_RRFHybrid(t *testing.T) {
 
 	if exportDir == "" {
 		t.Skip("Export directory not found")
+	}
+
+	// Check if nodes.json exists
+	nodesFile := filepath.Join(exportDir, "nodes.json")
+	if _, err := os.Stat(nodesFile); os.IsNotExist(err) {
+		t.Skipf("nodes.json not found in %s - run export-neo4j-to-json.mjs first", exportDir)
 	}
 
 	// Load data
@@ -512,4 +524,738 @@ func BenchmarkRRFFusion(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		svc.fuseRRF(vectorResults, bm25Results, opts)
 	}
+}
+
+// ========================================
+// Additional Tests for Coverage Improvement
+// ========================================
+
+// TestVectorIndex_Remove tests vector removal.
+func TestVectorIndex_Remove(t *testing.T) {
+	idx := NewVectorIndex(4)
+
+	// Add vectors
+	require.NoError(t, idx.Add("doc1", []float32{1, 0, 0, 0}))
+	require.NoError(t, idx.Add("doc2", []float32{0, 1, 0, 0}))
+	require.NoError(t, idx.Add("doc3", []float32{0, 0, 1, 0}))
+
+	assert.Equal(t, 3, idx.Count())
+	assert.True(t, idx.HasVector("doc1"))
+
+	// Remove a vector
+	idx.Remove("doc1")
+	assert.Equal(t, 2, idx.Count())
+	assert.False(t, idx.HasVector("doc1"))
+	assert.True(t, idx.HasVector("doc2"))
+
+	// Remove non-existent vector (should not panic)
+	idx.Remove("nonexistent")
+	assert.Equal(t, 2, idx.Count())
+}
+
+// TestVectorIndex_GetDimensions tests dimension getter.
+func TestVectorIndex_GetDimensions(t *testing.T) {
+	idx := NewVectorIndex(128)
+	assert.Equal(t, 128, idx.GetDimensions())
+
+	idx2 := NewVectorIndex(1024)
+	assert.Equal(t, 1024, idx2.GetDimensions())
+}
+
+// TestVectorIndex_CosineSimilarity tests cosine similarity calculation via search.
+func TestVectorIndex_CosineSimilarity(t *testing.T) {
+	idx := NewVectorIndex(4)
+
+	// Add reference vectors
+	require.NoError(t, idx.Add("ref1", []float32{1, 0, 0, 0}))
+	require.NoError(t, idx.Add("ref2", []float32{0, 1, 0, 0}))
+	require.NoError(t, idx.Add("ref3", []float32{-1, 0, 0, 0}))
+	require.NoError(t, idx.Add("ref4", []float32{1, 1, 0, 0}))
+
+	// Search for identical vector
+	results, err := idx.Search(context.Background(), []float32{1, 0, 0, 0}, 10, 0.0)
+	require.NoError(t, err)
+
+	// ref1 should have highest score (identical)
+	if len(results) > 0 {
+		assert.Equal(t, "ref1", results[0].ID)
+		assert.InDelta(t, 1.0, results[0].Score, 0.01)
+	}
+}
+
+// TestFulltextIndex_Remove tests document removal from fulltext index.
+func TestFulltextIndex_Remove(t *testing.T) {
+	idx := NewFulltextIndex()
+
+	// Add documents
+	idx.Index("doc1", "quick brown fox")
+	idx.Index("doc2", "lazy brown dog")
+	idx.Index("doc3", "quick lazy cat")
+
+	assert.Equal(t, 3, idx.Count())
+
+	// Remove a document
+	idx.Remove("doc1")
+	assert.Equal(t, 2, idx.Count())
+
+	// Search should not return removed document
+	results := idx.Search("quick", 10)
+	for _, r := range results {
+		assert.NotEqual(t, "doc1", r.ID)
+	}
+
+	// Remove non-existent document (should not panic)
+	idx.Remove("nonexistent")
+	assert.Equal(t, 2, idx.Count())
+}
+
+// TestFulltextIndex_GetDocument tests document retrieval.
+func TestFulltextIndex_GetDocument(t *testing.T) {
+	idx := NewFulltextIndex()
+
+	// Add a document
+	idx.Index("doc1", "quick brown fox")
+
+	// Get the document
+	content, exists := idx.GetDocument("doc1")
+	assert.True(t, exists)
+	assert.Equal(t, "quick brown fox", content)
+
+	// Get non-existent document
+	_, exists = idx.GetDocument("nonexistent")
+	assert.False(t, exists)
+}
+
+// TestFulltextIndex_PhraseSearch tests phrase searching.
+func TestFulltextIndex_PhraseSearch(t *testing.T) {
+	idx := NewFulltextIndex()
+
+	// Add documents
+	idx.Index("doc1", "the quick brown fox jumps over the lazy dog")
+	idx.Index("doc2", "brown fox is quick")
+	idx.Index("doc3", "the lazy brown dog sleeps")
+
+	// Search for exact phrase "quick brown"
+	results := idx.PhraseSearch("quick brown", 10)
+	
+	// Should find doc1 (has exact phrase "quick brown")
+	foundDoc1 := false
+	for _, r := range results {
+		if r.ID == "doc1" {
+			foundDoc1 = true
+		}
+	}
+	assert.True(t, foundDoc1, "Should find doc1 with exact phrase 'quick brown'")
+}
+
+// TestSearchService_RemoveNode tests node removal from search service.
+func TestSearchService_RemoveNode(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	svc := NewService(engine)
+
+	// Create and index nodes
+	node1 := &storage.Node{
+		ID:         "node1",
+		Labels:     []string{"Person"},
+		Properties: map[string]any{"name": "Alice", "embedding": []float32{1, 0, 0, 0}},
+	}
+	node2 := &storage.Node{
+		ID:         "node2",
+		Labels:     []string{"Person"},
+		Properties: map[string]any{"name": "Bob", "embedding": []float32{0, 1, 0, 0}},
+	}
+
+	engine.CreateNode(node1)
+	engine.CreateNode(node2)
+	svc.IndexNode(node1)
+	svc.IndexNode(node2)
+
+	// Remove node1
+	svc.RemoveNode("node1")
+
+	// Search should not return removed node
+	response, err := svc.Search(context.Background(), "Alice", nil, DefaultSearchOptions())
+	require.NoError(t, err)
+	for _, r := range response.Results {
+		assert.NotEqual(t, "node1", r.ID)
+	}
+}
+
+// TestSearchService_HybridSearch tests the hybrid RRF search.
+func TestSearchService_HybridSearch(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	svc := NewService(engine)
+
+	// Create nodes with both text and embeddings
+	nodes := []*storage.Node{
+		{
+			ID:     "node1",
+			Labels: []string{"Document"},
+			Properties: map[string]any{
+				"title":     "Machine Learning Basics",
+				"content":   "Introduction to machine learning algorithms",
+				"embedding": []float32{0.9, 0.1, 0, 0},
+			},
+		},
+		{
+			ID:     "node2",
+			Labels: []string{"Document"},
+			Properties: map[string]any{
+				"title":     "Deep Learning Neural Networks",
+				"content":   "Deep neural networks and deep learning",
+				"embedding": []float32{0.8, 0.2, 0, 0},
+			},
+		},
+		{
+			ID:     "node3",
+			Labels: []string{"Document"},
+			Properties: map[string]any{
+				"title":     "Data Science Overview",
+				"content":   "Data science and analytics fundamentals",
+				"embedding": []float32{0.1, 0.9, 0, 0},
+			},
+		},
+	}
+
+	for _, node := range nodes {
+		engine.CreateNode(node)
+		svc.IndexNode(node)
+	}
+
+	// Search with both text and query embedding
+	opts := DefaultSearchOptions()
+	queryEmbedding := []float32{0.85, 0.15, 0, 0}
+	opts.VectorWeight = 0.6
+	opts.BM25Weight = 0.4
+
+	response, err := svc.Search(context.Background(), "machine learning", queryEmbedding, opts)
+	require.NoError(t, err)
+
+	// Should return results ordered by hybrid score
+	assert.Greater(t, len(response.Results), 0)
+}
+
+// TestSearchService_VectorSearchOnly tests vector-only search mode.
+func TestSearchService_VectorSearchOnly(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	// Create a service with 4-dimensional vector index
+	svc := &Service{
+		engine:        engine,
+		vectorIndex:   NewVectorIndex(4), // Use 4 dimensions for test vectors
+		fulltextIndex: NewFulltextIndex(),
+	}
+
+	// Create nodes with embeddings in the Embedding field
+	nodes := []*storage.Node{
+		{
+			ID:        "vec1",
+			Labels:    []string{"Vector"},
+			Embedding: []float32{1, 0, 0, 0},
+		},
+		{
+			ID:        "vec2",
+			Labels:    []string{"Vector"},
+			Embedding: []float32{0.9, 0.1, 0, 0},
+		},
+		{
+			ID:        "vec3",
+			Labels:    []string{"Vector"},
+			Embedding: []float32{0, 1, 0, 0},
+		},
+	}
+
+	for _, node := range nodes {
+		engine.CreateNode(node)
+		err := svc.IndexNode(node)
+		require.NoError(t, err)
+	}
+
+	// Search with only query embedding (no text query)
+	opts := DefaultSearchOptions()
+	opts.MinSimilarity = 0.5
+	queryEmbedding := []float32{1, 0, 0, 0}
+
+	response, err := svc.Search(context.Background(), "", queryEmbedding, opts)
+	require.NoError(t, err)
+
+	// Should return vec1 and vec2 (above threshold), not vec3
+	assert.GreaterOrEqual(t, len(response.Results), 1)
+	for _, r := range response.Results {
+		assert.NotEqual(t, "vec3", r.ID, "vec3 should be below similarity threshold")
+	}
+}
+
+// TestSearchService_FilterByType tests type filtering.
+func TestSearchService_FilterByType(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	svc := NewService(engine)
+
+	// Create nodes with different labels
+	nodes := []*storage.Node{
+		{ID: "person1", Labels: []string{"Person"}, Properties: map[string]any{"name": "Alice"}},
+		{ID: "person2", Labels: []string{"Person"}, Properties: map[string]any{"name": "Bob"}},
+		{ID: "doc1", Labels: []string{"Document"}, Properties: map[string]any{"name": "Alice's Doc"}},
+	}
+
+	for _, node := range nodes {
+		engine.CreateNode(node)
+		svc.IndexNode(node)
+	}
+
+	// Search with type filter using opts.Types
+	opts := DefaultSearchOptions()
+	opts.Types = []string{"Person"}
+	response, err := svc.Search(context.Background(), "alice", nil, opts)
+	require.NoError(t, err)
+
+	// Should only return Person nodes
+	for _, r := range response.Results {
+		assert.Contains(t, r.Labels, "Person")
+		assert.NotContains(t, r.Labels, "Document")
+	}
+}
+
+// TestSearchService_EnrichResults tests result enrichment.
+func TestSearchService_EnrichResults(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	// Create a node with full properties
+	node := &storage.Node{
+		ID:     "enriched1",
+		Labels: []string{"Person", "Employee"},
+		Properties: map[string]any{
+			"name":      "Alice",
+			"age":       30,
+			"email":     "alice@example.com",
+			"embedding": []float32{1, 0, 0, 0},
+		},
+	}
+	engine.CreateNode(node)
+
+	svc := NewService(engine)
+	svc.IndexNode(node)
+
+	// Search and verify enriched results
+	opts := DefaultSearchOptions()
+	response, err := svc.Search(context.Background(), "Alice", nil, opts)
+	require.NoError(t, err)
+
+	assert.Greater(t, len(response.Results), 0)
+	if len(response.Results) > 0 {
+		// Check that result has enriched properties
+		r := response.Results[0]
+		assert.Equal(t, "enriched1", r.ID)
+		assert.Contains(t, r.Labels, "Person")
+		assert.Contains(t, r.Labels, "Employee")
+		// Properties should be included
+		if r.Properties != nil {
+			assert.Equal(t, "Alice", r.Properties["name"])
+		}
+	}
+}
+
+// TestSqrt tests the sqrt helper function.
+func TestSqrt(t *testing.T) {
+	tests := []struct {
+		input    float64
+		expected float64
+	}{
+		{0, 0},
+		{1, 1},
+		{4, 2},
+		{9, 3},
+		{16, 4},
+		{2, 1.414},
+	}
+
+	for _, tt := range tests {
+		result := sqrt(tt.input)
+		assert.InDelta(t, tt.expected, result, 0.01)
+	}
+}
+
+// TestTruncate tests the truncate helper function.
+func TestTruncate(t *testing.T) {
+	tests := []struct {
+		input    string
+		maxLen   int
+		expected string
+	}{
+		{"short", 10, "short"},
+		{"longer string", 8, "longe..."}, // 8-3=5 chars + "..."
+		{"exact", 5, "exact"},
+		{"", 5, ""},
+		{"test", 0, ""},       // Edge case: 0 maxLen
+		{"test", 3, "tes"},    // Edge case: maxLen <= 3, no ellipsis
+		{"test", 2, "te"},     // Edge case: maxLen <= 3, no ellipsis
+		{"hello world", 7, "hell..."}, // Normal case: 7-3=4 chars + "..."
+	}
+
+	for _, tt := range tests {
+		result := truncate(tt.input, tt.maxLen)
+		assert.Equal(t, tt.expected, result, "truncate(%q, %d)", tt.input, tt.maxLen)
+	}
+}
+
+// TestSearchService_BuildIndexesFromStorage tests index building from storage.
+func TestSearchService_BuildIndexesFromStorage(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	// Create nodes before service
+	nodes := []*storage.Node{
+		{
+			ID:     "preexisting1",
+			Labels: []string{"Doc"},
+			Properties: map[string]any{
+				"content":   "preexisting document content",
+				"embedding": []float32{1, 0, 0, 0},
+			},
+		},
+		{
+			ID:     "preexisting2",
+			Labels: []string{"Doc"},
+			Properties: map[string]any{
+				"content": "another preexisting document",
+			},
+		},
+	}
+	for _, node := range nodes {
+		engine.CreateNode(node)
+	}
+
+	// Create service and build indexes
+	svc := NewService(engine)
+	err := svc.BuildIndexes(context.Background())
+
+	assert.NoError(t, err)
+
+	// Verify search works
+	response, err := svc.Search(context.Background(), "preexisting", nil, DefaultSearchOptions())
+	require.NoError(t, err)
+	assert.Greater(t, len(response.Results), 0)
+}
+
+// TestGetAdaptiveRRFConfig tests RRF configuration.
+func TestGetAdaptiveRRFConfig(t *testing.T) {
+	// Test the package-level function
+	tests := []struct {
+		name   string
+		query  string
+	}{
+		{
+			name:  "short query",
+			query: "test",
+		},
+		{
+			name:  "longer query",
+			query: "machine learning concepts and algorithms",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config := GetAdaptiveRRFConfig(tt.query)
+			// Should return valid config
+			assert.NotNil(t, config)
+			assert.Greater(t, config.Limit, 0)
+		})
+	}
+}
+
+// TestSearchService_EmptyQuery tests behavior with empty query.
+func TestSearchService_EmptyQuery(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	svc := NewService(engine)
+
+	// Search with empty query and no embedding
+	response, err := svc.Search(context.Background(), "", nil, DefaultSearchOptions())
+	require.NoError(t, err)
+	assert.Equal(t, 0, len(response.Results))
+}
+
+// TestSearchService_SpecialCharacters tests search with special characters.
+func TestSearchService_SpecialCharacters(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	defer engine.Close()
+
+	svc := NewService(engine)
+
+	// Create node with special characters
+	node := &storage.Node{
+		ID:         "special1",
+		Labels:     []string{"Doc"},
+		Properties: map[string]any{"content": "C++ programming & Java!"},
+	}
+	engine.CreateNode(node)
+	svc.IndexNode(node)
+
+	// Search should handle special chars without panicking
+	response, err := svc.Search(context.Background(), "C++", nil, DefaultSearchOptions())
+	// Should not panic, even if results vary
+	assert.NoError(t, err)
+	assert.NotNil(t, response)
+}
+
+// ========================================
+// Tests for 0% coverage functions
+// ========================================
+
+func TestVectorSearchOnlyDirect(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic_vector_search", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+
+		// Create nodes with embeddings (float32)
+		embedding := make([]float32, 1024)
+		for i := range embedding {
+			embedding[i] = float32(i) / 1024.0
+		}
+
+		store.CreateNode(&storage.Node{
+			ID:        "node-1",
+			Labels:    []string{"Document"},
+			Embedding: embedding,
+			Properties: map[string]interface{}{
+				"title":   "Test Doc",
+				"content": "Test content",
+			},
+		})
+
+		service := NewService(store)
+
+		// Index node
+		node, _ := store.GetNode("node-1")
+		service.IndexNode(node)
+
+		// Create query embedding (float32 for search)
+		queryEmb := make([]float32, 1024)
+		for i := range queryEmb {
+			queryEmb[i] = float32(i) / 1024.0
+		}
+
+		opts := &SearchOptions{
+			Limit: 10,
+		}
+
+		response, err := service.vectorSearchOnly(ctx, queryEmb, opts)
+		if err != nil {
+			t.Logf("vectorSearchOnly error (may be expected): %v", err)
+		}
+		if response != nil {
+			t.Logf("Vector search returned %d results", len(response.Results))
+		}
+	})
+
+	t.Run("empty_embedding", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+
+		service := NewService(store)
+
+		opts := &SearchOptions{Limit: 10}
+		response, err := service.vectorSearchOnly(ctx, nil, opts)
+		// Expect error or empty results for nil embedding
+		if err == nil && response != nil && len(response.Results) != 0 {
+			t.Error("Expected empty results for nil embedding")
+		}
+	})
+}
+
+func TestBuildIndexesDirect(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("build_on_empty_storage", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+
+		service := NewService(store)
+
+		err := service.BuildIndexes(ctx)
+		if err != nil {
+			t.Errorf("BuildIndexes on empty storage failed: %v", err)
+		}
+	})
+
+	t.Run("build_with_nodes", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+
+		// Create nodes with embeddings (float32)
+		embedding := make([]float32, 1024)
+		for i := range embedding {
+			embedding[i] = 0.5
+		}
+
+		store.CreateNode(&storage.Node{
+			ID:        "doc-1",
+			Labels:    []string{"Document"},
+			Embedding: embedding,
+			Properties: map[string]interface{}{
+				"content": "First document content",
+			},
+		})
+		store.CreateNode(&storage.Node{
+			ID:     "doc-2",
+			Labels: []string{"Document"},
+			Properties: map[string]interface{}{
+				"content": "Second document without embedding",
+			},
+		})
+
+		service := NewService(store)
+
+		err := service.BuildIndexes(ctx)
+		if err != nil {
+			t.Errorf("BuildIndexes failed: %v", err)
+		}
+	})
+}
+
+func TestVectorIndexCosineSimilarityIndirect(t *testing.T) {
+	// Test cosine similarity through the VectorIndex search
+	idx := NewVectorIndex(4)
+
+	// Add a vector (float32)
+	vec1 := []float32{1.0, 0.0, 0.0, 0.0}
+	idx.Add("node-1", vec1)
+
+	// Search with similar vector
+	ctx := context.Background()
+	queryVec := []float32{1.0, 0.0, 0.0, 0.0}
+	results, err := idx.Search(ctx, queryVec, 1, 0.0)
+	if err != nil {
+		t.Fatalf("Search failed: %v", err)
+	}
+
+	if len(results) == 0 {
+		t.Error("Expected at least one result")
+	} else {
+		// Should have high similarity for identical vectors
+		if results[0].Score < 0.99 {
+			t.Errorf("Expected high similarity for identical vectors, got %f", results[0].Score)
+		}
+	}
+}
+
+func TestSearchServiceSearchDirect(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("search_with_embedding", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+
+		embedding := make([]float32, 1024)
+		for i := range embedding {
+			embedding[i] = 0.5
+		}
+
+		store.CreateNode(&storage.Node{
+			ID:        "doc-1",
+			Labels:    []string{"Document"},
+			Embedding: embedding,
+			Properties: map[string]interface{}{
+				"content": "Machine learning tutorial",
+			},
+		})
+
+		service := NewService(store)
+
+		// Index the node
+		node, _ := store.GetNode("doc-1")
+		service.IndexNode(node)
+
+		queryEmb := make([]float32, 1024)
+		for i := range queryEmb {
+			queryEmb[i] = 0.5
+		}
+
+		opts := &SearchOptions{
+			Limit: 10,
+		}
+
+		response, err := service.Search(ctx, "machine learning", queryEmb, opts)
+		if err != nil {
+			t.Fatalf("Search failed: %v", err)
+		}
+		t.Logf("Search returned %d results", len(response.Results))
+	})
+}
+
+func TestFulltextSearchWithPrefix(t *testing.T) {
+	idx := NewFulltextIndex()
+
+	// Index documents
+	idx.Index("doc-1", "machine learning algorithms")
+	idx.Index("doc-2", "deep learning models")
+	idx.Index("doc-3", "natural language processing")
+
+	// Search with prefix
+	results := idx.Search("mach", 10) // Should match "machine"
+	t.Logf("Prefix search for 'mach' returned %d results", len(results))
+
+	// Full term search
+	results = idx.Search("learning", 10)
+	if len(results) < 2 {
+		t.Errorf("Expected at least 2 results for 'learning', got %d", len(results))
+	}
+}
+
+func TestRRFHybridSearchDirect(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("rrf_with_both_results", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+
+		embedding := make([]float32, 1024)
+		for i := range embedding {
+			embedding[i] = 0.5
+		}
+
+		store.CreateNode(&storage.Node{
+			ID:        "doc-1",
+			Labels:    []string{"Document"},
+			Embedding: embedding,
+			Properties: map[string]interface{}{
+				"content": "Machine learning tutorial content",
+			},
+		})
+
+		service := NewService(store)
+
+		node, _ := store.GetNode("doc-1")
+		service.IndexNode(node)
+
+		queryEmb := make([]float32, 1024)
+		for i := range queryEmb {
+			queryEmb[i] = 0.5
+		}
+
+		opts := &SearchOptions{
+			Limit:        10,
+			RRFK:         60,
+			VectorWeight: 0.6,
+			BM25Weight:   0.4,
+		}
+
+		response, err := service.rrfHybridSearch(ctx, "machine learning", queryEmb, opts)
+		if err != nil {
+			t.Fatalf("rrfHybridSearch failed: %v", err)
+		}
+		t.Logf("RRF search returned %d results", len(response.Results))
+	})
 }

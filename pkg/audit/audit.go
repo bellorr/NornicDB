@@ -1,9 +1,129 @@
 // Package audit provides compliance audit logging for NornicDB.
-// Implements immutable audit trails required by:
-// - GDPR Art.30 (records of processing activities)
-// - HIPAA §164.312(b) (audit controls)
-// - FISMA AU controls (audit and accountability)
-// - SOC2 CC7 (system monitoring)
+//
+// This package implements immutable audit trails required by major regulatory frameworks:
+//   - GDPR Art.30: Records of processing activities
+//   - GDPR Art.15: Right of access (audit trail for data subject requests)
+//   - HIPAA §164.312(b): Audit controls and audit logs
+//   - HIPAA §164.308(a)(1)(ii)(D): Information system activity review
+//   - FISMA AU-2: Audit Events, AU-3: Content of Audit Records
+//   - SOC2 CC7.2: System monitoring controls
+//   - SOX §404: Internal controls over financial reporting
+//
+// Features:
+//   - Immutable audit log entries (append-only)
+//   - Structured JSON format for machine processing
+//   - Real-time security alerting
+//   - Compliance reporting (GDPR, HIPAA, SOC2)
+//   - User activity tracking
+//   - Data access logging
+//   - Retention management (7 years default for SOC2)
+//
+// Example Usage:
+//
+//	// Initialize audit logger
+//	config := audit.DefaultConfig()
+//	config.LogPath = "/var/log/nornicdb/audit.log"
+//	config.RetentionDays = 2555 // 7 years for SOC2
+//
+//	logger, err := audit.NewLogger(config)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer logger.Close()
+//
+//	// Set up security alerting
+//	logger.SetAlertCallback(func(event audit.Event) {
+//		if event.Type == audit.EventBreach {
+//			sendSecurityAlert(event)
+//		}
+//	})
+//
+//	// Log authentication events
+//	logger.LogAuth(audit.EventLogin, "user-123", "alice",
+//		"192.168.1.100", "Mozilla/5.0", true, "")
+//
+//	// Log data access (GDPR compliance)
+//	logger.LogDataAccess("user-123", "alice", "node", "patient-456",
+//		"READ", true, "PHI")
+//
+//	// Log GDPR erasure request
+//	logger.LogErasure("user-123", "alice", "patient-789", false,
+//		"Erasure request initiated")
+//
+//	// Generate compliance reports
+//	reader := audit.NewReader(config.LogPath)
+//	report, _ := reader.GenerateComplianceReport(
+//		time.Now().AddDate(0, -1, 0), // Last month
+//		time.Now(),
+//		"Monthly Compliance Report",
+//	)
+//
+//	fmt.Printf("Total events: %d\n", report.TotalEvents)
+//	fmt.Printf("Failed logins: %d\n", report.FailedLogins)
+//	fmt.Printf("GDPR erasures: %d\n", report.ErasureRequests)
+//
+// Event Types:
+//
+// Authentication:
+//   - LOGIN, LOGOUT, LOGIN_FAILED, PASSWORD_CHANGE
+//
+// Authorization:
+//   - ACCESS_DENIED, ROLE_CHANGE
+//
+// Data Operations (GDPR Art.15):
+//   - DATA_READ, DATA_CREATE, DATA_UPDATE, DATA_DELETE, DATA_EXPORT
+//
+// GDPR Rights:
+//   - ERASURE_REQUEST, ERASURE_COMPLETE, CONSENT_GIVEN, CONSENT_REVOKED
+//
+// System Events:
+//   - CONFIG_CHANGE, BACKUP, RESTORE, SCHEMA_CHANGE
+//
+// Security:
+//   - SECURITY_ALERT, BREACH_DETECTED
+//
+// Compliance Requirements:
+//
+// GDPR Art.30 (Records of Processing):
+//   - Who: UserID, Username (data controller/processor)
+//   - What: Resource, Action (categories of data)
+//   - When: Timestamp (retention periods)
+//   - Where: IPAddress (location of processing)
+//   - Why: Reason (legal basis)
+//
+// HIPAA §164.312(b) (Audit Controls):
+//   - User identification (UserID)
+//   - Type of action performed (EventType, Action)
+//   - Date and time (Timestamp)
+//   - Source of action (IPAddress, UserAgent)
+//   - Success or failure (Success, Reason)
+//
+// SOC2 CC7.2 (System Monitoring):
+//   - Logging of security events
+//   - Review of logs for anomalies
+//   - Retention of logs
+//   - Protection of log integrity
+//
+// ELI12 (Explain Like I'm 12):
+//
+// Think of audit logging like a security camera system for your data:
+//
+// 1. **Every action is recorded**: Like how security cameras record everything
+//    that happens, we record every time someone reads, changes, or deletes data.
+//
+// 2. **Can't be erased**: Just like how security footage is stored safely where
+//    bad guys can't delete it, our audit logs can't be changed or deleted.
+//
+// 3. **Shows who did what when**: If something goes wrong, we can look back and
+//    see exactly who did what and when, like reviewing security footage.
+//
+// 4. **Alerts for bad stuff**: If someone tries to break in or do something
+//    suspicious, the system sends an alert immediately, like a burglar alarm.
+//
+// 5. **Required by law**: Just like buildings need fire exits, companies that
+//    handle personal data need audit logs to prove they're being careful.
+//
+// The audit system helps keep everyone's data safe and proves we're following the rules!
 package audit
 
 import (
@@ -54,8 +174,48 @@ const (
 	EventBreach         EventType = "BREACH_DETECTED"
 )
 
-// Event represents an immutable audit log entry.
-// Fields are designed for compliance reporting requirements.
+// Event represents an immutable audit log entry for compliance tracking.
+//
+// Events follow a structured format designed to meet regulatory requirements:
+//   - GDPR Art.30: Records of processing activities
+//   - HIPAA §164.312(b): Audit controls
+//   - SOC2 CC7.2: System monitoring
+//
+// All fields are optional except Type and Timestamp, but including more
+// information improves compliance posture and forensic capabilities.
+//
+// Example:
+//
+//	// Authentication event
+//	event := audit.Event{
+//		Type:      audit.EventLogin,
+//		UserID:    "user-123",
+//		Username:  "alice",
+//		IPAddress: "192.168.1.100",
+//		UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+//		Success:   true,
+//		Metadata: map[string]string{
+//			"login_method": "password",
+//			"session_id":   "sess-abc123",
+//		},
+//	}
+//
+//	// Data access event (GDPR)
+//	event = audit.Event{
+//		Type:               audit.EventDataRead,
+//		UserID:             "user-123",
+//		Username:           "alice",
+//		Resource:           "patient_record",
+//		ResourceID:         "patient-456",
+//		Action:             "READ",
+//		Success:            true,
+//		DataClassification: "PHI",
+//		RequestPath:        "/api/patients/456",
+//	}
+//
+// Immutability:
+//   Once logged, events cannot be modified. This ensures audit trail integrity
+//   required by HIPAA and SOC2.
 type Event struct {
 	// Unique event identifier
 	ID string `json:"id"`
@@ -94,6 +254,42 @@ type Event struct {
 }
 
 // Logger handles audit log writing with compliance guarantees.
+//
+// The Logger provides:
+//   - Thread-safe concurrent logging
+//   - Immutable append-only log format
+//   - Automatic event ID generation
+//   - Real-time security alerting
+//   - Configurable retention and rotation
+//   - fsync support for durability
+//
+// Example:
+//
+//	config := audit.DefaultConfig()
+//	config.LogPath = "/secure/audit.log"
+//	config.SyncWrites = true // Force fsync for durability
+//
+//	logger, err := audit.NewLogger(config)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer logger.Close()
+//
+//	// Set up alerting
+//	logger.SetAlertCallback(func(event audit.Event) {
+//		slack.SendAlert(fmt.Sprintf("Security event: %s", event.Type))
+//	})
+//
+//	// Log events
+//	logger.Log(audit.Event{
+//		Type:    audit.EventSecurityAlert,
+//		Reason:  "Multiple failed login attempts",
+//		Success: false,
+//	})
+//
+// Thread Safety:
+//   All methods are thread-safe and can be called concurrently from
+//   multiple goroutines.
 type Logger struct {
 	mu       sync.Mutex
 	writer   io.Writer
@@ -146,7 +342,44 @@ func DefaultConfig() Config {
 	}
 }
 
-// NewLogger creates a new audit logger.
+// NewLogger creates a new audit logger with the given configuration.
+//
+// The logger creates the log directory if it doesn't exist and opens the
+// log file in append mode. If logging is disabled in config, returns a
+// no-op logger that discards all events.
+//
+// Parameters:
+//   - config: Logger configuration (use DefaultConfig() for defaults)
+//
+// Returns:
+//   - Logger instance ready for use
+//   - Error if failed to create directory or open log file
+//
+// Example:
+//
+//	// Standard configuration
+//	config := audit.DefaultConfig()
+//	logger, err := audit.NewLogger(config)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Custom configuration
+//	config = audit.Config{
+//		Enabled:       true,
+//		LogPath:       "/var/log/nornicdb/audit.log",
+//		RetentionDays: 2555, // 7 years
+//		SyncWrites:    true, // Force fsync
+//		AlertOnEvents: []audit.EventType{
+//			audit.EventBreach,
+//			audit.EventSecurityAlert,
+//		},
+//	}
+//	logger, err = audit.NewLogger(config)
+//
+// File Permissions:
+//   Log files are created with 0640 permissions (owner read/write, group read)
+//   Log directories are created with 0750 permissions
 func NewLogger(config Config) (*Logger, error) {
 	if !config.Enabled {
 		return &Logger{config: config}, nil
@@ -186,7 +419,52 @@ func (l *Logger) SetAlertCallback(fn func(Event)) {
 	l.alertCallback = fn
 }
 
-// Log records an audit event.
+// Log records an audit event to the audit trail.
+//
+// The event is automatically timestamped and assigned a unique ID if not provided.
+// If SyncWrites is enabled, the log is fsynced to disk for durability.
+//
+// Parameters:
+//   - event: Event to log (Type is required, other fields optional)
+//
+// Returns:
+//   - nil on success
+//   - Error if logging fails or logger is closed
+//
+// Example:
+//
+//	// Simple event
+//	err := logger.Log(audit.Event{
+//		Type:    audit.EventLogin,
+//		UserID:  "user-123",
+//		Success: true,
+//	})
+//
+//	// Detailed event
+//	err = logger.Log(audit.Event{
+//		Type:      audit.EventDataRead,
+//		UserID:    "user-456",
+//		Username:  "bob",
+//		IPAddress: "10.0.1.50",
+//		UserAgent: "NornicDB-Client/1.0",
+//		Resource:  "patient_record",
+//		ResourceID: "patient-789",
+//		Action:    "READ",
+//		Success:   true,
+//		DataClassification: "PHI",
+//		RequestPath: "/api/patients/789",
+//		Metadata: map[string]string{
+//			"query_type": "medical_history",
+//			"department": "cardiology",
+//		},
+//	})
+//
+// Automatic Fields:
+//   - Timestamp: Set to current UTC time if zero
+//   - ID: Generated if empty (format: audit-{nanoseconds}-{sequence})
+//
+// Thread Safety:
+//   This method is thread-safe and can be called concurrently.
 func (l *Logger) Log(event Event) error {
 	if !l.config.Enabled {
 		return nil
@@ -241,7 +519,36 @@ func (l *Logger) Log(event Event) error {
 	return nil
 }
 
-// LogAuth logs an authentication event.
+// LogAuth logs an authentication event with standard fields.
+//
+// This is a convenience method for logging common authentication events
+// like login, logout, and password changes.
+//
+// Parameters:
+//   - eventType: Type of auth event (EventLogin, EventLogout, etc.)
+//   - userID: Unique user identifier
+//   - username: Human-readable username
+//   - ip: Client IP address
+//   - userAgent: Client User-Agent string
+//   - success: Whether the operation succeeded
+//   - reason: Failure reason or additional context
+//
+// Example:
+//
+//	// Successful login
+//	logger.LogAuth(audit.EventLogin, "user-123", "alice",
+//		"192.168.1.100", "Mozilla/5.0", true, "")
+//
+//	// Failed login
+//	logger.LogAuth(audit.EventLoginFailed, "", "alice",
+//		"192.168.1.100", "Mozilla/5.0", false, "invalid password")
+//
+//	// Password change
+//	logger.LogAuth(audit.EventPasswordChange, "user-123", "alice",
+//		"192.168.1.100", "Mozilla/5.0", true, "user initiated")
+//
+// Compliance:
+//   Satisfies HIPAA §164.312(b) audit control requirements.
 func (l *Logger) LogAuth(eventType EventType, userID, username, ip, userAgent string, success bool, reason string) error {
 	return l.Log(Event{
 		Type:      eventType,
@@ -255,7 +562,38 @@ func (l *Logger) LogAuth(eventType EventType, userID, username, ip, userAgent st
 	})
 }
 
-// LogDataAccess logs a data access event (GDPR compliance).
+// LogDataAccess logs a data access event for GDPR Art.15 compliance.
+//
+// This method records all data access operations to maintain a complete
+// audit trail of personal data processing as required by GDPR.
+//
+// Parameters:
+//   - userID: User performing the access
+//   - username: Human-readable username
+//   - resourceType: Type of resource ("node", "edge", "user", etc.)
+//   - resourceID: Unique identifier of the accessed resource
+//   - action: Operation performed ("READ", "create", "update", "delete")
+//   - success: Whether the operation succeeded
+//   - classification: Data classification ("PHI", "PII", "PUBLIC", etc.)
+//
+// Example:
+//
+//	// Reading patient data (HIPAA PHI)
+//	logger.LogDataAccess("user-123", "dr_smith", "patient_record",
+//		"patient-456", "READ", true, "PHI")
+//
+//	// Creating user profile (PII)
+//	logger.LogDataAccess("user-789", "admin", "user_profile",
+//		"profile-123", "CREATE", true, "PII")
+//
+//	// Failed access attempt
+//	logger.LogDataAccess("user-456", "alice", "financial_record",
+//		"record-789", "READ", false, "FINANCIAL")
+//
+// GDPR Compliance:
+//   - Art.15: Right of access - provides audit trail for data subject requests
+//   - Art.30: Records of processing - documents all processing activities
+//   - Recital 82: Security measures - demonstrates appropriate safeguards
 func (l *Logger) LogDataAccess(userID, username, resourceType, resourceID, action string, success bool, classification string) error {
 	return l.Log(Event{
 		Type:               EventType("DATA_" + action),
@@ -269,7 +607,37 @@ func (l *Logger) LogDataAccess(userID, username, resourceType, resourceID, actio
 	})
 }
 
-// LogErasure logs a data erasure event (GDPR Art.17 - right to be forgotten).
+// LogErasure logs a GDPR Art.17 data erasure event ("right to be forgotten").
+//
+// This method records erasure requests and completions to demonstrate
+// compliance with GDPR data subject rights.
+//
+// Parameters:
+//   - userID: User processing the erasure (admin/DPO)
+//   - username: Human-readable username of processor
+//   - targetUserID: Data subject whose data is being erased
+//   - complete: true if erasure is complete, false if request initiated
+//   - details: Additional context or reason
+//
+// Example:
+//
+//	// Erasure request initiated
+//	logger.LogErasure("admin-123", "dpo_jane", "user-456", false,
+//		"GDPR erasure request received via email")
+//
+//	// Erasure completed
+//	logger.LogErasure("admin-123", "dpo_jane", "user-456", true,
+//		"All personal data erased from system")
+//
+//	// Partial erasure (legal hold)
+//	logger.LogErasure("admin-123", "dpo_jane", "user-789", false,
+//		"Partial erasure - financial records retained per legal hold")
+//
+// GDPR Requirements:
+//   - Art.17(1): Right to erasure
+//   - Art.17(3): Exceptions to erasure (legal obligations, etc.)
+//   - 30-day response deadline
+//   - Documentation of erasure actions
 func (l *Logger) LogErasure(userID, username, targetUserID string, complete bool, details string) error {
 	eventType := EventErasureRequest
 	if complete {
@@ -494,7 +862,53 @@ type ComplianceReport struct {
 	GeneratedAt      time.Time         `json:"generated_at"`
 }
 
-// GenerateComplianceReport creates a summary report for compliance auditors.
+// GenerateComplianceReport creates a comprehensive compliance report for auditors.
+//
+// This method analyzes audit logs for a time period and generates statistics
+// required for GDPR, HIPAA, and SOC2 compliance reporting.
+//
+// Parameters:
+//   - start: Start of reporting period
+//   - end: End of reporting period
+//   - periodName: Human-readable period description
+//
+// Returns:
+//   - ComplianceReport with statistics and metrics
+//   - Error if log reading fails
+//
+// Example:
+//
+//	reader := audit.NewReader("/var/log/nornicdb/audit.log")
+//
+//	// Monthly report
+//	start := time.Now().AddDate(0, -1, 0)
+//	end := time.Now()
+//	report, err := reader.GenerateComplianceReport(start, end, "November 2025")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Print summary
+//	fmt.Printf("=== %s Compliance Report ===\n", report.Period)
+//	fmt.Printf("Total Events: %d\n", report.TotalEvents)
+//	fmt.Printf("Unique Users: %d\n", report.UniqueUsers)
+//	fmt.Printf("Failed Logins: %d\n", report.FailedLogins)
+//	fmt.Printf("Access Denied: %d\n", report.AccessDenied)
+//	fmt.Printf("Data Accesses: %d\n", report.DataAccesses)
+//	fmt.Printf("GDPR Erasures: %d\n", report.ErasureRequests)
+//	fmt.Printf("Security Alerts: %d\n", report.SecurityAlerts)
+//
+//	// Export to JSON for compliance team
+//	reportJSON, _ := json.MarshalIndent(report, "", "  ")
+//	os.WriteFile("compliance-report-nov-2025.json", reportJSON, 0644)
+//
+// Report Contents:
+//   - Event counts by type
+//   - Security metrics (failed logins, access denied)
+//   - Data access statistics
+//   - GDPR erasure tracking
+//   - Unique user activity
+//   - Time period coverage
 func (r *Reader) GenerateComplianceReport(start, end time.Time, periodName string) (*ComplianceReport, error) {
 	result, err := r.Query(Query{
 		StartTime: start,

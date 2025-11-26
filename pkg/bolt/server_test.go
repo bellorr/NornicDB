@@ -1670,3 +1670,929 @@ func TestPackStreamFloat(t *testing.T) {
 		t.Errorf("got %v, want %v", decoded, testValue)
 	}
 }
+
+// =============================================================================
+// Additional Tests for Coverage Improvement
+// =============================================================================
+
+func TestHandlePull(t *testing.T) {
+	// Create a session with stored results
+	executor := &mockExecutor{
+		executeFunc: func(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+			return &QueryResult{
+				Columns: []string{"name", "age"},
+				Rows: [][]any{
+					{"Alice", 30},
+					{"Bob", 25},
+					{"Charlie", 35},
+				},
+			}, nil
+		},
+	}
+
+	session := &Session{
+		executor: executor,
+		lastResult: &QueryResult{
+			Columns: []string{"name", "age"},
+			Rows: [][]any{
+				{"Alice", 30},
+				{"Bob", 25},
+				{"Charlie", 35},
+			},
+		},
+		resultIndex: 0,
+	}
+
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	session.conn = server
+
+	// Handle PULL in goroutine
+	done := make(chan error, 1)
+	go func() {
+		// Pull all records (nil data means pull all)
+		err := session.handlePull(nil)
+		done <- err
+	}()
+
+	// Read from client side - should receive records
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			_, err := client.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Give some time for processing
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("handlePull failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+		// Timeout is ok - we're testing that it processes
+	}
+}
+
+func TestHandleDiscard(t *testing.T) {
+	session := &Session{
+		lastResult: &QueryResult{
+			Columns: []string{"n"},
+			Rows:    [][]any{{"test"}},
+		},
+		resultIndex: 0,
+	}
+
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	session.conn = server
+
+	// Handle DISCARD
+	done := make(chan error, 1)
+	go func() {
+		err := session.handleDiscard(nil)
+		done <- err
+	}()
+
+	// Read the response
+	go func() {
+		buf := make([]byte, 1024)
+		client.Read(buf)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("handleDiscard failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// lastResult should be cleared
+	if session.lastResult != nil {
+		t.Error("expected lastResult to be nil after DISCARD")
+	}
+}
+
+func TestHandleRoute(t *testing.T) {
+	session := &Session{}
+
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	session.conn = server
+
+	// Handle ROUTE
+	done := make(chan error, 1)
+	go func() {
+		err := session.handleRoute(nil)
+		done <- err
+	}()
+
+	// Read the response
+	go func() {
+		buf := make([]byte, 1024)
+		client.Read(buf)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("handleRoute failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestSendRecord(t *testing.T) {
+	session := &Session{}
+
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	session.conn = server
+
+	// Send a record
+	done := make(chan error, 1)
+	go func() {
+		err := session.sendRecord([]any{"Alice", 30, true, 3.14})
+		done <- err
+	}()
+
+	// Read from client
+	go func() {
+		buf := make([]byte, 1024)
+		client.Read(buf)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("sendRecord failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestDecodePackStreamList_MixedTypes(t *testing.T) {
+	// Test list with mixed types and value verification
+	tests := []struct {
+		name     string
+		data     []byte
+		expected []any
+	}{
+		{
+			name: "list with integers",
+			data: []byte{
+				0x93, // TINY_LIST with 3 elements
+				0x01, // tiny int 1
+				0x02, // tiny int 2
+				0x03, // tiny int 3
+			},
+			expected: []any{int64(1), int64(2), int64(3)},
+		},
+		{
+			name: "list with string and int",
+			data: []byte{
+				0x92,             // TINY_LIST with 2 elements
+				0x85,             // TINY_STRING "hello" (5 chars)
+				'h', 'e', 'l', 'l', 'o',
+				0x05, // tiny int 5
+			},
+			expected: []any{"hello", int64(5)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, _, err := decodePackStreamList(tt.data, 0)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if len(result) != len(tt.expected) {
+				t.Errorf("got %d elements, want %d", len(result), len(tt.expected))
+				return
+			}
+			for i := range tt.expected {
+				if result[i] != tt.expected[i] {
+					t.Errorf("element %d: got %v, want %v", i, result[i], tt.expected[i])
+				}
+			}
+		})
+	}
+}
+
+func TestDecodePackStreamList_LIST8(t *testing.T) {
+	// LIST8 with more elements
+	data := []byte{0xD4, 0x02} // LIST8 marker + 2 elements
+	data = append(data, 0x01) // tiny int 1
+	data = append(data, 0x02) // tiny int 2
+
+	result, _, err := decodePackStreamList(data, 0)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+		return
+	}
+	if len(result) != 2 {
+		t.Errorf("got %d elements, want 2", len(result))
+	}
+}
+
+func TestDecodePackStreamValue_AllTypes(t *testing.T) {
+	tests := []struct {
+		name     string
+		data     []byte
+		expected any
+	}{
+		{
+			name:     "null",
+			data:     []byte{0xC0},
+			expected: nil,
+		},
+		{
+			name:     "true",
+			data:     []byte{0xC3},
+			expected: true,
+		},
+		{
+			name:     "false",
+			data:     []byte{0xC2},
+			expected: false,
+		},
+		{
+			name:     "tiny int positive",
+			data:     []byte{0x2A}, // 42
+			expected: int64(42),
+		},
+		{
+			name:     "tiny int negative",
+			data:     []byte{0xF0}, // -16
+			expected: int64(-16),
+		},
+		{
+			name: "INT8",
+			data: []byte{0xC8, 0x80}, // -128
+			expected: int64(-128),
+		},
+		{
+			name: "INT16",
+			data: []byte{0xC9, 0x01, 0x00}, // 256
+			expected: int64(256),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, _, err := decodePackStreamValue(tt.data, 0)
+			if err != nil {
+				t.Errorf("unexpected error: %v", err)
+				return
+			}
+			if result != tt.expected {
+				t.Errorf("got %v (%T), want %v (%T)", result, result, tt.expected, tt.expected)
+			}
+		})
+	}
+}
+
+func TestEncodePackStreamValue_AllTypes(t *testing.T) {
+	tests := []struct {
+		name   string
+		value  any
+		marker byte // First byte
+	}{
+		{"nil", nil, 0xC0},
+		{"true", true, 0xC3},
+		{"false", false, 0xC2},
+		{"tiny int", int64(42), 0x2A},
+		{"negative int", int64(-10), 0xF6},
+		{"float64", 3.14, 0xC1},
+		{"string", "hello", 0x85}, // TINY_STRING
+		{"empty list", []any{}, 0x90}, // TINY_LIST
+		{"empty map", map[string]any{}, 0xA0}, // TINY_MAP
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := encodePackStreamValue(tt.value)
+			if len(result) == 0 {
+				t.Error("expected non-empty result")
+				return
+			}
+			if result[0] != tt.marker {
+				t.Errorf("got marker 0x%02X, want 0x%02X", result[0], tt.marker)
+			}
+		})
+	}
+}
+
+func TestDecodePackStreamMap_Nested(t *testing.T) {
+	// Nested map
+	data := []byte{
+		0xA1, // TINY_MAP with 1 element
+		0x84, 'd', 'a', 't', 'a', // key "data"
+		0xA1, // nested TINY_MAP with 1 element
+		0x83, 'f', 'o', 'o', // key "foo"
+		0x83, 'b', 'a', 'r', // value "bar"
+	}
+
+	result, _, err := decodePackStreamMap(data, 0)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+		return
+	}
+
+	nested, ok := result["data"].(map[string]any)
+	if !ok {
+		t.Error("expected nested map")
+		return
+	}
+	if nested["foo"] != "bar" {
+		t.Errorf("got %v, want 'bar'", nested["foo"])
+	}
+}
+
+func TestDispatchMessage_UnknownType(t *testing.T) {
+	session := &Session{}
+
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	session.conn = server
+
+	// Handle unknown message type
+	done := make(chan error, 1)
+	go func() {
+		err := session.dispatchMessage(0xFF, nil) // Unknown type
+		done <- err
+	}()
+
+	// Read the failure response
+	go func() {
+		buf := make([]byte, 1024)
+		client.Read(buf)
+	}()
+
+	select {
+	case err := <-done:
+		// dispatchMessage sends a failure response and returns nil
+		// OR it might return an error - either is acceptable behavior
+		_ = err // Ignore the error - we're just testing it doesn't panic
+	case <-time.After(100 * time.Millisecond):
+		// Timeout is ok
+	}
+}
+
+func TestSessionRunWithMultipleResults(t *testing.T) {
+	executor := &mockExecutor{
+		executeFunc: func(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+			return &QueryResult{
+				Columns: []string{"id", "name", "score"},
+				Rows: [][]any{
+					{1, "Alice", 95.5},
+					{2, "Bob", 87.3},
+					{3, "Charlie", 92.1},
+					{4, "Diana", 88.9},
+					{5, "Eve", 91.0},
+				},
+			}, nil
+		},
+	}
+
+	session := &Session{
+		executor: executor,
+	}
+
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	session.conn = server
+
+	// Execute a query
+	done := make(chan error, 1)
+	go func() {
+		// Build RUN message data (without struct marker - just query + params)
+		// handleRun expects the data payload after the message type has been identified
+		runMsg := encodePackStreamString("MATCH (n) RETURN n.id, n.name, n.score")
+		runMsg = append(runMsg, 0xA0) // Empty params map
+
+		err := session.handleRun(runMsg)
+		done <- err
+	}()
+
+	// Read SUCCESS response
+	go func() {
+		buf := make([]byte, 4096)
+		client.Read(buf)
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Logf("handleRun returned error (expected): %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// Verify lastResult was stored (if execution succeeded)
+	if session.lastResult != nil && len(session.lastResult.Rows) != 5 {
+		t.Errorf("expected 5 rows, got %d", len(session.lastResult.Rows))
+	}
+}
+
+func TestHandlePullWithLimit(t *testing.T) {
+	session := &Session{
+		lastResult: &QueryResult{
+			Columns: []string{"n"},
+			Rows: [][]any{
+				{"row1"},
+				{"row2"},
+				{"row3"},
+				{"row4"},
+				{"row5"},
+			},
+		},
+		resultIndex: 0,
+	}
+
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	session.conn = server
+
+	// Build PULL data with n=2 (PackStream map: {n: 2})
+	pullData := []byte{
+		0xA1,       // TINY_MAP with 1 element
+		0x81, 'n',  // TINY_STRING "n"
+		0x02,       // tiny int 2
+	}
+
+	// Pull only 2 records
+	done := make(chan error, 1)
+	go func() {
+		err := session.handlePull(pullData)
+		done <- err
+	}()
+
+	// Read from client
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			_, err := client.Read(buf)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Errorf("handlePull failed: %v", err)
+		}
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	// resultIndex should be advanced
+	if session.resultIndex != 2 {
+		t.Errorf("expected resultIndex 2, got %d", session.resultIndex)
+	}
+}
+
+func TestEncodePackStreamMap_ComplexTypes(t *testing.T) {
+	m := map[string]any{
+		"string":  "hello",
+		"int":     int64(42),
+		"float":   3.14,
+		"bool":    true,
+		"nil":     nil,
+		"list":    []any{1, 2, 3},
+		"nested": map[string]any{
+			"key": "value",
+		},
+	}
+
+	encoded := encodePackStreamMap(m)
+	if len(encoded) == 0 {
+		t.Error("expected non-empty encoded map")
+	}
+
+	// Should start with a MAP marker
+	if encoded[0]&0xF0 != 0xA0 && encoded[0] != 0xD8 && encoded[0] != 0xD9 && encoded[0] != 0xDA {
+		t.Errorf("expected MAP marker, got 0x%02X", encoded[0])
+	}
+}
+
+func TestEncodePackStreamList_LargeList(t *testing.T) {
+	// Create a list with more than 15 elements (requires LIST8)
+	list := make([]any, 20)
+	for i := range list {
+		list[i] = int64(i)
+	}
+
+	encoded := encodePackStreamList(list)
+	if len(encoded) == 0 {
+		t.Error("expected non-empty encoded list")
+	}
+
+	// Should start with LIST8 marker (0xD4)
+	if encoded[0] != 0xD4 {
+		t.Errorf("expected LIST8 marker 0xD4, got 0x%02X", encoded[0])
+	}
+}
+
+func TestDecodePackStreamString_LongString(t *testing.T) {
+	// STRING8 with longer content
+	content := "this is a longer string that tests STRING8 encoding"
+	data := []byte{0xD0, byte(len(content))}
+	data = append(data, []byte(content)...)
+
+	result, consumed, err := decodePackStreamString(data, 0)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+		return
+	}
+	if result != content {
+		t.Errorf("got %q, want %q", result, content)
+	}
+	if consumed != 2+len(content) { // marker + length + content
+		t.Errorf("consumed %d bytes, want %d", consumed, 2+len(content))
+	}
+}
+
+func TestDecodePackStreamValue_INT32(t *testing.T) {
+	// INT32: marker 0xCA + 4 bytes
+	data := []byte{0xCA, 0x00, 0x01, 0x00, 0x00} // 65536
+	result, _, err := decodePackStreamValue(data, 0)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+		return
+	}
+	if result != int64(65536) {
+		t.Errorf("got %v, want 65536", result)
+	}
+}
+
+func TestDecodePackStreamValue_INT64(t *testing.T) {
+	// INT64: marker 0xCB + 8 bytes
+	data := []byte{0xCB, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00} // 4294967296
+	result, _, err := decodePackStreamValue(data, 0)
+	if err != nil {
+		t.Errorf("unexpected error: %v", err)
+		return
+	}
+	if result != int64(4294967296) {
+		t.Errorf("got %v, want 4294967296", result)
+	}
+}
+
+// ============================================================================
+// Transaction Tests
+// ============================================================================
+
+// mockTransactionalExecutor implements TransactionalExecutor for testing.
+type mockTransactionalExecutor struct {
+	mockExecutor
+	beginCalled    bool
+	commitCalled   bool
+	rollbackCalled bool
+	beginError     error
+	commitError    error
+	rollbackError  error
+	lastMetadata   map[string]any
+}
+
+func (m *mockTransactionalExecutor) BeginTransaction(ctx context.Context, metadata map[string]any) error {
+	m.beginCalled = true
+	m.lastMetadata = metadata
+	return m.beginError
+}
+
+func (m *mockTransactionalExecutor) CommitTransaction(ctx context.Context) error {
+	m.commitCalled = true
+	return m.commitError
+}
+
+func (m *mockTransactionalExecutor) RollbackTransaction(ctx context.Context) error {
+	m.rollbackCalled = true
+	return m.rollbackError
+}
+
+func TestTransactionalExecutorInterface(t *testing.T) {
+	t.Run("regular executor does not implement TransactionalExecutor", func(t *testing.T) {
+		executor := &mockExecutor{}
+		_, ok := interface{}(executor).(TransactionalExecutor)
+		if ok {
+			t.Error("mockExecutor should NOT implement TransactionalExecutor")
+		}
+	})
+
+	t.Run("transactional executor implements TransactionalExecutor", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		_, ok := interface{}(executor).(TransactionalExecutor)
+		if !ok {
+			t.Error("mockTransactionalExecutor should implement TransactionalExecutor")
+		}
+	})
+}
+
+func TestHandleBeginWithTransactionalExecutor(t *testing.T) {
+	t.Run("begin calls executor", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:     conn,
+			executor: executor,
+		}
+
+		err := session.handleBegin(nil)
+		if err != nil {
+			t.Fatalf("handleBegin error: %v", err)
+		}
+
+		if !executor.beginCalled {
+			t.Error("BeginTransaction should have been called")
+		}
+		if !session.inTransaction {
+			t.Error("session should be in transaction")
+		}
+	})
+
+	t.Run("begin with metadata passes metadata to executor", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:     conn,
+			executor: executor,
+		}
+
+		// Create metadata with tx_timeout
+		metadata := encodePackStreamMap(map[string]any{
+			"tx_timeout": int64(30000),
+		})
+
+		err := session.handleBegin(metadata)
+		if err != nil {
+			t.Fatalf("handleBegin error: %v", err)
+		}
+
+		if executor.lastMetadata == nil {
+			t.Error("metadata should have been passed to executor")
+		}
+	})
+
+	t.Run("begin error returns failure", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{
+			beginError: io.EOF, // Simulate error
+		}
+		conn := &mockConn{}
+		session := &Session{
+			conn:     conn,
+			executor: executor,
+		}
+
+		err := session.handleBegin(nil)
+		if err != nil {
+			t.Fatalf("handleBegin should not return Go error: %v", err)
+		}
+
+		// Check that FAILURE was sent (contains 0x7F)
+		if len(conn.writeData) == 0 {
+			t.Error("expected failure response")
+		}
+	})
+}
+
+func TestHandleCommitWithTransactionalExecutor(t *testing.T) {
+	t.Run("commit calls executor and returns bookmark", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: true,
+		}
+
+		err := session.handleCommit(nil)
+		if err != nil {
+			t.Fatalf("handleCommit error: %v", err)
+		}
+
+		if !executor.commitCalled {
+			t.Error("CommitTransaction should have been called")
+		}
+		if session.inTransaction {
+			t.Error("session should not be in transaction after commit")
+		}
+
+		// Verify bookmark is in response
+		if len(conn.writeData) == 0 {
+			t.Error("expected success response with bookmark")
+		}
+	})
+
+	t.Run("commit without transaction returns failure", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: false,
+		}
+
+		err := session.handleCommit(nil)
+		if err != nil {
+			t.Fatalf("handleCommit should not return Go error: %v", err)
+		}
+
+		if executor.commitCalled {
+			t.Error("CommitTransaction should NOT have been called")
+		}
+	})
+
+	t.Run("commit error returns failure", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{
+			commitError: io.EOF,
+		}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: true,
+		}
+
+		err := session.handleCommit(nil)
+		if err != nil {
+			t.Fatalf("handleCommit should not return Go error: %v", err)
+		}
+
+		// Transaction state should still be cleared
+		if session.inTransaction {
+			t.Error("transaction state should be cleared even on error")
+		}
+	})
+}
+
+func TestHandleRollbackWithTransactionalExecutor(t *testing.T) {
+	t.Run("rollback calls executor", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: true,
+		}
+
+		err := session.handleRollback(nil)
+		if err != nil {
+			t.Fatalf("handleRollback error: %v", err)
+		}
+
+		if !executor.rollbackCalled {
+			t.Error("RollbackTransaction should have been called")
+		}
+		if session.inTransaction {
+			t.Error("session should not be in transaction after rollback")
+		}
+	})
+
+	t.Run("rollback without transaction is no-op", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: false,
+		}
+
+		err := session.handleRollback(nil)
+		if err != nil {
+			t.Fatalf("handleRollback error: %v", err)
+		}
+
+		if executor.rollbackCalled {
+			t.Error("RollbackTransaction should NOT have been called")
+		}
+	})
+}
+
+func TestHandleResetWithTransactionalExecutor(t *testing.T) {
+	t.Run("reset rolls back active transaction", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: true,
+		}
+
+		err := session.handleReset(nil)
+		if err != nil {
+			t.Fatalf("handleReset error: %v", err)
+		}
+
+		if !executor.rollbackCalled {
+			t.Error("RollbackTransaction should have been called on reset")
+		}
+		if session.inTransaction {
+			t.Error("session should not be in transaction after reset")
+		}
+	})
+
+	t.Run("reset without transaction does not call rollback", func(t *testing.T) {
+		executor := &mockTransactionalExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: false,
+		}
+
+		err := session.handleReset(nil)
+		if err != nil {
+			t.Fatalf("handleReset error: %v", err)
+		}
+
+		if executor.rollbackCalled {
+			t.Error("RollbackTransaction should NOT have been called")
+		}
+	})
+}
+
+func TestTransactionWithNonTransactionalExecutor(t *testing.T) {
+	t.Run("begin works without TransactionalExecutor", func(t *testing.T) {
+		executor := &mockExecutor{} // Does NOT implement TransactionalExecutor
+		conn := &mockConn{}
+		session := &Session{
+			conn:     conn,
+			executor: executor,
+		}
+
+		err := session.handleBegin(nil)
+		if err != nil {
+			t.Fatalf("handleBegin error: %v", err)
+		}
+
+		if !session.inTransaction {
+			t.Error("session should be in transaction")
+		}
+	})
+
+	t.Run("commit works without TransactionalExecutor", func(t *testing.T) {
+		executor := &mockExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: true,
+		}
+
+		err := session.handleCommit(nil)
+		if err != nil {
+			t.Fatalf("handleCommit error: %v", err)
+		}
+
+		if session.inTransaction {
+			t.Error("session should not be in transaction after commit")
+		}
+	})
+
+	t.Run("rollback works without TransactionalExecutor", func(t *testing.T) {
+		executor := &mockExecutor{}
+		conn := &mockConn{}
+		session := &Session{
+			conn:          conn,
+			executor:      executor,
+			inTransaction: true,
+		}
+
+		err := session.handleRollback(nil)
+		if err != nil {
+			t.Fatalf("handleRollback error: %v", err)
+		}
+
+		if session.inTransaction {
+			t.Error("session should not be in transaction after rollback")
+		}
+	})
+}

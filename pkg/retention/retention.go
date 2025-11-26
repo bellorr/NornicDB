@@ -1,19 +1,98 @@
 // Package retention provides data lifecycle and retention policy management for NornicDB.
 //
-// This package implements compliance-driven data retention following:
+// This package implements compliance-driven data retention following major regulatory frameworks:
 //   - GDPR Art.5(1)(e): Storage limitation principle
 //   - GDPR Art.17: Right to erasure ("right to be forgotten")
-//   - HIPAA §164.530(j): Record retention (6 years)
+//   - HIPAA §164.530(j): Record retention (6 years minimum)
 //   - FISMA AU-11: Audit Record Retention
-//   - SOC2 CC7.4: Records retention
+//   - SOC2 CC7.4: Records retention requirements
+//   - SOX: Financial records (7 years)
 //
-// Features:
-//   - Configurable retention policies per data type
+// Key Features:
+//   - Configurable retention policies per data category
 //   - Automatic data expiration and cleanup
-//   - Legal hold support
-//   - Data subject erasure (GDPR right to erasure)
-//   - Archive before deletion option
-//   - Retention policy inheritance
+//   - Legal hold support (prevents deletion during litigation)
+//   - GDPR Art.17 erasure requests ("right to be forgotten")
+//   - Archive-before-delete option for compliance
+//   - Policy persistence (save/load from JSON)
+//
+// Example Usage:
+//
+//	// Create retention manager
+//	manager := retention.NewManager()
+//
+//	// Add default compliance policies
+//	for _, policy := range retention.DefaultPolicies() {
+//		manager.AddPolicy(policy)
+//	}
+//
+//	// Set callbacks
+//	manager.SetDeleteCallback(func(record *retention.DataRecord) error {
+//		return database.Delete(record.ID)
+//	})
+//	manager.SetArchiveCallback(func(record *retention.DataRecord, path string) error {
+//		return archiveSystem.Store(record, path)
+//	})
+//
+//	// Process records according to policies
+//	record := &retention.DataRecord{
+//		ID:        "record-123",
+//		SubjectID: "user-456",
+//		Category:  retention.CategoryPII,
+//		CreatedAt: time.Now().Add(-4 * 365 * 24 * time.Hour), // 4 years old
+//	}
+//
+//	if err := manager.ProcessRecord(ctx, record); err != nil {
+//		log.Fatal(err) // May be deleted if beyond retention period
+//	}
+//
+//	// Handle GDPR erasure request
+//	req, err := manager.CreateErasureRequest("user-456", "user@example.com")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Find all user's data
+//	records := findAllUserData("user-456")
+//
+//	// Process erasure (respects legal holds)
+//	if err := manager.ProcessErasure(ctx, req.ID, records); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Erased %d records, retained %d (legal hold)\n",
+//		req.ItemsErased, req.ItemsRetained)
+//
+// Compliance Notes:
+//
+// GDPR Requirements:
+//   - Art.5(1)(e): Data minimization - don't keep data longer than necessary
+//   - Art.17: Right to erasure - users can request deletion of their data
+//   - Art.30: Records of processing - audit trail of what was deleted
+//   - 30-day deadline: Must respond to erasure requests within 30 days
+//
+// HIPAA Requirements:
+//   - §164.530(j)(2): Retain PHI for 6 years from creation or last use
+//   - §164.308(a)(1)(ii)(D): Information system activity review (audit logs)
+//   - Must document retention policies and procedures
+//
+// SOX Requirements:
+//   - §802: Retain financial records for 7 years
+//   - §1102: Criminal penalties for document destruction
+//
+// ELI12 (Explain Like I'm 12):
+//
+// Think of data retention like your school locker:
+//
+// 1. Some things you need to keep all year (textbooks = SYSTEM data)
+// 2. Some things you can throw away after the semester (old homework = ANALYTICS)
+// 3. Some things have rules about how long to keep them (report cards = AUDIT logs)
+// 4. Sometimes the principal says "don't throw away ANYTHING!" (legal hold)
+// 5. If you want your stuff deleted, you can ask and they have to do it (GDPR erasure)
+//
+// The retention manager is like a locker monitor who makes sure old stuff gets
+// thrown away at the right time, important stuff is archived first, and nobody
+// throws away things they're not supposed to!
 package retention
 
 import (
@@ -282,7 +361,28 @@ type Manager struct {
 	defaultPolicy *Policy
 }
 
-// NewManager creates a new retention manager.
+// NewManager creates a new retention manager with empty policies and holds.
+//
+// The manager starts with no policies, legal holds, or erasure requests.
+// Use AddPolicy() or load DefaultPolicies() to configure retention rules.
+//
+// Example:
+//
+//	manager := retention.NewManager()
+//
+//	// Add default compliance policies
+//	for _, policy := range retention.DefaultPolicies() {
+//		if err := manager.AddPolicy(policy); err != nil {
+//			log.Fatal(err)
+//		}
+//	}
+//
+//	// Set deletion callback
+//	manager.SetDeleteCallback(func(record *retention.DataRecord) error {
+//		return db.Delete(record.ID)
+//	})
+//
+// Returns a new Manager ready for policy configuration.
 func NewManager() *Manager {
 	return &Manager{
 		policies: make(map[string]*Policy),
@@ -411,7 +511,48 @@ func (m *Manager) ListPolicies() []*Policy {
 	return policies
 }
 
-// PlaceLegalHold places a legal hold.
+// PlaceLegalHold places a legal hold to prevent data deletion during litigation.
+//
+// Legal holds (also called "litigation holds") preserve data that may be relevant
+// to pending or anticipated legal proceedings. Data under legal hold CANNOT be
+// deleted, even if retention policies would normally require deletion.
+//
+// The hold can target:
+//   - Specific data subjects (users)
+//   - Specific data categories (e.g., all emails)
+//   - All data (leave SubjectIDs and Categories empty)
+//
+// Parameters:
+//   - hold: LegalHold configuration
+//
+// Returns:
+//   - nil on success
+//   - Error if hold is invalid
+//
+// Example:
+//
+//	// Litigation started - preserve all data for user-123
+//	hold := &retention.LegalHold{
+//		ID:          "hold-2024-001",
+//		Description: "Smith v. Company lawsuit",
+//		Matter:      "Case #2024-CV-12345",
+//		PlacedBy:    "legal@company.com",
+//		SubjectIDs:  []string{"user-123"},
+//		// No expiration - hold until manually released
+//	}
+//
+//	if err := manager.PlaceLegalHold(hold); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	fmt.Println("Legal hold placed - data preserved")
+//
+//	// Later, when litigation ends...
+//	manager.ReleaseLegalHold("hold-2024-001")
+//
+// Warning:
+//   Failure to preserve data under legal hold can result in sanctions,
+//   adverse inference instructions, or case dismissal.
 func (m *Manager) PlaceLegalHold(hold *LegalHold) error {
 	if hold.ID == "" {
 		return fmt.Errorf("%w: ID required", ErrInvalidPolicy)
@@ -542,7 +683,50 @@ func (m *Manager) ProcessRecord(ctx context.Context, record *DataRecord) error {
 	return nil
 }
 
-// CreateErasureRequest creates a new data subject erasure request.
+// CreateErasureRequest creates a GDPR Art.17 erasure request for a data subject.
+//
+// This implements the "right to be forgotten" - EU citizens can request
+// deletion of all their personal data.
+//
+// The request is given a 30-day deadline per GDPR requirements. Processing
+// the request will delete all data for the subject EXCEPT:
+//   - Data under legal hold
+//   - Data required by law to retain (e.g., financial records)
+//
+// Parameters:
+//   - subjectID: Unique identifier for the data subject (user)
+//   - subjectEmail: Email for verification and notification
+//
+// Returns:
+//   - ErasureRequest with PENDING status
+//   - ErrErasureInProgress if another erasure is already processing for this subject
+//
+// Example:
+//
+//	// User requests data deletion
+//	req, err := manager.CreateErasureRequest("user-123", "user@example.com")
+//	if err != nil {
+//		return err
+//	}
+//
+//	fmt.Printf("Erasure request %s created\n", req.ID)
+//	fmt.Printf("Deadline: %s (30 days)\n", req.Deadline)
+//
+//	// Find all user's data
+//	records := database.FindBySubject("user-123")
+//
+//	// Process the erasure
+//	if err := manager.ProcessErasure(ctx, req.ID, records); err != nil {
+//		return err
+//	}
+//
+//	// Notify user of completion
+//	if req.Status == retention.ErasureStatusCompleted {
+//		notifyUser(req.SubjectEmail, "Your data has been deleted")
+//	}
+//
+// Compliance:
+//   GDPR Art.17 requires processing within 30 days without undue delay.
 func (m *Manager) CreateErasureRequest(subjectID, subjectEmail string) (*ErasureRequest, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -717,7 +901,46 @@ func (m *Manager) LoadPolicies(path string) error {
 	return nil
 }
 
-// DefaultPolicies returns a set of compliance-ready default policies.
+// DefaultPolicies returns a set of pre-configured compliance-ready retention policies.
+//
+// These policies satisfy common regulatory requirements:
+//   - Audit logs: 7 years (HIPAA, SOX, FISMA)
+//   - PHI: 6 years (HIPAA §164.530(j))
+//   - PII: 3 years (GDPR data minimization)
+//   - Financial: 7 years (SOX, IRS)
+//   - User data: 1 year (reasonable default)
+//   - Analytics: 90 days (short-term operational data)
+//   - System: Indefinite (configuration data)
+//
+// Returns a slice of Policy objects ready to use with AddPolicy().
+//
+// Example:
+//
+//	manager := retention.NewManager()
+//
+//	// Load all default policies
+//	for _, policy := range retention.DefaultPolicies() {
+//		if err := manager.AddPolicy(policy); err != nil {
+//			log.Printf("Failed to add policy %s: %v", policy.Name, err)
+//		}
+//	}
+//
+//	// Or selectively add policies
+//	for _, policy := range retention.DefaultPolicies() {
+//		if policy.Category == retention.CategoryPHI {
+//			manager.AddPolicy(policy) // HIPAA compliance
+//		}
+//	}
+//
+//	// Save policies for persistence
+//	manager.SavePolicies("./config/retention-policies.json")
+//
+// Customization:
+//   These are starting points. Adjust retention periods based on your:
+//   - Industry regulations
+//   - Geographic requirements
+//   - Business needs
+//   - Legal counsel recommendations
 func DefaultPolicies() []*Policy {
 	now := time.Now().UTC()
 	return []*Policy{

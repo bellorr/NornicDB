@@ -1,5 +1,38 @@
 // Package config handles Neo4j-compatible configuration via environment variables.
-// Environment variables follow Neo4j naming conventions for drop-in compatibility.
+//
+// NornicDB uses environment variables for configuration to maintain compatibility with
+// Neo4j tooling and deployment workflows. All Neo4j environment variables are supported,
+// plus NornicDB-specific extensions prefixed with NORNICDB_.
+//
+// Configuration is loaded from environment variables using LoadFromEnv() and can be
+// validated with Validate() before use.
+//
+// Example Usage:
+//
+//	config := config.LoadFromEnv()
+//	if err := config.Validate(); err != nil {
+//		log.Fatalf("Invalid config: %v", err)
+//	}
+//
+//	fmt.Printf("Bolt server: %s:%d\n",
+//		config.Server.BoltAddress, config.Server.BoltPort)
+//
+// Environment Variables:
+//
+// Neo4j-Compatible:
+//   - NEO4J_AUTH="username/password" or "none"
+//   - NEO4J_dbms_connector_bolt_listen__address_port=7687
+//   - NEO4J_dbms_connector_http_listen__address_port=7474
+//   - NEO4J_dbms_directories_data="./data"
+//
+// NornicDB-Specific:
+//   - NORNICDB_MEMORY_DECAY_ENABLED=true
+//   - NORNICDB_MEMORY_DECAY_INTERVAL=1h
+//   - NORNICDB_EMBEDDING_PROVIDER="ollama" or "openai"
+//   - NORNICDB_EMBEDDING_MODEL="mxbai-embed-large"
+//   - NORNICDB_AUDIT_ENABLED=true
+//
+// For a complete list, see the Config struct field documentation.
 package config
 
 import (
@@ -10,8 +43,26 @@ import (
 	"time"
 )
 
-// Config holds all NornicDB configuration, loaded from environment variables.
-// Variable names mirror Neo4j for compatibility.
+// Config holds all NornicDB configuration loaded from environment variables.
+//
+// Configuration is organized into logical sections:
+//   - Auth: Authentication and authorization
+//   - Database: Storage and transaction settings
+//   - Server: Bolt and HTTP server settings
+//   - Memory: NornicDB-specific memory decay and embeddings
+//   - Compliance: GDPR/HIPAA/FISMA/SOC2 compliance controls
+//   - Logging: Logging configuration
+//
+// Use LoadFromEnv() to create a Config from environment variables.
+//
+// Example:
+//
+//	config := config.LoadFromEnv()
+//	if err := config.Validate(); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Config: %s\n", config)
 type Config struct {
 	// Authentication (NEO4J_AUTH format: "username/password" or "none")
 	Auth AuthConfig
@@ -175,14 +226,42 @@ type LoggingConfig struct {
 }
 
 // LoadFromEnv loads configuration from environment variables.
-// Uses Neo4j-compatible variable names where applicable.
+//
+// This function reads all configuration from the environment, using Neo4j-compatible
+// variable names where applicable (e.g., NEO4J_AUTH, NEO4J_dbms_*) and NornicDB-specific
+// variables prefixed with NORNICDB_.
+//
+// All values have sensible defaults, so LoadFromEnv() can be called without any
+// environment variables set.
+//
+// Example:
+//
+//	// Minimal setup - uses all defaults
+//	config := config.LoadFromEnv()
+//
+//	// With custom environment
+//	os.Setenv("NEO4J_AUTH", "myuser/mypass")
+//	os.Setenv("NEO4J_dbms_connector_bolt_listen__address_port", "7688")
+//	os.Setenv("NORNICDB_EMBEDDING_PROVIDER", "openai")
+//	os.Setenv("NORNICDB_EMBEDDING_API_KEY", "sk-...")
+//	config = config.LoadFromEnv()
+//
+//	if err := config.Validate(); err != nil {
+//		log.Fatal(err)
+//	}
+//
+// Returns a fully populated Config with defaults applied where environment
+// variables are not set.
 func LoadFromEnv() *Config {
 	config := &Config{}
 
 	// Authentication - NEO4J_AUTH format: "username/password" or "none"
-	authStr := getEnv("NEO4J_AUTH", "neo4j/neo4j")
+	// Default: disabled for easy development
+	authStr := getEnv("NEO4J_AUTH", "none")
 	if authStr == "none" {
 		config.Auth.Enabled = false
+		config.Auth.InitialUsername = "admin"
+		config.Auth.InitialPassword = "admin"
 	} else {
 		config.Auth.Enabled = true
 		parts := strings.SplitN(authStr, "/", 2)
@@ -190,7 +269,7 @@ func LoadFromEnv() *Config {
 			config.Auth.InitialUsername = parts[0]
 			config.Auth.InitialPassword = parts[1]
 		} else {
-			config.Auth.InitialUsername = "neo4j"
+			config.Auth.InitialUsername = "admin"
 			config.Auth.InitialPassword = authStr
 		}
 	}
@@ -285,7 +364,25 @@ func LoadFromEnv() *Config {
 	return config
 }
 
-// Validate checks configuration for errors.
+// Validate checks the configuration for logical errors and invalid values.
+//
+// This method checks:
+//   - Authentication is properly configured if enabled
+//   - Password meets minimum length requirements
+//   - Port numbers are valid (> 0)
+//   - Embedding dimensions are positive
+//
+// Call Validate() after LoadFromEnv() and before using the Config.
+//
+// Example:
+//
+//	config := config.LoadFromEnv()
+//	if err := config.Validate(); err != nil {
+//		log.Fatalf("Configuration error: %v", err)
+//	}
+//	// Config is valid, proceed with startup
+//
+// Returns nil if configuration is valid, or an error describing the problem.
 func (c *Config) Validate() error {
 	if c.Auth.Enabled {
 		if c.Auth.InitialUsername == "" {
@@ -311,7 +408,18 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// String returns a safe string representation (no secrets).
+// String returns a safe string representation of the Config.
+//
+// Sensitive values like passwords and API keys are NOT included in the output,
+// making this safe for logging.
+//
+// Example:
+//
+//	config := config.LoadFromEnv()
+//	log.Printf("Starting with config: %s", config)
+//	// Output: Config{Auth: true, Bolt: 0.0.0.0:7687, HTTP: 0.0.0.0:7474, DataDir: ./data}
+//
+// Returns a string suitable for logging and debugging.
 func (c *Config) String() string {
 	return fmt.Sprintf(
 		"Config{Auth: %v, Bolt: %s:%d, HTTP: %s:%d, DataDir: %s}",

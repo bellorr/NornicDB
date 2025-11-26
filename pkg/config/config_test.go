@@ -14,15 +14,15 @@ func TestLoadFromEnv_Defaults(t *testing.T) {
 
 	cfg := LoadFromEnv()
 
-	// Auth defaults
-	if !cfg.Auth.Enabled {
-		t.Error("expected Auth.Enabled to be true by default")
+	// Auth defaults - disabled by default for easy development
+	if cfg.Auth.Enabled {
+		t.Error("expected Auth.Enabled to be false by default")
 	}
-	if cfg.Auth.InitialUsername != "neo4j" {
-		t.Errorf("expected username 'neo4j', got %q", cfg.Auth.InitialUsername)
+	if cfg.Auth.InitialUsername != "admin" {
+		t.Errorf("expected username 'admin', got %q", cfg.Auth.InitialUsername)
 	}
-	if cfg.Auth.InitialPassword != "neo4j" {
-		t.Errorf("expected password 'neo4j', got %q", cfg.Auth.InitialPassword)
+	if cfg.Auth.InitialPassword != "admin" {
+		t.Errorf("expected password 'admin', got %q", cfg.Auth.InitialPassword)
 	}
 	if cfg.Auth.MinPasswordLength != 8 {
 		t.Errorf("expected min password length 8, got %d", cfg.Auth.MinPasswordLength)

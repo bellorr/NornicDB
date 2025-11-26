@@ -1,4 +1,125 @@
 // Package nornicdb provides the main API for embedded NornicDB usage.
+//
+// This package implements the core NornicDB database API, providing a high-level
+// interface for storing, retrieving, and searching memories (nodes) with automatic
+// relationship inference, memory decay, and hybrid search capabilities.
+//
+// Key Features:
+//   - Memory storage with automatic decay simulation
+//   - Vector similarity search using pre-computed embeddings
+//   - Full-text search with BM25 scoring
+//   - Automatic relationship inference
+//   - Cypher query execution
+//   - Neo4j compatibility
+//
+// Architecture:
+//   - Storage: In-memory graph storage (Badger planned)
+//   - Decay: Simulates human memory decay patterns
+//   - Inference: Automatic relationship detection
+//   - Search: Hybrid vector + full-text search
+//   - Cypher: Neo4j-compatible query language
+//
+// Example Usage:
+//
+//	// Open database
+//	config := nornicdb.DefaultConfig()
+//	config.DecayEnabled = true
+//	config.AutoLinksEnabled = true
+//
+//	db, err := nornicdb.Open("./data", config)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer db.Close()
+//
+//	// Store a memory
+//	memory := &nornicdb.Memory{
+//		Content:   "Machine learning is a subset of artificial intelligence",
+//		Title:     "ML Definition",
+//		Tier:      nornicdb.TierSemantic,
+//		Tags:      []string{"AI", "ML", "definition"},
+//		Embedding: embedding, // Pre-computed from Mimir
+//	}
+//
+//	stored, err := db.Store(ctx, memory)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Search memories
+//	results, err := db.Search(ctx, "artificial intelligence", 10)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	for _, result := range results {
+//		fmt.Printf("Found: %s (score: %.3f)\n", result.Title, result.Score)
+//	}
+//
+//	// Execute Cypher queries
+//	cypherResult, err := db.ExecuteCypher(ctx, "MATCH (n) RETURN count(n)", nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Total nodes: %v\n", cypherResult.Rows[0][0])
+//
+// Memory Tiers:
+//
+// NornicDB simulates human memory with three tiers based on cognitive science:
+//
+// 1. **Episodic** (7-day half-life):
+//    - Personal experiences and events
+//    - "I went to the store yesterday"
+//    - Decays quickly unless reinforced
+//
+// 2. **Semantic** (69-day half-life):
+//    - Facts, concepts, and general knowledge
+//    - "Paris is the capital of France"
+//    - More stable, slower decay
+//
+// 3. **Procedural** (693-day half-life):
+//    - Skills, procedures, and patterns
+//    - "How to ride a bicycle"
+//    - Very stable, minimal decay
+//
+// Integration with Mimir:
+//
+// NornicDB is designed to work with Mimir (the file indexing system):
+//   - Mimir: File discovery, reading, embedding generation
+//   - NornicDB: Storage, search, relationships, decay
+//   - Clean separation of concerns
+//   - Embeddings are pre-computed by Mimir and passed to NornicDB
+//
+// Data Flow:
+//   1. Mimir discovers and reads files
+//   2. Mimir generates embeddings via Ollama/OpenAI
+//   3. Mimir sends nodes with embeddings to NornicDB
+//   4. NornicDB stores, indexes, and infers relationships
+//   5. Applications query NornicDB for search and retrieval
+//
+// ELI12 (Explain Like I'm 12):
+//
+// Think of NornicDB like your brain's memory system:
+//
+// 1. **Different types of memories**: Just like you remember your birthday party
+//    differently than how to tie your shoes, NornicDB has different "tiers"
+//    for different kinds of information.
+//
+// 2. **Memories fade over time**: Just like you might forget what you had for
+//    lunch last Tuesday, old memories in NornicDB get "weaker" over time
+//    unless you access them again.
+//
+// 3. **Finding related memories**: When you think of "summer", you might
+//    remember "beach", "swimming", and "ice cream". NornicDB automatically
+//    finds these connections between related information.
+//
+// 4. **Smart search**: You can ask NornicDB "find me something about dogs"
+//    and it will find information about "puppies", "canines", and "pets"
+//    even if those exact words aren't in your search.
+//
+// It's like having a super-smart assistant that remembers everything you tell
+// it and can find connections you might not have noticed!
 package nornicdb
 
 import (
@@ -39,7 +160,42 @@ const (
 	TierProcedural MemoryTier = "PROCEDURAL"
 )
 
-// Memory represents a node in the knowledge graph.
+// Memory represents a node in the NornicDB knowledge graph.
+//
+// Memories are the fundamental unit of storage in NornicDB, representing
+// pieces of information with associated metadata, embeddings, and decay scores.
+//
+// Key fields:
+//   - Content: The main textual content
+//   - Tier: Memory type (Episodic, Semantic, Procedural)
+//   - DecayScore: Current strength (1.0 = new, 0.0 = fully decayed)
+//   - Embedding: Vector representation for similarity search
+//   - Tags: Categorical labels for organization
+//
+// Example:
+//
+//	// Create a semantic memory
+//	memory := &nornicdb.Memory{
+//		Content:   "The mitochondria is the powerhouse of the cell",
+//		Title:     "Cell Biology Fact",
+//		Tier:      nornicdb.TierSemantic,
+//		Tags:      []string{"biology", "cells", "education"},
+//		Source:    "textbook-chapter-3",
+//		Embedding: embedding, // From Mimir
+//		Properties: map[string]any{
+//			"subject":    "biology",
+//			"difficulty": "beginner",
+//		},
+//	}
+//
+//	stored, err := db.Store(ctx, memory)
+//
+// Memory Lifecycle:
+//   1. Created with DecayScore = 1.0
+//   2. DecayScore decreases over time based on tier
+//   3. AccessCount increases when retrieved
+//   4. LastAccessed updated on each access
+//   5. Archived when DecayScore < threshold
 type Memory struct {
 	ID           string         `json:"id"`
 	Content      string         `json:"content"`
@@ -55,7 +211,43 @@ type Memory struct {
 	Properties   map[string]any `json:"properties,omitempty"`
 }
 
-// Edge represents a relationship between memories.
+// Edge represents a relationship between two memories in the knowledge graph.
+//
+// Edges can be manually created or automatically inferred by the relationship
+// inference engine. They include confidence scores and reasoning information.
+//
+// Types of relationships:
+//   - Manual: Explicitly created by users
+//   - Similarity: Based on vector embedding similarity
+//   - CoAccess: Based on memories accessed together
+//   - Temporal: Based on creation/access time proximity
+//   - Transitive: Inferred through other relationships
+//
+// Example:
+//
+//	// Manual relationship
+//	edge := &nornicdb.Edge{
+//		SourceID:      "memory-1",
+//		TargetID:      "memory-2",
+//		Type:          "RELATES_TO",
+//		Confidence:    1.0,
+//		AutoGenerated: false,
+//		Reason:        "User-defined relationship",
+//		Properties: map[string]any{
+//			"strength": "strong",
+//			"category": "conceptual",
+//		},
+//	}
+//
+//	// Auto-generated relationship (from inference engine)
+//	edge = &nornicdb.Edge{
+//		SourceID:      "memory-3",
+//		TargetID:      "memory-4",
+//		Type:          "SIMILAR_TO",
+//		Confidence:    0.87,
+//		AutoGenerated: true,
+//		Reason:        "Vector similarity: 0.87",
+//	}
 type Edge struct {
 	ID            string         `json:"id"`
 	SourceID      string         `json:"source_id"`
@@ -68,7 +260,33 @@ type Edge struct {
 	Properties    map[string]any `json:"properties,omitempty"`
 }
 
-// Config holds NornicDB configuration.
+// Config holds NornicDB database configuration options.
+//
+// The configuration controls all aspects of the database including storage,
+// embeddings, memory decay, automatic relationship inference, and server ports.
+//
+// Example:
+//
+//	// Production configuration
+//	config := &nornicdb.Config{
+//		DataDir:                      "/var/lib/nornicdb",
+//		EmbeddingProvider:            "openai",
+//		EmbeddingAPIURL:              "https://api.openai.com/v1",
+//		EmbeddingModel:               "text-embedding-3-large",
+//		EmbeddingDimensions:          3072,
+//		DecayEnabled:                 true,
+//		DecayRecalculateInterval:     30 * time.Minute,
+//		DecayArchiveThreshold:        0.01, // Archive at 1%
+//		AutoLinksEnabled:             true,
+//		AutoLinksSimilarityThreshold: 0.85, // Higher precision
+//		AutoLinksCoAccessWindow:      60 * time.Second,
+//		BoltPort:                     7687,
+//		HTTPPort:                     7474,
+//	}
+//
+//	// Development configuration
+//	config = nornicdb.DefaultConfig()
+//	config.DecayEnabled = false // Disable for testing
 type Config struct {
 	// Storage
 	DataDir string `yaml:"data_dir"`
@@ -94,7 +312,22 @@ type Config struct {
 	HTTPPort int `yaml:"http_port"`
 }
 
-// DefaultConfig returns sensible default configuration.
+// DefaultConfig returns sensible default configuration for NornicDB.
+//
+// The defaults are optimized for development and small-scale deployments:
+//   - Local Ollama for embeddings (mxbai-embed-large model)
+//   - Memory decay enabled with 1-hour recalculation
+//   - Auto-linking enabled with 0.82 similarity threshold
+//   - Standard Neo4j ports (7687 Bolt, 7474 HTTP)
+//
+// Example:
+//
+//	config := nornicdb.DefaultConfig()
+//	// Customize as needed
+//	config.EmbeddingModel = "nomic-embed-text"
+//	config.DecayArchiveThreshold = 0.1 // Archive at 10%
+//
+//	db, err := nornicdb.Open("./data", config)
 func DefaultConfig() *Config {
 	return &Config{
 		DataDir:                      "./data",
@@ -113,14 +346,43 @@ func DefaultConfig() *Config {
 	}
 }
 
-// DB represents a NornicDB database instance.
+// DB represents a NornicDB database instance with all core functionality.
+//
+// The DB provides a high-level API for storing memories, executing queries,
+// and performing hybrid search. It coordinates between storage, decay management,
+// relationship inference, and search services.
+//
+// Key components:
+//   - Storage: Graph storage engine (currently in-memory)
+//   - Decay: Memory decay simulation
+//   - Inference: Automatic relationship detection
+//   - Search: Hybrid vector + full-text search
+//   - Cypher: Query execution engine
+//
+// Example:
+//
+//	db, err := nornicdb.Open("./data", nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer db.Close()
+//
+//	// Database is ready for operations
+//	memory := &nornicdb.Memory{
+//		Content: "Important information",
+//		Tier:    nornicdb.TierSemantic,
+//	}
+//	stored, _ := db.Store(ctx, memory)
+//
+// Thread Safety:
+//   All methods are thread-safe and can be called concurrently.
 type DB struct {
 	config *Config
 	mu     sync.RWMutex
 	closed bool
 
 	// Internal components
-	storage        *storage.MemoryEngine
+	storage        storage.Engine
 	decay          *decay.Manager
 	inference      *inference.Engine
 	cypherExecutor *cypher.StorageExecutor
@@ -130,7 +392,39 @@ type DB struct {
 	searchService *search.Service
 }
 
-// Open opens or creates a NornicDB database.
+// Open opens or creates a NornicDB database at the specified directory.
+//
+// This initializes all database components including storage, decay management,
+// relationship inference, and search services based on the configuration.
+//
+// Parameters:
+//   - dataDir: Directory for database files (created if doesn't exist)
+//   - config: Database configuration (uses DefaultConfig() if nil)
+//
+// Returns:
+//   - DB instance ready for use
+//   - Error if initialization fails
+//
+// Example:
+//
+//	// Open with defaults
+//	db, err := nornicdb.Open("./mydb", nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	defer db.Close()
+//
+//	// Open with custom config
+//	config := nornicdb.DefaultConfig()
+//	config.DecayEnabled = false
+//	db, err = nornicdb.Open("/var/lib/nornicdb", config)
+//
+// Initialization:
+//   - Creates data directory if needed
+//   - Initializes storage engine
+//   - Sets up decay manager (if enabled)
+//   - Configures relationship inference (if enabled)
+//   - Prepares search services
 func Open(dataDir string, config *Config) (*DB, error) {
 	if config == nil {
 		config = DefaultConfig()
@@ -141,8 +435,18 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		config: config,
 	}
 
-	// Initialize storage (in-memory for now, will add Badger later)
-	db.storage = storage.NewMemoryEngine()
+	// Initialize storage - use BadgerEngine for persistence, MemoryEngine for testing
+	if dataDir != "" {
+		badgerEngine, err := storage.NewBadgerEngine(dataDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open persistent storage: %w", err)
+		}
+		db.storage = badgerEngine
+		fmt.Printf("📂 Using persistent storage at %s\n", dataDir)
+	} else {
+		db.storage = storage.NewMemoryEngine()
+		fmt.Println("⚠️  Using in-memory storage (data will not persist)")
+	}
 
 	// Initialize Cypher executor
 	db.cypherExecutor = cypher.NewStorageExecutor(db.storage)

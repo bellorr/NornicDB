@@ -1,0 +1,123 @@
+site_name: NornicDB Documentation
+site_description: Production-ready graph database with GPU acceleration and Neo4j compatibility
+site_url: https://orneryd.github.io/nornicdb/
+repo_url: https://github.com/orneryd/nornicdb
+repo_name: orneryd/nornicdb
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: amber
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to light mode
+    - scheme: default
+      primary: amber
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to dark mode
+  features:
+    - navigation.instant
+    - navigation.tracking
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+    - content.code.copy
+    - content.code.select
+    - toc.follow
+
+plugins:
+  - search
+  - minify:
+      minify_html: true
+      minify_css: true
+      minify_js: true
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.arithmatex:
+      generic: true
+  - pymdownx.betterem:
+      smart_enable: all
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_generator: !!python/name:pymdownx.emoji.to_svg
+      emoji_index: !!python/name:pymdownx.emoji.twemoji
+  - pymdownx.highlight:
+      use_pygments: true
+      anchor_linenums: true
+      line_spans: __span
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+nav:
+  - Home: index.md
+  - Getting Started:
+      - Quick Start: guides/getting-started.md
+      - Installation: guides/getting-started.md#installation
+      - Configuration: guides/configuration.md
+  - User Guides:
+      - Architecture: guides/architecture.md
+      - Vector Search: guides/vector-search.md
+      - Cypher Queries: guides/cypher-queries.md
+      - Memory Decay: guides/memory-decay.md
+      - GPU Acceleration: guides/gpu-acceleration.md
+      - Neo4j Compatibility: guides/neo4j-compatibility.md
+      - Performance Tuning: guides/performance-tuning.md
+  - Developer Docs:
+      - API Reference: api-reference.md
+      - Examples: guides/examples.md
+      - Advanced Patterns: guides/advanced-patterns.md
+  - Operations:
+      - Deployment: guides/deployment.md
+      - Monitoring: guides/monitoring.md
+      - Backup & Recovery: guides/backup-recovery.md
+      - Troubleshooting: guides/troubleshooting.md
+  - Compliance & Security:
+      - Compliance: guides/compliance.md
+      - Security: guides/security.md
+      - Encryption: guides/encryption.md
+  - API Reference: api-reference.md
+  - Contributing: CONTRIBUTING.md
+  - License: LICENSE.md
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/orneryd/nornicdb
+    - icon: fontawesome/brands/docker
+      link: https://hub.docker.com/r/orneryd/nornicdb
+  analytics:
+    provider: google
+    property: G-XXXXXXXXXX
+
+copyright: Copyright &copy; 2025 NornicDB Contributors. MIT License.

@@ -202,12 +202,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 		
 		// Create admin user
-		_, err := authenticator.CreateUser("neo4j", adminPassword, []auth.Role{auth.RoleAdmin})
+		_, err := authenticator.CreateUser("admin", adminPassword, []auth.Role{auth.RoleAdmin})
 		if err != nil {
 			// User might already exist
 			fmt.Printf("   ⚠️  Admin user: %v\n", err)
 		} else {
-			fmt.Println("   ✅ Admin user created (neo4j)")
+			fmt.Println("   ✅ Admin user created (admin)")
 		}
 	} else {
 		fmt.Println("⚠️  Authentication disabled")

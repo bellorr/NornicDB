@@ -1729,3 +1729,256 @@ func TestNodeToMemoryIntAccessCount(t *testing.T) {
 	mem := nodeToMemory(node)
 	assert.Equal(t, int64(5), mem.AccessCount)
 }
+
+// =============================================================================
+// Tests for 0% coverage functions
+// =============================================================================
+
+func TestHybridSearch(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("basic_hybrid_search", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Store some test memories
+		for i := 0; i < 5; i++ {
+			_, err := db.Store(ctx, &Memory{
+				Content: "Test content about machine learning and AI",
+				Title:   "ML Test",
+			})
+			require.NoError(t, err)
+		}
+
+		// Create a mock query embedding (1024 dimensions)
+		queryEmbedding := make([]float32, 1024)
+		for i := range queryEmbedding {
+			queryEmbedding[i] = 0.1
+		}
+
+		results, err := db.HybridSearch(ctx, "machine learning", queryEmbedding, nil, 10)
+		require.NoError(t, err)
+		// Results may be empty if no search service or embeddings indexed
+		t.Logf("HybridSearch returned %d results", len(results))
+	})
+
+	t.Run("hybrid_search_with_labels", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		queryEmbedding := make([]float32, 1024)
+
+		results, err := db.HybridSearch(ctx, "test", queryEmbedding, []string{"Memory"}, 10)
+		require.NoError(t, err)
+		t.Logf("HybridSearch with labels returned %d results", len(results))
+	})
+
+	t.Run("hybrid_search_closed_db", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		db.Close()
+
+		queryEmbedding := make([]float32, 1024)
+
+		_, err = db.HybridSearch(ctx, "test", queryEmbedding, nil, 10)
+		assert.Error(t, err, "Should error on closed DB")
+	})
+
+	t.Run("hybrid_search_empty_query", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		queryEmbedding := make([]float32, 1024)
+
+		results, err := db.HybridSearch(ctx, "", queryEmbedding, nil, 10)
+		require.NoError(t, err)
+		t.Logf("HybridSearch with empty query returned %d results", len(results))
+	})
+}
+
+func TestLoadFromExport(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("load_from_nonexistent_directory", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		_, err = db.LoadFromExport(ctx, "/nonexistent/path/to/export")
+		assert.Error(t, err, "Should error for nonexistent directory")
+	})
+
+	t.Run("load_from_export_closed_db", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		db.Close()
+
+		_, err = db.LoadFromExport(ctx, "./testdata")
+		assert.Error(t, err, "Should error on closed DB")
+		assert.Equal(t, ErrClosed, err)
+	})
+}
+
+func TestBuildSearchIndexes(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("build_indexes_on_empty_db", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		err = db.BuildSearchIndexes(ctx)
+		require.NoError(t, err, "Should succeed on empty DB")
+	})
+
+	t.Run("build_indexes_with_data", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Store some test memories
+		for i := 0; i < 3; i++ {
+			_, err := db.Store(ctx, &Memory{
+				Content: "Searchable content for indexing test",
+				Title:   "Index Test",
+			})
+			require.NoError(t, err)
+		}
+
+		err = db.BuildSearchIndexes(ctx)
+		require.NoError(t, err)
+	})
+
+	t.Run("build_indexes_closed_db", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		db.Close()
+
+		err = db.BuildSearchIndexes(ctx)
+		assert.Error(t, err, "Should error on closed DB")
+		assert.Equal(t, ErrClosed, err)
+	})
+}
+
+func TestSetGetGPUManager(t *testing.T) {
+	t.Run("set_and_get_gpu_manager", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Initially nil
+		assert.Nil(t, db.GetGPUManager())
+
+		// Set a mock manager (using interface{})
+		mockManager := struct{ Name string }{Name: "MockGPU"}
+		db.SetGPUManager(mockManager)
+
+		// Get it back
+		retrieved := db.GetGPUManager()
+		assert.NotNil(t, retrieved)
+
+		// Type assert back
+		mock, ok := retrieved.(struct{ Name string })
+		assert.True(t, ok)
+		assert.Equal(t, "MockGPU", mock.Name)
+	})
+
+	t.Run("set_nil_gpu_manager", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Set a manager
+		db.SetGPUManager("test")
+		assert.NotNil(t, db.GetGPUManager())
+
+		// Set nil to clear
+		db.SetGPUManager(nil)
+		assert.Nil(t, db.GetGPUManager())
+	})
+
+	t.Run("thread_safe_access", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Concurrent access should not panic
+		done := make(chan bool)
+		for i := 0; i < 10; i++ {
+			go func(n int) {
+				db.SetGPUManager(n)
+				_ = db.GetGPUManager()
+				done <- true
+			}(i)
+		}
+		for i := 0; i < 10; i++ {
+			<-done
+		}
+	})
+}
+
+func TestCypherFunctionWithParams(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("simple_cypher_query", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Store some data
+		_, err = db.Store(ctx, &Memory{
+			Content: "Test for Cypher",
+			Title:   "Cypher Test",
+		})
+		require.NoError(t, err)
+
+		// Execute Cypher query
+		resultSet, err := db.Cypher(ctx, "MATCH (n:Memory) RETURN count(n)", nil)
+		require.NoError(t, err)
+		assert.NotNil(t, resultSet)
+	})
+
+	t.Run("cypher_with_create", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		resultSet, err := db.Cypher(ctx, "CREATE (n:TestNode {name: 'created'})", nil)
+		require.NoError(t, err)
+		assert.NotNil(t, resultSet)
+	})
+
+	t.Run("cypher_closed_db", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		db.Close()
+
+		_, err = db.Cypher(ctx, "RETURN 1", nil)
+		assert.Error(t, err)
+	})
+
+	t.Run("cypher_invalid_query", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		_, err = db.Cypher(ctx, "INVALID QUERY SYNTAX", nil)
+		assert.Error(t, err)
+	})
+
+	t.Run("cypher_with_params", func(t *testing.T) {
+		db, err := Open("./testdata", nil)
+		require.NoError(t, err)
+		defer db.Close()
+
+		params := map[string]any{
+			"name": "test",
+		}
+		resultSet, err := db.Cypher(ctx, "CREATE (n:Test {name: $name})", params)
+		require.NoError(t, err)
+		assert.NotNil(t, resultSet)
+	})
+}

@@ -20,8 +20,9 @@ server:
   data_dir: ./data
   
   # Authentication (Neo4j compatible format: username:password)
-  # Can also use environment: NORNIC_AUTH=neo4j:password
-  auth: "neo4j:password"
+  # Default: disabled (set to "none" or leave unset)
+  # To enable: set to "admin:admin" or use environment: NEO4J_AUTH=admin/admin
+  auth: "none"  # disabled by default for easy development
   
   # Enable TLS (optional)
   tls:

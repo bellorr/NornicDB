@@ -1,5 +1,121 @@
 // Package bolt implements the Neo4j Bolt protocol server for NornicDB.
-// This allows existing Neo4j drivers to connect to NornicDB.
+//
+// This package provides a Bolt protocol server that allows existing Neo4j drivers
+// and tools to connect to NornicDB without modification. The server implements
+// Bolt 4.x protocol specifications for maximum compatibility.
+//
+// Neo4j Bolt Protocol Compatibility:
+//   - Bolt 4.0, 4.1, 4.2, 4.3, 4.4 support
+//   - PackStream serialization format
+//   - Transaction management (BEGIN, COMMIT, ROLLBACK)
+//   - Streaming result sets (RUN, PULL, DISCARD)
+//   - Authentication handshake
+//   - Connection pooling support
+//
+// Supported Neo4j Drivers:
+//   - Neo4j Java Driver
+//   - Neo4j Python Driver (neo4j-driver)
+//   - Neo4j JavaScript Driver
+//   - Neo4j .NET Driver
+//   - Neo4j Go Driver
+//   - Community drivers (Rust, Ruby, etc.)
+//
+// Example Usage:
+//
+//	// Create Bolt server with Cypher executor
+//	config := bolt.DefaultConfig()
+//	config.Port = 7687
+//	config.MaxConnections = 100
+//
+//	// Implement query executor
+//	executor := &MyQueryExecutor{db: nornicDB}
+//
+//	server := bolt.New(config, executor)
+//
+//	// Start server
+//	if err := server.ListenAndServe(); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Server is now accepting Bolt connections on port 7687
+//
+// Client Usage (any Neo4j driver):
+//
+//	// Python example
+//	from neo4j import GraphDatabase
+//
+//	driver = GraphDatabase.driver("bolt://localhost:7687")
+//	with driver.session() as session:
+//	    result = session.run("MATCH (n) RETURN count(n)")
+//	    print(result.single()[0])
+//
+//	// Go example
+//	driver, _ := neo4j.NewDriver("bolt://localhost:7687", neo4j.NoAuth())
+//	session := driver.NewSession(neo4j.SessionConfig{})
+//	result, _ := session.Run("MATCH (n) RETURN count(n)", nil)
+//
+// Protocol Flow:
+//
+// 1. **Handshake**:
+//    - Client sends magic number (0x6060B017)
+//    - Client sends supported versions
+//    - Server responds with selected version
+//
+// 2. **Authentication**:
+//    - Client sends HELLO message with credentials
+//    - Server responds with SUCCESS or FAILURE
+//
+// 3. **Query Execution**:
+//    - Client sends RUN message with Cypher query
+//    - Server responds with SUCCESS (field names)
+//    - Client sends PULL to stream results
+//    - Server sends RECORD messages + final SUCCESS
+//
+// 4. **Transaction Management**:
+//    - BEGIN: Start explicit transaction
+//    - COMMIT: Commit transaction
+//    - ROLLBACK: Rollback transaction
+//
+// Message Types:
+//   - HELLO: Authentication
+//   - RUN: Execute Cypher query
+//   - PULL: Stream result records
+//   - DISCARD: Discard remaining results
+//   - BEGIN/COMMIT/ROLLBACK: Transaction control
+//   - RESET: Reset session state
+//   - GOODBYE: Close connection
+//
+// PackStream Encoding:
+//   The Bolt protocol uses PackStream for efficient binary serialization:
+//   - Compact representation of common types
+//   - Support for nested structures
+//   - Streaming-friendly format
+//
+// Performance:
+//   - Binary protocol (faster than HTTP/JSON)
+//   - Connection pooling and reuse
+//   - Streaming results (low memory usage)
+//   - Pipelining support
+//
+// ELI12 (Explain Like I'm 12):
+//
+// Think of the Bolt server like a translator at the United Nations:
+//
+// 1. **Different languages**: Neo4j drivers speak "Bolt language" but NornicDB
+//    speaks "NornicDB language". The Bolt server translates between them.
+//
+// 2. **Same conversation**: The drivers can have the same conversation they
+//    always had (asking questions in Cypher), they just don't know they're
+//    talking to a different database!
+//
+// 3. **Binary messages**: Instead of sending text messages (like HTTP), Bolt
+//    sends compact binary messages - like sending a compressed file instead
+//    of a text document. Much faster!
+//
+// 4. **Streaming**: Instead of waiting for ALL results before sending anything,
+//    Bolt can send results one-by-one as they're found, like a live news feed.
+//
+// This lets existing Neo4j tools work with NornicDB without any changes!
 package bolt
 
 import (
@@ -42,7 +158,29 @@ const (
 	MsgFailure byte = 0x7F
 )
 
-// Server implements a Bolt protocol server.
+// Server implements a Neo4j Bolt protocol server for NornicDB.
+//
+// The server handles multiple concurrent client connections, each running
+// in its own goroutine. It manages the Bolt protocol handshake, authentication,
+// and message routing to the configured query executor.
+//
+// Example:
+//
+//	config := bolt.DefaultConfig()
+//	executor := &MyExecutor{} // Implements QueryExecutor
+//	server := bolt.New(config, executor)
+//
+//	go func() {
+//		if err := server.ListenAndServe(); err != nil {
+//			log.Printf("Bolt server error: %v", err)
+//		}
+//	}()
+//
+//	// Server is now accepting connections
+//	fmt.Printf("Bolt server listening on bolt://localhost:%d\n", config.Port)
+//
+// Thread Safety:
+//   The server is thread-safe and handles concurrent connections safely.
 type Server struct {
 	config   *Config
 	listener net.Listener
@@ -54,9 +192,81 @@ type Server struct {
 	executor QueryExecutor
 }
 
-// QueryExecutor executes Cypher queries.
+// QueryExecutor executes Cypher queries for the Bolt server.
+//
+// This interface allows the Bolt server to be decoupled from the specific
+// database implementation. The executor receives Cypher queries and parameters
+// from Bolt clients and returns results in a standard format.
+//
+// Example Implementation:
+//
+//	type MyExecutor struct {
+//		db *nornicdb.DB
+//	}
+//
+//	func (e *MyExecutor) Execute(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+//		// Execute query against NornicDB
+//		result, err := e.db.ExecuteCypher(ctx, query, params)
+//		if err != nil {
+//			return nil, err
+//		}
+//
+//		// Convert to Bolt format
+//		return &QueryResult{
+//			Columns: result.Columns,
+//			Rows:    result.Rows,
+//		}, nil
+//	}
+//
+// The executor should handle:
+//   - Cypher query parsing and execution
+//   - Parameter substitution
+//   - Result formatting
+//   - Error handling and reporting
 type QueryExecutor interface {
 	Execute(ctx context.Context, query string, params map[string]any) (*QueryResult, error)
+}
+
+// TransactionalExecutor extends QueryExecutor with transaction support.
+//
+// If the executor implements this interface, the Bolt server will use
+// real transactions for BEGIN/COMMIT/ROLLBACK messages. Otherwise,
+// transaction messages are acknowledged but operations are auto-committed.
+//
+// Example Implementation:
+//
+//	type TxExecutor struct {
+//		db *nornicdb.DB
+//		tx *storage.Transaction  // Active transaction (nil if none)
+//	}
+//
+//	func (e *TxExecutor) BeginTransaction(ctx context.Context) error {
+//		e.tx = storage.NewTransaction(e.db.Engine())
+//		return nil
+//	}
+//
+//	func (e *TxExecutor) CommitTransaction(ctx context.Context) error {
+//		if e.tx == nil {
+//			return nil
+//		}
+//		err := e.tx.Commit()
+//		e.tx = nil
+//		return err
+//	}
+//
+//	func (e *TxExecutor) RollbackTransaction(ctx context.Context) error {
+//		if e.tx == nil {
+//			return nil
+//		}
+//		err := e.tx.Rollback()
+//		e.tx = nil
+//		return err
+//	}
+type TransactionalExecutor interface {
+	QueryExecutor
+	BeginTransaction(ctx context.Context, metadata map[string]any) error
+	CommitTransaction(ctx context.Context) error
+	RollbackTransaction(ctx context.Context) error
 }
 
 // QueryResult holds the result of a query.
@@ -65,7 +275,24 @@ type QueryResult struct {
 	Rows    [][]any
 }
 
-// Config holds Bolt server configuration.
+// Config holds Bolt protocol server configuration.
+//
+// All settings have sensible defaults via DefaultConfig(). The configuration
+// follows Neo4j Bolt server conventions where applicable.
+//
+// Example:
+//
+//	// Production configuration
+//	config := &bolt.Config{
+//		Port:            7687,  // Standard Bolt port
+//		MaxConnections:  1000,  // High concurrency
+//		ReadBufferSize:  32768, // 32KB read buffer
+//		WriteBufferSize: 32768, // 32KB write buffer
+//	}
+//
+//	// Development configuration
+//	config = bolt.DefaultConfig()
+//	config.Port = 7688 // Use different port
 type Config struct {
 	Port            int
 	MaxConnections  int
@@ -73,7 +300,17 @@ type Config struct {
 	WriteBufferSize int
 }
 
-// DefaultConfig returns sensible defaults.
+// DefaultConfig returns Neo4j-compatible default Bolt server configuration.
+//
+// Defaults match Neo4j Bolt server settings:
+//   - Port 7687 (standard Bolt port)
+//   - 100 max concurrent connections
+//   - 8KB read/write buffers
+//
+// Example:
+//
+//	config := bolt.DefaultConfig()
+//	server := bolt.New(config, executor)
 func DefaultConfig() *Config {
 	return &Config{
 		Port:            7687,
@@ -83,7 +320,25 @@ func DefaultConfig() *Config {
 	}
 }
 
-// New creates a new Bolt server.
+// New creates a new Bolt protocol server with the given configuration and executor.
+//
+// Parameters:
+//   - config: Server configuration (uses DefaultConfig() if nil)
+//   - executor: Query executor for handling Cypher queries (required)
+//
+// Returns:
+//   - Server instance ready to start
+//
+// Example:
+//
+//	config := bolt.DefaultConfig()
+//	executor := &MyQueryExecutor{db: nornicDB}
+//	server := bolt.New(config, executor)
+//
+//	// Start server
+//	if err := server.ListenAndServe(); err != nil {
+//		log.Fatal(err)
+//	}
 func New(config *Config, executor QueryExecutor) *Server {
 	if config == nil {
 		config = DefaultConfig()
@@ -96,7 +351,25 @@ func New(config *Config, executor QueryExecutor) *Server {
 	}
 }
 
-// ListenAndServe starts the Bolt server.
+// ListenAndServe starts the Bolt server and begins accepting connections.
+//
+// The server listens on the configured port and handles incoming Bolt
+// connections. Each connection is handled in a separate goroutine.
+//
+// Returns:
+//   - nil if server shuts down cleanly
+//   - Error if failed to bind to port or other startup error
+//
+// Example:
+//
+//	server := bolt.New(config, executor)
+//
+//	// Start server (blocks until shutdown)
+//	if err := server.ListenAndServe(); err != nil {
+//		log.Fatalf("Bolt server failed: %v", err)
+//	}
+//
+// The server will print its listening address when started successfully.
 func (s *Server) ListenAndServe() error {
 	addr := fmt.Sprintf(":%d", s.config.Port)
 	listener, err := net.Listen("tcp", addr)
@@ -183,6 +456,7 @@ type Session struct {
 
 	// Transaction state
 	inTransaction bool
+	txMetadata    map[string]any // Transaction metadata from BEGIN
 
 	// Query result state (for streaming with PULL)
 	lastResult  *QueryResult
@@ -453,28 +727,97 @@ func (s *Session) handleRoute(data []byte) error {
 }
 
 // handleReset handles the RESET message.
+// Resets the session state and rolls back any active transaction.
 func (s *Session) handleReset(data []byte) error {
+	// Rollback any active transaction
+	if s.inTransaction {
+		if txExec, ok := s.executor.(TransactionalExecutor); ok {
+			ctx := context.Background()
+			_ = txExec.RollbackTransaction(ctx) // Ignore error on reset
+		}
+	}
+
 	s.inTransaction = false
+	s.txMetadata = nil
 	s.lastResult = nil
 	s.resultIndex = 0
 	return s.sendSuccess(nil)
 }
 
 // handleBegin handles the BEGIN message.
+// If the executor implements TransactionalExecutor, starts a real transaction.
+// Otherwise, just tracks the transaction state for protocol compliance.
 func (s *Session) handleBegin(data []byte) error {
+	// Parse BEGIN metadata (contains tx_timeout, bookmarks, etc.)
+	var metadata map[string]any
+	if len(data) > 0 {
+		m, _, err := decodePackStreamMap(data, 0)
+		if err == nil {
+			metadata = m
+		}
+	}
+	s.txMetadata = metadata
+
+	// If executor supports transactions, start one
+	if txExec, ok := s.executor.(TransactionalExecutor); ok {
+		ctx := context.Background()
+		if err := txExec.BeginTransaction(ctx, metadata); err != nil {
+			return s.sendFailure("Neo.TransactionError.Begin", err.Error())
+		}
+	}
+
 	s.inTransaction = true
 	return s.sendSuccess(nil)
 }
 
 // handleCommit handles the COMMIT message.
+// If the executor implements TransactionalExecutor, commits the real transaction.
 func (s *Session) handleCommit(data []byte) error {
+	if !s.inTransaction {
+		return s.sendFailure("Neo.ClientError.Transaction.TransactionNotFound",
+			"No transaction to commit")
+	}
+
+	// If executor supports transactions, commit
+	if txExec, ok := s.executor.(TransactionalExecutor); ok {
+		ctx := context.Background()
+		if err := txExec.CommitTransaction(ctx); err != nil {
+			s.inTransaction = false
+			s.txMetadata = nil
+			return s.sendFailure("Neo.TransactionError.Commit", err.Error())
+		}
+	}
+
 	s.inTransaction = false
-	return s.sendSuccess(nil)
+	s.txMetadata = nil
+
+	// Return bookmark for client tracking
+	return s.sendSuccess(map[string]any{
+		"bookmark": "nornicdb:bookmark:1",
+	})
 }
 
 // handleRollback handles the ROLLBACK message.
+// If the executor implements TransactionalExecutor, rolls back the real transaction.
 func (s *Session) handleRollback(data []byte) error {
+	if !s.inTransaction {
+		// Not an error to rollback when not in transaction (Neo4j behavior)
+		return s.sendSuccess(nil)
+	}
+
+	// If executor supports transactions, rollback
+	if txExec, ok := s.executor.(TransactionalExecutor); ok {
+		ctx := context.Background()
+		if err := txExec.RollbackTransaction(ctx); err != nil {
+			// Rollback failed, but we still clear state
+			s.inTransaction = false
+			s.txMetadata = nil
+			return s.sendFailure("Neo.TransactionError.Rollback", err.Error())
+		}
+	}
+
 	s.inTransaction = false
+	s.txMetadata = nil
 	return s.sendSuccess(nil)
 }
 
@@ -531,7 +874,7 @@ func (s *Session) sendChunk(data []byte) error {
 // ============================================================================
 
 func encodePackStreamMap(m map[string]any) []byte {
-	if m == nil || len(m) == 0 {
+	if len(m) == 0 {
 		return []byte{0xA0}
 	}
 
@@ -554,7 +897,7 @@ func encodePackStreamMap(m map[string]any) []byte {
 }
 
 func encodePackStreamList(items []any) []byte {
-	if items == nil || len(items) == 0 {
+	if len(items) == 0 {
 		return []byte{0x90}
 	}
 

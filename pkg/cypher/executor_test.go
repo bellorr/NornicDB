@@ -381,6 +381,178 @@ func TestExecuteCallProcedure(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestExecuteCallWithYieldWhere(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Add test data with multiple labels
+	nodes := []*storage.Node{
+		{ID: "n1", Labels: []string{"Memory"}, Properties: map[string]interface{}{}},
+		{ID: "n2", Labels: []string{"Todo"}, Properties: map[string]interface{}{}},
+		{ID: "n3", Labels: []string{"File"}, Properties: map[string]interface{}{}},
+		{ID: "n4", Labels: []string{"Memory", "Important"}, Properties: map[string]interface{}{}},
+	}
+	for _, n := range nodes {
+		require.NoError(t, store.CreateNode(n))
+	}
+
+	t.Run("YIELD with column selection", func(t *testing.T) {
+		// Basic YIELD - just get labels
+		result, err := exec.Execute(ctx, "CALL db.labels() YIELD label", nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{"label"}, result.Columns)
+		require.GreaterOrEqual(t, len(result.Rows), 3) // Memory, Todo, File, Important
+	})
+
+	t.Run("YIELD with alias", func(t *testing.T) {
+		// YIELD with alias
+		result, err := exec.Execute(ctx, "CALL db.labels() YIELD label AS labelName", nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{"labelName"}, result.Columns)
+	})
+
+	t.Run("YIELD *", func(t *testing.T) {
+		// YIELD * returns all columns
+		result, err := exec.Execute(ctx, "CALL db.labels() YIELD *", nil)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(result.Columns), 1)
+	})
+
+	t.Run("YIELD with WHERE filtering", func(t *testing.T) {
+		// WHERE should filter results
+		result, err := exec.Execute(ctx, "CALL db.labels() YIELD label WHERE label = 'Memory'", nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{"label"}, result.Columns)
+		require.Equal(t, 1, len(result.Rows), "WHERE should filter to only 'Memory' label")
+		require.Equal(t, "Memory", result.Rows[0][0])
+	})
+
+	t.Run("YIELD with WHERE CONTAINS", func(t *testing.T) {
+		// WHERE with CONTAINS operator
+		// Search for 'd' which is only in "Todo"
+		result, err := exec.Execute(ctx, "CALL db.labels() YIELD label WHERE label CONTAINS 'd'", nil)
+		require.NoError(t, err)
+		foundLabels := make(map[string]bool)
+		for _, row := range result.Rows {
+			foundLabels[row[0].(string)] = true
+		}
+		require.True(t, foundLabels["Todo"], "Todo should be in results (contains 'd')")
+		require.False(t, foundLabels["Memory"], "Memory should NOT be in results (no 'd')")
+		require.False(t, foundLabels["File"], "File should NOT be in results (no 'd')")
+		require.False(t, foundLabels["Important"], "Important should NOT be in results (no 'd')")
+	})
+
+	t.Run("YIELD with WHERE <> (not equals)", func(t *testing.T) {
+		// WHERE with <> operator
+		result, err := exec.Execute(ctx, "CALL db.labels() YIELD label WHERE label <> 'Memory'", nil)
+		require.NoError(t, err)
+		for _, row := range result.Rows {
+			require.NotEqual(t, "Memory", row[0], "Memory should be filtered out")
+		}
+	})
+}
+
+func TestParseYieldClause(t *testing.T) {
+	tests := []struct {
+		name     string
+		cypher   string
+		expected *yieldClause
+	}{
+		{
+			name:     "no yield",
+			cypher:   "CALL db.labels()",
+			expected: nil,
+		},
+		{
+			name:   "yield star",
+			cypher: "CALL db.labels() YIELD *",
+			expected: &yieldClause{
+				yieldAll: true,
+				items:    []yieldItem{},
+			},
+		},
+		{
+			name:   "yield single column",
+			cypher: "CALL db.labels() YIELD label",
+			expected: &yieldClause{
+				items: []yieldItem{{name: "label", alias: ""}},
+			},
+		},
+		{
+			name:   "yield multiple columns",
+			cypher: "CALL db.index.vector.queryNodes('idx', 10, [1,2,3]) YIELD node, score",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "node", alias: ""},
+					{name: "score", alias: ""},
+				},
+			},
+		},
+		{
+			name:   "yield with alias",
+			cypher: "CALL db.labels() YIELD label AS labelName",
+			expected: &yieldClause{
+				items: []yieldItem{{name: "label", alias: "labelName"}},
+			},
+		},
+		{
+			name:   "yield with WHERE",
+			cypher: "CALL db.index.vector.queryNodes('idx', 10, [1,2,3]) YIELD node, score WHERE score > 0.5",
+			expected: &yieldClause{
+				items: []yieldItem{
+					{name: "node", alias: ""},
+					{name: "score", alias: ""},
+				},
+				where: "score > 0.5",
+			},
+		},
+		{
+			name:   "yield star with WHERE",
+			cypher: "CALL db.index.fulltext.queryNodes('idx', 'search') YIELD * WHERE score > 0.8",
+			expected: &yieldClause{
+				yieldAll: true,
+				items:    []yieldItem{},
+				where:    "score > 0.8",
+			},
+		},
+		{
+			name:   "yield with WHERE and RETURN",
+			cypher: "CALL db.labels() YIELD label WHERE label = 'Memory' RETURN label",
+			expected: &yieldClause{
+				items:      []yieldItem{{name: "label", alias: ""}},
+				where:      "label = 'Memory'",
+				hasReturn:  true,
+				returnExpr: "label",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseYieldClause(tt.cypher)
+			if tt.expected == nil {
+				assert.Nil(t, result)
+				return
+			}
+			require.NotNil(t, result)
+			assert.Equal(t, tt.expected.yieldAll, result.yieldAll, "yieldAll mismatch")
+			assert.Equal(t, len(tt.expected.items), len(result.items), "items count mismatch")
+			for i, item := range tt.expected.items {
+				if i < len(result.items) {
+					assert.Equal(t, item.name, result.items[i].name, "item name mismatch at %d", i)
+					assert.Equal(t, item.alias, result.items[i].alias, "item alias mismatch at %d", i)
+				}
+			}
+			assert.Equal(t, tt.expected.where, result.where, "where mismatch")
+			assert.Equal(t, tt.expected.hasReturn, result.hasReturn, "hasReturn mismatch")
+			if tt.expected.hasReturn {
+				assert.Equal(t, tt.expected.returnExpr, result.returnExpr, "returnExpr mismatch")
+			}
+		})
+	}
+}
+
 func TestExecuteWithParameters(t *testing.T) {
 	store := storage.NewMemoryEngine()
 	exec := NewStorageExecutor(store)
@@ -2513,10 +2685,10 @@ func TestUnsupportedQueryType(t *testing.T) {
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	// WITH is a valid start keyword but routes to unsupported
-	_, err := exec.Execute(ctx, "WITH 1 AS x RETURN x", nil)
+	// GRANT is truly unsupported
+	_, err := exec.Execute(ctx, "GRANT ADMIN TO user", nil)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "unsupported query type")
+	assert.Contains(t, err.Error(), "syntax error")
 }
 
 func TestExecuteMatchOrderByWithSkipLimit(t *testing.T) {

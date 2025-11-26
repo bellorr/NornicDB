@@ -1,13 +1,122 @@
 // Package auth provides authentication and authorization for NornicDB.
-// Implements Mimir-compatible authentication with JWT tokens and role-based access control.
-// Designed to meet GDPR Art.32, HIPAA §164.312(a), and FISMA AC controls.
 //
-// This package follows the same patterns as Mimir's authentication:
-// - JWT-based stateless tokens (HS256)
-// - Multiple credential sources (Bearer header, cookie, query param)
-// - Role-based access control with configurable roles
-// - Dev user support via environment variables
-// - OAuth 2.0 compatible token endpoint format
+// This package implements Mimir-compatible JWT authentication with role-based access control,
+// designed to meet regulatory compliance requirements:
+//   - GDPR Art.32: Technical and organizational measures to ensure security
+//   - HIPAA §164.312(a): Access Control - Unique User Identification
+//   - FISMA AC-2: Account Management
+//   - SOC 2 CC6.1: Logical access controls
+//
+// Architecture:
+//   - JWT tokens (HS256 algorithm) for stateless authentication
+//   - Multiple credential sources: Bearer header, cookies, query parameters
+//   - Role-based access control (RBAC) with 4 roles: admin, editor, viewer, none
+//   - Account lockout after failed login attempts
+//   - Password hashing with bcrypt
+//   - Audit logging for compliance
+//
+// Example Usage:
+//
+//	// Initialize authenticator
+//	config := auth.DefaultAuthConfig()
+//	config.JWTSecret = []byte("your-secret-key-min-32-chars")
+//	config.MinPasswordLength = 12
+//
+//	authenticator, err := auth.NewAuthenticator(config)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Set audit logging (required for HIPAA/GDPR)
+//	authenticator.SetAuditLogger(func(event auth.AuditEvent) {
+//		log.Printf("[AUDIT] %s: %s (success=%v)",
+//			event.EventType, event.Username, event.Success)
+//	})
+//
+//	// Create users
+//	admin, _ := authenticator.CreateUser("admin", "SecurePass123!",
+//		[]auth.Role{auth.RoleAdmin})
+//
+//	viewer, _ := authenticator.CreateUser("alice", "AlicePass456!",
+//		[]auth.Role{auth.RoleViewer})
+//
+//	// Authenticate and get JWT token
+//	tokenResp, user, err := authenticator.Authenticate(
+//		"admin", "SecurePass123!", "192.168.1.1", "Mozilla/5.0")
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Token: %s\n", tokenResp.AccessToken)
+//	fmt.Printf("Type: %s\n", tokenResp.TokenType) // "Bearer"
+//
+//	// Validate token
+//	claims, err := authenticator.ValidateToken(tokenResp.AccessToken)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Check permissions
+//	if user.HasPermission(auth.PermWrite) {
+//		fmt.Println("User can write")
+//	}
+//
+// OAuth 2.0 Compatibility:
+//
+// The token endpoint follows RFC 6749 (OAuth 2.0) format:
+//
+//	POST /auth/token
+//	Content-Type: application/x-www-form-urlencoded
+//
+//	grant_type=password&username=alice&password=secret
+//
+// Response:
+//
+//	{
+//	  "access_token": "eyJhbGc...",
+//	  "token_type": "Bearer",
+//	  "expires_in": 3600  // omitted if never expires
+//	}
+//
+// Compliance Features:
+//
+// GDPR Art.32 (Security):
+//   - Password hashing (bcrypt with configurable cost)
+//   - Token-based authentication (no session storage)
+//   - Account lockout (prevents brute force)
+//   - Audit logging (tracks all authentication events)
+//
+// HIPAA §164.312(a) (Access Control):
+//   - Unique user identification (User.ID)
+//   - Role-based permissions
+//   - Account disable/enable
+//   - Failed login tracking
+//
+// FISMA AC-2 (Account Management):
+//   - User creation with roles
+//   - Account lockout
+//   - Audit trail
+//   - Password policy enforcement
+//
+// Security Best Practices:
+//   - bcrypt for password hashing (adjustable cost)
+//   - HMAC-SHA256 for JWT signatures
+//   - Constant-time string comparison (prevents timing attacks)
+//   - Account lockout after N failed attempts
+//   - No password in logs or responses
+//
+// ELI12 (Explain Like I'm 12):
+//
+// Think of this like your school's login system:
+//
+// 1. **Creating an account**: Like signing up for a school portal with username/password
+// 2. **Logging in**: Like entering your credentials at the library computer
+// 3. **JWT token**: Like a hall pass that proves you're allowed to be here
+// 4. **Roles**: Like student vs teacher vs admin - different people can do different things
+// 5. **Account lockout**: If you get your password wrong 5 times, you're locked out for 15 minutes
+// 6. **Audit log**: Like the principal keeping a record of who entered the building and when
+//
+// The system makes sure only the right people can access the right data!
 package auth
 
 import (
@@ -75,7 +184,41 @@ var RolePermissions = map[Role][]Permission{
 	RoleNone:   {},
 }
 
-// User represents an authenticated user.
+// User represents an authenticated user account.
+//
+// Users have:
+//   - Unique ID and username
+//   - Password (hashed with bcrypt, never exposed)
+//   - One or more roles (admin, editor, viewer, none)
+//   - Timestamps for auditing
+//   - Metadata for custom properties
+//
+// Security features:
+//   - PasswordHash is never serialized (json:"-" tag)
+//   - FailedLogins and LockedUntil track brute force attempts
+//   - Disabled flag allows account suspension
+//
+// Example:
+//
+//	user := &auth.User{
+//		ID:       "usr-abc123",
+//		Username: "alice",
+//		Email:    "alice@example.com",
+//		Roles:    []auth.Role{auth.RoleEditor},
+//		Metadata: map[string]string{
+//			"department": "Engineering",
+//			"team":       "Backend",
+//		},
+//	}
+//
+//	// Check permissions
+//	if user.HasRole(auth.RoleAdmin) {
+//		fmt.Println("User is admin")
+//	}
+//
+//	if user.HasPermission(auth.PermWrite) {
+//		fmt.Println("User can write data")
+//	}
 type User struct {
 	ID           string            `json:"id"`
 	Username     string            `json:"username"`
@@ -91,7 +234,24 @@ type User struct {
 	Metadata     map[string]string `json:"metadata,omitempty"`
 }
 
-// HasRole checks if user has a specific role.
+// HasRole checks if the user has a specific role.
+//
+// A user can have multiple roles. This method returns true if any of
+// the user's roles match the specified role.
+//
+// Example:
+//
+//	user := &auth.User{
+//		Roles: []auth.Role{auth.RoleEditor, auth.RoleViewer},
+//	}
+//
+//	if user.HasRole(auth.RoleAdmin) {
+//		fmt.Println("Is admin") // Not printed
+//	}
+//
+//	if user.HasRole(auth.RoleEditor) {
+//		fmt.Println("Is editor") // Printed
+//	}
 func (u *User) HasRole(role Role) bool {
 	for _, r := range u.Roles {
 		if r == role {
@@ -101,7 +261,34 @@ func (u *User) HasRole(role Role) bool {
 	return false
 }
 
-// HasPermission checks if user has a specific permission through any of their roles.
+// HasPermission checks if the user has a specific permission through any of their roles.
+//
+// Permissions are granted by roles. This method checks all the user's roles
+// and returns true if any role grants the requested permission.
+//
+// Permission hierarchy:
+//   - RoleAdmin: read, write, create, delete, admin, schema, user_manage
+//   - RoleEditor: read, write, create, delete
+//   - RoleViewer: read
+//   - RoleNone: (no permissions)
+//
+// Example:
+//
+//	user := &auth.User{
+//		Roles: []auth.Role{auth.RoleEditor},
+//	}
+//
+//	if user.HasPermission(auth.PermRead) {
+//		fmt.Println("Can read") // Printed
+//	}
+//
+//	if user.HasPermission(auth.PermWrite) {
+//		fmt.Println("Can write") // Printed
+//	}
+//
+//	if user.HasPermission(auth.PermUserManage) {
+//		fmt.Println("Can manage users") // NOT printed (needs RoleAdmin)
+//	}
 func (u *User) HasPermission(perm Permission) bool {
 	for _, role := range u.Roles {
 		perms, ok := RolePermissions[role]
@@ -193,7 +380,43 @@ type AuditEvent struct {
 	RequestPath string    `json:"request_path,omitempty"`
 }
 
-// NewAuthenticator creates a new authenticator with the given configuration.
+// NewAuthenticator creates a new Authenticator with the given configuration.
+//
+// The authenticator manages user accounts, authentication, and authorization.
+// All operations are thread-safe.
+//
+// Configuration validation:
+//   - If SecurityEnabled=true, JWTSecret is required (min 32 bytes recommended)
+//   - MinPasswordLength defaults to 8 characters
+//   - BcryptCost defaults to bcrypt.DefaultCost (10)
+//   - MaxFailedLogins defaults to 5
+//   - LockoutDuration defaults to 15 minutes
+//
+// Example:
+//
+//	// Production configuration
+//	config := auth.AuthConfig{
+//		MinPasswordLength: 12,
+//		BcryptCost:        12,  // Higher = more secure but slower
+//		JWTSecret:         []byte("your-secret-key-at-least-32-chars-long"),
+//		TokenExpiry:       24 * time.Hour,  // Tokens expire after 24h
+//		MaxFailedLogins:   5,
+//		LockoutDuration:   30 * time.Minute,
+//		SecurityEnabled:   true,
+//	}
+//
+//	auth, err := auth.NewAuthenticator(config)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Development configuration (no security)
+//	devConfig := auth.AuthConfig{
+//		SecurityEnabled: false,  // All requests allowed
+//	}
+//	auth = auth.NewAuthenticator(devConfig)
+//
+// Returns error if SecurityEnabled=true but JWTSecret is empty.
 func NewAuthenticator(config AuthConfig) (*Authenticator, error) {
 	if config.SecurityEnabled && len(config.JWTSecret) == 0 {
 		return nil, ErrMissingSecret
@@ -232,7 +455,40 @@ func (a *Authenticator) logAudit(event AuditEvent) {
 	}
 }
 
-// CreateUser creates a new user with the given credentials.
+// CreateUser creates a new user account with the given credentials and roles.
+//
+// The password is immediately hashed with bcrypt and never stored in plain text.
+// If no roles are specified, defaults to RoleViewer.
+//
+// Parameters:
+//   - username: Unique username (must not already exist)
+//   - password: Plain text password (will be hashed)
+//   - roles: User roles, or empty slice for default (viewer)
+//
+// Returns:
+//   - User object (without password hash)
+//   - ErrUserExists if username already taken
+//   - ErrPasswordTooShort if password doesn't meet minimum length
+//
+// Example:
+//
+//	// Create admin user
+//	admin, err := auth.CreateUser("admin", "SecurePassword123!",
+//		[]auth.Role{auth.RoleAdmin})
+//	if err != nil {
+//		return err
+//	}
+//
+//	// Create regular user (defaults to viewer)
+//	user, err := auth.CreateUser("alice", "AlicePass456!", nil)
+//
+//	// Create user with multiple roles
+//	editor, err := auth.CreateUser("bob", "BobPass789!",
+//		[]auth.Role{auth.RoleEditor, auth.RoleViewer})
+//
+// Audit event: Logs "user_create" with success/failure.
+//
+// Compliance: HIPAA §164.308(a)(3)(ii)(A) - Unique user IDs
 func (a *Authenticator) CreateUser(username, password string, roles []Role) (*User, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -291,8 +547,67 @@ func (a *Authenticator) CreateUser(username, password string, roles []Role) (*Us
 	return a.copyUserSafe(user), nil
 }
 
-// Authenticate verifies credentials and returns a JWT token response.
-// Compatible with Mimir's /auth/token endpoint (OAuth 2.0 password grant).
+// Authenticate verifies user credentials and returns a JWT token.
+//
+// This implements the OAuth 2.0 password grant flow (RFC 6749 Section 4.3).
+// On successful authentication:
+//   1. Password is verified with bcrypt
+//   2. Failed login counter is reset
+//   3. LastLogin timestamp is updated
+//   4. JWT token is generated
+//   5. Audit event is logged
+//
+// Security features:
+//   - Account lockout after MaxFailedLogins attempts
+//   - Disabled accounts cannot authenticate
+//   - Timing attack resistant (doesn't reveal if user exists)
+//   - Failed attempts are logged for security monitoring
+//
+// Parameters:
+//   - username: User's username
+//   - password: User's password (plain text)
+//   - ipAddress: Client IP for audit logging
+//   - userAgent: Client User-Agent for audit logging
+//
+// Returns:
+//   - TokenResponse: OAuth 2.0 token response (access_token, token_type, expires_in)
+//   - User: User object (without password)
+//   - Error: ErrInvalidCredentials, ErrAccountLocked, or ErrUserNotFound
+//
+// Example:
+//
+//	token, user, err := auth.Authenticate(
+//		"alice",
+//		"AlicePassword123!",
+//		"192.168.1.100",
+//		"Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+//	)
+//	if err != nil {
+//		if errors.Is(err, auth.ErrAccountLocked) {
+//			http.Error(w, "Account locked. Try again in 15 minutes.", 423)
+//			return
+//		}
+//		http.Error(w, "Invalid credentials", 401)
+//		return
+//	}
+//
+//	// Use token in Authorization header
+//	fmt.Printf("Authorization: Bearer %s\n", token.AccessToken)
+//
+//	// Set cookie for browser sessions
+//	http.SetCookie(w, &http.Cookie{
+//		Name:     "token",
+//		Value:    token.AccessToken,
+//		HttpOnly: true,
+//		Secure:   true,
+//		SameSite: http.SameSiteStrictMode,
+//	})
+//
+// Compliance:
+//   - HIPAA §164.312(a)(2)(i): Unique User Identification
+//   - HIPAA §164.312(d): Person or Entity Authentication
+//   - GDPR Art.32: Technical measures to ensure security
+//   - FISMA AC-7: Unsuccessful Login Attempts
 func (a *Authenticator) Authenticate(username, password, ipAddress, userAgent string) (*TokenResponse, *User, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -396,8 +711,54 @@ func (a *Authenticator) Authenticate(username, password, ipAddress, userAgent st
 	return response, a.copyUserSafe(user), nil
 }
 
-// ValidateToken validates a JWT token and returns the claims if valid.
-// Supports Bearer tokens from Authorization header, cookies, or query params.
+// ValidateToken validates a JWT token and returns the claims.
+//
+// The token is verified using HMAC-SHA256. If valid, returns the decoded claims
+// including user ID, username, roles, and expiration.
+//
+// Validation checks:
+//   1. Token format (header.payload.signature)
+//   2. Signature verification (HMAC-SHA256)
+//   3. Expiration (if Exp > 0)
+//   4. Not before (if configured)
+//
+// If SecurityEnabled=false, returns dummy claims allowing all access.
+//
+// The token can include "Bearer " prefix (will be stripped).
+//
+// Parameters:
+//   - token: JWT token string (with or without "Bearer " prefix)
+//
+// Returns:
+//   - JWTClaims: Decoded claims with user info and roles
+//   - Error: ErrInvalidToken, ErrSessionExpired, or ErrNoCredentials
+//
+// Example:
+//
+//	// From Authorization header
+//	authHeader := r.Header.Get("Authorization") // "Bearer eyJhbGc..."
+//	claims, err := auth.ValidateToken(authHeader)
+//	if err != nil {
+//		http.Error(w, "Unauthorized", 401)
+//		return
+//	}
+//
+//	fmt.Printf("User: %s\n", claims.Username)
+//	fmt.Printf("Roles: %v\n", claims.Roles)
+//
+//	// Check if user has admin role
+//	hasAdmin := false
+//	for _, role := range claims.Roles {
+//		if role == string(auth.RoleAdmin) {
+//			hasAdmin = true
+//			break
+//		}
+//	}
+//
+// Security:
+//   - Uses constant-time comparison to prevent timing attacks
+//   - Validates expiration to prevent replay attacks
+//   - Checks signature to prevent tampering
 func (a *Authenticator) ValidateToken(token string) (*JWTClaims, error) {
 	if !a.config.SecurityEnabled {
 		// Security disabled - return dummy claims

@@ -109,7 +109,7 @@ server:
   bolt_port: 7687
   http_port: 7474
   data_dir: ./data
-  auth: "neo4j:password"
+  auth: "none"  # disabled by default, use "admin:password" to enable
 
 search:
   rrf:

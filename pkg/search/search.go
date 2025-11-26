@@ -1,5 +1,78 @@
-// Package search provides unified search with RRF, vector, and full-text capabilities.
-// This implements the same hybrid search approach used by Azure AI Search, Elasticsearch, and Weaviate.
+// Package search provides unified hybrid search with Reciprocal Rank Fusion (RRF).
+//
+// This package implements the same hybrid search approach used by production systems
+// like Azure AI Search, Elasticsearch, and Weaviate: combining vector similarity search
+// with BM25 full-text search using Reciprocal Rank Fusion.
+//
+// Search Capabilities:
+//   - Vector similarity search (cosine similarity with HNSW index)
+//   - BM25 full-text search (keyword matching with TF-IDF)
+//   - RRF hybrid search (fuses vector + BM25 results)
+//   - Adaptive weighting based on query characteristics
+//   - Automatic fallback when one method fails
+//
+// Example Usage:
+//
+//	// Create search service
+//	svc := search.NewService(storageEngine)
+//
+//	// Build indexes from existing nodes
+//	if err := svc.BuildIndexes(ctx); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Perform hybrid search
+//	query := "machine learning algorithms"
+//	embedding := embedder.Embed(ctx, query) // Get from embed package
+//	opts := search.DefaultSearchOptions()
+//
+//	response, err := svc.Search(ctx, query, embedding, opts)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	for _, result := range response.Results {
+//		fmt.Printf("[%.3f] %s\n", result.RRFScore, result.Title)
+//	}
+//
+// How RRF Works:
+//
+// RRF (Reciprocal Rank Fusion) combines rankings from multiple search methods.
+// Instead of merging scores directly (which can be incomparable), RRF uses rank
+// positions to create a unified ranking.
+//
+// Formula: RRF_score = Σ (weight / (k + rank))
+//
+// Where:
+//   - k is a constant (typically 60) to reduce the impact of high ranks
+//   - rank is the position in the result list (1-indexed)
+//   - weight allows emphasizing one method over another
+//
+// Example: A document ranked #1 in vector search and #3 in BM25:
+//
+//	RRF = (1.0 / (60 + 1)) + (1.0 / (60 + 3))
+//	    = (1.0 / 61) + (1.0 / 63)
+//	    = 0.0164 + 0.0159
+//	    = 0.0323
+//
+// Documents that appear in both result sets get boosted scores.
+//
+// ELI12 (Explain Like I'm 12):
+//
+// Imagine two friends ranking pizza places:
+//   - Friend A (vector search) ranks by taste similarity to your favorite
+//   - Friend B (BM25) ranks by matching your description "spicy pepperoni"
+//
+// They might disagree! Friend A says place X is #1 (tastes similar), while
+// Friend B says it's #5 (doesn't match keywords well).
+//
+// RRF solves this by:
+// 1. If a place appears in BOTH lists, it gets bonus points
+// 2. Higher ranks (being at the top) give more points
+// 3. The magic number 60 prevents #1 from completely dominating
+//
+// This way, a place that's #2 in both lists beats a place that's #1 in one
+// but missing from the other!
 package search
 
 import (
@@ -100,7 +173,31 @@ func DefaultSearchOptions() *SearchOptions {
 	}
 }
 
-// Service provides unified search capabilities.
+// Service provides unified hybrid search with automatic index management.
+//
+// The Service maintains:
+//   - Vector index (HNSW for fast approximate nearest neighbor search)
+//   - Full-text index (BM25 with inverted index)
+//   - Connection to storage engine for node data enrichment
+//
+// Thread-safe: Multiple goroutines can call Search() concurrently.
+//
+// Example:
+//
+//	svc := search.NewService(engine)
+//	defer svc.Close()
+//
+//	// Index existing data
+//	if err := svc.BuildIndexes(ctx); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Index new nodes as they're created
+//	node := &storage.Node{...}
+//	if err := svc.IndexNode(node); err != nil {
+//		log.Printf("Failed to index: %v", err)
+//	}
+//
 type Service struct {
 	engine       storage.Engine
 	vectorIndex  *VectorIndex
@@ -108,7 +205,26 @@ type Service struct {
 	mu           sync.RWMutex
 }
 
-// NewService creates a new search service.
+// NewService creates a new search Service with empty indexes.
+//
+// The service is created with:
+//   - 1024-dimensional vector index (default for mxbai-embed-large)
+//   - Empty full-text index
+//   - Reference to storage engine for data enrichment
+//
+// Call BuildIndexes() after creation to populate indexes from existing data.
+//
+// Example:
+//
+//	engine, _ := storage.NewMemoryEngine()
+//	svc := search.NewService(engine)
+//
+//	// Build indexes from all nodes
+//	if err := svc.BuildIndexes(context.Background()); err != nil {
+//		log.Fatal(err)
+//	}
+//
+// Returns a new Service ready for indexing and searching.
 func NewService(engine storage.Engine) *Service {
 	return &Service{
 		engine:        engine,
@@ -173,7 +289,47 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	return nil
 }
 
-// Search performs RRF hybrid search (vector + BM25) with fallback.
+// Search performs hybrid search with automatic fallback.
+//
+// Search strategy:
+//  1. Try RRF hybrid search (vector + BM25) if embedding provided
+//  2. Fall back to vector-only if RRF returns no results
+//  3. Fall back to BM25-only if vector search fails or no embedding
+//
+// This ensures you always get results even if one index is empty or fails.
+//
+// Parameters:
+//   - ctx: Context for cancellation
+//   - query: Text query for BM25 search
+//   - embedding: Vector embedding for similarity search (can be nil)
+//   - opts: Search options (use DefaultSearchOptions() if unsure)
+//
+// Example:
+//
+//	svc := search.NewService(engine)
+//
+//	// Hybrid search (best results)
+//	query := "graph database memory"
+//	embedding, _ := embedder.Embed(ctx, query)
+//	opts := search.DefaultSearchOptions()
+//	opts.Limit = 10
+//
+//	resp, err := svc.Search(ctx, query, embedding, opts)
+//	if err != nil {
+//		return err
+//	}
+//
+//	fmt.Printf("Found %d results using %s\n",
+//		resp.Returned, resp.SearchMethod)
+//
+//	for i, result := range resp.Results {
+//		fmt.Printf("%d. [RRF: %.4f] %s\n",
+//			i+1, result.RRFScore, result.Title)
+//		fmt.Printf("   Vector rank: #%d, BM25 rank: #%d\n",
+//			result.VectorRank, result.BM25Rank)
+//	}
+//
+// Returns a SearchResponse with ranked results and metadata about the search method used.
 func (s *Service) Search(ctx context.Context, query string, embedding []float32, opts *SearchOptions) (*SearchResponse, error) {
 	if opts == nil {
 		opts = DefaultSearchOptions()
@@ -247,8 +403,53 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	}, nil
 }
 
-// fuseRRF implements Reciprocal Rank Fusion algorithm.
+// fuseRRF implements the Reciprocal Rank Fusion (RRF) algorithm.
+//
+// RRF combines multiple ranked lists without requiring score normalization.
+// Each ranking method votes for documents using their rank positions.
+//
 // Formula: RRF_score(doc) = Σ (weight_i / (k + rank_i))
+//
+// Where:
+//   - k = constant (default 60) to smooth rank differences
+//   - rank_i = position in list i (1-indexed: 1st place = rank 1)
+//   - weight_i = importance weight for list i (default 1.0)
+//
+// Why k=60?
+//   - From research by Cormack et al. (2009)
+//   - Balances between giving too much weight to top results vs treating all ranks equally
+//   - k=60 means rank #1 gets score 1/61=0.016, rank #2 gets 1/62=0.016
+//   - Difference is small, but rank #1 is still slightly better
+//
+// Example calculation:
+//
+//	Document appears in:
+//	  - Vector results at rank #2
+//	  - BM25 results at rank #5
+//	
+//	RRF_score = (1.0 / (60 + 2)) + (1.0 / (60 + 5))
+//	          = (1.0 / 62) + (1.0 / 65)
+//	          = 0.01613 + 0.01538
+//	          = 0.03151
+//	
+//	Document only in vector at rank #1:
+//	RRF_score = (1.0 / (60 + 1)) + 0
+//	          = 0.01639
+//	
+//	First document wins! Being in both lists beats being #1 in just one.
+//
+// ELI12:
+//
+// Think of it like American Idol with two judges:
+//   - Judge A ranks singers by vocal technique
+//   - Judge B ranks by stage presence
+//
+// A singer ranked #2 by both judges should beat one ranked #1 by only one judge.
+// RRF does this math automatically!
+//
+// Reference: Cormack, Clarke & Buettcher (2009)
+// "Reciprocal Rank Fusion outperforms the best known automatic evaluation
+// measures in combining results from multiple text retrieval systems."
 func (s *Service) fuseRRF(vectorResults, bm25Results []indexResult, opts *SearchOptions) []rrfResult {
 	// Create rank maps (1-indexed per RRF formula)
 	vectorRanks := make(map[string]int)
@@ -518,7 +719,44 @@ func (s *Service) enrichIndexResults(indexResults []indexResult, limit int) []Se
 	return results
 }
 
-// GetAdaptiveRRFConfig returns RRF weights based on query characteristics.
+// GetAdaptiveRRFConfig returns optimized RRF weights based on query characteristics.
+//
+// This function analyzes the query and adjusts weights to favor the search method
+// most likely to perform well:
+//
+//   - Short queries (1-2 words): Favor BM25 keyword matching
+//     Example: "python" or "graph database"
+//     Weights: Vector=0.5, BM25=1.5
+//
+//   - Long queries (6+ words): Favor vector semantic understanding
+//     Example: "How do I implement a distributed consensus algorithm?"
+//     Weights: Vector=1.5, BM25=0.5
+//
+//   - Medium queries (3-5 words): Balanced approach
+//     Example: "machine learning algorithms"
+//     Weights: Vector=1.0, BM25=1.0
+//
+// Why this works:
+//   - Short queries lack context → keywords more reliable
+//   - Long queries have semantic meaning → embeddings capture intent better
+//
+// Example:
+//
+//	// Automatic adaptation
+//	query1 := "database"
+//	opts1 := search.GetAdaptiveRRFConfig(query1)
+//	fmt.Printf("Short query weights: V=%.1f, B=%.1f\n",
+//		opts1.VectorWeight, opts1.BM25Weight)
+//	// Output: V=0.5, B=1.5 (favors keywords)
+//
+//	query2 := "What are the best practices for scaling graph databases?"
+//	opts2 := search.GetAdaptiveRRFConfig(query2)
+//	fmt.Printf("Long query weights: V=%.1f, B=%.1f\n",
+//		opts2.VectorWeight, opts2.BM25Weight)
+//	// Output: V=1.5, B=0.5 (favors semantics)
+//
+// Returns SearchOptions with adapted weights. Other options (Limit, MinSimilarity)
+// are set to defaults.
 func GetAdaptiveRRFConfig(query string) *SearchOptions {
 	words := strings.Fields(query)
 	wordCount := len(words)
@@ -569,6 +807,13 @@ func findResultIndex(results []indexResult, id string) int {
 func truncate(s string, maxLen int) string {
 	if len(s) <= maxLen {
 		return s
+	}
+	// Handle edge cases where maxLen is too small for ellipsis
+	if maxLen <= 3 {
+		if maxLen <= 0 {
+			return ""
+		}
+		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
 }

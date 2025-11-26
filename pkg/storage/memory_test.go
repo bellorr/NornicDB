@@ -987,3 +987,270 @@ func TestMemoryEngine_copyEdge(t *testing.T) {
 func TestMemoryEngine_ImplementsEngine(t *testing.T) {
 	var _ Engine = (*MemoryEngine)(nil)
 }
+
+// ========================================
+// Tests for 0% coverage functions
+// ========================================
+
+func TestGetAllNodes(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Test empty storage
+	t.Run("empty_storage", func(t *testing.T) {
+		nodes := engine.GetAllNodes()
+		if len(nodes) != 0 {
+			t.Errorf("Expected 0 nodes, got %d", len(nodes))
+		}
+	})
+
+	// Create some test nodes
+	node1 := &Node{
+		ID:         "node-1",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Alice"},
+	}
+	node2 := &Node{
+		ID:         "node-2",
+		Labels:     []string{"Person"},
+		Properties: map[string]interface{}{"name": "Bob"},
+	}
+	node3 := &Node{
+		ID:         "node-3",
+		Labels:     []string{"Company"},
+		Properties: map[string]interface{}{"name": "Acme"},
+	}
+
+	engine.CreateNode(node1)
+	engine.CreateNode(node2)
+	engine.CreateNode(node3)
+
+	t.Run("all_nodes_returned", func(t *testing.T) {
+		nodes := engine.GetAllNodes()
+		if len(nodes) != 3 {
+			t.Errorf("Expected 3 nodes, got %d", len(nodes))
+		}
+
+		// Verify all nodes are present
+		foundIDs := make(map[NodeID]bool)
+		for _, n := range nodes {
+			foundIDs[n.ID] = true
+		}
+		if !foundIDs["node-1"] || !foundIDs["node-2"] || !foundIDs["node-3"] {
+			t.Error("Not all nodes were returned")
+		}
+	})
+
+	t.Run("returns_copies", func(t *testing.T) {
+		nodes := engine.GetAllNodes()
+		// Modify returned node
+		nodes[0].Properties["modified"] = true
+
+		// Original should be unchanged
+		original, _ := engine.GetNode(nodes[0].ID)
+		if _, exists := original.Properties["modified"]; exists {
+			t.Error("Modification affected original node - not a copy")
+		}
+	})
+
+	t.Run("closed_engine", func(t *testing.T) {
+		closedEngine := NewMemoryEngine()
+		closedEngine.CreateNode(&Node{ID: "test", Labels: []string{"Test"}})
+		closedEngine.Close()
+
+		nodes := closedEngine.GetAllNodes()
+		if len(nodes) != 0 {
+			t.Errorf("Closed engine should return empty slice, got %d nodes", len(nodes))
+		}
+	})
+}
+
+func TestGetEdgeBetween(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Create nodes
+	engine.CreateNode(&Node{ID: "alice", Labels: []string{"Person"}})
+	engine.CreateNode(&Node{ID: "bob", Labels: []string{"Person"}})
+	engine.CreateNode(&Node{ID: "charlie", Labels: []string{"Person"}})
+
+	// Create edges
+	engine.CreateEdge(&Edge{
+		ID:        "edge-1",
+		Type:      "KNOWS",
+		StartNode: "alice",
+		EndNode:   "bob",
+	})
+	engine.CreateEdge(&Edge{
+		ID:        "edge-2",
+		Type:      "WORKS_WITH",
+		StartNode: "alice",
+		EndNode:   "bob",
+	})
+	engine.CreateEdge(&Edge{
+		ID:        "edge-3",
+		Type:      "KNOWS",
+		StartNode: "bob",
+		EndNode:   "charlie",
+	})
+
+	t.Run("find_existing_edge", func(t *testing.T) {
+		edge := engine.GetEdgeBetween("alice", "bob", "KNOWS")
+		if edge == nil {
+			t.Fatal("Expected to find KNOWS edge between alice and bob")
+		}
+		if edge.Type != "KNOWS" {
+			t.Errorf("Expected type KNOWS, got %s", edge.Type)
+		}
+	})
+
+	t.Run("find_any_edge_type", func(t *testing.T) {
+		// Empty type should match any
+		edge := engine.GetEdgeBetween("alice", "bob", "")
+		if edge == nil {
+			t.Fatal("Expected to find edge between alice and bob")
+		}
+	})
+
+	t.Run("no_edge_wrong_type", func(t *testing.T) {
+		edge := engine.GetEdgeBetween("alice", "bob", "MARRIED_TO")
+		if edge != nil {
+			t.Error("Should not find MARRIED_TO edge")
+		}
+	})
+
+	t.Run("no_edge_between_nodes", func(t *testing.T) {
+		edge := engine.GetEdgeBetween("alice", "charlie", "KNOWS")
+		if edge != nil {
+			t.Error("Should not find edge between alice and charlie")
+		}
+	})
+
+	t.Run("no_edge_nonexistent_source", func(t *testing.T) {
+		edge := engine.GetEdgeBetween("unknown", "bob", "")
+		if edge != nil {
+			t.Error("Should not find edge from nonexistent node")
+		}
+	})
+
+	t.Run("returns_copy", func(t *testing.T) {
+		edge := engine.GetEdgeBetween("alice", "bob", "KNOWS")
+		edge.Properties = map[string]interface{}{"modified": true}
+
+		original := engine.GetEdgeBetween("alice", "bob", "KNOWS")
+		if _, exists := original.Properties["modified"]; exists {
+			t.Error("Modification affected original edge - not a copy")
+		}
+	})
+
+	t.Run("closed_engine", func(t *testing.T) {
+		closedEngine := NewMemoryEngine()
+		closedEngine.CreateNode(&Node{ID: "a", Labels: []string{"X"}})
+		closedEngine.CreateNode(&Node{ID: "b", Labels: []string{"X"}})
+		closedEngine.CreateEdge(&Edge{ID: "e", Type: "T", StartNode: "a", EndNode: "b"})
+		closedEngine.Close()
+
+		edge := closedEngine.GetEdgeBetween("a", "b", "T")
+		if edge != nil {
+			t.Error("Closed engine should return nil")
+		}
+	})
+}
+
+func TestGetInDegree(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Create nodes
+	engine.CreateNode(&Node{ID: "center", Labels: []string{"Node"}})
+	engine.CreateNode(&Node{ID: "n1", Labels: []string{"Node"}})
+	engine.CreateNode(&Node{ID: "n2", Labels: []string{"Node"}})
+	engine.CreateNode(&Node{ID: "n3", Labels: []string{"Node"}})
+
+	t.Run("zero_incoming", func(t *testing.T) {
+		degree := engine.GetInDegree("center")
+		if degree != 0 {
+			t.Errorf("Expected 0 incoming edges, got %d", degree)
+		}
+	})
+
+	// Add incoming edges to center
+	engine.CreateEdge(&Edge{ID: "e1", Type: "POINTS_TO", StartNode: "n1", EndNode: "center"})
+	engine.CreateEdge(&Edge{ID: "e2", Type: "POINTS_TO", StartNode: "n2", EndNode: "center"})
+	engine.CreateEdge(&Edge{ID: "e3", Type: "LINKS", StartNode: "n3", EndNode: "center"})
+
+	t.Run("three_incoming", func(t *testing.T) {
+		degree := engine.GetInDegree("center")
+		if degree != 3 {
+			t.Errorf("Expected 3 incoming edges, got %d", degree)
+		}
+	})
+
+	t.Run("nonexistent_node", func(t *testing.T) {
+		degree := engine.GetInDegree("nonexistent")
+		if degree != 0 {
+			t.Errorf("Expected 0 for nonexistent node, got %d", degree)
+		}
+	})
+
+	t.Run("closed_engine", func(t *testing.T) {
+		closedEngine := NewMemoryEngine()
+		closedEngine.CreateNode(&Node{ID: "x", Labels: []string{"X"}})
+		closedEngine.CreateNode(&Node{ID: "y", Labels: []string{"X"}})
+		closedEngine.CreateEdge(&Edge{ID: "e", Type: "T", StartNode: "y", EndNode: "x"})
+		closedEngine.Close()
+
+		degree := closedEngine.GetInDegree("x")
+		if degree != 0 {
+			t.Errorf("Closed engine should return 0, got %d", degree)
+		}
+	})
+}
+
+func TestGetOutDegree(t *testing.T) {
+	engine := NewMemoryEngine()
+	defer engine.Close()
+
+	// Create nodes
+	engine.CreateNode(&Node{ID: "center", Labels: []string{"Node"}})
+	engine.CreateNode(&Node{ID: "n1", Labels: []string{"Node"}})
+	engine.CreateNode(&Node{ID: "n2", Labels: []string{"Node"}})
+
+	t.Run("zero_outgoing", func(t *testing.T) {
+		degree := engine.GetOutDegree("center")
+		if degree != 0 {
+			t.Errorf("Expected 0 outgoing edges, got %d", degree)
+		}
+	})
+
+	// Add outgoing edges from center
+	engine.CreateEdge(&Edge{ID: "e1", Type: "POINTS_TO", StartNode: "center", EndNode: "n1"})
+	engine.CreateEdge(&Edge{ID: "e2", Type: "LINKS", StartNode: "center", EndNode: "n2"})
+
+	t.Run("two_outgoing", func(t *testing.T) {
+		degree := engine.GetOutDegree("center")
+		if degree != 2 {
+			t.Errorf("Expected 2 outgoing edges, got %d", degree)
+		}
+	})
+
+	t.Run("nonexistent_node", func(t *testing.T) {
+		degree := engine.GetOutDegree("nonexistent")
+		if degree != 0 {
+			t.Errorf("Expected 0 for nonexistent node, got %d", degree)
+		}
+	})
+
+	t.Run("closed_engine", func(t *testing.T) {
+		closedEngine := NewMemoryEngine()
+		closedEngine.CreateNode(&Node{ID: "x", Labels: []string{"X"}})
+		closedEngine.CreateNode(&Node{ID: "y", Labels: []string{"X"}})
+		closedEngine.CreateEdge(&Edge{ID: "e", Type: "T", StartNode: "x", EndNode: "y"})
+		closedEngine.Close()
+
+		degree := closedEngine.GetOutDegree("x")
+		if degree != 0 {
+			t.Errorf("Closed engine should return 0, got %d", degree)
+		}
+	})
+}

@@ -41,6 +41,13 @@ func TestLoadFromMimirExport_RealData(t *testing.T) {
 	if exportDir == "" {
 		t.Skipf("Export directory not found in any of: %v (run export-neo4j-to-json.mjs first)", possiblePaths)
 	}
+	
+	// Check if nodes.json exists
+	nodesFile := filepath.Join(exportDir, "nodes.json")
+	if _, err := os.Stat(nodesFile); os.IsNotExist(err) {
+		t.Skipf("nodes.json not found in %s - run export-neo4j-to-json.mjs first", exportDir)
+	}
+	
 	t.Logf("Using export directory: %s", exportDir)
 
 	// Load metadata first to know what to expect

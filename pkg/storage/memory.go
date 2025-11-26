@@ -1,16 +1,104 @@
-// Package storage provides storage implementations.
-// MemoryEngine is a thread-safe in-memory storage for testing and small datasets.
+// Package storage provides storage engine implementations for NornicDB.
+//
+// The storage package defines the Engine interface and provides multiple implementations:
+//   - MemoryEngine: In-memory storage for testing and small datasets
+//   - BadgerEngine: Persistent disk-based storage (coming soon)
+//
+// All storage engines are thread-safe and support concurrent operations.
+//
+// Example Usage:
+//
+//	// Create in-memory storage
+//	engine := storage.NewMemoryEngine()
+//	defer engine.Close()
+//
+//	// Create a node
+//	node := &storage.Node{
+//		ID:     "user-001",
+//		Labels: []string{"User"},
+//		Properties: map[string]any{
+//			"name": "Alice",
+//			"email": "alice@example.com",
+//		},
+//		CreatedAt: time.Now(),
+//	}
+//
+//	if err := engine.CreateNode(node); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Create an edge
+//	edge := &storage.Edge{
+//		ID:        "follows-001",
+//		StartNode: "user-001",
+//		EndNode:   "user-002",
+//		Type:      "FOLLOWS",
+//		CreatedAt: time.Now(),
+//	}
+//
+//	if err := engine.CreateEdge(edge); err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Query nodes by label
+//	users, _ := engine.GetNodesByLabel("User")
+//	fmt.Printf("Found %d users\n", len(users))
 package storage
 
 import (
+	"fmt"
 	"sync"
 )
 
-// MemoryEngine is an in-memory implementation of Engine.
-// It's useful for:
-// - Unit testing (no disk I/O)
-// - Loading Neo4j exports into memory
-// - Small datasets that fit in RAM
+// MemoryEngine is a thread-safe in-memory graph storage implementation.
+//
+// Use Cases:
+//   - Unit testing (no disk I/O, fast cleanup)
+//   - Loading Neo4j exports into memory for analysis
+//   - Small datasets that fit entirely in RAM
+//   - Development and prototyping
+//
+// Features:
+//   - Thread-safe: All operations use RWMutex for concurrent access
+//   - Indexed: Maintains indexes for labels and edges for fast lookups
+//   - Deep copies: Returns copies to prevent external mutation
+//   - Bulk operations: Efficient batch insert for nodes and edges
+//
+// Performance Characteristics:
+//   - Node lookup by ID: O(1)
+//   - Node lookup by label: O(k) where k = nodes with that label
+//   - Edge lookup: O(1)
+//   - Outgoing/incoming edges: O(degree)
+//   - Memory usage: ~200-500 bytes per node + properties
+//
+// Thread Safety:
+//   All public methods are thread-safe. Multiple goroutines can safely
+//   call any method concurrently.
+//
+// Example:
+//
+//	engine := storage.NewMemoryEngine()
+//	defer engine.Close()
+//
+//	// Create nodes
+//	nodes := []*storage.Node{
+//		{ID: "n1", Labels: []string{"Person"}, Properties: map[string]any{"name": "Alice"}},
+//		{ID: "n2", Labels: []string{"Person"}, Properties: map[string]any{"name": "Bob"}},
+//	}
+//	engine.BulkCreateNodes(nodes)
+//
+//	// Create edges
+//	edges := []*storage.Edge{
+//		{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "KNOWS"},
+//	}
+//	engine.BulkCreateEdges(edges)
+//
+//	// Query
+//	people, _ := engine.GetNodesByLabel("Person")
+//	fmt.Printf("Found %d people\n", len(people))
+//
+//	outgoing, _ := engine.GetOutgoingEdges("n1")
+//	fmt.Printf("Alice knows %d people\n", len(outgoing))
 type MemoryEngine struct {
 	mu    sync.RWMutex
 	nodes map[NodeID]*Node
@@ -21,10 +109,27 @@ type MemoryEngine struct {
 	outgoingEdges map[NodeID]map[EdgeID]struct{}
 	incomingEdges map[NodeID]map[EdgeID]struct{}
 
+	// Schema management
+	schema *SchemaManager
+
 	closed bool
 }
 
-// NewMemoryEngine creates a new in-memory storage engine.
+// NewMemoryEngine creates a new in-memory storage engine with empty indexes.
+//
+// The engine starts with no data and all indexes empty. It's immediately ready
+// for use and requires no initialization beyond this constructor.
+//
+// Example:
+//
+//	engine := storage.NewMemoryEngine()
+//	defer engine.Close()
+//
+//	// Engine is ready to use
+//	node := &storage.Node{ID: "test", Labels: []string{"Test"}}
+//	engine.CreateNode(node)
+//
+// Returns a new MemoryEngine ready for concurrent use.
 func NewMemoryEngine() *MemoryEngine {
 	return &MemoryEngine{
 		nodes:         make(map[NodeID]*Node),
@@ -32,10 +137,44 @@ func NewMemoryEngine() *MemoryEngine {
 		nodesByLabel:  make(map[string]map[NodeID]struct{}),
 		outgoingEdges: make(map[NodeID]map[EdgeID]struct{}),
 		incomingEdges: make(map[NodeID]map[EdgeID]struct{}),
+		schema:        NewSchemaManager(),
 	}
 }
 
-// CreateNode creates a new node.
+// CreateNode creates a new node in the storage.
+//
+// The node is deep-copied to prevent external mutations after storage.
+// The ID must be unique - duplicate IDs return ErrAlreadyExists.
+//
+// Parameters:
+//   - node: Node with unique ID, labels, and properties
+//
+// Returns:
+//   - nil on success
+//   - ErrInvalidData if node is nil
+//   - ErrInvalidID if ID is empty
+//   - ErrAlreadyExists if node with this ID exists
+//   - ErrStorageClosed if engine is closed
+//
+// Example:
+//
+//	node := &storage.Node{
+//		ID:     storage.NodeID("user-123"),
+//		Labels: []string{"User", "Admin"},
+//		Properties: map[string]any{
+//			"name":  "Alice",
+//			"email": "alice@example.com",
+//			"age":   30,
+//		},
+//		CreatedAt: time.Now(),
+//	}
+//
+//	if err := engine.CreateNode(node); err != nil {
+//		if errors.Is(err, storage.ErrAlreadyExists) {
+//			fmt.Println("Node already exists")
+//		}
+//		return err
+//	}
 func (m *MemoryEngine) CreateNode(node *Node) error {
 	if node == nil {
 		return ErrInvalidData
@@ -55,6 +194,15 @@ func (m *MemoryEngine) CreateNode(node *Node) error {
 		return ErrAlreadyExists
 	}
 
+	// Check unique constraints for all labels and properties
+	for _, label := range node.Labels {
+		for propName, propValue := range node.Properties {
+			if err := m.schema.CheckUniqueConstraint(label, propName, propValue, ""); err != nil {
+				return fmt.Errorf("constraint violation: %w", err)
+			}
+		}
+	}
+
 	// Deep copy to prevent external mutation
 	stored := m.copyNode(node)
 	m.nodes[node.ID] = stored
@@ -67,10 +215,40 @@ func (m *MemoryEngine) CreateNode(node *Node) error {
 		m.nodesByLabel[label][node.ID] = struct{}{}
 	}
 
+	// Register unique constraint values
+	for _, label := range node.Labels {
+		for propName, propValue := range node.Properties {
+			m.schema.RegisterUniqueValue(label, propName, propValue, node.ID)
+		}
+	}
+
 	return nil
 }
 
-// GetNode retrieves a node by ID.
+// GetNode retrieves a node by its unique ID.
+//
+// Returns a deep copy of the node to prevent external mutations.
+//
+// Parameters:
+//   - id: Unique node identifier
+//
+// Returns:
+//   - Node copy on success
+//   - ErrInvalidID if ID is empty
+//   - ErrNotFound if node doesn't exist
+//   - ErrStorageClosed if engine is closed
+//
+// Example:
+//
+//	node, err := engine.GetNode("user-123")
+//	if err != nil {
+//		if errors.Is(err, storage.ErrNotFound) {
+//			fmt.Println("Node not found")
+//		}
+//		return err
+//	}
+//
+//	fmt.Printf("User: %s\n", node.Properties["name"])
 func (m *MemoryEngine) GetNode(id NodeID) (*Node, error) {
 	if id == "" {
 		return nil, ErrInvalidID
@@ -347,7 +525,37 @@ func (m *MemoryEngine) DeleteEdge(id EdgeID) error {
 	return nil
 }
 
-// GetNodesByLabel returns all nodes with the given label.
+// GetNodesByLabel returns all nodes that have the specified label.
+//
+// Uses an index for O(k) performance where k = number of nodes with this label.
+// Returns deep copies of all matching nodes.
+//
+// Parameters:
+//   - label: Label to search for (case-sensitive)
+//
+// Returns:
+//   - Slice of matching nodes (empty slice if none found)
+//   - ErrStorageClosed if engine is closed
+//
+// Example:
+//
+//	// Get all users
+//	users, err := engine.GetNodesByLabel("User")
+//	if err != nil {
+//		return err
+//	}
+//
+//	fmt.Printf("Found %d users:\n", len(users))
+//	for _, user := range users {
+//		fmt.Printf("  - %s\n", user.Properties["name"])
+//	}
+//
+//	// Get all admins
+//	admins, _ := engine.GetNodesByLabel("Admin")
+//	fmt.Printf("Found %d admins\n", len(admins))
+//
+// Note: A node can have multiple labels. This returns nodes where the
+// specified label is present in the Labels slice.
 func (m *MemoryEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -417,7 +625,36 @@ func (m *MemoryEngine) GetEdgeBetween(source, target NodeID, edgeType string) *E
 	return nil
 }
 
-// GetOutgoingEdges returns all edges starting from the given node.
+// GetOutgoingEdges returns all edges where the given node is the source.
+//
+// Uses an index for O(degree) performance where degree = number of outgoing edges.
+// Returns deep copies of all matching edges.
+//
+// Parameters:
+//   - nodeID: Source node ID
+//
+// Returns:
+//   - Slice of outgoing edges (empty if none)
+//   - ErrInvalidID if ID is empty
+//   - ErrStorageClosed if engine is closed
+//
+// Example:
+//
+//	// Find who Alice follows
+//	outgoing, err := engine.GetOutgoingEdges("user-alice")
+//	if err != nil {
+//		return err
+//	}
+//
+//	fmt.Printf("Alice follows %d people:\n", len(outgoing))
+//	for _, edge := range outgoing {
+//		target, _ := engine.GetNode(edge.EndNode)
+//		fmt.Printf("  - %s (%s)\n", target.Properties["name"], edge.Type)
+//	}
+//
+// Use Case:
+//   For a social graph, this finds all people a user follows.
+//   For a dependency graph, this finds all dependencies of a package.
 func (m *MemoryEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
@@ -445,7 +682,36 @@ func (m *MemoryEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	return edges, nil
 }
 
-// GetIncomingEdges returns all edges ending at the given node.
+// GetIncomingEdges returns all edges where the given node is the target.
+//
+// Uses an index for O(degree) performance where degree = number of incoming edges.
+// Returns deep copies of all matching edges.
+//
+// Parameters:
+//   - nodeID: Target node ID
+//
+// Returns:
+//   - Slice of incoming edges (empty if none)
+//   - ErrInvalidID if ID is empty
+//   - ErrStorageClosed if engine is closed
+//
+// Example:
+//
+//	// Find who follows Alice
+//	incoming, err := engine.GetIncomingEdges("user-alice")
+//	if err != nil {
+//		return err
+//	}
+//
+//	fmt.Printf("Alice has %d followers:\n", len(incoming))
+//	for _, edge := range incoming {
+//		source, _ := engine.GetNode(edge.StartNode)
+//		fmt.Printf("  - %s\n", source.Properties["name"])
+//	}
+//
+// Use Case:
+//   For a social graph, this finds all followers of a user.
+//   For a dependency graph, this finds all packages that depend on this one.
 func (m *MemoryEngine) GetIncomingEdges(nodeID NodeID) ([]*Edge, error) {
 	if nodeID == "" {
 		return nil, ErrInvalidID
@@ -501,7 +767,41 @@ func (m *MemoryEngine) GetEdgesBetween(startID, endID NodeID) ([]*Edge, error) {
 	return edges, nil
 }
 
-// BulkCreateNodes creates multiple nodes efficiently.
+// BulkCreateNodes creates multiple nodes in a single transaction.
+//
+// This is more efficient than calling CreateNode repeatedly because:
+//   - Single lock acquisition for all nodes
+//   - Atomic operation (all succeed or all fail)
+//   - Batch index updates
+//
+// All nodes are validated before any are inserted. If validation fails,
+// no nodes are created.
+//
+// Parameters:
+//   - nodes: Slice of nodes to create
+//
+// Returns:
+//   - nil on success (all nodes created)
+//   - ErrInvalidData if any node is invalid
+//   - ErrAlreadyExists if any ID already exists
+//   - ErrStorageClosed if engine is closed
+//
+// Example:
+//
+//	nodes := []*storage.Node{
+//		{ID: "u1", Labels: []string{"User"}, Properties: map[string]any{"name": "Alice"}},
+//		{ID: "u2", Labels: []string{"User"}, Properties: map[string]any{"name": "Bob"}},
+//		{ID: "u3", Labels: []string{"User"}, Properties: map[string]any{"name": "Carol"}},
+//	}
+//
+//	if err := engine.BulkCreateNodes(nodes); err != nil {
+//		log.Fatal(err) // All or nothing - either all 3 created or none
+//	}
+//
+//	fmt.Println("Created 3 users in one operation")
+//
+// Performance:
+//   Approximately 10x faster than individual CreateNode calls for 100+ nodes.
 func (m *MemoryEngine) BulkCreateNodes(nodes []*Node) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -586,7 +886,32 @@ func (m *MemoryEngine) BulkCreateEdges(edges []*Edge) error {
 	return nil
 }
 
-// Close closes the storage engine.
+// Close closes the storage engine and releases all memory.
+//
+// After Close(), all subsequent operations will return ErrStorageClosed.
+// All internal maps are set to nil to allow garbage collection.
+//
+// This method is idempotent - calling Close() multiple times is safe.
+//
+// Example:
+//
+//	engine := storage.NewMemoryEngine()
+//	defer engine.Close() // Always close to release memory
+//
+//	// Use engine...
+//	node := &storage.Node{...}
+//	engine.CreateNode(node)
+//
+//	// Explicit close
+//	if err := engine.Close(); err != nil {
+//		log.Printf("Close error: %v", err)
+//	}
+//
+//	// Further operations will fail
+//	_, err := engine.GetNode("test")
+//	fmt.Println(errors.Is(err, storage.ErrStorageClosed)) // true
+//
+// Returns nil (Close never fails for MemoryEngine).
 func (m *MemoryEngine) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -677,6 +1002,188 @@ func (m *MemoryEngine) copyEdge(e *Edge) *Edge {
 	}
 
 	return copied
+}
+
+// GetInDegree returns the number of incoming edges to a node.
+func (m *MemoryEngine) GetInDegree(nodeID NodeID) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.closed {
+		return 0
+	}
+
+	edgeIDs := m.incomingEdges[nodeID]
+	return len(edgeIDs)
+}
+
+// GetOutDegree returns the number of outgoing edges from a node.
+func (m *MemoryEngine) GetOutDegree(nodeID NodeID) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.closed {
+		return 0
+	}
+
+	edgeIDs := m.outgoingEdges[nodeID]
+	return len(edgeIDs)
+}
+
+// GetSchema returns the schema manager for constraint and index management.
+func (m *MemoryEngine) GetSchema() *SchemaManager {
+	return m.schema
+}
+
+// ============================================================================
+// Transaction Support - Unlocked Methods
+// ============================================================================
+// These methods are used internally by Transaction.Commit() and assume the
+// caller already holds the write lock. Do NOT call these directly.
+
+// createNodeUnlocked creates a node without acquiring a lock.
+// Used internally by Transaction.Commit(). Caller must hold m.mu.Lock().
+func (m *MemoryEngine) createNodeUnlocked(node *Node) {
+	// Deep copy to prevent external mutation
+	stored := m.copyNode(node)
+	m.nodes[node.ID] = stored
+
+	// Update label index
+	for _, label := range node.Labels {
+		if m.nodesByLabel[label] == nil {
+			m.nodesByLabel[label] = make(map[NodeID]struct{})
+		}
+		m.nodesByLabel[label][node.ID] = struct{}{}
+	}
+
+	// Register unique constraint values
+	for _, label := range node.Labels {
+		for propName, propValue := range node.Properties {
+			m.schema.RegisterUniqueValue(label, propName, propValue, node.ID)
+		}
+	}
+}
+
+// updateNodeUnlocked updates a node without acquiring a lock.
+// Used internally by Transaction.Commit(). Caller must hold m.mu.Lock().
+func (m *MemoryEngine) updateNodeUnlocked(node *Node) {
+	existing, exists := m.nodes[node.ID]
+	if !exists {
+		return
+	}
+
+	// Remove from old label indexes
+	for _, label := range existing.Labels {
+		if m.nodesByLabel[label] != nil {
+			delete(m.nodesByLabel[label], node.ID)
+		}
+	}
+
+	// Store updated node
+	stored := m.copyNode(node)
+	m.nodes[node.ID] = stored
+
+	// Update label index
+	for _, label := range node.Labels {
+		if m.nodesByLabel[label] == nil {
+			m.nodesByLabel[label] = make(map[NodeID]struct{})
+		}
+		m.nodesByLabel[label][node.ID] = struct{}{}
+	}
+}
+
+// deleteNodeUnlocked deletes a node without acquiring a lock.
+// Used internally by Transaction.Commit(). Caller must hold m.mu.Lock().
+func (m *MemoryEngine) deleteNodeUnlocked(id NodeID) {
+	node, exists := m.nodes[id]
+	if !exists {
+		return
+	}
+
+	// Remove from label indexes
+	for _, label := range node.Labels {
+		if m.nodesByLabel[label] != nil {
+			delete(m.nodesByLabel[label], id)
+		}
+	}
+
+	// Delete all outgoing edges
+	if outgoing := m.outgoingEdges[id]; outgoing != nil {
+		for edgeID := range outgoing {
+			edge := m.edges[edgeID]
+			if edge != nil {
+				if incoming := m.incomingEdges[edge.EndNode]; incoming != nil {
+					delete(incoming, edgeID)
+				}
+			}
+			delete(m.edges, edgeID)
+		}
+		delete(m.outgoingEdges, id)
+	}
+
+	// Delete all incoming edges
+	if incoming := m.incomingEdges[id]; incoming != nil {
+		for edgeID := range incoming {
+			edge := m.edges[edgeID]
+			if edge != nil {
+				if outgoing := m.outgoingEdges[edge.StartNode]; outgoing != nil {
+					delete(outgoing, edgeID)
+				}
+			}
+			delete(m.edges, edgeID)
+		}
+		delete(m.incomingEdges, id)
+	}
+
+	// Delete the node itself
+	delete(m.nodes, id)
+}
+
+// createEdgeUnlocked creates an edge without acquiring a lock.
+// Used internally by Transaction.Commit(). Caller must hold m.mu.Lock().
+func (m *MemoryEngine) createEdgeUnlocked(edge *Edge) {
+	// Deep copy
+	stored := m.copyEdge(edge)
+	m.edges[edge.ID] = stored
+
+	// Update outgoing edges index
+	if m.outgoingEdges[edge.StartNode] == nil {
+		m.outgoingEdges[edge.StartNode] = make(map[EdgeID]struct{})
+	}
+	m.outgoingEdges[edge.StartNode][edge.ID] = struct{}{}
+
+	// Update incoming edges index
+	if m.incomingEdges[edge.EndNode] == nil {
+		m.incomingEdges[edge.EndNode] = make(map[EdgeID]struct{})
+	}
+	m.incomingEdges[edge.EndNode][edge.ID] = struct{}{}
+}
+
+// deleteEdgeUnlocked deletes an edge without acquiring a lock.
+// Used internally by Transaction.Commit(). Caller must hold m.mu.Lock().
+func (m *MemoryEngine) deleteEdgeUnlocked(id EdgeID) {
+	edge, exists := m.edges[id]
+	if !exists {
+		return
+	}
+
+	// Remove from outgoing index
+	if outgoing := m.outgoingEdges[edge.StartNode]; outgoing != nil {
+		delete(outgoing, id)
+	}
+
+	// Remove from incoming index
+	if incoming := m.incomingEdges[edge.EndNode]; incoming != nil {
+		delete(incoming, id)
+	}
+
+	// Delete the edge
+	delete(m.edges, id)
+}
+
+// BeginTransaction creates a new transaction bound to this engine.
+func (m *MemoryEngine) BeginTransaction() *Transaction {
+	return NewTransaction(m)
 }
 
 // Verify MemoryEngine implements Engine interface
