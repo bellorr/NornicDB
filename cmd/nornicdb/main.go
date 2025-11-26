@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/bolt"
+	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/server"
 )
@@ -166,6 +168,27 @@ func runServe(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("opening database: %w", err)
 	}
 	defer db.Close()
+
+	// Initialize GPU acceleration (Metal on macOS, auto-detect otherwise)
+	fmt.Println("🎮 Initializing GPU acceleration...")
+	gpuConfig := gpu.DefaultConfig()
+	gpuConfig.Enabled = true
+	gpuConfig.FallbackOnError = true
+	
+	// Prefer Metal on macOS/Apple Silicon
+	if runtime.GOOS == "darwin" {
+		gpuConfig.PreferredBackend = gpu.BackendMetal
+	}
+	
+	gpuManager, gpuErr := gpu.NewManager(gpuConfig)
+	if gpuErr != nil {
+		fmt.Printf("   ⚠️  GPU not available: %v (using CPU)\n", gpuErr)
+	} else if gpuManager.IsEnabled() {
+		db.SetGPUManager(gpuManager)
+		fmt.Printf("   ✅ GPU enabled: %s\n", gpuManager.Device())
+	} else {
+		fmt.Println("   ⚠️  GPU disabled (CPU fallback active)")
+	}
 
 	// Load data if specified
 	if loadExport != "" {
