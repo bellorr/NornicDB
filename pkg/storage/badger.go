@@ -78,6 +78,10 @@ type BadgerOptions struct {
 	// Logger for BadgerDB internal logging.
 	// If nil, BadgerDB's default logger is used.
 	Logger badger.Logger
+
+	// LowMemory enables memory-constrained settings.
+	// Reduces MemTableSize and other buffers to use less RAM.
+	LowMemory bool
 }
 
 // NewBadgerEngine creates a new persistent storage engine.
@@ -112,21 +116,33 @@ func NewBadgerEngine(dataDir string) (*BadgerEngine, error) {
 //	})
 func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	badgerOpts := badger.DefaultOptions(opts.DataDir)
-	
+
 	if opts.InMemory {
 		badgerOpts = badgerOpts.WithInMemory(true)
 	}
-	
+
 	if opts.SyncWrites {
 		badgerOpts = badgerOpts.WithSyncWrites(true)
 	}
-	
+
 	if opts.Logger != nil {
 		badgerOpts = badgerOpts.WithLogger(opts.Logger)
 	} else {
 		// Use a quiet logger by default
 		badgerOpts = badgerOpts.WithLogger(nil)
 	}
+
+	// Apply low memory settings to reduce RAM usage
+	// These settings are always applied for containerized environments
+	badgerOpts = badgerOpts.
+		WithMemTableSize(16 << 20).     // 16MB instead of 64MB
+		WithValueLogFileSize(64 << 20). // 64MB instead of 1GB
+		WithNumMemtables(2).            // 2 instead of 5
+		WithNumLevelZeroTables(2).      // 2 instead of 5
+		WithNumLevelZeroTablesStall(4). // 4 instead of 15
+		WithValueThreshold(1024).       // Store values > 1KB in value log
+		WithBlockCacheSize(32 << 20).   // 32MB block cache
+		WithIndexCacheSize(16 << 20)    // 16MB index cache
 
 	db, err := badger.Open(badgerOpts)
 	if err != nil {

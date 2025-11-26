@@ -275,12 +275,14 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 
 	// Compound queries: MATCH ... MERGE ... (with variable references)
 	// This is more complex than simple MERGE and requires executing MATCH first
-	if strings.HasPrefix(upperQuery, "MATCH") && strings.Contains(upperQuery, " MERGE ") {
+	// Must check for MERGE with any whitespace before it (space, newline, tab)
+	if strings.HasPrefix(upperQuery, "MATCH") && findKeywordIndex(cypher, "MERGE") > 0 {
 		return e.executeCompoundMatchMerge(ctx, cypher)
 	}
 
 	// Compound queries: MATCH ... CREATE ... (create relationship between matched nodes)
-	if strings.HasPrefix(upperQuery, "MATCH") && strings.Contains(upperQuery, " CREATE ") {
+	// Must check for CREATE with any whitespace before it
+	if strings.HasPrefix(upperQuery, "MATCH") && findKeywordIndex(cypher, "CREATE") > 0 {
 		return e.executeCompoundMatchCreate(ctx, cypher)
 	}
 

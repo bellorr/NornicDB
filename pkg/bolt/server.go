@@ -57,24 +57,24 @@
 // Protocol Flow:
 //
 // 1. **Handshake**:
-//    - Client sends magic number (0x6060B017)
-//    - Client sends supported versions
-//    - Server responds with selected version
+//   - Client sends magic number (0x6060B017)
+//   - Client sends supported versions
+//   - Server responds with selected version
 //
 // 2. **Authentication**:
-//    - Client sends HELLO message with credentials
-//    - Server responds with SUCCESS or FAILURE
+//   - Client sends HELLO message with credentials
+//   - Server responds with SUCCESS or FAILURE
 //
 // 3. **Query Execution**:
-//    - Client sends RUN message with Cypher query
-//    - Server responds with SUCCESS (field names)
-//    - Client sends PULL to stream results
-//    - Server sends RECORD messages + final SUCCESS
+//   - Client sends RUN message with Cypher query
+//   - Server responds with SUCCESS (field names)
+//   - Client sends PULL to stream results
+//   - Server sends RECORD messages + final SUCCESS
 //
 // 4. **Transaction Management**:
-//    - BEGIN: Start explicit transaction
-//    - COMMIT: Commit transaction
-//    - ROLLBACK: Rollback transaction
+//   - BEGIN: Start explicit transaction
+//   - COMMIT: Commit transaction
+//   - ROLLBACK: Rollback transaction
 //
 // Message Types:
 //   - HELLO: Authentication
@@ -86,10 +86,11 @@
 //   - GOODBYE: Close connection
 //
 // PackStream Encoding:
-//   The Bolt protocol uses PackStream for efficient binary serialization:
-//   - Compact representation of common types
-//   - Support for nested structures
-//   - Streaming-friendly format
+//
+//	The Bolt protocol uses PackStream for efficient binary serialization:
+//	- Compact representation of common types
+//	- Support for nested structures
+//	- Streaming-friendly format
 //
 // Performance:
 //   - Binary protocol (faster than HTTP/JSON)
@@ -101,19 +102,19 @@
 //
 // Think of the Bolt server like a translator at the United Nations:
 //
-// 1. **Different languages**: Neo4j drivers speak "Bolt language" but NornicDB
-//    speaks "NornicDB language". The Bolt server translates between them.
+//  1. **Different languages**: Neo4j drivers speak "Bolt language" but NornicDB
+//     speaks "NornicDB language". The Bolt server translates between them.
 //
-// 2. **Same conversation**: The drivers can have the same conversation they
-//    always had (asking questions in Cypher), they just don't know they're
-//    talking to a different database!
+//  2. **Same conversation**: The drivers can have the same conversation they
+//     always had (asking questions in Cypher), they just don't know they're
+//     talking to a different database!
 //
-// 3. **Binary messages**: Instead of sending text messages (like HTTP), Bolt
-//    sends compact binary messages - like sending a compressed file instead
-//    of a text document. Much faster!
+//  3. **Binary messages**: Instead of sending text messages (like HTTP), Bolt
+//     sends compact binary messages - like sending a compressed file instead
+//     of a text document. Much faster!
 //
-// 4. **Streaming**: Instead of waiting for ALL results before sending anything,
-//    Bolt can send results one-by-one as they're found, like a live news feed.
+//  4. **Streaming**: Instead of waiting for ALL results before sending anything,
+//     Bolt can send results one-by-one as they're found, like a live news feed.
 //
 // This lets existing Neo4j tools work with NornicDB without any changes!
 package bolt
@@ -125,6 +126,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -180,7 +182,8 @@ const (
 //	fmt.Printf("Bolt server listening on bolt://localhost:%d\n", config.Port)
 //
 // Thread Safety:
-//   The server is thread-safe and handles concurrent connections safely.
+//
+//	The server is thread-safe and handles concurrent connections safely.
 type Server struct {
 	config   *Config
 	listener net.Listener
@@ -420,6 +423,13 @@ func (s *Server) IsClosed() bool {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	// Recover from panics to prevent crashing the server
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Printf("Recovered from panic in connection handler: %v\n", r)
+		}
+	}()
+
 	session := &Session{
 		conn:     conn,
 		server:   s,
@@ -439,6 +449,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 		if err := session.handleMessage(); err != nil {
 			if err == io.EOF {
+				return
+			}
+			// Silently handle connection reset errors (client disconnected)
+			errStr := err.Error()
+			if strings.Contains(errStr, "connection reset") ||
+				strings.Contains(errStr, "broken pipe") ||
+				strings.Contains(errStr, "use of closed network connection") {
 				return
 			}
 			fmt.Printf("Message handling error: %v\n", err)
@@ -497,7 +514,7 @@ func (s *Session) handshake() error {
 // Bolt messages can span multiple chunks - we read until we get a 0-size chunk.
 func (s *Session) handleMessage() error {
 	var message []byte
-	
+
 	// Read chunks until we get a zero-size chunk (message terminator)
 	for {
 		// Read chunk header (2 bytes: size)
@@ -517,7 +534,7 @@ func (s *Session) handleMessage() error {
 		if _, err := io.ReadFull(s.conn, chunk); err != nil {
 			return err
 		}
-		
+
 		message = append(message, chunk...)
 	}
 
@@ -644,7 +661,7 @@ func (s *Session) parseRunMessage(data []byte) (string, map[string]any, error) {
 			offset += consumed
 		}
 	}
-	
+
 	// Bolt v4+ has an extra metadata map after params (for bookmarks, tx_timeout, etc.)
 	// We can ignore it for now, but we should parse it to avoid issues
 	// offset is now pointing to the extra map if present
