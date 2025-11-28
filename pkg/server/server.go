@@ -385,9 +385,9 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 	mcpServer := mcp.NewServer(db, mcpConfig)
 
 	// Configure embeddings if enabled
-	if config.EmbeddingEnabled && config.EmbeddingAPIURL != "" {
-		var embedder mcp.Embedder
-
+	// Local provider doesn't need API URL, others do
+	embeddingsReady := config.EmbeddingEnabled && (config.EmbeddingProvider == "local" || config.EmbeddingAPIURL != "")
+	if embeddingsReady {
 		embedConfig := &embed.Config{
 			Provider:   config.EmbeddingProvider,
 			APIURL:     config.EmbeddingAPIURL,
@@ -396,34 +396,54 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			Timeout:    30 * time.Second,
 		}
 
-		// Set API path based on provider
+		// Set API path based on provider (only for remote providers)
 		switch config.EmbeddingProvider {
 		case "ollama":
 			embedConfig.APIPath = "/api/embeddings"
-			embedder = embed.NewOllama(embedConfig)
 		case "openai":
 			embedConfig.APIPath = "/v1/embeddings"
-			embedder = embed.NewOpenAI(embedConfig)
+		case "local":
+			// Local provider doesn't need API path
 		default:
-			// Default to Ollama
+			// Default to Ollama format
 			embedConfig.APIPath = "/api/embeddings"
-			embedder = embed.NewOllama(embedConfig)
 		}
 
-		// Health check: test embedding endpoint before enabling
-		// If unavailable, gracefully fall back to text-only search
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := embedder.Embed(ctx, "health check")
-		cancel()
-
+		// Use factory function for all providers
+		embedder, err := embed.NewEmbedder(embedConfig)
 		if err != nil {
-			fmt.Printf("⚠️  Embeddings endpoint unavailable (%s): %v\n", config.EmbeddingAPIURL, err)
+			if config.EmbeddingProvider == "local" {
+				fmt.Printf("⚠️  Local embedding model unavailable: %v\n", err)
+			} else {
+				fmt.Printf("⚠️  Embeddings endpoint unavailable (%s): %v\n", config.EmbeddingAPIURL, err)
+			}
 			fmt.Println("   → Falling back to full-text search only")
 			// Don't set embedder - MCP server will use text search
 		} else {
-			fmt.Printf("✓ Embeddings enabled: %s (%s, %d dims)\n",
-				config.EmbeddingAPIURL, config.EmbeddingModel, config.EmbeddingDimensions)
-			mcpServer.SetEmbedder(embedder)
+			// Health check: test embedding before enabling
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_, healthErr := embedder.Embed(ctx, "health check")
+			cancel()
+
+			if healthErr != nil {
+				if config.EmbeddingProvider == "local" {
+					fmt.Printf("⚠️  Local embedding model failed health check: %v\n", healthErr)
+				} else {
+					fmt.Printf("⚠️  Embeddings endpoint unavailable (%s): %v\n", config.EmbeddingAPIURL, healthErr)
+				}
+				fmt.Println("   → Falling back to full-text search only")
+			} else {
+				if config.EmbeddingProvider == "local" {
+					fmt.Printf("✓ Embeddings enabled: local GGUF (%s, %d dims)\n",
+						config.EmbeddingModel, config.EmbeddingDimensions)
+				} else {
+					fmt.Printf("✓ Embeddings enabled: %s (%s, %d dims)\n",
+						config.EmbeddingAPIURL, config.EmbeddingModel, config.EmbeddingDimensions)
+				}
+				mcpServer.SetEmbedder(embedder)
+				// Share embedder with DB for auto-embed queue
+				db.SetEmbedder(embedder)
+			}
 		}
 	}
 
@@ -655,6 +675,7 @@ func (s *Server) buildRouter() http.Handler {
 	// Embedding control (NornicDB-specific)
 	mux.HandleFunc("/nornicdb/embed/trigger", s.withAuth(s.handleEmbedTrigger, auth.PermWrite))
 	mux.HandleFunc("/nornicdb/embed/stats", s.withAuth(s.handleEmbedStats, auth.PermRead))
+	mux.HandleFunc("/nornicdb/embed/clear", s.withAuth(s.handleEmbedClear, auth.PermAdmin))
 	mux.HandleFunc("/nornicdb/search/rebuild", s.withAuth(s.handleSearchRebuild, auth.PermWrite))
 
 	// Admin endpoints (NornicDB-specific)
@@ -1304,6 +1325,8 @@ func (s *Server) handleDecay(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleEmbedTrigger triggers the embedding worker to process nodes without embeddings.
+// Query params:
+//   - regenerate=true: Clear all existing embeddings first, then regenerate
 func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.Request.Invalid", "POST required")
@@ -1314,6 +1337,18 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 	if stats == nil {
 		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.DatabaseError.General.UnknownError", "Auto-embed not enabled")
 		return
+	}
+
+	// Check if regenerate=true to clear existing embeddings first
+	regenerate := r.URL.Query().Get("regenerate") == "true"
+	var cleared int
+	if regenerate {
+		var err error
+		cleared, err = s.db.ClearAllEmbeddings()
+		if err != nil {
+			s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.DatabaseError.General.UnknownError", "Failed to clear embeddings: "+err.Error())
+			return
+		}
 	}
 
 	// Check if already running
@@ -1330,7 +1365,9 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 	stats = s.db.EmbedQueueStats()
 
 	var message string
-	if wasRunning {
+	if regenerate {
+		message = fmt.Sprintf("Cleared %d embeddings - regenerating all in background", cleared)
+	} else if wasRunning {
 		message = "Embedding worker already running - will continue processing"
 	} else {
 		message = "Embedding worker triggered - processing nodes in background"
@@ -1338,6 +1375,8 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 
 	response := map[string]interface{}{
 		"triggered":      true,
+		"regenerate":     regenerate,
+		"cleared":        cleared,
 		"already_active": wasRunning,
 		"message":        message,
 		"stats":          stats,
@@ -1359,6 +1398,28 @@ func (s *Server) handleEmbedStats(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"enabled": true,
 		"stats":   stats,
+	}
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+// handleEmbedClear clears all embeddings from nodes (admin only).
+// This allows regeneration with a new model or fixing corrupted embeddings.
+func (s *Server) handleEmbedClear(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.Request.Invalid", "POST or DELETE required")
+		return
+	}
+
+	cleared, err := s.db.ClearAllEmbeddings()
+	if err != nil {
+		s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.DatabaseError.General.UnknownError", err.Error())
+		return
+	}
+
+	response := map[string]interface{}{
+		"success": true,
+		"cleared": cleared,
+		"message": fmt.Sprintf("Cleared embeddings from %d nodes - use /nornicdb/embed/trigger to regenerate", cleared),
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }

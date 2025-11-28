@@ -1647,5 +1647,67 @@ func hasPrefix(s, prefix []byte) bool {
 	return len(s) >= len(prefix) && bytes.Equal(s[:len(prefix)], prefix)
 }
 
+// ClearAllEmbeddings removes embeddings from all nodes, allowing them to be regenerated.
+// Returns the number of nodes that had their embeddings cleared.
+func (b *BadgerEngine) ClearAllEmbeddings() (int, error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return 0, ErrStorageClosed
+	}
+	b.mu.Unlock()
+
+	cleared := 0
+
+	// First, collect all node IDs that have embeddings
+	var nodeIDs []NodeID
+	err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.PrefetchSize = 100
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte{prefixNode}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			err := item.Value(func(val []byte) error {
+				node, err := decodeNode(val)
+				if err != nil {
+					return nil // Skip invalid nodes
+				}
+				if len(node.Embedding) > 0 {
+					nodeIDs = append(nodeIDs, node.ID)
+				}
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, fmt.Errorf("error scanning nodes: %w", err)
+	}
+
+	// Now update each node to clear its embedding
+	for _, id := range nodeIDs {
+		node, err := b.GetNode(id)
+		if err != nil {
+			continue // Skip if node no longer exists
+		}
+		node.Embedding = nil
+		if err := b.UpdateNode(node); err != nil {
+			fmt.Printf("Warning: failed to clear embedding for node %s: %v\n", id, err)
+			continue
+		}
+		cleared++
+	}
+
+	fmt.Printf("✓ Cleared embeddings from %d nodes\n", cleared)
+	return cleared, nil
+}
+
 // Verify BadgerEngine implements Engine interface
 var _ Engine = (*BadgerEngine)(nil)

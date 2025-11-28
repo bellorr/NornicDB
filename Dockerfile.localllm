@@ -1,0 +1,143 @@
+# NornicDB Docker Image with Local GGUF Embedding Support
+# Includes llama.cpp for native embedding generation without external services
+#
+# Build: docker build -f Dockerfile.localllm -t nornicdb-local .
+# Run:   docker run -v /path/to/models:/data/models -e NORNICDB_EMBEDDING_PROVIDER=local nornicdb-local
+
+# =============================================================================
+# Stage 1: Build the UI
+# =============================================================================
+FROM node:20-alpine AS ui-builder
+
+WORKDIR /ui
+RUN npm config set registry https://registry.npmjs.org/
+COPY ui/package.json ui/package-lock.json* ./
+RUN npm ci 2>/dev/null || npm install --legacy-peer-deps
+COPY ui/ .
+RUN npm run build
+
+# =============================================================================
+# Stage 2: Build llama.cpp static libraries
+# =============================================================================
+FROM debian:bookworm-slim AS llama-builder
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone and build llama.cpp
+ARG LLAMA_VERSION=b4535
+WORKDIR /llama
+RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/llama.cpp.git .
+
+# Build static library (CPU-only for maximum compatibility)
+# Use generic ARM64 target and disable OpenMP for simpler static linking
+RUN cmake -B build \
+    -DLLAMA_STATIC=ON \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_SERVER=OFF \
+    -DGGML_NATIVE=OFF \
+    -DGGML_OPENMP=OFF \
+    -DCMAKE_C_FLAGS="-mcpu=generic" \
+    -DCMAKE_CXX_FLAGS="-mcpu=generic" \
+    && cmake --build build --config Release -j$(nproc)
+
+# Combine all static libraries into one
+RUN mkdir -p /llama/lib && \
+    find build -name "*.a" -exec cp {} /llama/lib/ \; && \
+    ar -M <<EOF
+CREATE /llama/lib/libllama_combined.a
+ADDLIB /llama/lib/libllama.a
+ADDLIB /llama/lib/libggml.a
+ADDLIB /llama/lib/libggml-base.a
+ADDLIB /llama/lib/libggml-cpu.a
+SAVE
+END
+EOF
+
+# =============================================================================
+# Stage 3: Build NornicDB with CGO + localllm
+# =============================================================================
+FROM golang:1.23-bookworm AS builder
+
+WORKDIR /build
+
+# Install CGO dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy llama.cpp artifacts from llama-builder
+# Detect architecture and name library accordingly
+ARG TARGETARCH=arm64
+COPY --from=llama-builder /llama/lib/libllama_combined.a /build/lib/llama/libllama_linux_arm64.a
+COPY --from=llama-builder /llama/include/llama.h /build/lib/llama/
+COPY --from=llama-builder /llama/ggml/include/*.h /build/lib/llama/
+
+# Copy go mod files and download dependencies
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# Copy built UI from ui-builder stage
+COPY --from=ui-builder /ui/dist ./ui/dist
+
+# Build with CGO enabled and localllm tag
+RUN CGO_ENABLED=1 GOOS=linux go build \
+    -tags=localllm \
+    -ldflags="-s -w -linkmode external -extldflags '-static'" \
+    -o nornicdb ./cmd/nornicdb
+
+# =============================================================================
+# Stage 4: Runtime
+# =============================================================================
+FROM debian:bookworm-slim
+
+WORKDIR /app
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy binary from builder
+COPY --from=builder /build/nornicdb /app/nornicdb
+
+# Copy entrypoint script
+COPY docker-entrypoint.sh /app/docker-entrypoint.sh
+RUN chmod +x /app/docker-entrypoint.sh
+
+# Create directories
+RUN mkdir -p /data /data/models
+
+# Expose ports
+EXPOSE 7474 7687
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
+  CMD wget --spider -q http://localhost:7474/health || exit 1
+
+# Environment variables
+ENV NORNICDB_DATA_DIR=/data \
+    NORNICDB_HTTP_PORT=7474 \
+    NORNICDB_BOLT_PORT=7687 \
+    NORNICDB_EMBEDDING_PROVIDER=local \
+    NORNICDB_EMBEDDING_MODEL=bge-m3 \
+    NORNICDB_EMBEDDING_DIMENSIONS=1024 \
+    NORNICDB_MODELS_DIR=/data/models \
+    NORNICDB_EMBEDDING_GPU_LAYERS=0 \
+    NORNICDB_NO_AUTH=true
+
+# Entry point
+ENTRYPOINT ["/app/docker-entrypoint.sh"]
+CMD []

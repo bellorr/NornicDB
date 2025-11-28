@@ -764,40 +764,38 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		}
 	}()
 
-	// Initialize async embedding queue (if enabled and provider configured)
-	if config.AutoEmbedEnabled && config.EmbeddingProvider != "" {
-		// Set API path based on provider
-		apiPath := "/v1/embeddings" // OpenAI-compatible (llama.cpp, vLLM, etc.)
-		if config.EmbeddingProvider == "ollama" {
-			apiPath = "/api/embeddings"
-		}
-
-		embedConfig := &embed.Config{
-			Provider:   config.EmbeddingProvider,
-			APIURL:     config.EmbeddingAPIURL,
-			APIPath:    apiPath,
-			APIKey:     config.EmbeddingAPIKey,
-			Model:      config.EmbeddingModel,
-			Dimensions: config.EmbeddingDimensions,
-			Timeout:    30 * time.Second,
-		}
-		embedder, err := embed.NewEmbedder(embedConfig)
-		if err != nil {
-			fmt.Printf("⚠️  Auto-embed disabled: %v\n", err)
-		} else {
-			db.embedQueue = NewEmbedQueue(embedder, db.storage, nil)
-			// Set callback to update search index after embedding
-			db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
-				if db.searchService != nil {
-					_ = db.searchService.IndexNode(node)
-				}
-			})
-			fmt.Printf("🧠 Auto-embed queue started using %s/%s (%d dims)\n",
-				config.EmbeddingProvider, config.EmbeddingModel, config.EmbeddingDimensions)
-		}
-	}
+	// Note: Auto-embed queue is initialized via SetEmbedder() after the server creates
+	// the embedder. This avoids duplicate embedder creation and ensures consistency
+	// between search embeddings and auto-embed.
 
 	return db, nil
+}
+
+// SetEmbedder configures the auto-embed queue with the given embedder.
+// This should be called by the server after creating a working embedder.
+// The embedder is shared with the MCP server for consistency.
+func (db *DB) SetEmbedder(embedder embed.Embedder) {
+	if embedder == nil {
+		return
+	}
+
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.embedQueue != nil {
+		// Already set up
+		return
+	}
+
+	db.embedQueue = NewEmbedQueue(embedder, db.storage, nil)
+	// Set callback to update search index after embedding
+	db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
+		if db.searchService != nil {
+			_ = db.searchService.IndexNode(node)
+		}
+	})
+	fmt.Printf("🧠 Auto-embed queue started using %s (%d dims)\n",
+		embedder.Model(), embedder.Dimensions())
 }
 
 // LoadFromExport loads data from a Mimir JSON export directory.
@@ -898,6 +896,16 @@ func (db *DB) EmbedExisting(ctx context.Context) (int, error) {
 	}
 	db.embedQueue.Trigger()
 	return 0, nil // Worker will process in background
+}
+
+// ClearAllEmbeddings removes embeddings from all nodes, allowing them to be regenerated.
+// This is useful for re-embedding with a new model or fixing corrupted embeddings.
+func (db *DB) ClearAllEmbeddings() (int, error) {
+	// Check if storage supports ClearAllEmbeddings
+	if badgerStorage, ok := db.storage.(*storage.BadgerEngine); ok {
+		return badgerStorage.ClearAllEmbeddings()
+	}
+	return 0, fmt.Errorf("storage engine does not support ClearAllEmbeddings")
 }
 
 // EmbedQuery generates an embedding for a search query.
