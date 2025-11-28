@@ -20,6 +20,7 @@
     "test:bolt": "go test -v ./pkg/bolt/",
     "docker:build:metal": "docker build -t timothyswt/nornicdb-arm64-metal:latest -f Dockerfile .",
     "docker:build:cuda": "docker build -t timothyswt/nornicdb-amd64-cuda:latest -f Dockerfile.cuda .",
+    "docker:build": "docker build -t timothyswt/nornicdb-amd64-cuda:latest -f Dockerfile .",
     "docker:run:cuda": "docker-compose -f docker-compose.cuda.yml up",
     "docker:run:cuda:build": "docker-compose -f docker-compose.cuda.yml up --build"
   },

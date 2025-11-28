@@ -96,14 +96,14 @@ Features:
 		Long:  "Start NornicDB server with Bolt protocol and HTTP API endpoints",
 		RunE:  runServe,
 	}
-	serveCmd.Flags().Int("bolt-port", 7687, "Bolt protocol port (Neo4j compatible)")
-	serveCmd.Flags().Int("http-port", 7474, "HTTP API port")
-	serveCmd.Flags().String("data-dir", "./data", "Data directory")
-	serveCmd.Flags().String("load-export", "", "Load data from Mimir export directory on startup")
-	serveCmd.Flags().String("embedding-url", "http://localhost:11434", "Embedding API URL (Ollama)")
-	serveCmd.Flags().String("embedding-key", "de1234555", "Embeddings API Key)")
-	serveCmd.Flags().String("embedding-model", "mxbai-embed-large", "Embedding model name")
-	serveCmd.Flags().Int("embedding-dim", 1024, "Embedding dimensions")
+	serveCmd.Flags().Int("bolt-port", getEnvInt("NORNICDB_BOLT_PORT", 7687), "Bolt protocol port (Neo4j compatible)")
+	serveCmd.Flags().Int("http-port", getEnvInt("NORNICDB_HTTP_PORT", 7474), "HTTP API port")
+	serveCmd.Flags().String("data-dir", getEnvStr("NORNICDB_DATA_DIR", "./data"), "Data directory")
+	serveCmd.Flags().String("load-export", getEnvStr("NORNICDB_LOAD_EXPORT", ""), "Load data from Mimir export directory on startup")
+	serveCmd.Flags().String("embedding-url", getEnvStr("NORNICDB_EMBEDDING_API_URL", "http://localhost:11434"), "Embedding API URL")
+	serveCmd.Flags().String("embedding-key", getEnvStr("NORNICDB_EMBEDDING_API_KEY", ""), "Embeddings API Key")
+	serveCmd.Flags().String("embedding-model", getEnvStr("NORNICDB_EMBEDDING_MODEL", "mxbai-embed-large"), "Embedding model name")
+	serveCmd.Flags().Int("embedding-dim", getEnvInt("NORNICDB_EMBEDDING_DIMENSIONS", 1024), "Embedding dimensions")
 	serveCmd.Flags().Bool("no-auth", false, "Disable authentication")
 	serveCmd.Flags().String("admin-password", "admin", "Admin password (default: admin)")
 	// Parallel execution flags
@@ -362,6 +362,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Create and start HTTP server
 	serverConfig := server.DefaultConfig()
 	serverConfig.Port = httpPort
+	// Pass embedding settings to server
+	serverConfig.EmbeddingEnabled = true
+	serverConfig.EmbeddingProvider = "openai" // llama.cpp uses OpenAI format
+	serverConfig.EmbeddingAPIURL = embeddingURL
+	serverConfig.EmbeddingModel = embeddingModel
+	serverConfig.EmbeddingDimensions = embeddingDim
 
 	// Enable embedded UI from the ui package
 	server.SetUIAssets(ui.Assets)
@@ -598,4 +604,22 @@ func runDecayStats(cmd *cobra.Command, args []string) error {
 	fmt.Println("  Archived: 0")
 	// TODO: Implement
 	return nil
+}
+
+// getEnvStr returns environment variable value or default
+func getEnvStr(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+// getEnvInt returns environment variable as int or default
+func getEnvInt(key string, defaultVal int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultVal
 }
