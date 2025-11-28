@@ -77,6 +77,7 @@ package search
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"sort"
 	"strings"
@@ -334,9 +335,38 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	return nil
 }
 
+// NodeIterator is an interface for streaming node iteration.
+type NodeIterator interface {
+	IterateNodes(fn func(*storage.Node) bool) error
+}
+
 // BuildIndexes builds search indexes from all nodes in the engine.
+// Prefers streaming iteration to avoid loading all nodes into memory.
 func (s *Service) BuildIndexes(ctx context.Context) error {
-	// Get all nodes via the storage engine
+	// Try streaming iterator first (memory efficient)
+	if iterator, ok := s.engine.(NodeIterator); ok {
+		count := 0
+		err := iterator.IterateNodes(func(node *storage.Node) bool {
+			select {
+			case <-ctx.Done():
+				return false // Stop iteration
+			default:
+				_ = s.IndexNode(node)
+				count++
+				if count%100 == 0 {
+					fmt.Printf("📊 Indexed %d nodes...\n", count)
+				}
+				return true // Continue
+			}
+		})
+		if err != nil {
+			return err
+		}
+		fmt.Printf("📊 Indexed %d total nodes\n", count)
+		return nil
+	}
+
+	// Fallback to AllNodes (loads everything into memory)
 	if exportable, ok := s.engine.(storage.ExportableEngine); ok {
 		nodes, err := exportable.AllNodes()
 		if err != nil {
@@ -349,7 +379,6 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 				return ctx.Err()
 			default:
 				if err := s.IndexNode(node); err != nil {
-					// Log error but continue
 					continue
 				}
 			}

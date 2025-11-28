@@ -839,5 +839,21 @@ func (w *WALEngine) GetEngine() Engine {
 	return w.engine
 }
 
+// FindNodeNeedingEmbedding delegates to underlying engine if it supports it.
+func (w *WALEngine) FindNodeNeedingEmbedding() *Node {
+	if finder, ok := w.engine.(interface{ FindNodeNeedingEmbedding() *Node }); ok {
+		return finder.FindNodeNeedingEmbedding()
+	}
+	return nil
+}
+
+// IterateNodes delegates to underlying engine if it supports streaming iteration.
+func (w *WALEngine) IterateNodes(fn func(*Node) bool) error {
+	if iterator, ok := w.engine.(interface{ IterateNodes(func(*Node) bool) error }); ok {
+		return iterator.IterateNodes(fn)
+	}
+	return fmt.Errorf("underlying engine does not support IterateNodes")
+}
+
 // Verify WALEngine implements Engine interface
 var _ Engine = (*WALEngine)(nil)

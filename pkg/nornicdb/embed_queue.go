@@ -27,6 +27,9 @@ type EmbedWorker struct {
 	// Trigger channel to wake up worker immediately
 	trigger chan struct{}
 
+	// Callback after embedding a node (for search index update)
+	onEmbedded func(node *storage.Node)
+
 	// Stats
 	mu        sync.Mutex
 	processed int
@@ -79,6 +82,12 @@ func NewEmbedWorker(embedder embed.Embedder, storage storage.Engine, config *Emb
 	go ew.worker()
 
 	return ew
+}
+
+// SetOnEmbedded sets a callback to be called after a node is embedded.
+// Use this to update search indexes.
+func (ew *EmbedWorker) SetOnEmbedded(fn func(node *storage.Node)) {
+	ew.onEmbedded = fn
 }
 
 // Trigger wakes up the worker to check for nodes without embeddings.
@@ -206,6 +215,11 @@ func (ew *EmbedWorker) processNextBatch() {
 		return
 	}
 
+	// Call callback to update search index
+	if ew.onEmbedded != nil {
+		ew.onEmbedded(node)
+	}
+
 	ew.mu.Lock()
 	ew.processed++
 	ew.mu.Unlock()
@@ -219,44 +233,21 @@ func (ew *EmbedWorker) processNextBatch() {
 	ew.Trigger()
 }
 
-// findNodeWithoutEmbedding scans storage for a single node that needs embedding.
-// Uses streaming/iteration to avoid loading all nodes at once.
+// EmbeddingFinder interface for efficient node lookup
+type EmbeddingFinder interface {
+	FindNodeNeedingEmbedding() *storage.Node
+}
+
+// findNodeWithoutEmbedding finds a single node that needs embedding.
+// Uses efficient streaming iteration if available, falls back to AllNodes.
 func (ew *EmbedWorker) findNodeWithoutEmbedding() *storage.Node {
-	// Get all nodes but iterate - AllNodes returns a slice unfortunately
-	// For now, just get first match. Could optimize with a query later.
-	nodes, err := ew.storage.AllNodes()
-	if err != nil {
-		return nil
+	// Try efficient streaming method first (BadgerEngine, WALEngine)
+	if finder, ok := ew.storage.(EmbeddingFinder); ok {
+		return finder.FindNodeNeedingEmbedding()
 	}
 
-	for _, node := range nodes {
-		// Skip internal nodes
-		for _, label := range node.Labels {
-			if strings.HasPrefix(label, "_") {
-				continue
-			}
-		}
-
-		// Skip if already has embedding
-		if len(node.Embedding) > 0 {
-			continue
-		}
-
-		// Skip if already checked and has no content
-		if _, ok := node.Properties["embedding_skipped"]; ok {
-			continue
-		}
-
-		// Skip if marked as having embedding (even if empty - might be queued)
-		if hasEmbed, ok := node.Properties["has_embedding"].(bool); ok && hasEmbed {
-			continue
-		}
-
-		// Found one that needs processing
-		return node
-	}
-
-	return nil
+	// Fallback: use storage helper
+	return storage.FindNodeNeedingEmbedding(ew.storage)
 }
 
 // embedWithRetry embeds chunks with retry logic and averages if multiple chunks.

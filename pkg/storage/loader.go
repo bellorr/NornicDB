@@ -515,6 +515,36 @@ type ExportableEngine interface {
 	AllEdges() ([]*Edge, error)
 }
 
+// FindNodeNeedingEmbedding finds a single node that needs embedding.
+// This is more efficient than AllNodes() as it stops after finding one.
+func FindNodeNeedingEmbedding(engine Engine) *Node {
+	// Use AllNodes but stop early - not ideal but works with any engine
+	if exportable, ok := engine.(ExportableEngine); ok {
+		nodes, err := exportable.AllNodes()
+		if err != nil {
+			return nil
+		}
+		for _, node := range nodes {
+			// Skip internal nodes
+			isInternal := false
+			for _, label := range node.Labels {
+				if len(label) > 0 && label[0] == '_' {
+					isInternal = true
+					break
+				}
+			}
+			if isInternal {
+				continue
+			}
+			// Return first node without embedding
+			if len(node.Embedding) == 0 {
+				return node
+			}
+		}
+	}
+	return nil
+}
+
 // AllNodes returns all nodes in the memory engine.
 func (m *MemoryEngine) AllNodes() ([]*Node, error) {
 	m.mu.RLock()

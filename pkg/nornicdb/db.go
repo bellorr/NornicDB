@@ -752,6 +752,18 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Initialize search service (uses pre-computed embeddings from Mimir)
 	db.searchService = search.NewService(db.storage)
 
+	// Build search indexes from existing data (including embeddings)
+	// This runs in background to not block startup
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		if err := db.searchService.BuildIndexes(ctx); err != nil {
+			fmt.Printf("⚠️  Failed to build search indexes: %v\n", err)
+		} else {
+			fmt.Println("✅ Search indexes built from existing data")
+		}
+	}()
+
 	// Initialize async embedding queue (if enabled and provider configured)
 	if config.AutoEmbedEnabled && config.EmbeddingProvider != "" {
 		// Set API path based on provider
@@ -774,6 +786,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			fmt.Printf("⚠️  Auto-embed disabled: %v\n", err)
 		} else {
 			db.embedQueue = NewEmbedQueue(embedder, db.storage, nil)
+			// Set callback to update search index after embedding
+			db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
+				if db.searchService != nil {
+					_ = db.searchService.IndexNode(node)
+				}
+			})
 			fmt.Printf("🧠 Auto-embed queue started using %s/%s (%d dims)\n",
 				config.EmbeddingProvider, config.EmbeddingModel, config.EmbeddingDimensions)
 		}

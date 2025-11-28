@@ -655,6 +655,7 @@ func (s *Server) buildRouter() http.Handler {
 	// Embedding control (NornicDB-specific)
 	mux.HandleFunc("/nornicdb/embed/trigger", s.withAuth(s.handleEmbedTrigger, auth.PermWrite))
 	mux.HandleFunc("/nornicdb/embed/stats", s.withAuth(s.handleEmbedStats, auth.PermRead))
+	mux.HandleFunc("/nornicdb/search/rebuild", s.withAuth(s.handleSearchRebuild, auth.PermWrite))
 
 	// Admin endpoints (NornicDB-specific)
 	mux.HandleFunc("/admin/stats", s.withAuth(s.handleAdminStats, auth.PermAdmin))
@@ -1358,6 +1359,26 @@ func (s *Server) handleEmbedStats(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"enabled": true,
 		"stats":   stats,
+	}
+	s.writeJSON(w, http.StatusOK, response)
+}
+
+// handleSearchRebuild rebuilds search indexes from all nodes.
+func (s *Server) handleSearchRebuild(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		s.writeNeo4jError(w, http.StatusMethodNotAllowed, "Neo.ClientError.Request.Invalid", "POST required")
+		return
+	}
+
+	err := s.db.BuildSearchIndexes(r.Context())
+	if err != nil {
+		s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.DatabaseError.General.UnknownError", err.Error())
+		return
+	}
+
+	response := map[string]interface{}{
+		"success": true,
+		"message": "Search indexes rebuilt from all nodes",
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }

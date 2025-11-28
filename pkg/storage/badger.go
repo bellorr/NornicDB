@@ -105,7 +105,7 @@ type BadgerOptions struct {
 //		log.Fatal(err)
 //	}
 //	defer engine.Close()
-//	
+//
 //	// Engine is ready - create nodes
 //	node := &storage.Node{
 //		ID:     "user-1",
@@ -129,11 +129,11 @@ type BadgerOptions struct {
 //	// Main application database
 //	mainDB, _ := storage.NewBadgerEngine("./data/main")
 //	defer mainDB.Close()
-//	
+//
 //	// Test database
 //	testDB, _ := storage.NewBadgerEngine("./data/test")
 //	defer testDB.Close()
-//	
+//
 //	// Cache database
 //	cacheDB, _ := storage.NewBadgerEngine("./data/cache")
 //	defer cacheDB.Close()
@@ -151,7 +151,8 @@ type BadgerOptions struct {
 //   - Includes write-ahead log and compaction overhead
 //
 // Thread Safety:
-//   Safe for concurrent use from multiple goroutines.
+//
+//	Safe for concurrent use from multiple goroutines.
 func NewBadgerEngine(dataDir string) (*BadgerEngine, error) {
 	return NewBadgerEngineWithOptions(BadgerOptions{
 		DataDir: dataDir,
@@ -178,7 +179,7 @@ func NewBadgerEngine(dataDir string) (*BadgerEngine, error) {
 //		InMemory: true,     // All data in RAM, lost on shutdown
 //	})
 //	defer engine.Close()
-//	
+//
 //	// Perfect for unit tests - fast and clean
 //	testCreateNodes(engine)
 //
@@ -221,7 +222,8 @@ func NewBadgerEngine(dataDir string) (*BadgerEngine, error) {
 //   - InMemory=true: Fastest but data lost on shutdown
 //
 // Thread Safety:
-//   Safe for concurrent use from multiple goroutines.
+//
+//	Safe for concurrent use from multiple goroutines.
 func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	badgerOpts := badger.DefaultOptions(opts.DataDir)
 
@@ -1526,6 +1528,114 @@ func (b *BadgerEngine) Size() (lsm, vlog int64) {
 	b.mu.RUnlock()
 
 	return b.db.Size()
+}
+
+// FindNodeNeedingEmbedding iterates through nodes and returns the first one
+// without an embedding. Uses Badger's iterator to avoid loading all nodes.
+func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return nil
+	}
+	b.mu.RUnlock()
+
+	var result *Node
+	scanned := 0
+	withEmbed := 0
+	internal := 0
+
+	b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.PrefetchSize = 10 // Small batch
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte{prefixNode}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			scanned++
+			item := it.Item()
+			err := item.Value(func(val []byte) error {
+				node, err := decodeNode(val)
+				if err != nil {
+					return nil // Skip invalid nodes
+				}
+
+				// Skip internal nodes (labels starting with _)
+				isInternal := false
+				for _, label := range node.Labels {
+					if len(label) > 0 && label[0] == '_' {
+						isInternal = true
+						break
+					}
+				}
+				if isInternal {
+					internal++
+					return nil // Continue to next node
+				}
+
+				// Check embedding
+				if len(node.Embedding) > 0 {
+					withEmbed++
+					return nil // Has embedding, continue
+				}
+
+				// Found one without embedding
+				result = node
+				return ErrIterationStopped // Custom error to break iteration
+			})
+			if err == ErrIterationStopped {
+				break
+			}
+		}
+		return nil
+	})
+
+	fmt.Printf("🔍 Scanned %d nodes: %d with embeddings, %d internal, found: %v\n",
+		scanned, withEmbed, internal, result != nil)
+
+	return result
+}
+
+// ErrIterationStopped is used to break iteration early
+var ErrIterationStopped = fmt.Errorf("iteration stopped")
+
+// IterateNodes iterates through all nodes one at a time without loading all into memory.
+// The callback returns true to continue, false to stop.
+func (b *BadgerEngine) IterateNodes(fn func(*Node) bool) error {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	return b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.PrefetchSize = 10
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte{prefixNode}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			item := it.Item()
+			var node *Node
+			err := item.Value(func(val []byte) error {
+				var decErr error
+				node, decErr = decodeNode(val)
+				return decErr
+			})
+			if err != nil {
+				continue // Skip invalid nodes
+			}
+			if !fn(node) {
+				break // Callback requested stop
+			}
+		}
+		return nil
+	})
 }
 
 // ============================================================================
