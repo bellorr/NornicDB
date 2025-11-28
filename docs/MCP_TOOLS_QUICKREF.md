@@ -1,5 +1,9 @@
 # MCP Tools Quick Reference
 
+> **Version:** 0.1.3 (Production)  
+> **Status:** ✅ All 8 tools fully implemented and tested  
+> **Docker:** `docker pull timothyswt/nornicdb-arm64-metal:0.1.3`
+
 **For LLMs:** This is your cheat sheet for using NornicDB's memory system.
 
 ---
@@ -379,5 +383,5 @@ I recommend starting with:
 
 ---
 
-**Last Updated:** 2025-11-27  
-**Version:** 1.0 (Design Phase)
+**Last Updated:** 2025-11-28  
+**Version:** 0.1.3 (Production)

@@ -27,16 +27,27 @@ go build -o nornicdb ./cmd/nornicdb
 ### Option 2: Docker
 
 ```bash
-# Pull the image
-docker pull ghcr.io/orneryd/nornicdb:latest
+# Pull the image (ARM64/Apple Silicon)
+docker pull timothyswt/nornicdb-arm64-metal:0.1.3
+
+# Or use latest
+docker pull timothyswt/nornicdb-arm64-metal:latest
 
 # Run the container
 docker run -d \
+  --name nornicdb \
   -p 7474:7474 \
   -p 7687:7687 \
   -v nornicdb-data:/data \
-  ghcr.io/orneryd/nornicdb:latest
+  timothyswt/nornicdb-arm64-metal:0.1.3
+
+# Verify it's running
+curl http://localhost:7474/health
 ```
+
+**Available Tags:**
+- `timothyswt/nornicdb-arm64-metal:0.1.3` - Current stable release
+- `timothyswt/nornicdb-arm64-metal:latest` - Latest build
 
 ### Option 3: Go Package
 
@@ -187,11 +198,47 @@ memory := &nornicdb.Memory{
 }
 ```
 
+## MCP Integration (For AI Agents)
+
+NornicDB includes a native MCP (Model Context Protocol) server for AI agent integration.
+
+### Configure Cursor IDE
+
+Add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "mimir": {
+      "url": "http://localhost:7474/mcp",
+      "type": "http",
+      "description": "NornicDB MCP Server"
+    }
+  }
+}
+```
+
+### Available MCP Tools
+
+| Tool | Purpose |
+|------|---------|
+| `store` | Save knowledge/decisions |
+| `recall` | Retrieve by ID or filters |
+| `discover` | Semantic search |
+| `link` | Connect concepts |
+| `index` | Index files |
+| `unindex` | Remove indexed files |
+| `task` | Manage single task |
+| `tasks` | Query multiple tasks |
+
+See **[Cursor Chat Mode Guide](cursor-chatmode.md)** for detailed usage.
+
 ## Next Steps
 
+- **[Cursor Chat Mode Guide](cursor-chatmode.md)** - Use with Cursor IDE
+- **[MCP Tools Quick Reference](../MCP_TOOLS_QUICKREF.md)** - Tool cheat sheet
 - **[Vector Search Guide](vector-search.md)** - Learn semantic search
 - **[Cypher Queries](cypher-queries.md)** - Master Neo4j queries
-- **[GPU Acceleration](gpu-acceleration.md)** - Boost performance
 - **[API Reference](../api-reference.md)** - Complete API docs
 
 ## Troubleshooting

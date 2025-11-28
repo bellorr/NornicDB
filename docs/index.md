@@ -5,10 +5,11 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 ## 🚀 Quick Links
 
 - **[Getting Started](guides/getting-started.md)** - Set up NornicDB in 5 minutes
+- **[Cursor Chat Mode Guide](guides/cursor-chatmode.md)** - 🆕 Use with AI agents
+- **[MCP Tools Quick Reference](MCP_TOOLS_QUICKREF.md)** - Tool cheat sheet
 - **[Architecture Overview](guides/architecture.md)** - Understand the system design
 - **[API Reference](api-reference.md)** - Auto-generated from GoDoc comments
 - **[Configuration Guide](guides/configuration.md)** - Production setup
-- **[Examples & Tutorials](guides/examples.md)** - Real-world usage patterns
 
 ## 📚 Documentation Sections
 
@@ -28,6 +29,12 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 - **[Configuration](guides/configuration.md)** - Advanced setup options
 - **[Performance Tuning](guides/performance-tuning.md)** - Optimization strategies
 - **[Compliance & Security](guides/compliance.md)** - GDPR, HIPAA, SOC2
+
+### For AI/Agent Integration
+
+- **[Cursor Chat Mode Guide](guides/cursor-chatmode.md)** - 🆕 Use NornicDB with Cursor IDE
+- **[MCP Tools Quick Reference](MCP_TOOLS_QUICKREF.md)** - 8-tool cheat sheet
+- **[Agent Preamble (mimir-v2)](../docs/agents/claudette-mimir-v2.md)** - Memory-augmented AI agent
 
 ### For DevOps
 
@@ -86,6 +93,7 @@ NornicDB is MIT licensed. See [LICENSE](../LICENSE) for details.
 
 ---
 
-**Last Updated:** November 25, 2025  
-**Version:** 1.0.0  
+**Last Updated:** November 28, 2025  
+**Version:** 0.1.3  
+**Docker:** `timothyswt/nornicdb-arm64-metal:0.1.3`  
 **Status:** Production Ready ✅
