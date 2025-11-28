@@ -1,10 +1,10 @@
-//go:build !cgo || (!darwin && !linux)
+//go:build !cgo || (!darwin && !linux && !(windows && cuda))
 
 // Package localllm provides CGO bindings to llama.cpp for local GGUF model inference.
 //
 // This is a stub implementation for platforms without CGO or llama.cpp support.
 // To use local GGUF models, build with CGO enabled on a supported platform
-// (Linux, macOS) and ensure the llama.cpp static library is available.
+// (Linux, macOS, Windows with CUDA) and ensure the llama.cpp static library is available.
 package localllm
 
 import (
@@ -13,7 +13,7 @@ import (
 	"runtime"
 )
 
-var errNotSupported = errors.New("local GGUF embeddings not supported: build with CGO on linux/darwin")
+var errNotSupported = errors.New("local GGUF embeddings not supported: build with CGO on linux/darwin/windows (with -tags=cuda for Windows)")
 
 // Model wraps a GGUF model for embedding generation.
 // This is a stub that returns errors on unsupported platforms.

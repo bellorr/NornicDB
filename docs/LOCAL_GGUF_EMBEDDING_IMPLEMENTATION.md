@@ -675,8 +675,12 @@ nornicdb serve --embedding-provider=local --embedding-model=bge-m3
 ## Checklist
 
 - [x] Vendor llama.cpp headers (`lib/llama/`) - Placeholder headers created
-- [ ] Build static libs with GPU support (CUDA for Linux/Windows, Metal for macOS)
+- [x] Build static libs with GPU support (CUDA for Linux/Windows, Metal for macOS)
+  - [x] macOS ARM64 with Metal (`libllama_darwin_arm64.a`)
+  - [x] Linux AMD64 with CUDA (via build script)
+  - [x] Windows AMD64 with CUDA (`llama_windows.go` + `build-llama-cuda.ps1`)
 - [x] Implement `pkg/localllm/llama.go` (CGO bindings with GPU detection)
+- [x] Implement `pkg/localllm/llama_windows.go` (Windows CUDA CGO bindings)
 - [x] Implement `pkg/embed/local_gguf.go` (Embedder)
 - [x] Update `NewEmbedder()` factory to handle `local` provider
 - [x] **Ensure `ollama` and `openai` providers remain unchanged** - Tests pass!
@@ -687,13 +691,21 @@ nornicdb serve --embedding-provider=local --embedding-model=bge-m3
 - [x] Tests + benchmarks (CPU and GPU) - Tests created, skip without model
 - [x] Docs update - README and build workflow created
 
-**Build Tag:** Use `-tags=localllm` to enable local GGUF support. Default builds use stub.
+**Build Tags:**
+- Use `-tags=localllm` to enable local GGUF support on Linux/macOS
+- Use `-tags="cuda localllm"` for Windows with CUDA support
 
-**Next Steps:**
+**Next Steps (Linux/macOS):**
 1. Run `./scripts/build-llama.sh` to build llama.cpp for your platform
 2. Place a `.gguf` model in `/data/models/`
 3. Build with: `go build -tags=localllm ./cmd/nornicdb`
 4. Run with: `NORNICDB_EMBEDDING_PROVIDER=local nornicdb serve`
+
+**Next Steps (Windows with CUDA):**
+1. Run `.\scripts\build-llama-cuda.ps1` to build llama.cpp with CUDA
+2. Place a `.gguf` model in your models directory
+3. Run `.\build-cuda.bat` or `.\build-full.bat` to build NornicDB
+4. Run with: `set NORNICDB_EMBEDDING_PROVIDER=local && bin\nornicdb.exe serve`
 
 ---
 

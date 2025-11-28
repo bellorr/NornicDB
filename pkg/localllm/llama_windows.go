@@ -1,22 +1,19 @@
-//go:build cgo && (darwin || linux)
+//go:build cgo && windows && cuda
 
 // Package localllm provides CGO bindings to llama.cpp for local GGUF model inference.
 //
-// This package enables NornicDB to run embedding models directly without external
-// services like Ollama. It uses llama.cpp compiled as a static library with
-// GPU acceleration (Metal on macOS, CUDA on Linux) and CPU fallback.
+// This is the Windows CUDA implementation for GPU-accelerated embedding generation.
 //
-// Metal Optimizations (Apple Silicon):
+// CUDA Optimizations (NVIDIA GPU):
 //   - Flash attention for faster inference
 //   - Full model GPU offload by default
-//   - Unified memory utilization
+//   - VRAM-optimized tensor placement
 //   - SIMD-optimized CPU fallback
 //
-// Features:
-//   - GPU-first with automatic CPU fallback
-//   - Memory-mapped model loading for low memory footprint
-//   - Thread-safe embedding generation
-//   - Batch embedding support
+// Build Requirements:
+//   - CUDA Toolkit 12.x installed
+//   - Visual Studio 2022 Build Tools with MSVC
+//   - Pre-built libllama_windows_amd64.a with CUDA support
 //
 // Example:
 //
@@ -32,21 +29,21 @@
 package localllm
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/../../lib/llama
+#cgo CFLAGS: -I${SRCDIR}/../../lib/llama/windows_amd64_cuda
 
-// Linux with CUDA (GPU primary) - includes CUDA driver (-lcuda), runtime (-lcudart), cuBLAS, and OpenMP (-lgomp)
-#cgo linux,amd64,cuda LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_amd64_cuda -L/usr/local/cuda/lib64 -lcudart -lcublas -lcuda -lgomp -lm -lstdc++ -lpthread
-// Linux CPU fallback
-#cgo linux,amd64,!cuda LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_amd64 -lm -lstdc++ -lpthread
+// Windows with CUDA - link against all llama.cpp static libraries
+// Libraries built with MSVC: llama.lib, ggml-cuda.lib, ggml-cpu.lib, ggml-base.lib, ggml.lib, common.lib
+#cgo LDFLAGS: -L${SRCDIR}/../../lib/llama/windows_amd64_cuda
+#cgo LDFLAGS: ${SRCDIR}/../../lib/llama/windows_amd64_cuda/llama.lib
+#cgo LDFLAGS: ${SRCDIR}/../../lib/llama/windows_amd64_cuda/ggml-cuda.lib
+#cgo LDFLAGS: ${SRCDIR}/../../lib/llama/windows_amd64_cuda/ggml-cpu.lib
+#cgo LDFLAGS: ${SRCDIR}/../../lib/llama/windows_amd64_cuda/ggml-base.lib
+#cgo LDFLAGS: ${SRCDIR}/../../lib/llama/windows_amd64_cuda/ggml.lib
+#cgo LDFLAGS: ${SRCDIR}/../../lib/llama/windows_amd64_cuda/common.lib
 
-#cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_arm64 -lm -lstdc++ -lpthread
-
-// macOS with Metal (GPU primary on Apple Silicon)
-#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_darwin_arm64 -lm -lc++ -framework Accelerate -framework Metal -framework MetalPerformanceShaders -framework Foundation
-#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_darwin_amd64 -lm -lc++ -framework Accelerate
-
-// Windows with CUDA - handled in llama_windows.go
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_windows_amd64 -lcudart -lcublas -lm -lstdc++
+// CUDA runtime and cuBLAS libraries from CUDA Toolkit
+#cgo LDFLAGS: -L"C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.0/lib/x64"
+#cgo LDFLAGS: -lcudart -lcublas -lcublasLt -lcuda
 
 #include <stdlib.h>
 #include <string.h>
@@ -87,7 +84,7 @@ struct llama_model* load_model(const char* path, int n_gpu_layers) {
     return llama_model_load_from_file(path, params);
 }
 
-// Create embedding context with Metal/GPU optimizations
+// Create embedding context with CUDA optimizations
 struct llama_context* create_context(struct llama_model* model, int n_ctx, int n_batch, int n_threads) {
     struct llama_context_params params = llama_context_default_params();
 
@@ -106,8 +103,7 @@ struct llama_context* create_context(struct llama_model* model, int n_ctx, int n
     params.embeddings = 1;
     params.pooling_type = LLAMA_POOLING_TYPE_MEAN;
 
-    // Flash attention - major speedup on Metal and CUDA
-    // Note: Some older llama.cpp versions may not have this
+    // Flash attention - major speedup on CUDA
     #ifdef LLAMA_SUPPORTS_FLASH_ATTN
     params.flash_attn = 1;
     #endif
@@ -214,10 +210,10 @@ type Options struct {
 // GPU is enabled by default (-1 = auto-detect and use all layers).
 // Set GPULayers to 0 to force CPU-only mode.
 //
-// For Apple Silicon, this enables full Metal GPU acceleration with:
+// For NVIDIA GPUs, this enables full CUDA acceleration with:
 //   - Flash attention
-//   - Full model offload
-//   - Unified memory optimization
+//   - Full model offload to GPU
+//   - Optimized tensor operations
 //
 // Example:
 //
@@ -251,12 +247,12 @@ func DefaultOptions(modelPath string) Options {
 //   - 0: CPU only (no GPU offload)
 //   - N: Offload N layers to GPU
 //
-// Metal Optimization (Apple Silicon):
+// CUDA Optimization (NVIDIA GPU):
 //
-// When running on Apple Silicon with Metal support compiled in:
+// When running with CUDA support:
 //   - All model layers are offloaded to GPU by default
 //   - Flash attention is enabled for faster inference
-//   - Unified memory is utilized efficiently
+//   - VRAM is used for tensor storage
 //   - Typical speedup: 5-10x over CPU-only
 //
 // Example:
@@ -309,7 +305,7 @@ func LoadModel(opts Options) (*Model, error) {
 //
 // GPU Acceleration:
 //
-// On Apple Silicon with Metal, the embedding is computed on the GPU:
+// On NVIDIA GPUs with CUDA, the embedding is computed on the GPU:
 //  1. Tokenization (CPU)
 //  2. Model inference (GPU - flash attention enabled)
 //  3. Pooling (GPU)
@@ -352,7 +348,7 @@ func (m *Model) Embed(ctx context.Context, text string) ([]float32, error) {
 		return nil, fmt.Errorf("text produced no tokens")
 	}
 
-	// Generate embedding (GPU-accelerated on Metal/CUDA)
+	// Generate embedding (GPU-accelerated on CUDA)
 	emb := make([]float32, m.dims)
 	result := C.embed(m.ctx, (*C.int)(&tokens[0]), n, (*C.float)(&emb[0]), C.int(m.dims))
 	if result != 0 {
@@ -414,7 +410,7 @@ func (m *Model) ModelDescription() string { return m.modelDesc }
 // Close releases all resources associated with the model.
 //
 // After Close is called, the Model must not be used.
-// This properly releases GPU memory on Metal/CUDA.
+// This properly releases GPU memory on CUDA.
 func (m *Model) Close() error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

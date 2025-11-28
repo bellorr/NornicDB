@@ -1,5 +1,7 @@
-# NornicDB Docker Image with NVIDIA CUDA Support
+# NornicDB Docker Image with NVIDIA CUDA Support + Bundled BGE-M3 Embedding Model
 # Neo4j-compatible graph database with GPU-accelerated local embeddings
+#
+# This image includes the BGE-M3 GGUF model (MIT licensed) for zero-config embeddings
 
 # Stage 1: Build the UI
 FROM node:20-alpine AS ui-builder
@@ -60,7 +62,25 @@ RUN set -e && \
     echo "END" >> /tmp/ar_script.mri && \
     ar -M < /tmp/ar_script.mri
 
-# Stage 3: Build the Go binary with CUDA support
+# Stage 3: Model provider - uses local model file
+# The BGE-M3 GGUF model (MIT licensed) should be placed in models/bge-m3.gguf
+# If not present, the build will fail with a helpful message
+FROM alpine:3.19 AS model-provider
+
+WORKDIR /models
+
+# Copy local model file - must exist at build time
+# Place the model at: nornicdb/models/bge-m3.gguf
+COPY models/bge-m3.gguf /models/bge-m3.gguf
+
+# Verify the model file is valid (should be > 100MB)
+RUN ls -lh /models/bge-m3.gguf && \
+    test $(stat -c%s /models/bge-m3.gguf) -gt 100000000 || \
+    (echo "ERROR: Model file too small or invalid. Please download from:" && \
+     echo "  https://huggingface.co/BAAI/bge-m3-gguf/resolve/main/bge-m3-q8_0.gguf" && \
+     echo "and place it at: nornicdb/models/bge-m3.gguf" && exit 1)
+
+# Stage 4: Build the Go binary with CUDA support
 FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS builder
 
 # Install Go and OpenMP
@@ -112,8 +132,11 @@ COPY --from=builder /build/nornicdb /app/nornicdb
 COPY docker-entrypoint.sh /app/docker-entrypoint.sh
 RUN chmod +x /app/docker-entrypoint.sh
 
-# Create data directory
-RUN mkdir -p /data /data/models
+# Create directories - /data for user data (volume mount), /app/models for bundled model
+RUN mkdir -p /data /app/models
+
+# Copy the bundled BGE-M3 model to /app/models (won't be overwritten by /data volume mounts)
+COPY --from=model-provider /models/bge-m3.gguf /app/models/bge-m3.gguf
 
 # Expose ports
 EXPOSE 7474 7687
@@ -122,14 +145,16 @@ EXPOSE 7474 7687
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
   CMD wget --spider -q http://localhost:7474/health || exit 1
 
-# Default environment variables
+# Default environment variables - configured for bundled model
+# Note: NORNICDB_MODELS_DIR points to /app/models where the bundled model lives
+# This way volume mounts to /data won't overwrite the model
 ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_HTTP_PORT=7474 \
     NORNICDB_BOLT_PORT=7687 \
     NORNICDB_EMBEDDING_PROVIDER=local \
     NORNICDB_EMBEDDING_MODEL=bge-m3 \
     NORNICDB_EMBEDDING_DIMENSIONS=1024 \
-    NORNICDB_MODELS_DIR=/data/models \
+    NORNICDB_MODELS_DIR=/app/models \
     NORNICDB_EMBEDDING_GPU_LAYERS=-1 \
     NORNICDB_NO_AUTH=true \
     NORNICDB_GPU_ENABLED=true \

@@ -8,17 +8,21 @@ This directory contains static libraries and headers for llama.cpp, used by Norn
 lib/llama/
 ├── llama.h                      # Main llama.cpp header
 ├── ggml.h                       # GGML tensor library header
+├── ggml-*.h                     # Additional GGML headers
 ├── libllama_darwin_arm64.a      # macOS Apple Silicon (with Metal)
 ├── libllama_darwin_amd64.a      # macOS Intel
 ├── libllama_linux_amd64.a       # Linux x86_64 (CPU only)
 ├── libllama_linux_amd64_cuda.a  # Linux x86_64 (with CUDA)
 ├── libllama_linux_arm64.a       # Linux ARM64
 ├── libllama_windows_amd64.a     # Windows x86_64 (with CUDA)
+├── libllama_windows_amd64.lib   # Windows x86_64 (MSVC format)
 ├── VERSION                      # llama.cpp version used
 └── README.md                    # This file
 ```
 
 ## Building from Source
+
+### Linux/macOS
 
 Run the build script from the nornicdb directory:
 
@@ -30,11 +34,34 @@ Run the build script from the nornicdb directory:
 ./scripts/build-llama.sh b4600
 ```
 
+### Windows with CUDA
+
+Run the PowerShell build script:
+
+```powershell
+# Build with CUDA support
+.\scripts\build-llama-cuda.ps1
+
+# Build specific version
+.\scripts\build-llama-cuda.ps1 -Version b4600
+
+# Clean build
+.\scripts\build-llama-cuda.ps1 -Clean
+```
+
 ### Requirements
 
+**All platforms:**
 - CMake 3.14+
-- C/C++ compiler (gcc, clang, MSVC)
 - Git
+
+**Linux/macOS:**
+- C/C++ compiler (gcc, clang)
+
+**Windows:**
+- Visual Studio 2022 with C++ Desktop development
+- CUDA Toolkit 12.x (for GPU acceleration)
+- Ninja (optional, for faster builds)
 
 ### GPU Support
 
@@ -73,11 +100,19 @@ gh workflow run build-llama.yml
    ```bash
    cp bge-m3.Q4_K_M.gguf /data/models/bge-m3.gguf
    ```
+4. Build with appropriate tags:
+   ```bash
+   # Linux/macOS
+   go build -tags=localllm ./cmd/nornicdb
+   
+   # Windows with CUDA
+   go build -tags="cuda localllm" ./cmd/nornicdb
+   ```
 
 ## Placeholder Headers
 
 The `llama.h` and `ggml.h` files in this directory are placeholders for development.
-Running `./scripts/build-llama.sh` will replace them with actual headers from llama.cpp.
+Running the build script will replace them with actual headers from llama.cpp.
 
 ## Version Compatibility
 
