@@ -1576,13 +1576,21 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 					return nil // Continue to next node
 				}
 
-				// Check embedding
+				// Check if node already has embedding
 				if len(node.Embedding) > 0 {
 					withEmbed++
 					return nil // Has embedding, continue
 				}
 
-				// Found one without embedding
+				// Check if node was already processed (skipped due to no content)
+				if _, skipped := node.Properties["embedding_skipped"]; skipped {
+					return nil // Already processed, skip
+				}
+				if hasEmbed, ok := node.Properties["has_embedding"].(bool); ok && !hasEmbed {
+					return nil // Explicitly marked as no embedding needed
+				}
+
+				// Found one that needs embedding
 				result = node
 				return ErrIterationStopped // Custom error to break iteration
 			})

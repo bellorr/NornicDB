@@ -178,9 +178,16 @@ func (ew *EmbedWorker) processNextBatch() {
 	text := buildEmbeddingText(node.Properties)
 	if text == "" {
 		// No content - mark as processed but skip
+		fmt.Printf("⏭️  Skipping node %s: no embeddable content\n", node.ID)
 		node.Properties["has_embedding"] = false
 		node.Properties["embedding_skipped"] = "no content"
 		_ = ew.storage.UpdateNode(node)
+
+		// Immediately try next node (don't wait for next trigger)
+		go func() {
+			time.Sleep(100 * time.Millisecond)
+			ew.Trigger()
+		}()
 		return
 	}
 
