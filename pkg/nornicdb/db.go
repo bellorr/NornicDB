@@ -320,6 +320,10 @@ type Config struct {
 	ParallelMaxWorkers   int  `yaml:"parallel_max_workers"`    // Max worker goroutines (0 = auto, uses runtime.NumCPU())
 	ParallelMinBatchSize int  `yaml:"parallel_min_batch_size"` // Min items before parallelizing (default: 1000)
 
+	// Async writes (eventual consistency)
+	AsyncWritesEnabled bool          `yaml:"async_writes_enabled"` // Enable async writes for faster performance
+	AsyncFlushInterval time.Duration `yaml:"async_flush_interval"` // How often to flush pending writes (default: 50ms)
+
 	// Server
 	BoltPort int `yaml:"bolt_port"`
 	HTTPPort int `yaml:"http_port"`
@@ -356,9 +360,11 @@ func DefaultConfig() *Config {
 		AutoLinksEnabled:             true,
 		AutoLinksSimilarityThreshold: 0.82,
 		AutoLinksCoAccessWindow:      30 * time.Second,
-		ParallelEnabled:              true, // Enable parallel query execution by default
-		ParallelMaxWorkers:           0,    // 0 = auto (runtime.NumCPU())
-		ParallelMinBatchSize:         1000, // Parallelize for 1000+ items
+		ParallelEnabled:              true,                  // Enable parallel query execution by default
+		ParallelMaxWorkers:           0,                     // 0 = auto (runtime.NumCPU())
+		ParallelMinBatchSize:         1000,                  // Parallelize for 1000+ items
+		AsyncWritesEnabled:           true,                  // Enable async writes for eventual consistency (faster writes)
+		AsyncFlushInterval:           50 * time.Millisecond, // Flush pending writes every 50ms
 		BoltPort:                     7687,
 		HTTPPort:                     7474,
 	}
@@ -402,6 +408,7 @@ type DB struct {
 
 	// Internal components
 	storage        storage.Engine
+	wal            *storage.WAL // Write-ahead log for durability
 	decay          *decay.Manager
 	inference      *inference.Engine
 	cypherExecutor *cypher.StorageExecutor
@@ -710,8 +717,31 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to open persistent storage: %w", err)
 		}
-		db.storage = badgerEngine
-		fmt.Printf("📂 Using persistent storage at %s\n", dataDir)
+
+		// Initialize WAL for durability (uses batch sync mode by default for better performance)
+		walConfig := storage.DefaultWALConfig()
+		walConfig.Dir = dataDir + "/wal"
+		wal, err := storage.NewWAL(walConfig.Dir, walConfig)
+		if err != nil {
+			badgerEngine.Close()
+			return nil, fmt.Errorf("failed to initialize WAL: %w", err)
+		}
+		db.wal = wal
+
+		// Wrap storage with WAL for durability
+		walEngine := storage.NewWALEngine(badgerEngine, wal)
+
+		// Optionally wrap with AsyncEngine for faster writes (eventual consistency)
+		if config.AsyncWritesEnabled {
+			asyncConfig := &storage.AsyncEngineConfig{
+				FlushInterval: config.AsyncFlushInterval,
+			}
+			db.storage = storage.NewAsyncEngine(walEngine, asyncConfig)
+			fmt.Printf("📂 Using persistent storage at %s (WAL + async writes, flush: %v)\n", dataDir, config.AsyncFlushInterval)
+		} else {
+			db.storage = walEngine
+			fmt.Printf("📂 Using persistent storage at %s (WAL enabled, batch sync)\n", dataDir)
+		}
 	} else {
 		db.storage = storage.NewMemoryEngine()
 		fmt.Println("⚠️  Using in-memory storage (data will not persist)")
@@ -907,6 +937,13 @@ func (db *DB) Close() error {
 	// Close embed queue gracefully (processes remaining batch)
 	if db.embedQueue != nil {
 		db.embedQueue.Close()
+	}
+
+	// Close WAL first to ensure all writes are flushed
+	if db.wal != nil {
+		if err := db.wal.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("WAL close: %w", err))
+		}
 	}
 
 	if db.storage != nil {
@@ -1522,6 +1559,15 @@ func (db *DB) GetGPUManager() interface{} {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	return db.gpuManager
+}
+
+// IsAsyncWritesEnabled returns true if async writes (eventual consistency) is enabled.
+// When enabled, write operations return immediately and are flushed in the background.
+// HTTP handlers should return 202 Accepted instead of 201 Created for writes.
+func (db *DB) IsAsyncWritesEnabled() bool {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.config.AsyncWritesEnabled
 }
 
 // CypherResult holds results from a Cypher query.

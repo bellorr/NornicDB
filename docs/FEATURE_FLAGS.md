@@ -16,6 +16,8 @@ Complete reference for all feature flags in NornicDB. Feature flags allow you to
 | | WAL (Write-Ahead Log) | ✅ Enabled | `NORNICDB_WAL_ENABLED` |
 | **Performance** | | | |
 | | Embedding Cache | ✅ Enabled (10K) | `NORNICDB_EMBEDDING_CACHE_SIZE` |
+| | Async Writes | ✅ Enabled | `NORNICDB_ASYNC_WRITES_ENABLED` |
+| | Async Flush Interval | 50ms | `NORNICDB_ASYNC_FLUSH_INTERVAL` |
 | **Auto-Integration** | | | |
 | | Cooldown Auto-Integration | ✅ Enabled | `NORNICDB_COOLDOWN_AUTO_INTEGRATION_ENABLED` |
 | | Evidence Auto-Integration | ✅ Enabled | `NORNICDB_EVIDENCE_AUTO_INTEGRATION_ENABLED` |
@@ -414,6 +416,81 @@ nornicdb serve --embedding-cache 0
 - Memory-constrained environments
 - Fully unique queries (no repetition)
 - Debugging embedding issues
+
+---
+
+### Async Writes (Write-Behind Caching)
+
+**Purpose**: Dramatically improve write performance by returning immediately and flushing to disk in the background. Trades strong consistency for eventual consistency.
+
+**Environment Variables**: 
+- `NORNICDB_ASYNC_WRITES_ENABLED` - Enable/disable async writes
+- `NORNICDB_ASYNC_FLUSH_INTERVAL` - How often to flush (default: 50ms)
+
+**Default**: ✅ Enabled (50ms flush interval)
+
+```bash
+# Disable for strong consistency (writes block until persisted)
+export NORNICDB_ASYNC_WRITES_ENABLED=false
+
+# Enable with default 50ms flush interval
+export NORNICDB_ASYNC_WRITES_ENABLED=true
+
+# Adjust flush interval (lower = more consistent, higher = better throughput)
+export NORNICDB_ASYNC_FLUSH_INTERVAL=100ms
+```
+
+**Go API**:
+```go
+config := nornicdb.DefaultConfig()
+
+// Disable async writes for strong consistency
+config.AsyncWritesEnabled = false
+
+// Or enable with custom flush interval
+config.AsyncWritesEnabled = true
+config.AsyncFlushInterval = 50 * time.Millisecond
+
+db, err := nornicdb.Open("./data", config)
+```
+
+**Performance Characteristics**:
+| Mode | Write Latency | Throughput | Durability |
+|------|---------------|------------|------------|
+| Sync (disabled) | ~50-100ms | ~15 ops/sec | Immediate |
+| Async (enabled) | <1ms | ~10,000+ ops/sec | Within flush interval |
+
+**HTTP Response Behavior**:
+| Mode | Mutation Status | Header |
+|------|-----------------|--------|
+| Sync | `200 OK` | - |
+| Async | `202 Accepted` | `X-NornicDB-Consistency: eventual` |
+
+**What it does**:
+- Writes (CREATE, DELETE, SET) return immediately after updating in-memory cache
+- Background goroutine flushes pending writes every `AsyncFlushInterval`
+- Reads check pending cache first, then underlying storage
+- Combined with WAL for crash safety
+
+**Trade-offs**:
+- ✅ ~100x faster writes
+- ✅ Better batch operation throughput
+- ✅ Reduced disk I/O pressure
+- ⚠️ Data may be lost if crash before flush (mitigated by WAL)
+- ⚠️ Reads may see slightly stale data (within flush interval)
+- ⚠️ `202 Accepted` indicates operation queued, not completed
+
+**When to enable (default)**:
+- High write throughput workloads
+- Batch imports
+- Agent-driven updates
+- Systems where WAL provides durability guarantee
+
+**When to disable**:
+- Financial or critical data requiring immediate consistency
+- Systems without WAL enabled
+- Debugging write-related issues
+- When clients require `200 OK` confirmation of persistence
 
 ---
 

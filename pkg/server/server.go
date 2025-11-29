@@ -1186,7 +1186,20 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		response.Results = append(response.Results, qr)
 	}
 
-	s.writeJSON(w, http.StatusOK, response)
+	// Determine appropriate status code based on consistency mode
+	// For eventual consistency (async writes), mutations return 202 Accepted
+	status := http.StatusOK
+	if s.db.IsAsyncWritesEnabled() {
+		for _, stmt := range req.Statements {
+			if isMutationQuery(stmt.Statement) {
+				status = http.StatusAccepted
+				w.Header().Set("X-NornicDB-Consistency", "eventual")
+				break
+			}
+		}
+	}
+
+	s.writeJSON(w, status, response)
 }
 
 // generateRowMeta generates metadata for each value in a row
@@ -1266,6 +1279,17 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 		}
 	}
 
+	// For transaction open, 201 Created is correct (creating transaction resource)
+	// But if mutations are included with async writes, add consistency header
+	if s.db.IsAsyncWritesEnabled() && len(req.Statements) > 0 {
+		for _, stmt := range req.Statements {
+			if isMutationQuery(stmt.Statement) {
+				w.Header().Set("X-NornicDB-Consistency", "eventual")
+				break
+			}
+		}
+	}
+
 	s.writeJSON(w, http.StatusCreated, response)
 }
 
@@ -1306,7 +1330,19 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		response.Results = append(response.Results, qr)
 	}
 
-	s.writeJSON(w, http.StatusOK, response)
+	// For commits with async writes and mutations, use 202 Accepted
+	status := http.StatusOK
+	if s.db.IsAsyncWritesEnabled() && len(req.Statements) > 0 {
+		for _, stmt := range req.Statements {
+			if isMutationQuery(stmt.Statement) {
+				status = http.StatusAccepted
+				w.Header().Set("X-NornicDB-Consistency", "eventual")
+				break
+			}
+		}
+	}
+
+	s.writeJSON(w, status, response)
 }
 
 func (s *Server) handleRollbackTransaction(w http.ResponseWriter, r *http.Request, dbName, txID string) {
