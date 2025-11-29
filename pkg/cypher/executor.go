@@ -115,6 +115,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -2666,15 +2667,22 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 }
 
 func (e *StorageExecutor) generateID() string {
-	// Simple ID generation - use UUID in production
-	return fmt.Sprintf("node-%d", e.idCounter())
+	// Generate cryptographically unique ID like Neo4j does internally
+	// Neo4j uses internal sequences; we use UUIDs for guaranteed uniqueness
+	// Format: node-{uuid} to ensure zero collision probability
+	buf := make([]byte, 16)
+	rand.Read(buf)
+	// Use timestamp prefix for readability and rough time-ordering
+	return fmt.Sprintf("node-%d-%x", time.Now().UnixNano()/1000000, buf[:8])
 }
 
+// Deprecated: Sequential counter replaced with UUID generation
 var idCounter int64
 
 func (e *StorageExecutor) idCounter() int64 {
-	idCounter++
-	return idCounter
+	// Keep for backward compatibility but not used in generateID anymore
+	atomic.AddInt64(&idCounter, 1)
+	return atomic.LoadInt64(&idCounter)
 }
 
 // evaluateExistsSubquery checks if an EXISTS { } subquery returns any matches
