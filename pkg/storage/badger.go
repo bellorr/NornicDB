@@ -6,6 +6,7 @@ package storage
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -1607,9 +1608,6 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 	return result
 }
 
-// ErrIterationStopped is used to break iteration early
-var ErrIterationStopped = fmt.Errorf("iteration stopped")
-
 // IterateNodes iterates through all nodes one at a time without loading all into memory.
 // The callback returns true to continue, false to stop.
 func (b *BadgerEngine) IterateNodes(fn func(*Node) bool) error {
@@ -1643,6 +1641,165 @@ func (b *BadgerEngine) IterateNodes(fn func(*Node) bool) error {
 				break // Callback requested stop
 			}
 		}
+		return nil
+	})
+}
+
+// StreamNodes implements StreamingEngine.StreamNodes for memory-efficient iteration.
+// Iterates through all nodes one at a time without loading all into memory.
+func (b *BadgerEngine) StreamNodes(ctx context.Context, fn func(node *Node) error) error {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	return b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.PrefetchSize = 10
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte{prefixNode}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			// Check context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			item := it.Item()
+			var node *Node
+			err := item.Value(func(val []byte) error {
+				var decErr error
+				node, decErr = decodeNode(val)
+				return decErr
+			})
+			if err != nil {
+				continue // Skip invalid nodes
+			}
+			if err := fn(node); err != nil {
+				if err == ErrIterationStopped {
+					return nil // Normal stop
+				}
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// StreamEdges implements StreamingEngine.StreamEdges for memory-efficient iteration.
+// Iterates through all edges one at a time without loading all into memory.
+func (b *BadgerEngine) StreamEdges(ctx context.Context, fn func(edge *Edge) error) error {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	return b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.PrefetchSize = 10
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		prefix := []byte{prefixEdge}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			// Check context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			item := it.Item()
+			var edge *Edge
+			err := item.Value(func(val []byte) error {
+				var decErr error
+				edge, decErr = decodeEdge(val)
+				return decErr
+			})
+			if err != nil {
+				continue // Skip invalid edges
+			}
+			if err := fn(edge); err != nil {
+				if err == ErrIterationStopped {
+					return nil // Normal stop
+				}
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// StreamNodeChunks implements StreamingEngine.StreamNodeChunks for batch processing.
+// Iterates through nodes in chunks, more efficient for batch operations.
+func (b *BadgerEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func(nodes []*Node) error) error {
+	if chunkSize <= 0 {
+		chunkSize = 1000
+	}
+
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	return b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.PrefetchSize = min(chunkSize, 100)
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		chunk := make([]*Node, 0, chunkSize)
+		prefix := []byte{prefixNode}
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			// Check context cancellation
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			item := it.Item()
+			var node *Node
+			err := item.Value(func(val []byte) error {
+				var decErr error
+				node, decErr = decodeNode(val)
+				return decErr
+			})
+			if err != nil {
+				continue // Skip invalid nodes
+			}
+
+			chunk = append(chunk, node)
+
+			if len(chunk) >= chunkSize {
+				if err := fn(chunk); err != nil {
+					return err
+				}
+				// Reset chunk, reuse capacity
+				chunk = chunk[:0]
+			}
+		}
+
+		// Process remaining nodes
+		if len(chunk) > 0 {
+			if err := fn(chunk); err != nil {
+				return err
+			}
+		}
+
 		return nil
 	})
 }

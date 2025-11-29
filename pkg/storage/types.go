@@ -56,12 +56,13 @@ import (
 
 // Common errors
 var (
-	ErrNotFound      = errors.New("not found")
-	ErrAlreadyExists = errors.New("already exists")
-	ErrInvalidID     = errors.New("invalid id")
-	ErrInvalidData   = errors.New("invalid data")
-	ErrInvalidEdge   = errors.New("invalid edge: start or end node not found")
-	ErrStorageClosed = errors.New("storage closed")
+	ErrNotFound         = errors.New("not found")
+	ErrAlreadyExists    = errors.New("already exists")
+	ErrInvalidID        = errors.New("invalid id")
+	ErrInvalidData      = errors.New("invalid data")
+	ErrInvalidEdge      = errors.New("invalid edge: start or end node not found")
+	ErrStorageClosed    = errors.New("storage closed")
+	ErrIterationStopped = errors.New("iteration stopped") // Sentinel to stop streaming early
 )
 
 // NodeID is a strongly-typed unique identifier for graph nodes.

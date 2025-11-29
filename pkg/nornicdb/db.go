@@ -136,6 +136,7 @@ import (
 	"sync"
 	"time"
 
+	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/decay"
 	"github.com/orneryd/nornicdb/pkg/embed"
@@ -751,6 +752,22 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			TransitiveMinConf:   0.5,
 		}
 		db.inference = inference.New(inferConfig)
+
+		// Wire up TopologyIntegration if feature flag is enabled
+		// This enables automatic topology-based relationship suggestions
+		// Note: Manual TLP via Cypher (CALL gds.linkPrediction.*) is always available
+		if featureflags.IsTopologyAutoIntegrationEnabled() {
+			topoConfig := inference.DefaultTopologyConfig()
+			topoConfig.Enabled = true
+			topoConfig.Algorithm = "adamic_adar" // Best for social/knowledge graphs
+			topoConfig.Weight = 0.4              // 40% topology, 60% semantic
+			topoConfig.MinScore = 0.3
+			topoConfig.GraphRefreshInterval = 100 // Rebuild every 100 predictions
+
+			topo := inference.NewTopologyIntegration(db.storage, topoConfig)
+			db.inference.SetTopologyIntegration(topo)
+			fmt.Println("✅ Topology auto-integration enabled (NORNICDB_TOPOLOGY_LINK_PREDICTION_ENABLED=true)")
+		}
 	}
 
 	// Initialize search service (uses pre-computed embeddings from Mimir)
@@ -987,6 +1004,7 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 }
 
 // Remember performs semantic search for memories using embedding.
+// Uses streaming iteration to avoid loading all nodes into memory.
 func (db *DB) Remember(ctx context.Context, embedding []float32, limit int) ([]*Memory, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -1003,39 +1021,53 @@ func (db *DB) Remember(ctx context.Context, embedding []float32, limit int) ([]*
 		limit = 10
 	}
 
-	// Get all nodes from storage (naive implementation for now)
-	// TODO: Replace with HNSW index for efficient ANN search
-	allNodes, err := db.storage.AllNodes()
-	if err != nil {
-		return nil, fmt.Errorf("getting nodes: %w", err)
-	}
-
 	type scored struct {
 		mem   *Memory
 		score float64
 	}
+
+	// Use streaming iteration to avoid loading all nodes at once
+	// We maintain a sorted slice of top-k results
 	var results []scored
 
-	for _, node := range allNodes {
-		mem := nodeToMemory(node)
-		if len(mem.Embedding) == 0 {
-			continue
+	err := storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(node *storage.Node) error {
+		// Skip nodes without embeddings
+		if len(node.Embedding) == 0 {
+			return nil
 		}
 
-		// Calculate cosine similarity
+		mem := nodeToMemory(node)
 		sim := cosineSimilarity(embedding, mem.Embedding)
-		results = append(results, scored{mem: mem, score: sim})
+
+		// If we don't have enough results yet, just add
+		if len(results) < limit {
+			results = append(results, scored{mem: mem, score: sim})
+			// Sort when we reach limit
+			if len(results) == limit {
+				sort.Slice(results, func(i, j int) bool {
+					return results[i].score > results[j].score
+				})
+			}
+		} else if sim > results[limit-1].score {
+			// Only add if better than worst in results
+			results[limit-1] = scored{mem: mem, score: sim}
+			// Re-sort (could optimize with heap)
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].score > results[j].score
+			})
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("streaming nodes: %w", err)
 	}
 
-	// Sort by similarity descending
+	// Final sort (in case we have fewer than limit results)
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].score > results[j].score
 	})
-
-	// Take top limit
-	if len(results) > limit {
-		results = results[:limit]
-	}
 
 	memories := make([]*Memory, len(results))
 	for i, r := range results {
@@ -1723,6 +1755,7 @@ type Node struct {
 }
 
 // ListNodes returns nodes with optional label filter.
+// Uses streaming iteration to avoid loading all nodes into memory.
 func (db *DB) ListNodes(ctx context.Context, label string, limit, offset int) ([]*Node, error) {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
@@ -1731,14 +1764,10 @@ func (db *DB) ListNodes(ctx context.Context, label string, limit, offset int) ([
 		return nil, ErrClosed
 	}
 
-	allNodes, err := db.storage.AllNodes()
-	if err != nil {
-		return nil, err
-	}
-
 	var nodes []*Node
 	count := 0
-	for _, n := range allNodes {
+
+	err := storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(n *storage.Node) error {
 		// Filter by label if specified
 		if label != "" {
 			hasLabel := false
@@ -1749,19 +1778,19 @@ func (db *DB) ListNodes(ctx context.Context, label string, limit, offset int) ([
 				}
 			}
 			if !hasLabel {
-				continue
+				return nil // Skip, continue iteration
 			}
 		}
 
 		// Handle offset
 		if count < offset {
 			count++
-			continue
+			return nil
 		}
 
-		// Handle limit
+		// Handle limit - stop early when we have enough
 		if len(nodes) >= limit {
-			break
+			return storage.ErrIterationStopped
 		}
 
 		nodes = append(nodes, &Node{
@@ -1771,6 +1800,11 @@ func (db *DB) ListNodes(ctx context.Context, label string, limit, offset int) ([
 			CreatedAt:  n.CreatedAt,
 		})
 		count++
+		return nil
+	})
+
+	if err != nil && err != storage.ErrIterationStopped {
+		return nil, err
 	}
 
 	return nodes, nil
@@ -2153,35 +2187,46 @@ func (db *DB) FindSimilar(ctx context.Context, nodeID string, limit int) ([]*Sea
 		return nil, fmt.Errorf("node has no embedding")
 	}
 
-	// Find similar by embedding
-	allNodes, err := db.storage.AllNodes()
-	if err != nil {
-		return nil, err
-	}
-
+	// Find similar by embedding using streaming iteration
 	type scored struct {
 		node  *storage.Node
 		score float64
 	}
 	var results []scored
 
-	for _, n := range allNodes {
+	err = storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(n *storage.Node) error {
+		// Skip self and nodes without embeddings
 		if string(n.ID) == nodeID || len(n.Embedding) == 0 {
-			continue
+			return nil
 		}
 
 		sim := cosineSimilarity(target.Embedding, n.Embedding)
-		results = append(results, scored{node: n, score: sim})
+
+		// Maintain top-k results
+		if len(results) < limit {
+			results = append(results, scored{node: n, score: sim})
+			if len(results) == limit {
+				sort.Slice(results, func(i, j int) bool {
+					return results[i].score > results[j].score
+				})
+			}
+		} else if sim > results[limit-1].score {
+			results[limit-1] = scored{node: n, score: sim}
+			sort.Slice(results, func(i, j int) bool {
+				return results[i].score > results[j].score
+			})
+		}
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
 	}
 
-	// Sort by similarity
+	// Final sort
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].score > results[j].score
 	})
-
-	if len(results) > limit {
-		results = results[:limit]
-	}
 
 	searchResults := make([]*SearchResult, len(results))
 	for i, r := range results {
