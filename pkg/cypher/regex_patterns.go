@@ -69,6 +69,22 @@ var (
 )
 
 // =============================================================================
+// Fast-Path Compound Query Patterns
+// =============================================================================
+
+var (
+	// MATCH (a:Label), (b:Label) WITH a, b LIMIT 1 CREATE (a)-[r:Type]->(b) DELETE r
+	// This pattern is used heavily in benchmarks and relationship tests.
+	// Groups: 1=var1, 2=label1, 3=var2, 4=label2, 5=withVar1, 6=withVar2, 7=limit, 8=relVar, 9=relType, 10=delVar
+	matchCreateDeleteRelPattern = regexp.MustCompile(
+		`(?i)^\s*MATCH\s*\((\w+):(\w+)\)\s*,\s*\((\w+):(\w+)\)` +
+			`\s*WITH\s+(\w+)\s*,\s*(\w+)` +
+			`\s+LIMIT\s+(\d+)` +
+			`\s+CREATE\s*\(\w+\)-\[(\w+):(\w+)\]->\(\w+\)` +
+			`\s+DELETE\s+(\w+)\s*$`)
+)
+
+// =============================================================================
 // Query Analysis Patterns (EXPLAIN/PROFILE)
 // =============================================================================
 

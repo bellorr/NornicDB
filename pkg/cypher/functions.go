@@ -2558,7 +2558,7 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 		// For now, return rels from rel context
 		if rel, ok := rels[inner]; ok {
 			return []interface{}{map[string]interface{}{
-				"id":         string(rel.ID),
+				"_edgeId":    string(rel.ID),
 				"type":       rel.Type,
 				"properties": rel.Properties,
 			}}
@@ -3854,7 +3854,7 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 	}
 	if rel, ok := rels[expr]; ok {
 		return map[string]interface{}{
-			"id":         string(rel.ID),
+			"_edgeId":    string(rel.ID),
 			"type":       rel.Type,
 			"properties": rel.Properties,
 		}

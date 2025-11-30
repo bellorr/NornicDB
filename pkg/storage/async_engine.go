@@ -30,6 +30,9 @@ type AsyncEngine struct {
 	deleteEdges map[EdgeID]bool
 	mu          sync.RWMutex
 
+	// Label index for fast lookups - maps normalized label to node IDs
+	labelIndex map[string]map[NodeID]bool
+
 	// Background flush
 	flushInterval time.Duration
 	flushTicker   *time.Ticker
@@ -68,6 +71,7 @@ func NewAsyncEngine(engine Engine, config *AsyncEngineConfig) *AsyncEngine {
 		edgeCache:     make(map[EdgeID]*Edge),
 		deleteNodes:   make(map[NodeID]bool),
 		deleteEdges:   make(map[EdgeID]bool),
+		labelIndex:    make(map[string]map[NodeID]bool),
 		flushInterval: config.FlushInterval,
 		stopChan:      make(chan struct{}),
 	}
@@ -113,8 +117,7 @@ func (ae *AsyncEngine) Flush() error {
 
 	ae.totalFlushes++
 
-	// Snapshot pending changes - keep originals in cache during write
-	// to prevent race condition where reads miss data during flush
+	// Snapshot pending changes
 	nodesToWrite := make(map[NodeID]*Node, len(ae.nodeCache))
 	for k, v := range ae.nodeCache {
 		nodesToWrite[k] = v
@@ -134,48 +137,49 @@ func (ae *AsyncEngine) Flush() error {
 
 	ae.mu.Unlock()
 
-	// Now write to engine WITHOUT holding lock (I/O can be slow)
-	// Apply bulk deletes first (SINGLE transaction instead of N transactions!)
+	// Apply bulk deletes first
 	if len(nodesToDelete) > 0 {
 		nodeIDs := make([]NodeID, 0, len(nodesToDelete))
 		for id := range nodesToDelete {
 			nodeIDs = append(nodeIDs, id)
 		}
-		ae.engine.BulkDeleteNodes(nodeIDs) // Best effort - ignore errors
+		ae.engine.BulkDeleteNodes(nodeIDs)
 	}
 	if len(edgesToDelete) > 0 {
 		edgeIDs := make([]EdgeID, 0, len(edgesToDelete))
 		for id := range edgesToDelete {
 			edgeIDs = append(edgeIDs, id)
 		}
-		ae.engine.BulkDeleteEdges(edgeIDs) // Best effort - ignore errors
+		ae.engine.BulkDeleteEdges(edgeIDs)
 	}
 
 	// Apply creates/updates
-	for _, node := range nodesToWrite {
-		// Check if this was also deleted
-		if nodesToDelete[node.ID] {
-			continue
+	if len(nodesToWrite) > 0 {
+		nodes := make([]*Node, 0, len(nodesToWrite))
+		for _, node := range nodesToWrite {
+			if !nodesToDelete[node.ID] {
+				nodes = append(nodes, node)
+			}
 		}
-		// Try create, if exists do update
-		if err := ae.engine.CreateNode(node); err != nil {
-			ae.engine.UpdateNode(node)
+		if len(nodes) > 0 {
+			ae.engine.BulkCreateNodes(nodes)
 		}
 	}
-	for _, edge := range edgesToWrite {
-		if edgesToDelete[edge.ID] {
-			continue
+	if len(edgesToWrite) > 0 {
+		edges := make([]*Edge, 0, len(edgesToWrite))
+		for _, edge := range edgesToWrite {
+			if !edgesToDelete[edge.ID] {
+				edges = append(edges, edge)
+			}
 		}
-		if err := ae.engine.CreateEdge(edge); err != nil {
-			ae.engine.UpdateEdge(edge)
+		if len(edges) > 0 {
+			ae.engine.BulkCreateEdges(edges)
 		}
 	}
 
-	// Clear flushed items from cache AFTER engine writes complete
-	// This prevents the race condition where reads miss data during flush
+	// Clear flushed items
 	ae.mu.Lock()
 	for id := range nodesToWrite {
-		// Only delete if it's the same object (not updated during flush)
 		if ae.nodeCache[id] == nodesToWrite[id] {
 			delete(ae.nodeCache, id)
 		}
@@ -214,6 +218,16 @@ func (ae *AsyncEngine) CreateNode(node *Node) error {
 	// Remove from delete set if present
 	delete(ae.deleteNodes, node.ID)
 	ae.nodeCache[node.ID] = node
+
+	// Update label index
+	for _, label := range node.Labels {
+		normalLabel := strings.ToLower(label)
+		if ae.labelIndex[normalLabel] == nil {
+			ae.labelIndex[normalLabel] = make(map[NodeID]bool)
+		}
+		ae.labelIndex[normalLabel][node.ID] = true
+	}
+
 	ae.pendingWrites++
 	return nil
 }
@@ -229,11 +243,27 @@ func (ae *AsyncEngine) UpdateNode(node *Node) error {
 }
 
 // DeleteNode marks for deletion and returns immediately.
+// Optimized: if node was created in this transaction (still in cache),
+// just remove it from cache - no need to delete from underlying engine.
 func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
-	delete(ae.nodeCache, id)
+	// Check if node was created in this transaction (not yet flushed)
+	if node, existsInCache := ae.nodeCache[id]; existsInCache {
+		// Remove from label index
+		for _, label := range node.Labels {
+			normalLabel := strings.ToLower(label)
+			if ae.labelIndex[normalLabel] != nil {
+				delete(ae.labelIndex[normalLabel], id)
+			}
+		}
+		// Node was created but not flushed - just remove from cache
+		delete(ae.nodeCache, id)
+		return nil
+	}
+
+	// Node exists in underlying engine - mark for deletion
 	ae.deleteNodes[id] = true
 	ae.pendingWrites++
 	return nil
@@ -261,11 +291,21 @@ func (ae *AsyncEngine) UpdateEdge(edge *Edge) error {
 }
 
 // DeleteEdge marks for deletion and returns immediately.
+// Optimized: if edge was created in this transaction (still in cache),
+// just remove it from cache - no need to delete from underlying engine.
 func (ae *AsyncEngine) DeleteEdge(id EdgeID) error {
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
-	delete(ae.edgeCache, id)
+	// Check if edge was created in this transaction (not yet flushed)
+	if _, existsInCache := ae.edgeCache[id]; existsInCache {
+		// Edge was created but not flushed - just remove from cache
+		// No need to mark for deletion since it doesn't exist in underlying engine
+		delete(ae.edgeCache, id)
+		return nil
+	}
+
+	// Edge exists in underlying engine - mark for deletion
 	ae.deleteEdges[id] = true
 	ae.pendingWrites++
 	return nil
@@ -309,6 +349,38 @@ func (ae *AsyncEngine) GetEdge(id EdgeID) (*Edge, error) {
 // GetNodesByLabel checks cache and merges with engine results.
 // Uses case-insensitive label matching for Neo4j compatibility.
 // Snapshots cache state quickly, then releases lock before engine I/O.
+// GetFirstNodeByLabel returns the first node with the specified label.
+// Optimized for MATCH...LIMIT 1 patterns - uses label index for O(1) lookup.
+func (ae *AsyncEngine) GetFirstNodeByLabel(label string) (*Node, error) {
+	ae.mu.RLock()
+	normalLabel := strings.ToLower(label)
+
+	// Use label index for O(1) lookup instead of scanning entire cache
+	if nodeIDs := ae.labelIndex[normalLabel]; len(nodeIDs) > 0 {
+		for id := range nodeIDs {
+			if !ae.deleteNodes[id] {
+				if node := ae.nodeCache[id]; node != nil {
+					ae.mu.RUnlock()
+					return node, nil
+				}
+			}
+		}
+	}
+	ae.mu.RUnlock()
+
+	// Check underlying engine
+	if getter, ok := ae.engine.(interface{ GetFirstNodeByLabel(string) (*Node, error) }); ok {
+		return getter.GetFirstNodeByLabel(label)
+	}
+
+	// Fallback: get all and return first
+	nodes, err := ae.engine.GetNodesByLabel(label)
+	if err != nil || len(nodes) == 0 {
+		return nil, err
+	}
+	return nodes[0], nil
+}
+
 func (ae *AsyncEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	ae.mu.RLock()
 	cachedNodes := make([]*Node, 0)

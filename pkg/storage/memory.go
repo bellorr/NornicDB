@@ -137,7 +137,7 @@ type MemoryEngine struct {
 //	func TestMyGraph(t *testing.T) {
 //		engine := storage.NewMemoryEngine()
 //		defer engine.Close()
-//		
+//
 //		// Fast, clean test environment
 //		node := &storage.Node{
 //			ID:     storage.NodeID("test-1"),
@@ -145,7 +145,7 @@ type MemoryEngine struct {
 //			Properties: map[string]any{"value": 42},
 //		}
 //		engine.CreateNode(node)
-//		
+//
 //		// Verify
 //		retrieved, _ := engine.GetNode(storage.NodeID("test-1"))
 //		assert.Equal(t, 42, retrieved.Properties["value"])
@@ -156,11 +156,11 @@ type MemoryEngine struct {
 //	// Load 10,000 nodes from Neo4j export into memory
 //	engine := storage.NewMemoryEngine()
 //	defer engine.Close()
-//	
+//
 //	export := loadNeo4jExport("graph-export.json")
 //	engine.BulkCreateNodes(export.Nodes)
 //	engine.BulkCreateEdges(export.Edges)
-//	
+//
 //	// Now analyze in memory (fast!)
 //	users, _ := engine.GetNodesByLabel("User")
 //	fmt.Printf("Loaded %d users\n", len(users))
@@ -170,7 +170,7 @@ type MemoryEngine struct {
 //	func processDocuments(docs []Document) *Graph {
 //		engine := storage.NewMemoryEngine()
 //		defer engine.Close()
-//		
+//
 //		// Build graph in memory
 //		for _, doc := range docs {
 //			node := &storage.Node{
@@ -183,10 +183,10 @@ type MemoryEngine struct {
 //			}
 //			engine.CreateNode(node)
 //		}
-//		
+//
 //		// Detect relationships
 //		detectRelationships(engine)
-//		
+//
 //		// Export results
 //		return exportGraph(engine)
 //	}
@@ -216,7 +216,8 @@ type MemoryEngine struct {
 //   - 100,000 nodes ≈ 20-50 MB
 //
 // Thread Safety:
-//   Safe for concurrent use from multiple goroutines.
+//
+//	Safe for concurrent use from multiple goroutines.
 func NewMemoryEngine() *MemoryEngine {
 	return &MemoryEngine{
 		nodes:         make(map[NodeID]*Node),
@@ -775,6 +776,31 @@ func (m *MemoryEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 //
 // Note: A node can have multiple labels. This returns nodes where the
 // specified label is present in the Labels slice.
+// GetFirstNodeByLabel returns the first node with the specified label.
+// Optimized for MATCH...LIMIT 1 patterns - stops after first match.
+func (m *MemoryEngine) GetFirstNodeByLabel(label string) (*Node, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.closed {
+		return nil, ErrStorageClosed
+	}
+
+	nodeIDs := m.nodesByLabel[normalizeLabel(label)]
+	if nodeIDs == nil {
+		return nil, nil
+	}
+
+	// Return first node found
+	for id := range nodeIDs {
+		if node := m.nodes[id]; node != nil {
+			return m.copyNode(node), nil
+		}
+	}
+
+	return nil, nil
+}
+
 func (m *MemoryEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

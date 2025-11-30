@@ -1069,11 +1069,17 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 	matchPart := strings.TrimSpace(block[:createIdx])
 	createPart := strings.TrimSpace(block[createIdx:]) // Keep "CREATE" for splitting
 
+	// Strip WITH clause from matchPart (handles MATCH ... WITH ... LIMIT 1 CREATE ...)
+	if withInMatch := findKeywordIndex(matchPart, "WITH"); withInMatch > 0 {
+		matchPart = strings.TrimSpace(matchPart[:withInMatch])
+	}
+
 	// Find WITH clause (for MATCH...CREATE...WITH...DELETE pattern)
 	withIdx := findKeywordIndex(createPart, "WITH")
 	deleteIdx := findKeywordIndex(createPart, "DELETE")
 	var deleteTarget string
 	hasWithDelete := withIdx > 0 && deleteIdx > withIdx
+	hasDirectDelete := deleteIdx > 0 && withIdx <= 0 // DELETE without WITH in createPart
 
 	// Find RETURN clause if present (only in last block typically)
 	returnIdx := findKeywordIndex(createPart, "RETURN")
@@ -1088,6 +1094,10 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				deleteTarget = strings.TrimSpace(withDeletePart[deletePartIdx+6:])
 			}
 			createPart = strings.TrimSpace(createPart[:withIdx])
+		} else if hasDirectDelete {
+			// CREATE...DELETE...RETURN (DELETE without WITH)
+			deleteTarget = strings.TrimSpace(createPart[deleteIdx+6 : returnIdx])
+			createPart = strings.TrimSpace(createPart[:deleteIdx])
 		} else {
 			createPart = strings.TrimSpace(createPart[:returnIdx])
 		}
@@ -1099,6 +1109,10 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			deleteTarget = strings.TrimSpace(withDeletePart[deletePartIdx+6:])
 		}
 		createPart = strings.TrimSpace(createPart[:withIdx])
+	} else if hasDirectDelete {
+		// CREATE...DELETE without WITH or RETURN
+		deleteTarget = strings.TrimSpace(createPart[deleteIdx+6:])
+		createPart = strings.TrimSpace(createPart[:deleteIdx])
 	}
 
 	// Parse all node patterns from MATCH clause and find matching nodes
@@ -1151,6 +1165,20 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			}
 
 			// Find matching node (uncached path)
+			// Optimization: if no properties filter, use GetFirstNodeByLabel for O(1) lookup
+			if len(nodeInfo.properties) == 0 && len(nodeInfo.labels) > 0 {
+				// Try optimized single-node fetch
+				if getter, ok := e.storage.(interface {
+					GetFirstNodeByLabel(string) (*storage.Node, error)
+				}); ok {
+					if node, err := getter.GetFirstNodeByLabel(nodeInfo.labels[0]); err == nil && node != nil {
+						nodeVars[nodeInfo.variable] = node
+						continue
+					}
+				}
+			}
+
+			// Full scan path (when properties need filtering or no optimized getter)
 			var candidates []*storage.Node
 			if len(nodeInfo.labels) > 0 {
 				candidates, _ = e.storage.GetNodesByLabel(nodeInfo.labels[0])

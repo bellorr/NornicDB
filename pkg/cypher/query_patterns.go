@@ -283,12 +283,15 @@ func detectEdgePropertyAgg(query string, info *PatternInfo) bool {
 
 		// Check if aggregation is on the relationship variable
 		if strings.EqualFold(varName, relVar) {
+			// Only use EdgePropertyAgg optimization for actual property aggregations
+			// Simple count(r) without a property should use the regular path
+			if propName == "" {
+				return false // Let regular executeMatch handle simple count(r)
+			}
 			info.Pattern = PatternEdgePropertyAgg
 			info.RelVar = relVar
 			info.AggFunctions = append(info.AggFunctions, aggFunc)
-			if propName != "" {
-				info.AggProperty = propName
-			}
+			info.AggProperty = propName
 			return true
 		}
 	}

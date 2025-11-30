@@ -1232,6 +1232,51 @@ func (b *BadgerEngine) BulkDeleteEdges(ids []EdgeID) error {
 // Query Operations
 // ============================================================================
 
+// GetFirstNodeByLabel returns the first node with the specified label.
+// This is optimized for MATCH...LIMIT 1 patterns - stops after first match.
+func (b *BadgerEngine) GetFirstNodeByLabel(label string) (*Node, error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return nil, ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	var node *Node
+	err := b.db.View(func(txn *badger.Txn) error {
+		prefix := labelIndexPrefix(label)
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			nodeID := extractNodeIDFromLabelIndex(it.Item().Key(), len(label))
+			if nodeID == "" {
+				continue
+			}
+
+			item, err := txn.Get(nodeKey(nodeID))
+			if err != nil {
+				continue
+			}
+
+			if err := item.Value(func(val []byte) error {
+				var decodeErr error
+				node, decodeErr = decodeNode(val)
+				return decodeErr
+			}); err != nil {
+				continue
+			}
+
+			return nil // Found first node, stop
+		}
+		return nil
+	})
+
+	return node, err
+}
+
 // GetNodesByLabel returns all nodes with the specified label.
 func (b *BadgerEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	b.mu.RLock()

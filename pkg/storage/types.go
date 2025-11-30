@@ -365,6 +365,7 @@ type Engine interface {
 
 	// Query operations
 	GetNodesByLabel(label string) ([]*Node, error)
+	GetFirstNodeByLabel(label string) (*Node, error) // Optimized for LIMIT 1
 	GetOutgoingEdges(nodeID NodeID) ([]*Edge, error)
 	GetIncomingEdges(nodeID NodeID) ([]*Edge, error)
 	GetEdgesBetween(startID, endID NodeID) ([]*Edge, error)

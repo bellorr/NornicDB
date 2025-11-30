@@ -993,6 +993,11 @@ func (w *WALEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	return w.engine.GetNodesByLabel(label)
 }
 
+// GetFirstNodeByLabel delegates to underlying engine.
+func (w *WALEngine) GetFirstNodeByLabel(label string) (*Node, error) {
+	return w.engine.GetFirstNodeByLabel(label)
+}
+
 // BatchGetNodes delegates to underlying engine.
 func (w *WALEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 	return w.engine.BatchGetNodes(ids)

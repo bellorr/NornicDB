@@ -2,6 +2,7 @@
 package bolt
 
 import (
+	"bufio"
 	"context"
 	"io"
 	"net"
@@ -165,6 +166,18 @@ func (m *mockConn) SetDeadline(t time.Time) error      { return nil }
 func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 
+// newTestSession creates a properly initialized Session for testing.
+// This ensures reader and writer are set up correctly.
+func newTestSession(conn net.Conn, executor QueryExecutor) *Session {
+	return &Session{
+		conn:       conn,
+		reader:     bufio.NewReaderSize(conn, 8192),
+		writer:     bufio.NewWriterSize(conn, 8192),
+		executor:   executor,
+		messageBuf: make([]byte, 0, 4096),
+	}
+}
+
 func TestSessionHandshake(t *testing.T) {
 	t.Run("valid handshake", func(t *testing.T) {
 		// Bolt magic: 0x6060B017
@@ -178,10 +191,7 @@ func TestSessionHandshake(t *testing.T) {
 		}
 
 		conn := &mockConn{readData: handshakeData}
-		session := &Session{
-			conn:     conn,
-			executor: &mockExecutor{},
-		}
+		session := newTestSession(conn, &mockExecutor{})
 
 		err := session.handshake()
 		if err != nil {
@@ -208,7 +218,7 @@ func TestSessionHandshake(t *testing.T) {
 		}
 
 		conn := &mockConn{readData: handshakeData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handshake()
 		if err == nil {
@@ -222,16 +232,13 @@ func TestSessionHandleMessage(t *testing.T) {
 		// PackStream struct format: 0xB1 (tiny struct, 1 field) + signature + data
 		// HELLO message needs an empty map (auth info): 0xA0
 		messageData := []byte{
-			0x00, 0x03,           // Size: 3 bytes
+			0x00, 0x03, // Size: 3 bytes
 			0xB1, MsgHello, 0xA0, // Tiny struct + HELLO sig + empty map
-			0x00, 0x00,           // Zero terminator (end of message)
+			0x00, 0x00, // Zero terminator (end of message)
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{
-			conn:     conn,
-			executor: &mockExecutor{},
-		}
+		session := newTestSession(conn, &mockExecutor{})
 
 		err := session.handleMessage()
 		if err != nil {
@@ -241,13 +248,13 @@ func TestSessionHandleMessage(t *testing.T) {
 
 	t.Run("goodbye message", func(t *testing.T) {
 		messageData := []byte{
-			0x00, 0x02,            // Size: 2 bytes
-			0xB0, MsgGoodbye,      // Tiny struct (0 fields) + GOODBYE sig
-			0x00, 0x00,            // Zero terminator
+			0x00, 0x02, // Size: 2 bytes
+			0xB0, MsgGoodbye, // Tiny struct (0 fields) + GOODBYE sig
+			0x00, 0x00, // Zero terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err != io.EOF {
@@ -259,18 +266,15 @@ func TestSessionHandleMessage(t *testing.T) {
 		// RUN needs query string and params map
 		// Query: "TEST" (0x84 + TEST), Params: empty map (0xA0)
 		messageData := []byte{
-			0x00, 0x08,                              // Size: 8 bytes
-			0xB1, MsgRun,                            // Tiny struct + RUN sig
-			0x84, 'T', 'E', 'S', 'T',                // Query string "TEST"
-			0xA0,                                     // Empty params map
-			0x00, 0x00,                              // Zero terminator
+			0x00, 0x08, // Size: 8 bytes
+			0xB1, MsgRun, // Tiny struct + RUN sig
+			0x84, 'T', 'E', 'S', 'T', // Query string "TEST"
+			0xA0,       // Empty params map
+			0x00, 0x00, // Zero terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{
-			conn:     conn,
-			executor: &mockExecutor{},
-		}
+		session := newTestSession(conn, &mockExecutor{})
 
 		err := session.handleMessage()
 		if err != nil {
@@ -281,13 +285,13 @@ func TestSessionHandleMessage(t *testing.T) {
 	t.Run("pull message", func(t *testing.T) {
 		// PULL needs options map
 		messageData := []byte{
-			0x00, 0x03,           // Size: 3 bytes
-			0xB1, MsgPull, 0xA0,  // Tiny struct + PULL sig + empty options
-			0x00, 0x00,           // Zero terminator
+			0x00, 0x03, // Size: 3 bytes
+			0xB1, MsgPull, 0xA0, // Tiny struct + PULL sig + empty options
+			0x00, 0x00, // Zero terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err != nil {
@@ -297,16 +301,14 @@ func TestSessionHandleMessage(t *testing.T) {
 
 	t.Run("reset message", func(t *testing.T) {
 		messageData := []byte{
-			0x00, 0x02,            // Size: 2 bytes
-			0xB0, MsgReset,        // Tiny struct (0 fields) + RESET sig
-			0x00, 0x00,            // Zero terminator
+			0x00, 0x02, // Size: 2 bytes
+			0xB0, MsgReset, // Tiny struct (0 fields) + RESET sig
+			0x00, 0x00, // Zero terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{
-			conn:          conn,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, nil)
+		session.inTransaction = true
 
 		err := session.handleMessage()
 		if err != nil {
@@ -320,13 +322,13 @@ func TestSessionHandleMessage(t *testing.T) {
 
 	t.Run("begin message", func(t *testing.T) {
 		messageData := []byte{
-			0x00, 0x03,            // Size: 3 bytes
-			0xB1, MsgBegin, 0xA0,  // Tiny struct + BEGIN sig + empty options map
-			0x00, 0x00,            // Zero terminator
+			0x00, 0x03, // Size: 3 bytes
+			0xB1, MsgBegin, 0xA0, // Tiny struct + BEGIN sig + empty options map
+			0x00, 0x00, // Zero terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err != nil {
@@ -340,16 +342,14 @@ func TestSessionHandleMessage(t *testing.T) {
 
 	t.Run("commit message", func(t *testing.T) {
 		messageData := []byte{
-			0x00, 0x02,            // Size: 2 bytes
-			0xB0, MsgCommit,       // Tiny struct (0 fields) + COMMIT sig
-			0x00, 0x00,            // Zero terminator
+			0x00, 0x02, // Size: 2 bytes
+			0xB0, MsgCommit, // Tiny struct (0 fields) + COMMIT sig
+			0x00, 0x00, // Zero terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{
-			conn:          conn,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, nil)
+		session.inTransaction = true
 
 		err := session.handleMessage()
 		if err != nil {
@@ -363,16 +363,14 @@ func TestSessionHandleMessage(t *testing.T) {
 
 	t.Run("rollback message", func(t *testing.T) {
 		messageData := []byte{
-			0x00, 0x02,            // Size: 2 bytes
-			0xB0, MsgRollback,     // Tiny struct (0 fields) + ROLLBACK sig
-			0x00, 0x00,            // Zero terminator
+			0x00, 0x02, // Size: 2 bytes
+			0xB0, MsgRollback, // Tiny struct (0 fields) + ROLLBACK sig
+			0x00, 0x00, // Zero terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{
-			conn:          conn,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, nil)
+		session.inTransaction = true
 
 		err := session.handleMessage()
 		if err != nil {
@@ -392,7 +390,7 @@ func TestSessionHandleMessage(t *testing.T) {
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err == nil {
@@ -406,7 +404,7 @@ func TestSessionHandleMessage(t *testing.T) {
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err != nil {
@@ -417,7 +415,7 @@ func TestSessionHandleMessage(t *testing.T) {
 
 func TestSessionSendChunk(t *testing.T) {
 	conn := &mockConn{}
-	session := &Session{conn: conn}
+	session := newTestSession(conn, nil)
 
 	data := []byte{MsgSuccess, 0xA0} // Success + empty map marker
 	err := session.sendChunk(data)
@@ -445,7 +443,7 @@ func TestSessionSendChunk(t *testing.T) {
 
 func TestSessionSendSuccess(t *testing.T) {
 	conn := &mockConn{}
-	session := &Session{conn: conn}
+	session := newTestSession(conn, nil)
 
 	err := session.sendSuccess(map[string]any{
 		"server": "NornicDB",
@@ -462,7 +460,7 @@ func TestSessionSendSuccess(t *testing.T) {
 
 func TestSessionSendFailure(t *testing.T) {
 	conn := &mockConn{}
-	session := &Session{conn: conn}
+	session := newTestSession(conn, nil)
 
 	err := session.sendFailure("Neo.ClientError.Statement.SyntaxError", "Invalid query")
 	if err != nil {
@@ -672,7 +670,7 @@ func TestIsClosed(t *testing.T) {
 func TestSendChunkLargeData(t *testing.T) {
 	t.Run("large data chunking", func(t *testing.T) {
 		conn := &mockConn{}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		// Create data that's larger than typical chunk (but still fits)
 		data := make([]byte, 1000)
@@ -694,7 +692,7 @@ func TestSendChunkLargeData(t *testing.T) {
 
 	t.Run("empty data", func(t *testing.T) {
 		conn := &mockConn{}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.sendChunk([]byte{})
 		if err != nil {
@@ -732,7 +730,7 @@ func TestSendChunkWriteError(t *testing.T) {
 	t.Run("write error", func(t *testing.T) {
 		// sendChunk now does single write with consolidated buffer
 		conn := &errorConn{writeErr: io.ErrClosedPipe}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.sendChunk([]byte{0x01})
 		if err == nil {
@@ -749,7 +747,7 @@ func TestSendChunkWriteError(t *testing.T) {
 				return len(b), nil
 			},
 		}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.sendChunk([]byte{0xAB, 0xCD})
 		if err != nil {
@@ -815,7 +813,7 @@ func TestHandshakeVersionNegotiation(t *testing.T) {
 		}
 
 		conn := &mockConn{readData: handshakeData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handshake()
 		// Should still work (server picks best available or rejects)
@@ -829,7 +827,7 @@ func TestHandshakeVersionNegotiation(t *testing.T) {
 			mockConn: mockConn{readData: []byte{}},
 			readErr:  io.ErrUnexpectedEOF,
 		}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handshake()
 		if err == nil {
@@ -850,7 +848,7 @@ func TestHandshakeVersionNegotiation(t *testing.T) {
 			mockConn: mockConn{readData: handshakeData},
 			writeErr: io.ErrClosedPipe,
 		}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handshake()
 		if err == nil {
@@ -865,7 +863,7 @@ func TestHandshakeVersionNegotiation(t *testing.T) {
 		}
 
 		conn := &mockConn{readData: handshakeData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handshake()
 		if err == nil {
@@ -876,7 +874,7 @@ func TestHandshakeVersionNegotiation(t *testing.T) {
 
 func TestHandleMessageReadError(t *testing.T) {
 	conn := &errorConn{readErr: io.ErrUnexpectedEOF}
-	session := &Session{conn: conn}
+	session := newTestSession(conn, nil)
 
 	err := session.handleMessage()
 	if err == nil {
@@ -892,7 +890,7 @@ func TestHandleMessageDataReadError(t *testing.T) {
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err == nil {
@@ -904,12 +902,12 @@ func TestHandleMessageDataReadError(t *testing.T) {
 		// Header + data but no terminator
 		messageData := []byte{
 			0x00, 0x01, // Size: 1 byte
-			MsgHello,   // Message type
+			MsgHello, // Message type
 			// Missing terminator
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err == nil {
@@ -926,7 +924,7 @@ func TestSessionHandleDiscard(t *testing.T) {
 	}
 
 	conn := &mockConn{readData: messageData}
-	session := &Session{conn: conn}
+	session := newTestSession(conn, nil)
 
 	err := session.handleMessage()
 	// Discard should return error for unhandled or be handled
@@ -942,7 +940,7 @@ func TestSessionHandleRoute(t *testing.T) {
 	}
 
 	conn := &mockConn{readData: messageData}
-	session := &Session{conn: conn}
+	session := newTestSession(conn, nil)
 
 	err := session.handleMessage()
 	// Route should be handled or return error
@@ -957,14 +955,14 @@ func TestMultiChunkMessageHandling(t *testing.T) {
 	t.Run("single chunk message", func(t *testing.T) {
 		// Single chunk: size header + data + zero terminator
 		messageData := []byte{
-			0x00, 0x05,           // Size: 5 bytes
+			0x00, 0x05, // Size: 5 bytes
 			0xB1, MsgHello, 0xA0, // Tiny struct with signature HELLO, empty map
-			0x00, 0x00,           // Zero chunk terminator
+			0x00, 0x00, // Zero chunk terminator
 		}
 
 		conn := &mockConn{readData: messageData}
 		executor := &mockExecutor{}
-		session := &Session{conn: conn, executor: executor}
+		session := newTestSession(conn, executor)
 
 		err := session.handleMessage()
 		// HELLO needs proper handling, but we're testing chunk reading
@@ -979,17 +977,17 @@ func TestMultiChunkMessageHandling(t *testing.T) {
 
 		messageData := []byte{
 			// First chunk
-			0x00, 0x03,     // Size: 3 bytes
+			0x00, 0x03, // Size: 3 bytes
 			0xB1, 0x01, 'A', // Data
 			// Second chunk
 			0x00, 0x02, // Size: 2 bytes
-			'B', 'C',   // Data
+			'B', 'C', // Data
 			// Zero terminator
 			0x00, 0x00,
 		}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		// Will error since it's not a valid message, but tests multi-chunk reading
@@ -1001,7 +999,7 @@ func TestMultiChunkMessageHandling(t *testing.T) {
 		messageData := []byte{0x00, 0x00}
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn}
+		session := newTestSession(conn, nil)
 
 		err := session.handleMessage()
 		if err != nil {
@@ -1034,7 +1032,7 @@ func TestMultiChunkMessageHandling(t *testing.T) {
 		messageData = append(messageData, 0x00, 0x00)
 
 		conn := &mockConn{readData: messageData}
-		session := &Session{conn: conn, executor: &mockExecutor{}}
+		session := newTestSession(conn, &mockExecutor{})
 
 		err := session.handleMessage()
 		// Will likely error on parsing but tests chunk accumulation
@@ -1273,9 +1271,9 @@ func TestDecodePackStreamMap(t *testing.T) {
 		{
 			name: "single entry",
 			data: []byte{
-				0xA1,       // Tiny map, 1 entry
-				0x81, 'a',  // Key: "a"
-				0x01,       // Value: 1
+				0xA1,      // Tiny map, 1 entry
+				0x81, 'a', // Key: "a"
+				0x01, // Value: 1
 			},
 			offset: 0,
 			check:  func(m map[string]any) bool { return m["a"] == int64(1) },
@@ -1434,7 +1432,7 @@ func TestParseRunMessage(t *testing.T) {
 		data := []byte{
 			0x8D, // Tiny string, 13 chars for "MATCH (n) ..."
 			'M', 'A', 'T', 'C', 'H', ' ', '(', 'n', ')', ' ', 'R', 'E', 'T',
-			0xA1,            // Map with 1 entry
+			0xA1,                     // Map with 1 entry
 			0x84, 'n', 'a', 'm', 'e', // Key: "name"
 			0x85, 'A', 'l', 'i', 'c', 'e', // Value: "Alice"
 		}
@@ -1497,7 +1495,7 @@ func TestSessionExecuteWithParams(t *testing.T) {
 	messageData = append(messageData, 0x00, 0x00) // Zero terminator
 
 	conn := &mockConn{readData: messageData}
-	session := &Session{conn: conn, executor: executor}
+	session := newTestSession(conn, executor)
 
 	err := session.handleMessage()
 	if err != nil {
@@ -1553,7 +1551,7 @@ func TestEncodePackStreamIntVariants(t *testing.T) {
 		value       int64
 		expectFirst byte
 	}{
-		{"INT8 negative -17", -17, 0xC8},  // -17 requires INT8 (-128 to -17 range)
+		{"INT8 negative -17", -17, 0xC8},   // -17 requires INT8 (-128 to -17 range)
 		{"INT8 negative -100", -100, 0xC8}, // -100 is in INT8 range
 		{"INT16 positive", 200, 0xC9},      // 200 > 127, goes to INT16
 		{"INT16 negative", -1000, 0xC9},    // -1000 < -128, needs INT16
@@ -1614,10 +1612,10 @@ func TestDecodePackStreamIntVariants(t *testing.T) {
 		data     []byte
 		expected int64
 	}{
-		{"INT8 positive", []byte{0xC8, 0x64}, 100},            // 100
-		{"INT8 negative", []byte{0xC8, 0x9C}, -100},           // -100
-		{"INT16 positive", []byte{0xC9, 0x03, 0xE8}, 1000},    // 1000
-		{"INT16 negative", []byte{0xC9, 0xFC, 0x18}, -1000},   // -1000
+		{"INT8 positive", []byte{0xC8, 0x64}, 100},          // 100
+		{"INT8 negative", []byte{0xC8, 0x9C}, -100},         // -100
+		{"INT16 positive", []byte{0xC9, 0x03, 0xE8}, 1000},  // 1000
+		{"INT16 negative", []byte{0xC9, 0xFC, 0x18}, -1000}, // -1000
 	}
 
 	for _, tt := range tests {
@@ -1679,8 +1677,17 @@ func TestHandlePull(t *testing.T) {
 		},
 	}
 
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
 	session := &Session{
-		executor: executor,
+		conn:       server,
+		reader:     bufio.NewReaderSize(server, 8192),
+		writer:     bufio.NewWriterSize(server, 8192),
+		executor:   executor,
+		messageBuf: make([]byte, 0, 4096),
 		lastResult: &QueryResult{
 			Columns: []string{"name", "age"},
 			Rows: [][]any{
@@ -1691,13 +1698,6 @@ func TestHandlePull(t *testing.T) {
 		},
 		resultIndex: 0,
 	}
-
-	// Create a mock connection
-	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
-
-	session.conn = server
 
 	// Handle PULL in goroutine
 	done := make(chan error, 1)
@@ -1730,20 +1730,22 @@ func TestHandlePull(t *testing.T) {
 }
 
 func TestHandleDiscard(t *testing.T) {
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
 	session := &Session{
+		conn:       server,
+		reader:     bufio.NewReaderSize(server, 8192),
+		writer:     bufio.NewWriterSize(server, 8192),
+		messageBuf: make([]byte, 0, 4096),
 		lastResult: &QueryResult{
 			Columns: []string{"n"},
 			Rows:    [][]any{{"test"}},
 		},
 		resultIndex: 0,
 	}
-
-	// Create a mock connection
-	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
-
-	session.conn = server
 
 	// Handle DISCARD
 	done := make(chan error, 1)
@@ -1773,14 +1775,17 @@ func TestHandleDiscard(t *testing.T) {
 }
 
 func TestHandleRoute(t *testing.T) {
-	session := &Session{}
-
 	// Create a mock connection
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
 
-	session.conn = server
+	session := &Session{
+		conn:       server,
+		reader:     bufio.NewReaderSize(server, 8192),
+		writer:     bufio.NewWriterSize(server, 8192),
+		messageBuf: make([]byte, 0, 4096),
+	}
 
 	// Handle ROUTE
 	done := make(chan error, 1)
@@ -1805,14 +1810,17 @@ func TestHandleRoute(t *testing.T) {
 }
 
 func TestSendRecord(t *testing.T) {
-	session := &Session{}
-
 	// Create a mock connection
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
 
-	session.conn = server
+	session := &Session{
+		conn:       server,
+		reader:     bufio.NewReaderSize(server, 8192),
+		writer:     bufio.NewWriterSize(server, 8192),
+		messageBuf: make([]byte, 0, 4096),
+	}
 
 	// Send a record
 	done := make(chan error, 1)
@@ -1856,8 +1864,8 @@ func TestDecodePackStreamList_MixedTypes(t *testing.T) {
 		{
 			name: "list with string and int",
 			data: []byte{
-				0x92,             // TINY_LIST with 2 elements
-				0x85,             // TINY_STRING "hello" (5 chars)
+				0x92, // TINY_LIST with 2 elements
+				0x85, // TINY_STRING "hello" (5 chars)
 				'h', 'e', 'l', 'l', 'o',
 				0x05, // tiny int 5
 			},
@@ -1888,8 +1896,8 @@ func TestDecodePackStreamList_MixedTypes(t *testing.T) {
 func TestDecodePackStreamList_LIST8(t *testing.T) {
 	// LIST8 with more elements
 	data := []byte{0xD4, 0x02} // LIST8 marker + 2 elements
-	data = append(data, 0x01) // tiny int 1
-	data = append(data, 0x02) // tiny int 2
+	data = append(data, 0x01)  // tiny int 1
+	data = append(data, 0x02)  // tiny int 2
 
 	result, _, err := decodePackStreamList(data, 0)
 	if err != nil {
@@ -1933,13 +1941,13 @@ func TestDecodePackStreamValue_AllTypes(t *testing.T) {
 			expected: int64(-16),
 		},
 		{
-			name: "INT8",
-			data: []byte{0xC8, 0x80}, // -128
+			name:     "INT8",
+			data:     []byte{0xC8, 0x80}, // -128
 			expected: int64(-128),
 		},
 		{
-			name: "INT16",
-			data: []byte{0xC9, 0x01, 0x00}, // 256
+			name:     "INT16",
+			data:     []byte{0xC9, 0x01, 0x00}, // 256
 			expected: int64(256),
 		},
 	}
@@ -1970,8 +1978,8 @@ func TestEncodePackStreamValue_AllTypes(t *testing.T) {
 		{"tiny int", int64(42), 0x2A},
 		{"negative int", int64(-10), 0xF6},
 		{"float64", 3.14, 0xC1},
-		{"string", "hello", 0x85}, // TINY_STRING
-		{"empty list", []any{}, 0x90}, // TINY_LIST
+		{"string", "hello", 0x85},             // TINY_STRING
+		{"empty list", []any{}, 0x90},         // TINY_LIST
 		{"empty map", map[string]any{}, 0xA0}, // TINY_MAP
 	}
 
@@ -1992,9 +2000,9 @@ func TestEncodePackStreamValue_AllTypes(t *testing.T) {
 func TestDecodePackStreamMap_Nested(t *testing.T) {
 	// Nested map
 	data := []byte{
-		0xA1, // TINY_MAP with 1 element
+		0xA1,                     // TINY_MAP with 1 element
 		0x84, 'd', 'a', 't', 'a', // key "data"
-		0xA1, // nested TINY_MAP with 1 element
+		0xA1,                // nested TINY_MAP with 1 element
 		0x83, 'f', 'o', 'o', // key "foo"
 		0x83, 'b', 'a', 'r', // value "bar"
 	}
@@ -2016,14 +2024,17 @@ func TestDecodePackStreamMap_Nested(t *testing.T) {
 }
 
 func TestDispatchMessage_UnknownType(t *testing.T) {
-	session := &Session{}
-
 	// Create a mock connection
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
 
-	session.conn = server
+	session := &Session{
+		conn:       server,
+		reader:     bufio.NewReaderSize(server, 8192),
+		writer:     bufio.NewWriterSize(server, 8192),
+		messageBuf: make([]byte, 0, 4096),
+	}
 
 	// Handle unknown message type
 	done := make(chan error, 1)
@@ -2064,16 +2075,18 @@ func TestSessionRunWithMultipleResults(t *testing.T) {
 		},
 	}
 
-	session := &Session{
-		executor: executor,
-	}
-
 	// Create a mock connection
 	server, client := net.Pipe()
 	defer server.Close()
 	defer client.Close()
 
-	session.conn = server
+	session := &Session{
+		conn:       server,
+		reader:     bufio.NewReaderSize(server, 8192),
+		writer:     bufio.NewWriterSize(server, 8192),
+		executor:   executor,
+		messageBuf: make([]byte, 0, 4096),
+	}
 
 	// Execute a query
 	done := make(chan error, 1)
@@ -2108,7 +2121,16 @@ func TestSessionRunWithMultipleResults(t *testing.T) {
 }
 
 func TestHandlePullWithLimit(t *testing.T) {
+	// Create a mock connection
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
 	session := &Session{
+		conn:       server,
+		reader:     bufio.NewReaderSize(server, 8192),
+		writer:     bufio.NewWriterSize(server, 8192),
+		messageBuf: make([]byte, 0, 4096),
 		lastResult: &QueryResult{
 			Columns: []string{"n"},
 			Rows: [][]any{
@@ -2122,18 +2144,11 @@ func TestHandlePullWithLimit(t *testing.T) {
 		resultIndex: 0,
 	}
 
-	// Create a mock connection
-	server, client := net.Pipe()
-	defer server.Close()
-	defer client.Close()
-
-	session.conn = server
-
 	// Build PULL data with n=2 (PackStream map: {n: 2})
 	pullData := []byte{
-		0xA1,       // TINY_MAP with 1 element
-		0x81, 'n',  // TINY_STRING "n"
-		0x02,       // tiny int 2
+		0xA1,      // TINY_MAP with 1 element
+		0x81, 'n', // TINY_STRING "n"
+		0x02, // tiny int 2
 	}
 
 	// Pull only 2 records
@@ -2170,12 +2185,12 @@ func TestHandlePullWithLimit(t *testing.T) {
 
 func TestEncodePackStreamMap_ComplexTypes(t *testing.T) {
 	m := map[string]any{
-		"string":  "hello",
-		"int":     int64(42),
-		"float":   3.14,
-		"bool":    true,
-		"nil":     nil,
-		"list":    []any{1, 2, 3},
+		"string": "hello",
+		"int":    int64(42),
+		"float":  3.14,
+		"bool":   true,
+		"nil":    nil,
+		"list":   []any{1, 2, 3},
 		"nested": map[string]any{
 			"key": "value",
 		},
@@ -2309,10 +2324,7 @@ func TestHandleBeginWithTransactionalExecutor(t *testing.T) {
 	t.Run("begin calls executor", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:     conn,
-			executor: executor,
-		}
+		session := newTestSession(conn, executor)
 
 		err := session.handleBegin(nil)
 		if err != nil {
@@ -2330,10 +2342,7 @@ func TestHandleBeginWithTransactionalExecutor(t *testing.T) {
 	t.Run("begin with metadata passes metadata to executor", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:     conn,
-			executor: executor,
-		}
+		session := newTestSession(conn, executor)
 
 		// Create metadata with tx_timeout
 		metadata := encodePackStreamMap(map[string]any{
@@ -2355,10 +2364,7 @@ func TestHandleBeginWithTransactionalExecutor(t *testing.T) {
 			beginError: io.EOF, // Simulate error
 		}
 		conn := &mockConn{}
-		session := &Session{
-			conn:     conn,
-			executor: executor,
-		}
+		session := newTestSession(conn, executor)
 
 		err := session.handleBegin(nil)
 		if err != nil {
@@ -2376,11 +2382,8 @@ func TestHandleCommitWithTransactionalExecutor(t *testing.T) {
 	t.Run("commit calls executor and returns bookmark", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = true
 
 		err := session.handleCommit(nil)
 		if err != nil {
@@ -2403,11 +2406,8 @@ func TestHandleCommitWithTransactionalExecutor(t *testing.T) {
 	t.Run("commit without transaction returns failure", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: false,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = false
 
 		err := session.handleCommit(nil)
 		if err != nil {
@@ -2424,11 +2424,8 @@ func TestHandleCommitWithTransactionalExecutor(t *testing.T) {
 			commitError: io.EOF,
 		}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = true
 
 		err := session.handleCommit(nil)
 		if err != nil {
@@ -2446,11 +2443,8 @@ func TestHandleRollbackWithTransactionalExecutor(t *testing.T) {
 	t.Run("rollback calls executor", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = true
 
 		err := session.handleRollback(nil)
 		if err != nil {
@@ -2468,11 +2462,8 @@ func TestHandleRollbackWithTransactionalExecutor(t *testing.T) {
 	t.Run("rollback without transaction is no-op", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: false,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = false
 
 		err := session.handleRollback(nil)
 		if err != nil {
@@ -2489,11 +2480,8 @@ func TestHandleResetWithTransactionalExecutor(t *testing.T) {
 	t.Run("reset rolls back active transaction", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = true
 
 		err := session.handleReset(nil)
 		if err != nil {
@@ -2511,11 +2499,8 @@ func TestHandleResetWithTransactionalExecutor(t *testing.T) {
 	t.Run("reset without transaction does not call rollback", func(t *testing.T) {
 		executor := &mockTransactionalExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: false,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = false
 
 		err := session.handleReset(nil)
 		if err != nil {
@@ -2532,10 +2517,7 @@ func TestTransactionWithNonTransactionalExecutor(t *testing.T) {
 	t.Run("begin works without TransactionalExecutor", func(t *testing.T) {
 		executor := &mockExecutor{} // Does NOT implement TransactionalExecutor
 		conn := &mockConn{}
-		session := &Session{
-			conn:     conn,
-			executor: executor,
-		}
+		session := newTestSession(conn, executor)
 
 		err := session.handleBegin(nil)
 		if err != nil {
@@ -2550,11 +2532,8 @@ func TestTransactionWithNonTransactionalExecutor(t *testing.T) {
 	t.Run("commit works without TransactionalExecutor", func(t *testing.T) {
 		executor := &mockExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = true
 
 		err := session.handleCommit(nil)
 		if err != nil {
@@ -2569,11 +2548,8 @@ func TestTransactionWithNonTransactionalExecutor(t *testing.T) {
 	t.Run("rollback works without TransactionalExecutor", func(t *testing.T) {
 		executor := &mockExecutor{}
 		conn := &mockConn{}
-		session := &Session{
-			conn:          conn,
-			executor:      executor,
-			inTransaction: true,
-		}
+		session := newTestSession(conn, executor)
+		session.inTransaction = true
 
 		err := session.handleRollback(nil)
 		if err != nil {

@@ -120,6 +120,7 @@
 package bolt
 
 import (
+	"bufio"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -279,6 +280,21 @@ type TransactionalExecutor interface {
 	BeginTransaction(ctx context.Context, metadata map[string]any) error
 	CommitTransaction(ctx context.Context) error
 	RollbackTransaction(ctx context.Context) error
+}
+
+// FlushableExecutor extends QueryExecutor with deferred commit support.
+// This enables Neo4j-style optimization where writes are buffered until PULL.
+type FlushableExecutor interface {
+	QueryExecutor
+	// Flush persists all pending writes to storage.
+	Flush() error
+}
+
+// DeferrableExecutor extends FlushableExecutor with deferred flush mode control.
+type DeferrableExecutor interface {
+	FlushableExecutor
+	// SetDeferFlush enables/disables deferred flush mode.
+	SetDeferFlush(enabled bool)
 }
 
 // QueryResult holds the result of a query.
@@ -604,10 +620,30 @@ func (s *Server) handleConnection(conn net.Conn) {
 	}()
 
 	session := &Session{
-		conn:     conn,
-		server:   s,
-		executor: s.executor,
+		conn:       conn,
+		reader:     bufio.NewReaderSize(conn, 8192), // 8KB read buffer
+		writer:     bufio.NewWriterSize(conn, 8192), // 8KB write buffer
+		server:     s,
+		executor:   s.executor,
+		messageBuf: make([]byte, 0, 4096), // Pre-allocate 4KB message buffer
 	}
+
+	// Enable deferred flush mode for Neo4j-style write batching
+	if deferrable, ok := s.executor.(DeferrableExecutor); ok {
+		deferrable.SetDeferFlush(true)
+	}
+
+	// Ensure cleanup on session end
+	defer func() {
+		// Flush any pending writes
+		if flushable, ok := s.executor.(FlushableExecutor); ok {
+			flushable.Flush()
+		}
+		// Disable deferred flush mode
+		if deferrable, ok := s.executor.(DeferrableExecutor); ok {
+			deferrable.SetDeferFlush(false)
+		}
+	}()
 
 	// Perform handshake
 	if err := session.handshake(); err != nil {
@@ -615,7 +651,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		return
 	}
 
-	// Handle messages
+	// Handle messages synchronously (simpler, lower overhead for request-response)
 	for {
 		if s.closed.Load() {
 			return
@@ -624,7 +660,6 @@ func (s *Server) handleConnection(conn net.Conn) {
 			if err == io.EOF {
 				return
 			}
-			// Silently handle connection reset errors (client disconnected)
 			errStr := err.Error()
 			if strings.Contains(errStr, "connection reset") ||
 				strings.Contains(errStr, "broken pipe") ||
@@ -640,6 +675,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 // Session represents a client session.
 type Session struct {
 	conn     net.Conn
+	reader   *bufio.Reader // Buffered reader for reduced syscalls
+	writer   *bufio.Writer // Buffered writer for reduced syscalls
 	server   *Server
 	executor QueryExecutor
 	version  uint32
@@ -651,13 +688,35 @@ type Session struct {
 	// Query result state (for streaming with PULL)
 	lastResult  *QueryResult
 	resultIndex int
+
+	// Deferred commit state (Neo4j-style optimization)
+	// Writes are buffered in AsyncEngine until PULL completes
+	pendingFlush bool
+
+	// Query metadata for Neo4j driver compatibility
+	queryId          int64 // Query ID counter for qid field
+	lastQueryIsWrite bool  // Was last query a write operation
+
+	// Reusable buffers to reduce allocations
+	headerBuf  [2]byte // For reading chunk headers
+	messageBuf []byte  // Reusable message buffer
+
+	// Async message processing (Neo4j-style batching)
+	messageQueue chan *boltMessage // Incoming messages queue
+	writeMu      sync.Mutex        // Protects writer for concurrent access
+}
+
+// boltMessage represents a parsed Bolt message ready for processing
+type boltMessage struct {
+	msgType byte
+	data    []byte
 }
 
 // handshake performs the Bolt handshake.
 func (s *Session) handshake() error {
 	// Read magic number (4 bytes: 0x60 0x60 0xB0 0x17)
-	magic := make([]byte, 4)
-	if _, err := io.ReadFull(s.conn, magic); err != nil {
+	var magic [4]byte
+	if _, err := io.ReadFull(s.reader, magic[:]); err != nil {
 		return fmt.Errorf("failed to read magic: %w", err)
 	}
 
@@ -666,72 +725,157 @@ func (s *Session) handshake() error {
 	}
 
 	// Read supported versions (4 x 4 bytes)
-	versions := make([]byte, 16)
-	if _, err := io.ReadFull(s.conn, versions); err != nil {
+	var versions [16]byte
+	if _, err := io.ReadFull(s.reader, versions[:]); err != nil {
 		return fmt.Errorf("failed to read versions: %w", err)
 	}
 
 	// Select highest supported version
 	s.version = BoltV4_4
 
-	// Send selected version
+	// Send selected version using buffered writer
 	response := []byte{0x00, 0x00, 0x04, 0x04} // Bolt 4.4
-	if _, err := s.conn.Write(response); err != nil {
+	if _, err := s.writer.Write(response); err != nil {
 		return fmt.Errorf("failed to send version: %w", err)
+	}
+	if err := s.writer.Flush(); err != nil {
+		return fmt.Errorf("failed to flush version: %w", err)
 	}
 
 	return nil
 }
 
-// handleMessage handles a single Bolt message.
+// readMessage reads a single Bolt message from the connection.
+// Returns the parsed message or nil for empty messages.
+func (s *Session) readMessage() (*boltMessage, error) {
+	// Create a new buffer for this message (since we're async, can't reuse)
+	var msgBuf []byte
+
+	// Read chunks until we get a zero-size chunk (message terminator)
+	var headerBuf [2]byte
+	for {
+		if _, err := io.ReadFull(s.reader, headerBuf[:]); err != nil {
+			return nil, err
+		}
+
+		size := int(headerBuf[0])<<8 | int(headerBuf[1])
+		if size == 0 {
+			break
+		}
+
+		// Grow buffer
+		oldLen := len(msgBuf)
+		newLen := oldLen + size
+		if cap(msgBuf) < newLen {
+			newBuf := make([]byte, newLen, newLen*2)
+			copy(newBuf, msgBuf)
+			msgBuf = newBuf
+		} else {
+			msgBuf = msgBuf[:newLen]
+		}
+
+		if _, err := io.ReadFull(s.reader, msgBuf[oldLen:newLen]); err != nil {
+			return nil, err
+		}
+	}
+
+	if len(msgBuf) == 0 {
+		return nil, nil // Empty message (no-op)
+	}
+
+	// Parse message type
+	if len(msgBuf) < 2 {
+		return nil, fmt.Errorf("message too short: %d bytes", len(msgBuf))
+	}
+
+	// Bolt messages are PackStream structures
+	structMarker := msgBuf[0]
+	var msgType byte
+	var data []byte
+
+	if structMarker >= 0xB0 && structMarker <= 0xBF {
+		msgType = msgBuf[1]
+		data = msgBuf[2:]
+	} else {
+		msgType = msgBuf[0]
+		data = msgBuf[1:]
+	}
+
+	// Make a copy of data since buffer might be reused
+	dataCopy := make([]byte, len(data))
+	copy(dataCopy, data)
+
+	return &boltMessage{msgType: msgType, data: dataCopy}, nil
+}
+
+// processMessage processes a parsed Bolt message.
+func (s *Session) processMessage(msg *boltMessage) error {
+	// No mutex needed - messages are processed sequentially from the queue
+	return s.dispatchMessage(msg.msgType, msg.data)
+}
+
+// handleMessage handles a single Bolt message synchronously (for compatibility).
 // Bolt messages can span multiple chunks - we read until we get a 0-size chunk.
 func (s *Session) handleMessage() error {
-	var message []byte
+	// Reuse message buffer - reset length but keep capacity
+	s.messageBuf = s.messageBuf[:0]
 
 	// Read chunks until we get a zero-size chunk (message terminator)
 	for {
-		// Read chunk header (2 bytes: size)
-		header := make([]byte, 2)
-		if _, err := io.ReadFull(s.conn, header); err != nil {
+		// Read chunk header using reusable buffer (no allocation)
+		if _, err := io.ReadFull(s.reader, s.headerBuf[:]); err != nil {
 			return err
 		}
 
-		size := int(header[0])<<8 | int(header[1])
+		size := int(s.headerBuf[0])<<8 | int(s.headerBuf[1])
 		if size == 0 {
 			// Zero-size chunk marks end of message
 			break
 		}
 
-		// Read chunk data
-		chunk := make([]byte, size)
-		if _, err := io.ReadFull(s.conn, chunk); err != nil {
-			return err
+		// Ensure message buffer has capacity
+		oldLen := len(s.messageBuf)
+		newLen := oldLen + size
+		if cap(s.messageBuf) < newLen {
+			// Need to grow - double capacity or use needed size
+			newCap := cap(s.messageBuf) * 2
+			if newCap < newLen {
+				newCap = newLen
+			}
+			newBuf := make([]byte, newLen, newCap)
+			copy(newBuf, s.messageBuf)
+			s.messageBuf = newBuf
+		} else {
+			s.messageBuf = s.messageBuf[:newLen]
 		}
 
-		message = append(message, chunk...)
+		// Read chunk data directly into message buffer
+		if _, err := io.ReadFull(s.reader, s.messageBuf[oldLen:newLen]); err != nil {
+			return err
+		}
 	}
 
-	if len(message) == 0 {
+	if len(s.messageBuf) == 0 {
 		return nil // Empty message (no-op)
 	}
 
 	// Parse and handle message
-	if len(message) < 2 {
-		return fmt.Errorf("message too short: %d bytes", len(message))
+	if len(s.messageBuf) < 2 {
+		return fmt.Errorf("message too short: %d bytes", len(s.messageBuf))
 	}
 
 	// Bolt messages are PackStream structures
-	structMarker := message[0]
+	structMarker := s.messageBuf[0]
 
 	// Check if it's a tiny struct (0xB0-0xBF)
 	if structMarker >= 0xB0 && structMarker <= 0xBF {
-		msgType := message[1]
-		msgData := message[2:]
+		msgType := s.messageBuf[1]
+		msgData := s.messageBuf[2:]
 		return s.dispatchMessage(msgType, msgData)
 	}
 
 	// For non-struct markers, try direct message type (fallback)
-	return s.dispatchMessage(message[0], message[1:])
+	return s.dispatchMessage(s.messageBuf[0], s.messageBuf[1:])
 }
 
 // dispatchMessage routes the message to the appropriate handler.
@@ -803,14 +947,37 @@ func (s *Session) handleRun(data []byte) error {
 		return s.sendFailure("Neo.ClientError.Statement.SyntaxError", err.Error())
 	}
 
+	// Track if this was a write operation (for deferred flush)
+	// Uppercase once to avoid 5 separate allocations
+	upperQuery := strings.ToUpper(query)
+	isWrite := strings.Contains(upperQuery, "CREATE") ||
+		strings.Contains(upperQuery, "DELETE") ||
+		strings.Contains(upperQuery, "SET ") ||
+		strings.Contains(upperQuery, "MERGE") ||
+		strings.Contains(upperQuery, "REMOVE ")
+	if isWrite {
+		s.pendingFlush = true
+	}
+	s.lastQueryIsWrite = isWrite
+
 	// Store result for PULL
 	s.lastResult = result
 	s.resultIndex = 0
+	s.queryId++
 
-	// Return SUCCESS with field names
+	// Return SUCCESS with field names (Neo4j compatible metadata)
+	// Note: Neo4j only sends qid for EXPLICIT transactions, not implicit/autocommit
+	// For implicit transactions, only send fields and t_first
+	if s.inTransaction {
+		return s.sendSuccess(map[string]any{
+			"fields":  result.Columns,
+			"t_first": int64(0),
+			"qid":     s.queryId,
+		})
+	}
 	return s.sendSuccess(map[string]any{
 		"fields":  result.Columns,
-		"t_first": 0,
+		"t_first": int64(0),
 	})
 }
 
@@ -861,9 +1028,8 @@ func (s *Session) parseRunMessage(data []byte) (string, map[string]any, error) {
 // handlePull handles the PULL message.
 func (s *Session) handlePull(data []byte) error {
 	if s.lastResult == nil {
-		return s.sendSuccess(map[string]any{
-			"has_more": false,
-		})
+		// Neo4j doesn't send has_more when false - just empty metadata
+		return s.sendSuccess(map[string]any{})
 	}
 
 	// Parse PULL options (n = number of records to pull)
@@ -920,10 +1086,37 @@ func (s *Session) handlePull(data []byte) error {
 	if !hasMore {
 		s.lastResult = nil
 		s.resultIndex = 0
+
+		// Neo4j-style deferred commit: flush pending writes after streaming completes
+		if s.pendingFlush {
+			if flushable, ok := s.executor.(FlushableExecutor); ok {
+				flushable.Flush()
+			}
+			s.pendingFlush = false
+		}
+
+		// Return metadata for completed query (Neo4j compatibility)
+		// Neo4j sends: type, bookmark, t_last, stats, db (but NOT has_more when false)
+		queryType := "r"
+		if s.lastQueryIsWrite {
+			queryType = "w"
+		}
+
+		// Build stats matching Neo4j format (only if there are updates)
+		metadata := map[string]any{
+			"bookmark": "nornicdb:tx:auto",
+			"type":     queryType,
+			"t_last":   int64(0), // Streaming time
+			"db":       "neo4j",  // Default database name
+		}
+
+		// Note: Neo4j does NOT send has_more when it's false
+		return s.sendSuccess(metadata)
 	}
 
+	// When there are more records, send has_more: true
 	return s.sendSuccess(map[string]any{
-		"has_more": hasMore,
+		"has_more": true,
 	})
 }
 
@@ -931,9 +1124,8 @@ func (s *Session) handlePull(data []byte) error {
 func (s *Session) handleDiscard(data []byte) error {
 	s.lastResult = nil
 	s.resultIndex = 0
-	return s.sendSuccess(map[string]any{
-		"has_more": false,
-	})
+	// Neo4j doesn't send has_more when false - just empty metadata
+	return s.sendSuccess(map[string]any{})
 }
 
 // handleRoute handles the ROUTE message (for cluster routing).
@@ -1049,7 +1241,7 @@ func (s *Session) sendRecord(fields []any) error {
 	return s.sendChunk(buf)
 }
 
-// sendRecordsBatched sends multiple RECORD responses in a single write.
+// sendRecordsBatched sends multiple RECORD responses using buffered I/O.
 // This dramatically reduces syscall overhead for large result sets.
 // For 500 records: ~500 syscalls → 1 syscall = ~8x faster
 func (s *Session) sendRecordsBatched(rows [][]any) error {
@@ -1057,37 +1249,36 @@ func (s *Session) sendRecordsBatched(rows [][]any) error {
 		return nil
 	}
 
-	// Get buffer from pool
-	bufPtr := recordBufferPool.Get().(*[]byte)
-	buf := (*bufPtr)[:0] // Reset length but keep capacity
-
-	// Serialize all records into a single buffer
+	// Write all records to buffer
 	for _, row := range rows {
-		// Each record is a separate chunk: header(2) + data + terminator(2)
 		recordData := []byte{0xB1, MsgRecord}
 		recordData = append(recordData, encodePackStreamList(row)...)
 
-		// Add chunk header
+		// Write chunk header
 		size := len(recordData)
-		buf = append(buf, byte(size>>8), byte(size))
-		buf = append(buf, recordData...)
-		// Add terminator (0x00 0x00)
-		buf = append(buf, 0x00, 0x00)
+		s.writer.WriteByte(byte(size >> 8))
+		s.writer.WriteByte(byte(size))
+
+		// Write record data
+		s.writer.Write(recordData)
+
+		// Write terminator
+		s.writer.WriteByte(0)
+		s.writer.WriteByte(0)
 	}
 
-	// Single write for all records
-	_, err := s.conn.Write(buf)
-
-	// Return buffer to pool
-	*bufPtr = buf
-	recordBufferPool.Put(bufPtr)
-
-	return err
+	// Don't flush here - let the final SUCCESS message flush everything
+	return nil
 }
 
 // sendSuccess sends a SUCCESS response with PackStream encoding.
+// Pre-allocated success header
+var successHeader = []byte{0xB1, MsgSuccess}
+
 func (s *Session) sendSuccess(metadata map[string]any) error {
-	buf := []byte{0xB1, MsgSuccess}
+	// Reuse buffer from pool for small responses
+	buf := make([]byte, 0, 128)
+	buf = append(buf, successHeader...)
 	buf = append(buf, encodePackStreamMap(metadata)...)
 	return s.sendChunk(buf)
 }
@@ -1103,20 +1294,25 @@ func (s *Session) sendFailure(code, message string) error {
 	return s.sendChunk(buf)
 }
 
-// sendChunk sends a chunk to the client.
-// Consolidates header + data + terminator into single Write for performance.
+// sendChunk sends a chunk to the client using buffered I/O.
+// The buffer is flushed after each complete message response.
 func (s *Session) sendChunk(data []byte) error {
 	size := len(data)
 
-	// Single buffer: header (2) + data + terminator (2)
-	buf := make([]byte, 2+len(data)+2)
-	buf[0] = byte(size >> 8)
-	buf[1] = byte(size)
-	copy(buf[2:], data)
-	// buf[2+len(data)] and buf[2+len(data)+1] are already 0x00 (zero terminator)
+	// Write chunk header (2 bytes)
+	s.writer.WriteByte(byte(size >> 8))
+	s.writer.WriteByte(byte(size))
 
-	_, err := s.conn.Write(buf)
-	return err
+	// Write data
+	s.writer.Write(data)
+
+	// Write terminator (0x00 0x00)
+	s.writer.WriteByte(0)
+	s.writer.WriteByte(0)
+
+	// Flush immediately to ensure response is sent
+	// This is critical for request-response protocols
+	return s.writer.Flush()
 }
 
 // ============================================================================

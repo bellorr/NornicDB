@@ -2002,7 +2002,7 @@ func (e *StorageExecutor) callApocPathSpanningTree(cypher string) (*ExecuteResul
 				},
 				"relationships": []interface{}{
 					map[string]interface{}{
-						"id":         string(edge.ID),
+						"_edgeId":    string(edge.ID),
 						"type":       edge.Type,
 						"properties": edge.Properties,
 						"startNode":  string(edge.StartNode),
