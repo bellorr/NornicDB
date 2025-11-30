@@ -124,8 +124,14 @@ if %NO_CUDA%==1 (
     set BUILD_TAGS=cuda,localllm
 )
 
+REM Generate build timestamp
+for /f "tokens=2-4 delims=/ " %%a in ('date /t') do set DATESTAMP=%%c%%a%%b
+for /f "tokens=1-2 delims=: " %%a in ('time /t') do set TIMESTAMP=%%a%%b
+set BUILD_TIME=%DATESTAMP%-%TIMESTAMP%
+echo   Build timestamp: %BUILD_TIME%
+
 REM Build main binary
-go build -tags "%BUILD_TAGS%" -ldflags="-s -w" -o bin\nornicdb.exe .\cmd\nornicdb
+go build -tags "%BUILD_TAGS%" -ldflags="-s -w -X main.buildTime=%BUILD_TIME%" -o bin\nornicdb.exe .\cmd\nornicdb
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] NornicDB build failed!
     exit /b 1

@@ -1239,6 +1239,67 @@ func TestExecuteMatchCreateNodeAndRelationships(t *testing.T) {
 	assert.True(t, relTypes["SUPPLIES"], "Should have SUPPLIES relationship")
 }
 
+// TestExecuteMatchCreateNodeThenRelationship tests the Northwind pattern where:
+// 1. MATCH finds an existing node
+// 2. CREATE creates a new node
+// 3. CREATE creates a relationship FROM the matched node TO the created node
+// This is the pattern: MATCH (cu:Customer) CREATE (o:Order) CREATE (cu)-[:PURCHASED]->(o)
+func TestExecuteMatchCreateNodeThenRelationship(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create a customer first
+	_, err := exec.Execute(ctx, "CREATE (cu:Customer {customerID: 'ALFKI', companyName: 'Alfreds Futterkiste'})", nil)
+	require.NoError(t, err)
+
+	// Verify customer exists
+	customers, _ := store.GetNodesByLabel("Customer")
+	require.Len(t, customers, 1, "Should have 1 customer")
+
+	// Now run the Northwind pattern:
+	// MATCH the customer, CREATE an order, CREATE the relationship
+	result, err := exec.Execute(ctx, `
+		MATCH (cu:Customer {customerID: 'ALFKI'})
+		CREATE (o:Order {orderID: 10643, orderDate: '1997-08-25', shipCountry: 'Germany'})
+		CREATE (cu)-[:PURCHASED]->(o)
+	`, nil)
+
+	// This is the critical assertion - the query should succeed
+	require.NoError(t, err, "MATCH + CREATE node + CREATE relationship should work; variable 'cu' from MATCH should be available")
+
+	// Verify stats
+	assert.Equal(t, 1, result.Stats.NodesCreated, "Should create 1 Order node")
+	assert.Equal(t, 1, result.Stats.RelationshipsCreated, "Should create 1 PURCHASED relationship")
+
+	// Verify order was created
+	orders, err := store.GetNodesByLabel("Order")
+	require.NoError(t, err)
+	require.Len(t, orders, 1, "Should have 1 Order node")
+	// Check orderID - could be int64 or float64 depending on parsing
+	orderID := orders[0].Properties["orderID"]
+	switch v := orderID.(type) {
+	case int64:
+		assert.Equal(t, int64(10643), v)
+	case float64:
+		assert.Equal(t, float64(10643), v)
+	default:
+		t.Errorf("Unexpected orderID type: %T", orderID)
+	}
+
+	// Verify relationship exists
+	edges, err := store.AllEdges()
+	require.NoError(t, err)
+	require.Len(t, edges, 1, "Should have 1 relationship")
+	assert.Equal(t, "PURCHASED", edges[0].Type)
+
+	// Verify the relationship connects the right nodes
+	customerNode := customers[0]
+	orderNode := orders[0]
+	assert.Equal(t, customerNode.ID, edges[0].StartNode, "Relationship should start from Customer")
+	assert.Equal(t, orderNode.ID, edges[0].EndNode, "Relationship should end at Order")
+}
+
 // TestExecuteMatchCreateMultipleNodes tests creating multiple nodes in a single MATCH...CREATE
 func TestExecuteMatchCreateMultipleNodes(t *testing.T) {
 	store := storage.NewMemoryEngine()

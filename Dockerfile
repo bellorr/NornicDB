@@ -40,8 +40,8 @@ COPY . .
 # The embed directive is now in ui/embed.go (not cmd/nornicdb)
 COPY --from=ui-builder /ui/dist ./ui/dist
 
-# Build the binary with embedded UI
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o nornicdb ./cmd/nornicdb
+# Build the binary with embedded UI and build timestamp
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" -o nornicdb ./cmd/nornicdb
 
 # Runtime stage
 FROM alpine:3.19

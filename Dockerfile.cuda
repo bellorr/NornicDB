@@ -1,5 +1,14 @@
 # NornicDB Docker Image with NVIDIA CUDA Support
 # Neo4j-compatible graph database with GPU-accelerated local embeddings
+#
+# PREREQUISITES: Build the llama-cuda-libs image once (takes ~10-15 min):
+#   docker build -f Dockerfile.llama-cuda -t timothyswt/llama-cuda-libs:b4785 .
+#   docker push timothyswt/llama-cuda-libs:b4785  # optional: share across machines
+#
+# Then this build is fast (~1-2 min) because CUDA compilation is cached!
+
+# Global ARG must be declared before FROM to use in FROM instruction
+ARG LLAMA_CUDA_IMAGE=timothyswt/llama-cuda-libs:b4785
 
 # Stage 1: Build the UI
 FROM node:20-alpine AS ui-builder
@@ -21,44 +30,9 @@ COPY ui/ .
 # Build the UI
 RUN npm run build
 
-# Stage 2: Build llama.cpp with CUDA
-FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS llama-builder
-
-# Install build dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    git \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
-
-# Clone and build llama.cpp with CUDA
-ARG LLAMA_VERSION=b4785
-WORKDIR /llama
-RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/llama.cpp.git .
-
-# Build static library with CUDA support
-RUN cmake -B build \
-    -DLLAMA_STATIC=ON \
-    -DBUILD_SHARED_LIBS=OFF \
-    -DLLAMA_BUILD_TESTS=OFF \
-    -DLLAMA_BUILD_EXAMPLES=OFF \
-    -DLLAMA_BUILD_SERVER=OFF \
-    -DGGML_CUDA=ON \
-    -DGGML_CUDA_FA_ALL_QUANTS=ON \
-    && cmake --build build --config Release -j$(nproc)
-
-# Combine static libraries
-RUN set -e && \
-    mkdir -p /llama/lib && \
-    find build -name "*.a" -exec cp {} /llama/lib/ \; && \
-    echo "CREATE /llama/lib/libllama_combined.a" > /tmp/ar_script.mri && \
-    for lib in /llama/lib/lib*.a; do \
-        echo "ADDLIB $lib" >> /tmp/ar_script.mri; \
-    done && \
-    echo "SAVE" >> /tmp/ar_script.mri && \
-    echo "END" >> /tmp/ar_script.mri && \
-    ar -M < /tmp/ar_script.mri
+# Stage 2: Pre-built llama.cpp CUDA libraries (build once, reuse forever)
+# Build with: docker build -f Dockerfile.llama-cuda -t timothyswt/llama-cuda-libs:b4785 .
+FROM ${LLAMA_CUDA_IMAGE} AS llama-builder
 
 # Stage 3: Build the Go binary with CUDA support
 FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS builder
@@ -74,10 +48,9 @@ ENV CUDA_HOME=/usr/local/cuda
 
 WORKDIR /build
 
-# Copy llama.cpp artifacts from llama-builder
-COPY --from=llama-builder /llama/lib/libllama_combined.a /build/lib/llama/libllama_linux_amd64_cuda.a
-COPY --from=llama-builder /llama/include/llama.h /build/lib/llama/
-COPY --from=llama-builder /llama/ggml/include/*.h /build/lib/llama/
+# Copy llama.cpp artifacts from pre-built image
+COPY --from=llama-builder /output/lib/libllama_linux_amd64_cuda.a /build/lib/llama/libllama_linux_amd64_cuda.a
+COPY --from=llama-builder /output/include/*.h /build/lib/llama/
 
 # Copy go mod files
 COPY go.mod go.sum ./
@@ -89,8 +62,8 @@ COPY . .
 # Copy built UI from ui-builder stage
 COPY --from=ui-builder /ui/dist ./ui/dist
 
-# Build with CGO enabled for CUDA support and local LLM embeddings
-RUN CGO_ENABLED=1 GOOS=linux go build -tags "cuda localllm" -ldflags="-s -w" -o nornicdb ./cmd/nornicdb
+# Build with CGO enabled for CUDA support and local LLM embeddings, include build timestamp
+RUN CGO_ENABLED=1 GOOS=linux go build -tags "cuda localllm" -ldflags="-s -w -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" -o nornicdb ./cmd/nornicdb
 
 # Runtime stage - use CUDA runtime image (smaller than devel)
 FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04

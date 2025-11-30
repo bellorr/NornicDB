@@ -12,7 +12,14 @@ set CXX=cl
 
 REM Build with cuda and localllm tags for GPU-accelerated local embeddings
 echo Building NornicDB with CUDA support...
-go build -tags "cuda localllm" -o bin\nornicdb.exe .\cmd\nornicdb
+
+REM Generate build timestamp
+for /f "tokens=2-4 delims=/ " %%a in ('date /t') do set DATESTAMP=%%c%%a%%b
+for /f "tokens=1-2 delims=: " %%a in ('time /t') do set TIMESTAMP=%%a%%b
+set BUILD_TIME=%DATESTAMP%-%TIMESTAMP%
+echo Build timestamp: %BUILD_TIME%
+
+go build -tags "cuda localllm" -ldflags="-X main.buildTime=%BUILD_TIME%" -o bin\nornicdb.exe .\cmd\nornicdb
 if %ERRORLEVEL% NEQ 0 (
     echo CUDA build failed!
     exit /b 1

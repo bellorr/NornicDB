@@ -1,0 +1,58 @@
+# Standalone llama.cpp CUDA static library builder
+# Build once and push - never rebuild unless upgrading llama.cpp version
+#
+# Build:
+#   docker build -f Dockerfile.llama-cuda -t timothyswt/llama-cuda-libs:b4785 .
+#   docker push timothyswt/llama-cuda-libs:b4785
+#
+# The resulting image contains pre-compiled static libraries and headers
+# that can be used by other Dockerfiles via COPY --from=
+
+FROM nvidia/cuda:12.6.3-devel-ubuntu22.04
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
+    git \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Clone and build llama.cpp with CUDA
+ARG LLAMA_VERSION=b4785
+WORKDIR /llama
+RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/llama.cpp.git .
+
+# Build static library with CUDA support
+RUN cmake -B build \
+    -DLLAMA_STATIC=ON \
+    -DBUILD_SHARED_LIBS=OFF \
+    -DLLAMA_BUILD_TESTS=OFF \
+    -DLLAMA_BUILD_EXAMPLES=OFF \
+    -DLLAMA_BUILD_SERVER=OFF \
+    -DGGML_CUDA=ON \
+    -DGGML_CUDA_FA_ALL_QUANTS=ON \
+    && cmake --build build --config Release -j$(nproc)
+
+# Combine static libraries into one
+RUN set -e && \
+    mkdir -p /llama/lib && \
+    find build -name "*.a" -exec cp {} /llama/lib/ \; && \
+    echo "CREATE /llama/lib/libllama_combined.a" > /tmp/ar_script.mri && \
+    for lib in /llama/lib/lib*.a; do \
+        echo "ADDLIB $lib" >> /tmp/ar_script.mri; \
+    done && \
+    echo "SAVE" >> /tmp/ar_script.mri && \
+    echo "END" >> /tmp/ar_script.mri && \
+    ar -M < /tmp/ar_script.mri
+
+# Create output directory structure for easy copying
+RUN mkdir -p /output/lib /output/include && \
+    cp /llama/lib/libllama_combined.a /output/lib/libllama_linux_amd64_cuda.a && \
+    cp /llama/include/llama.h /output/include/ && \
+    cp /llama/ggml/include/*.h /output/include/
+
+# Verify output
+RUN echo "=== Built llama.cpp CUDA libraries ===" && \
+    ls -lh /output/lib/ && \
+    ls -lh /output/include/

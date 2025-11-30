@@ -27,8 +27,9 @@ import (
 )
 
 var (
-	version = "0.1.0"
-	commit  = "dev"
+	version   = "0.1.0"
+	commit    = "dev"
+	buildTime = "unknown" // Set via ldflags: -X main.buildTime=$(date +%Y%m%d-%H%M%S)
 )
 
 // parseMemorySize parses a human-readable memory size string.
@@ -85,7 +86,7 @@ Features:
 		Use:   "version",
 		Short: "Print version information",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Printf("NornicDB v%s (%s)\n", version, commit)
+			fmt.Printf("NornicDB v%s (%s) built %s\n", version, commit, buildTime)
 		},
 	})
 
@@ -236,7 +237,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 		cache.ConfigureGlobalCache(cfg.Memory.QueryCacheSize, cfg.Memory.QueryCacheTTL)
 	}
 
-	fmt.Printf("🚀 Starting NornicDB v%s\n", version)
+	fmt.Printf("🚀 Starting NornicDB v%s (build: %s)\n", version, buildTime)
 	fmt.Printf("   Data directory:  %s\n", dataDir)
 	fmt.Printf("   Bolt protocol:   bolt://localhost:%d\n", boltPort)
 	fmt.Printf("   HTTP API:        http://localhost:%d\n", httpPort)

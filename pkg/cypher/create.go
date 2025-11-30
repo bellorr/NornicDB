@@ -190,6 +190,200 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 	return result, nil
 }
 
+// executeCreateWithRefs is like executeCreate but also returns the created nodes and edges maps.
+// This is used by compound queries like CREATE...WITH...DELETE to avoid expensive O(n) scans
+// when looking up the created entities.
+func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher string) (*ExecuteResult, map[string]*storage.Node, map[string]*storage.Edge, error) {
+	// Substitute parameters AFTER routing to avoid keyword detection issues
+	if params := getParamsFromContext(ctx); params != nil {
+		cypher = e.substituteParams(cypher, params)
+	}
+
+	result := &ExecuteResult{
+		Columns: []string{},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+
+	// Parse CREATE pattern
+	pattern := cypher[6:] // Skip "CREATE"
+
+	// Use word boundary detection to avoid matching substrings
+	returnIdx := findKeywordIndex(cypher, "RETURN")
+	if returnIdx > 0 {
+		pattern = cypher[6:returnIdx]
+	}
+	pattern = strings.TrimSpace(pattern)
+
+	// Split into individual patterns (nodes and relationships)
+	allPatterns := e.splitCreatePatterns(pattern)
+
+	// Separate node patterns from relationship patterns
+	var nodePatterns []string
+	var relPatterns []string
+	for _, p := range allPatterns {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if containsOutsideStrings(p, "->") || containsOutsideStrings(p, "<-") || containsOutsideStrings(p, "-[") {
+			relPatterns = append(relPatterns, p)
+		} else {
+			nodePatterns = append(nodePatterns, p)
+		}
+	}
+
+	// First, create all nodes
+	createdNodes := make(map[string]*storage.Node)
+	createdEdges := make(map[string]*storage.Edge)
+
+	for _, nodePatternStr := range nodePatterns {
+		nodePatternStr = strings.TrimSpace(nodePatternStr)
+		if nodePatternStr == "" {
+			continue
+		}
+
+		nodePattern := e.parseNodePattern(nodePatternStr)
+
+		// Create the node
+		node := &storage.Node{
+			ID:         storage.NodeID(e.generateID()),
+			Labels:     nodePattern.labels,
+			Properties: nodePattern.properties,
+		}
+
+		if err := e.storage.CreateNode(node); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to create node: %w", err)
+		}
+
+		result.Stats.NodesCreated++
+
+		if nodePattern.variable != "" {
+			createdNodes[nodePattern.variable] = node
+		}
+	}
+
+	// Then, create all relationships using variable references or inline node definitions
+	for _, relPatternStr := range relPatterns {
+		relPatternStr = strings.TrimSpace(relPatternStr)
+		if relPatternStr == "" {
+			continue
+		}
+
+		// Parse the relationship pattern: (varA)-[:TYPE {props}]->(varB)
+		sourceContent, relStr, targetContent, isReverse, err := e.parseCreateRelPatternWithVars(relPatternStr)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+
+		// Determine source node - either lookup by variable or create inline
+		var sourceNode *storage.Node
+		if node, exists := createdNodes[sourceContent]; exists {
+			sourceNode = node
+		} else {
+			sourcePattern := e.parseNodePattern("(" + sourceContent + ")")
+			sourceNode = &storage.Node{
+				ID:         storage.NodeID(e.generateID()),
+				Labels:     sourcePattern.labels,
+				Properties: sourcePattern.properties,
+			}
+			if err := e.storage.CreateNode(sourceNode); err != nil {
+				return nil, nil, nil, fmt.Errorf("failed to create source node: %w", err)
+			}
+			result.Stats.NodesCreated++
+			if sourcePattern.variable != "" {
+				createdNodes[sourcePattern.variable] = sourceNode
+			}
+		}
+
+		// Determine target node - either lookup by variable or create inline
+		var targetNode *storage.Node
+		if node, exists := createdNodes[targetContent]; exists {
+			targetNode = node
+		} else {
+			targetPattern := e.parseNodePattern("(" + targetContent + ")")
+			targetNode = &storage.Node{
+				ID:         storage.NodeID(e.generateID()),
+				Labels:     targetPattern.labels,
+				Properties: targetPattern.properties,
+			}
+			if err := e.storage.CreateNode(targetNode); err != nil {
+				return nil, nil, nil, fmt.Errorf("failed to create target node: %w", err)
+			}
+			result.Stats.NodesCreated++
+			if targetPattern.variable != "" {
+				createdNodes[targetPattern.variable] = targetNode
+			}
+		}
+
+		// Parse relationship type and properties
+		relType, relProps := e.parseRelationshipTypeAndProps(relStr)
+
+		// Extract relationship variable if present (e.g., "r:TYPE" -> "r")
+		relVar := ""
+		if colonIdx := strings.Index(relStr, ":"); colonIdx > 0 {
+			relVar = strings.TrimSpace(relStr[:colonIdx])
+		} else if !strings.Contains(relStr, "{") {
+			// No colon and no props - entire string might be variable
+			relVar = strings.TrimSpace(relStr)
+		}
+
+		// Handle direction
+		var startNode, endNode *storage.Node
+		if isReverse {
+			startNode, endNode = targetNode, sourceNode
+		} else {
+			startNode, endNode = sourceNode, targetNode
+		}
+
+		// Create the relationship
+		edge := &storage.Edge{
+			ID:         storage.EdgeID(e.generateID()),
+			Type:       relType,
+			StartNode:  startNode.ID,
+			EndNode:    endNode.ID,
+			Properties: relProps,
+		}
+
+		if err := e.storage.CreateEdge(edge); err != nil {
+			return nil, nil, nil, fmt.Errorf("failed to create relationship: %w", err)
+		}
+
+		if relVar != "" {
+			createdEdges[relVar] = edge
+		}
+		result.Stats.RelationshipsCreated++
+	}
+
+	// Handle RETURN clause
+	if returnIdx > 0 {
+		returnPart := strings.TrimSpace(cypher[returnIdx+6:])
+		returnItems := e.parseReturnItems(returnPart)
+
+		result.Columns = make([]string, len(returnItems))
+		row := make([]interface{}, len(returnItems))
+
+		for i, item := range returnItems {
+			if item.alias != "" {
+				result.Columns[i] = item.alias
+			} else {
+				result.Columns[i] = item.expr
+			}
+
+			// Find the matching node for this return item
+			for variable, node := range createdNodes {
+				if strings.HasPrefix(item.expr, variable) || item.expr == variable {
+					row[i] = e.resolveReturnItem(item, variable, node)
+					break
+				}
+			}
+		}
+		result.Rows = [][]interface{}{row}
+	}
+
+	return result, createdNodes, createdEdges, nil
+}
+
 // splitCreatePatterns splits a CREATE pattern into individual patterns (nodes and relationships)
 // respecting parentheses depth, string literals, and handling relationship syntax.
 // IMPORTANT: This properly handles content inside string literals (single/double quotes)
@@ -1180,57 +1374,14 @@ func (e *StorageExecutor) executeCompoundCreateWithDelete(ctx context.Context, c
 		deletePart = strings.TrimSpace(cypher[deleteIdx+6:])
 	}
 
-	// Execute the CREATE part first
-	createResult, err := e.executeCreate(ctx, createPart)
+	// Execute the CREATE part and get the created nodes/edges directly
+	// This avoids expensive O(n) scans of GetNodesByLabel/AllEdges
+	createResult, createdVars, createdEdges, err := e.executeCreateWithRefs(ctx, createPart)
 	if err != nil {
 		return nil, fmt.Errorf("CREATE failed: %w", err)
 	}
 	result.Stats.NodesCreated = createResult.Stats.NodesCreated
 	result.Stats.RelationshipsCreated = createResult.Stats.RelationshipsCreated
-
-	// Parse the created variable from CREATE pattern
-	// e.g., CREATE (t:TestNode...) -> variable is "t"
-	// e.g., CREATE (a)-[r:KNOWS]->(b) -> relationship variable is "r"
-	createdVars := make(map[string]*storage.Node)
-	createdEdges := make(map[string]*storage.Edge)
-
-	// Parse all node patterns from CREATE - find all (varName:Label) patterns
-	// Uses pre-compiled nodeVarLabelPattern from regex_patterns.go
-	allNodeMatches := nodeVarLabelPattern.FindAllStringSubmatch(createPart, -1)
-	for _, matches := range allNodeMatches {
-		if len(matches) > 1 {
-			varName := matches[1]
-			labelName := ""
-			if len(matches) > 2 && matches[2] != "" {
-				labelName = matches[2]
-			}
-
-			// Find the created node by label
-			if labelName != "" {
-				nodes, _ := e.storage.GetNodesByLabel(labelName)
-				if len(nodes) > 0 {
-					// Get the most recently created node with this label
-					createdVars[varName] = nodes[len(nodes)-1]
-				}
-			}
-		}
-	}
-
-	// Parse relationship variable if present: [r:TYPE] or [r] or [:TYPE]
-	// Pattern: [varName:TYPE] where varName is optional
-	// Uses pre-compiled relVarTypePattern from regex_patterns.go
-	if matches := relVarTypePattern.FindStringSubmatch(createPart); len(matches) > 1 {
-		relVar := matches[1]
-		// Check if first capture is actually a variable (not a type without variable)
-		// If there's a colon, first part is variable, second is type
-		// If no colon and first part exists, it could be variable or type
-		if relVar != "" {
-			edges, _ := e.storage.AllEdges()
-			if len(edges) > 0 {
-				createdEdges[relVar] = edges[len(edges)-1]
-			}
-		}
-	}
 
 	// Parse WITH clause to see what variables are passed through
 	withVars := strings.Split(withPart, ",")
