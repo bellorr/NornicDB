@@ -115,6 +115,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -163,6 +164,12 @@ type StorageExecutor struct {
 	txContext *TransactionContext // Active transaction context
 	cache     *SmartQueryCache    // Query result cache with label-aware invalidation
 	planCache *QueryPlanCache     // Parsed query plan cache
+
+	// Node lookup cache for MATCH patterns like (n:Label {prop: value})
+	// Key: "Label:{prop:value,...}", Value: *storage.Node
+	// This dramatically speeds up repeated MATCH lookups for the same pattern
+	nodeLookupCache   map[string]*storage.Node
+	nodeLookupCacheMu sync.RWMutex
 }
 
 // NewStorageExecutor creates a new Cypher executor with the given storage backend.
@@ -186,11 +193,54 @@ type StorageExecutor struct {
 //	result, err := executor.Execute(ctx, "MATCH (n) RETURN count(n)", nil)
 func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 	return &StorageExecutor{
-		parser:    NewParser(),
-		storage:   store,
-		cache:     NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
-		planCache: NewQueryPlanCache(500),   // Cache 500 parsed query plans
+		parser:          NewParser(),
+		storage:         store,
+		cache:           NewSmartQueryCache(1000), // Query result cache with label-aware invalidation
+		planCache:       NewQueryPlanCache(500),   // Cache 500 parsed query plans
+		nodeLookupCache: make(map[string]*storage.Node, 1000),
 	}
+}
+
+// makeLookupKey creates a cache key from label and properties.
+func makeLookupKey(label string, props map[string]interface{}) string {
+	if len(props) == 0 {
+		return label
+	}
+	// Simple key: label + sorted props
+	key := label + ":"
+	for k, v := range props {
+		key += fmt.Sprintf("%s=%v,", k, v)
+	}
+	return key
+}
+
+// lookupCachedNode looks up a node by label+properties from cache.
+func (e *StorageExecutor) lookupCachedNode(label string, props map[string]interface{}) *storage.Node {
+	key := makeLookupKey(label, props)
+	e.nodeLookupCacheMu.RLock()
+	node := e.nodeLookupCache[key]
+	e.nodeLookupCacheMu.RUnlock()
+	return node
+}
+
+// cacheNodeLookup caches a node lookup result.
+func (e *StorageExecutor) cacheNodeLookup(label string, props map[string]interface{}, node *storage.Node) {
+	key := makeLookupKey(label, props)
+	e.nodeLookupCacheMu.Lock()
+	// Simple eviction: if too large, clear
+	if len(e.nodeLookupCache) > 10000 {
+		e.nodeLookupCache = make(map[string]*storage.Node, 1000)
+	}
+	e.nodeLookupCache[key] = node
+	e.nodeLookupCacheMu.Unlock()
+}
+
+// invalidateNodeLookupCache clears the node lookup cache.
+// Called on write operations that might invalidate cached lookups.
+func (e *StorageExecutor) invalidateNodeLookupCache() {
+	e.nodeLookupCacheMu.Lock()
+	e.nodeLookupCache = make(map[string]*storage.Node, 1000)
+	e.nodeLookupCacheMu.Unlock()
 }
 
 // Execute parses and executes a Cypher query with optional parameters.

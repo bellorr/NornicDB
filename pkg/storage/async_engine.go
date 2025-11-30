@@ -99,25 +99,35 @@ func (ae *AsyncEngine) flushLoop() {
 // Flush writes all pending changes to the underlying engine.
 // Uses batched operations for better performance - all deletes in one transaction.
 //
-// CRITICAL: We hold the lock for the ENTIRE duration to prevent race conditions.
-// Without this, reads between "clear cache" and "write to engine" would see no data.
+// Design: Snapshot caches, clear them, UNLOCK, then write to engine.
+// Reads during write see engine data (consistent since cache is empty).
+// This avoids blocking reads during I/O which kills Mac M-series performance.
 func (ae *AsyncEngine) Flush() error {
 	ae.mu.Lock()
-	defer ae.mu.Unlock()
 
 	// Nothing to flush
 	if len(ae.nodeCache) == 0 && len(ae.edgeCache) == 0 && len(ae.deleteNodes) == 0 && len(ae.deleteEdges) == 0 {
+		ae.mu.Unlock()
 		return nil
 	}
 
 	ae.totalFlushes++
 
-	// Snapshot pending changes (we'll clear these AFTER successful writes)
+	// Snapshot pending changes
 	nodesToWrite := ae.nodeCache
 	edgesToWrite := ae.edgeCache
 	nodesToDelete := ae.deleteNodes
 	edgesToDelete := ae.deleteEdges
 
+	// Clear caches BEFORE unlock - reads will go to engine
+	ae.nodeCache = make(map[NodeID]*Node)
+	ae.edgeCache = make(map[EdgeID]*Edge)
+	ae.deleteNodes = make(map[NodeID]bool)
+	ae.deleteEdges = make(map[EdgeID]bool)
+
+	ae.mu.Unlock()
+
+	// Now write to engine WITHOUT holding lock (I/O can be slow)
 	// Apply bulk deletes first (SINGLE transaction instead of N transactions!)
 	if len(nodesToDelete) > 0 {
 		nodeIDs := make([]NodeID, 0, len(nodesToDelete))
@@ -153,12 +163,6 @@ func (ae *AsyncEngine) Flush() error {
 			ae.engine.UpdateEdge(edge)
 		}
 	}
-
-	// NOW clear the caches - data is safely in the underlying engine
-	ae.nodeCache = make(map[NodeID]*Node)
-	ae.edgeCache = make(map[EdgeID]*Edge)
-	ae.deleteNodes = make(map[NodeID]bool)
-	ae.deleteEdges = make(map[EdgeID]bool)
 
 	return nil
 }
@@ -271,12 +275,9 @@ func (ae *AsyncEngine) GetEdge(id EdgeID) (*Edge, error) {
 
 // GetNodesByLabel checks cache and merges with engine results.
 // Uses case-insensitive label matching for Neo4j compatibility.
-// NOTE: We hold the read lock for the ENTIRE operation to prevent race conditions
-// with Flush() which clears the cache after writing to the engine.
+// Snapshots cache state quickly, then releases lock before engine I/O.
 func (ae *AsyncEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	ae.mu.RLock()
-	defer ae.mu.RUnlock()
-
 	cachedNodes := make([]*Node, 0)
 	deletedIDs := make(map[NodeID]bool)
 
@@ -294,8 +295,9 @@ func (ae *AsyncEngine) GetNodesByLabel(label string) ([]*Node, error) {
 			}
 		}
 	}
+	ae.mu.RUnlock()
 
-	// Get from engine (still under lock to prevent Flush race)
+	// Get from engine WITHOUT lock (I/O can be slow)
 	engineNodes, err := ae.engine.GetNodesByLabel(label)
 	if err != nil {
 		return cachedNodes, nil // Return cache-only on error

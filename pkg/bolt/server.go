@@ -581,6 +581,12 @@ func (s *Server) IsClosed() bool {
 func (s *Server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 
+	// Disable Nagle's algorithm for lower latency
+	// Without this, small packets get delayed up to 40ms
+	if tcpConn, ok := conn.(*net.TCPConn); ok {
+		tcpConn.SetNoDelay(true)
+	}
+
 	// Recover from panics to prevent crashing the server
 	defer func() {
 		if r := recover(); r != nil {
@@ -1039,25 +1045,19 @@ func (s *Session) sendFailure(code, message string) error {
 }
 
 // sendChunk sends a chunk to the client.
+// Consolidates header + data + terminator into single Write for performance.
 func (s *Session) sendChunk(data []byte) error {
 	size := len(data)
-	header := []byte{byte(size >> 8), byte(size)}
 
-	if _, err := s.conn.Write(header); err != nil {
-		return err
-	}
+	// Single buffer: header (2) + data + terminator (2)
+	buf := make([]byte, 2+len(data)+2)
+	buf[0] = byte(size >> 8)
+	buf[1] = byte(size)
+	copy(buf[2:], data)
+	// buf[2+len(data)] and buf[2+len(data)+1] are already 0x00 (zero terminator)
 
-	if _, err := s.conn.Write(data); err != nil {
-		return err
-	}
-
-	// Chunk terminator
-	terminator := []byte{0x00, 0x00}
-	if _, err := s.conn.Write(terminator); err != nil {
-		return err
-	}
-
-	return nil
+	_, err := s.conn.Write(buf)
+	return err
 }
 
 // ============================================================================

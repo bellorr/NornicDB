@@ -57,7 +57,7 @@ func DefaultParallelConfig() ParallelConfig {
 	return ParallelConfig{
 		Enabled:      true,
 		MaxWorkers:   runtime.NumCPU(),
-		MinBatchSize: 200, // OPTIMIZATION: Reduced from 1000 - parallelization benefits smaller batches
+		MinBatchSize: 1000, // Reverted: 200 caused contention on Mac M-series
 	}
 }
 

@@ -1142,7 +1142,15 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				continue
 			}
 
-			// Find matching node
+			// Try cached lookup first for label+properties patterns
+			if len(nodeInfo.labels) > 0 && len(nodeInfo.properties) > 0 {
+				if cached := e.lookupCachedNode(nodeInfo.labels[0], nodeInfo.properties); cached != nil {
+					nodeVars[nodeInfo.variable] = cached
+					continue
+				}
+			}
+
+			// Find matching node (uncached path)
 			var candidates []*storage.Node
 			if len(nodeInfo.labels) > 0 {
 				candidates, _ = e.storage.GetNodesByLabel(nodeInfo.labels[0])
@@ -1154,6 +1162,10 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			for _, node := range candidates {
 				if e.nodeMatchesProps(node, nodeInfo.properties) {
 					nodeVars[nodeInfo.variable] = node
+					// Cache for future lookups
+					if len(nodeInfo.labels) > 0 && len(nodeInfo.properties) > 0 {
+						e.cacheNodeLookup(nodeInfo.labels[0], nodeInfo.properties, node)
+					}
 					break
 				}
 			}
@@ -1449,17 +1461,15 @@ func (e *StorageExecutor) executeCompoundCreateWithDelete(ctx context.Context, c
 	// Execute DELETE
 	deleteTarget := strings.TrimSpace(deletePart)
 	if node, exists := createdVars[deleteTarget]; exists {
-		// Delete the node (and any relationships)
-		outEdges, _ := e.storage.GetOutgoingEdges(node.ID)
-		inEdges, _ := e.storage.GetIncomingEdges(node.ID)
-		for _, edge := range outEdges {
-			if err := e.storage.DeleteEdge(edge.ID); err == nil {
-				result.Stats.RelationshipsDeleted++
-			}
-		}
-		for _, edge := range inEdges {
-			if err := e.storage.DeleteEdge(edge.ID); err == nil {
-				result.Stats.RelationshipsDeleted++
+		// Node was JUST created in this query, so it has no pre-existing edges.
+		// Only need to check for edges created in the same query (in createdEdges).
+		// This avoids 2 unnecessary storage lookups per delete operation.
+		for varName, edge := range createdEdges {
+			if edge.StartNode == node.ID || edge.EndNode == node.ID {
+				if err := e.storage.DeleteEdge(edge.ID); err == nil {
+					result.Stats.RelationshipsDeleted++
+					delete(createdEdges, varName) // Mark as deleted
+				}
 			}
 		}
 		if err := e.storage.DeleteNode(node.ID); err != nil {

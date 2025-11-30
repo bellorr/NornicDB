@@ -12,6 +12,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
@@ -62,6 +63,13 @@ type BadgerEngine struct {
 	schema *SchemaManager
 	mu     sync.RWMutex // Protects schema operations
 	closed bool
+
+	// Hot node cache for frequently accessed nodes
+	// Dramatically speeds up repeated MATCH lookups
+	nodeCache   map[NodeID]*Node
+	nodeCacheMu sync.RWMutex
+	cacheHits   int64
+	cacheMisses int64
 }
 
 // BadgerOptions configures the BadgerDB engine.
@@ -85,6 +93,10 @@ type BadgerOptions struct {
 	// LowMemory enables memory-constrained settings.
 	// Reduces MemTableSize and other buffers to use less RAM.
 	LowMemory bool
+
+	// HighPerformance enables aggressive caching and larger buffers.
+	// Uses more RAM but significantly faster writes/reads.
+	HighPerformance bool
 }
 
 // NewBadgerEngine creates a new persistent storage engine with default settings.
@@ -244,17 +256,44 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 		badgerOpts = badgerOpts.WithLogger(nil)
 	}
 
-	// Apply low memory settings to reduce RAM usage
-	// These settings are always applied for containerized environments
-	badgerOpts = badgerOpts.
-		WithMemTableSize(16 << 20).     // 16MB instead of 64MB
-		WithValueLogFileSize(64 << 20). // 64MB instead of 1GB
-		WithNumMemtables(2).            // 2 instead of 5
-		WithNumLevelZeroTables(2).      // 2 instead of 5
-		WithNumLevelZeroTablesStall(4). // 4 instead of 15
-		WithValueThreshold(1024).       // Store values > 1KB in value log
-		WithBlockCacheSize(32 << 20).   // 32MB block cache
-		WithIndexCacheSize(16 << 20)    // 16MB index cache
+	if opts.HighPerformance {
+		// HIGH PERFORMANCE MODE: Maximize speed, use more RAM
+		// Target: Get close to in-memory performance for small-medium datasets
+		badgerOpts = badgerOpts.
+			WithMemTableSize(128 << 20).     // 128MB memtable (8x default) - fewer flushes
+			WithValueLogFileSize(256 << 20). // 256MB value log files
+			WithNumMemtables(5).             // 5 memtables for write buffering
+			WithNumLevelZeroTables(10).      // More L0 tables before compaction
+			WithNumLevelZeroTablesStall(20). // Higher stall threshold
+			WithValueThreshold(1 << 20).     // 1MB - keep most values in LSM tree
+			WithBlockCacheSize(256 << 20).   // 256MB block cache
+			WithIndexCacheSize(128 << 20).   // 128MB index cache
+			WithNumCompactors(4).            // More parallel compaction
+			WithCompactL0OnClose(false).     // Don't compact on close (faster shutdown)
+			WithDetectConflicts(false)       // Skip conflict detection (we handle it)
+	} else if opts.LowMemory {
+		// LOW MEMORY MODE: Minimize RAM usage
+		badgerOpts = badgerOpts.
+			WithMemTableSize(8 << 20).      // 8MB memtable
+			WithValueLogFileSize(32 << 20). // 32MB value log
+			WithNumMemtables(1).            // Single memtable
+			WithNumLevelZeroTables(1).      // Aggressive compaction
+			WithNumLevelZeroTablesStall(2).
+			WithValueThreshold(512).     // Small values in LSM
+			WithBlockCacheSize(8 << 20). // 8MB block cache
+			WithIndexCacheSize(4 << 20)  // 4MB index cache
+	} else {
+		// DEFAULT: Balanced settings
+		badgerOpts = badgerOpts.
+			WithMemTableSize(64 << 20).      // 64MB memtable (default)
+			WithValueLogFileSize(128 << 20). // 128MB value log
+			WithNumMemtables(3).             // 3 memtables
+			WithNumLevelZeroTables(5).       // Default L0 tables
+			WithNumLevelZeroTablesStall(10).
+			WithValueThreshold(1024).     // 1KB threshold
+			WithBlockCacheSize(64 << 20). // 64MB block cache
+			WithIndexCacheSize(32 << 20)  // 32MB index cache
+	}
 
 	db, err := badger.Open(badgerOpts)
 	if err != nil {
@@ -262,8 +301,9 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	}
 
 	return &BadgerEngine{
-		db:     db,
-		schema: NewSchemaManager(),
+		db:        db,
+		schema:    NewSchemaManager(),
+		nodeCache: make(map[NodeID]*Node, 10000), // Cache up to 10K hot nodes
 	}, nil
 }
 
@@ -514,7 +554,7 @@ func (b *BadgerEngine) CreateNode(node *Node) error {
 	}
 	b.mu.RUnlock()
 
-	return b.db.Update(func(txn *badger.Txn) error {
+	err := b.db.Update(func(txn *badger.Txn) error {
 		// Check if node already exists
 		key := nodeKey(node.ID)
 		_, err := txn.Get(key)
@@ -546,6 +586,15 @@ func (b *BadgerEngine) CreateNode(node *Node) error {
 
 		return nil
 	})
+
+	// Populate cache on successful create
+	if err == nil {
+		b.nodeCacheMu.Lock()
+		b.nodeCache[node.ID] = node
+		b.nodeCacheMu.Unlock()
+	}
+
+	return err
 }
 
 // GetNode retrieves a node by ID.
@@ -560,6 +609,16 @@ func (b *BadgerEngine) GetNode(id NodeID) (*Node, error) {
 		return nil, ErrStorageClosed
 	}
 	b.mu.RUnlock()
+
+	// Check cache first
+	b.nodeCacheMu.RLock()
+	if cached, ok := b.nodeCache[id]; ok {
+		b.nodeCacheMu.RUnlock()
+		atomic.AddInt64(&b.cacheHits, 1)
+		return cached, nil
+	}
+	b.nodeCacheMu.RUnlock()
+	atomic.AddInt64(&b.cacheMisses, 1)
 
 	var node *Node
 	err := b.db.View(func(txn *badger.Txn) error {
@@ -577,6 +636,17 @@ func (b *BadgerEngine) GetNode(id NodeID) (*Node, error) {
 			return decodeErr
 		})
 	})
+
+	// Cache the result on successful fetch
+	if err == nil && node != nil {
+		b.nodeCacheMu.Lock()
+		// Simple eviction: if cache is too large, clear it
+		if len(b.nodeCache) > 10000 {
+			b.nodeCache = make(map[NodeID]*Node, 10000)
+		}
+		b.nodeCache[id] = node
+		b.nodeCacheMu.Unlock()
+	}
 
 	return node, err
 }
@@ -597,7 +667,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 	}
 	b.mu.RUnlock()
 
-	return b.db.Update(func(txn *badger.Txn) error {
+	err := b.db.Update(func(txn *badger.Txn) error {
 		key := nodeKey(node.ID)
 
 		// Get existing node for label index updates
@@ -644,6 +714,15 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 
 		return nil
 	})
+
+	// Update cache on successful update
+	if err == nil {
+		b.nodeCacheMu.Lock()
+		b.nodeCache[node.ID] = node
+		b.nodeCacheMu.Unlock()
+	}
+
+	return err
 }
 
 // DeleteNode removes a node and all its edges.
@@ -659,7 +738,7 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 	}
 	b.mu.RUnlock()
 
-	return b.db.Update(func(txn *badger.Txn) error {
+	err := b.db.Update(func(txn *badger.Txn) error {
 		key := nodeKey(id)
 
 		// Get node for label cleanup
@@ -702,6 +781,15 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 		// Delete the node
 		return txn.Delete(key)
 	})
+
+	// Invalidate cache on successful delete
+	if err == nil {
+		b.nodeCacheMu.Lock()
+		delete(b.nodeCache, id)
+		b.nodeCacheMu.Unlock()
+	}
+
+	return err
 }
 
 // deleteEdgesWithPrefix deletes all edges matching a prefix (helper for DeleteNode).
@@ -1020,7 +1108,7 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 	}
 	b.mu.RUnlock()
 
-	return b.db.Update(func(txn *badger.Txn) error {
+	err := b.db.Update(func(txn *badger.Txn) error {
 		for _, id := range ids {
 			if id == "" {
 				continue // Skip invalid IDs
@@ -1032,6 +1120,17 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 		}
 		return nil
 	})
+
+	// Invalidate cache for deleted nodes
+	if err == nil {
+		b.nodeCacheMu.Lock()
+		for _, id := range ids {
+			delete(b.nodeCache, id)
+		}
+		b.nodeCacheMu.Unlock()
+	}
+
+	return err
 }
 
 // BulkDeleteEdges removes multiple edges in a single transaction.
@@ -1075,38 +1174,23 @@ func (b *BadgerEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	}
 	b.mu.RUnlock()
 
-	// OPTIMIZATION: Two-phase approach - collect IDs first, then batch fetch
-	// This enables better prefetching and reduces transaction overhead
-	var nodeIDs []NodeID
+	// Single-pass: iterate label index and fetch nodes in same transaction
+	// This reduces transaction overhead compared to two-phase approach
+	var nodes []*Node
 	err := b.db.View(func(txn *badger.Txn) error {
 		prefix := labelIndexPrefix(label)
 		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false // Don't need values from index
+		opts.PrefetchValues = false // Don't need values from index keys
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
-		// Phase 1: Collect all node IDs from label index
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			nodeID := extractNodeIDFromLabelIndex(it.Item().Key(), len(label))
-			if nodeID != "" {
-				nodeIDs = append(nodeIDs, nodeID)
+			if nodeID == "" {
+				continue
 			}
-		}
-		return nil
-	})
 
-	if err != nil {
-		return nil, err
-	}
-
-	if len(nodeIDs) == 0 {
-		return []*Node{}, nil
-	}
-
-	// Phase 2: Batch fetch all nodes in single transaction with prefetch
-	nodes := make([]*Node, 0, len(nodeIDs))
-	err = b.db.View(func(txn *badger.Txn) error {
-		for _, nodeID := range nodeIDs {
+			// Fetch node data in same transaction
 			item, err := txn.Get(nodeKey(nodeID))
 			if err != nil {
 				continue // Skip if node was deleted

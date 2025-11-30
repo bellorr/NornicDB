@@ -713,7 +713,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Initialize storage - use BadgerEngine for persistence, MemoryEngine for testing
 	if dataDir != "" {
-		badgerEngine, err := storage.NewBadgerEngine(dataDir)
+		// Use high-performance BadgerDB settings by default
+		// This uses more RAM but provides much faster read/write performance
+		badgerEngine, err := storage.NewBadgerEngineWithOptions(storage.BadgerOptions{
+			DataDir:         dataDir,
+			HighPerformance: true,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to open persistent storage: %w", err)
 		}

@@ -729,7 +729,8 @@ func (e *errorConn) Read(b []byte) (n int, err error) {
 }
 
 func TestSendChunkWriteError(t *testing.T) {
-	t.Run("write header error", func(t *testing.T) {
+	t.Run("write error", func(t *testing.T) {
+		// sendChunk now does single write with consolidated buffer
 		conn := &errorConn{writeErr: io.ErrClosedPipe}
 		session := &Session{conn: conn}
 
@@ -739,42 +740,30 @@ func TestSendChunkWriteError(t *testing.T) {
 		}
 	})
 
-	t.Run("write data error", func(t *testing.T) {
-		// Need to allow header write but fail on data
-		callCount := 0
+	t.Run("write succeeds", func(t *testing.T) {
+		// Verify correct format: header (2) + data + terminator (2)
+		var written []byte
 		conn := &sequentialErrorConn{
 			writeFunc: func(b []byte) (int, error) {
-				callCount++
-				if callCount == 1 {
-					return len(b), nil // Header succeeds
-				}
-				return 0, io.ErrClosedPipe // Data fails
+				written = append(written, b...)
+				return len(b), nil
 			},
 		}
 		session := &Session{conn: conn}
 
-		err := session.sendChunk([]byte{0x01, 0x02})
-		if err == nil {
-			t.Error("expected error when data write fails")
+		err := session.sendChunk([]byte{0xAB, 0xCD})
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
 		}
-	})
-
-	t.Run("write terminator error", func(t *testing.T) {
-		callCount := 0
-		conn := &sequentialErrorConn{
-			writeFunc: func(b []byte) (int, error) {
-				callCount++
-				if callCount <= 2 {
-					return len(b), nil // Header and data succeed
-				}
-				return 0, io.ErrClosedPipe // Terminator fails
-			},
+		// Expected: [0x00, 0x02] (size=2) + [0xAB, 0xCD] (data) + [0x00, 0x00] (terminator)
+		expected := []byte{0x00, 0x02, 0xAB, 0xCD, 0x00, 0x00}
+		if len(written) != len(expected) {
+			t.Errorf("wrong length: got %d, want %d", len(written), len(expected))
 		}
-		session := &Session{conn: conn}
-
-		err := session.sendChunk([]byte{0x01})
-		if err == nil {
-			t.Error("expected error when terminator write fails")
+		for i := range expected {
+			if written[i] != expected[i] {
+				t.Errorf("byte %d: got %02x, want %02x", i, written[i], expected[i])
+			}
 		}
 	})
 }
