@@ -6,6 +6,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -44,6 +45,13 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	if isStandaloneWith {
 		// Has standalone WITH clause - delegate to special handler
 		return e.executeMatchWithClause(ctx, cypher)
+	}
+
+	// Check for UNWIND clause between MATCH and RETURN
+	unwindIdx := findKeywordIndex(cypher, "UNWIND")
+	if unwindIdx > 0 && (returnIdx == -1 || unwindIdx < returnIdx) {
+		// Has UNWIND clause - delegate to special handler
+		return e.executeMatchUnwind(ctx, cypher)
 	}
 
 	if returnIdx == -1 {
@@ -100,8 +108,9 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	}
 
 	// Extract pattern between MATCH and WHERE/RETURN
+	// Use findKeywordNotInBrackets to avoid matching WHERE inside list comprehensions like [x WHERE ...]
 	matchPart := cypher[5:] // Skip "MATCH"
-	whereIdx := findKeywordIndex(cypher, "WHERE")
+	whereIdx := findKeywordNotInBrackets(upper, " WHERE ")
 	if whereIdx > 0 {
 		matchPart = cypher[5:whereIdx]
 	} else if returnIdx > 0 {
@@ -149,7 +158,60 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 
 	// Handle aggregation queries
 	if hasAggregation {
-		return e.executeAggregation(nodes, nodePattern.variable, returnItems, result)
+		aggResult, err := e.executeAggregation(nodes, nodePattern.variable, returnItems, result)
+		if err != nil {
+			return nil, err
+		}
+		// Apply ORDER BY to aggregated results
+		orderByIdx := strings.Index(upper, "ORDER BY")
+		if orderByIdx > 0 {
+			orderPart := upper[orderByIdx+8:]
+			endIdx := len(orderPart)
+			for _, kw := range []string{" SKIP ", " LIMIT "} {
+				if idx := strings.Index(orderPart, kw); idx >= 0 && idx < endIdx {
+					endIdx = idx
+				}
+			}
+			orderExpr := strings.TrimSpace(cypher[orderByIdx+8 : orderByIdx+8+endIdx])
+			aggResult.Rows = e.orderResultRows(aggResult.Rows, aggResult.Columns, orderExpr)
+		}
+
+		// Apply SKIP to aggregated results
+		skipIdx := strings.Index(upper, "SKIP")
+		skip := 0
+		if skipIdx > 0 {
+			skipPart := strings.TrimSpace(cypher[skipIdx+4:])
+			skipPart = strings.Split(skipPart, " ")[0]
+			if s, err := strconv.Atoi(skipPart); err == nil {
+				skip = s
+			}
+		}
+
+		// Apply LIMIT to aggregated results
+		limitIdx := strings.Index(upper, "LIMIT")
+		limit := -1
+		if limitIdx > 0 {
+			limitPart := strings.TrimSpace(cypher[limitIdx+5:])
+			limitPart = strings.Split(limitPart, " ")[0]
+			if l, err := strconv.Atoi(limitPart); err == nil {
+				limit = l
+			}
+		}
+
+		// Apply SKIP and LIMIT
+		if skip > 0 || limit >= 0 {
+			startIdx := skip
+			if startIdx > len(aggResult.Rows) {
+				startIdx = len(aggResult.Rows)
+			}
+			endIdx := len(aggResult.Rows)
+			if limit >= 0 && startIdx+limit < endIdx {
+				endIdx = startIdx + limit
+			}
+			aggResult.Rows = aggResult.Rows[startIdx:endIdx]
+		}
+
+		return aggResult, nil
 	}
 
 	// Parse ORDER BY
@@ -694,9 +756,12 @@ func (e *StorageExecutor) orderNodes(nodes []*storage.Node, variable, orderExpr 
 	return sorted
 }
 
-// executeMatchWithClause handles MATCH ... WITH ... RETURN queries
+// executeMatchWithClause handles MATCH ... WHERE ... WITH ... RETURN queries
 // This processes computed values (like CASE WHEN) in the WITH clause
+// and handles aggregation with implicit GROUP BY
 func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	upper := strings.ToUpper(cypher)
+
 	// Find clause boundaries
 	withIdx := findKeywordIndex(cypher, "WITH")
 	returnIdx := findKeywordIndex(cypher, "RETURN")
@@ -705,11 +770,29 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 		return nil, fmt.Errorf("WITH and RETURN clauses required")
 	}
 
+	// Check for UNWIND between WITH and RETURN - delegate to specialized handler
+	unwindIdx := findKeywordNotInBrackets(upper[withIdx:], " UNWIND ")
+	if unwindIdx > 0 {
+		return e.executeMatchWithUnwind(ctx, cypher)
+	}
+
 	// Extract MATCH part (before WITH)
 	matchPart := strings.TrimSpace(cypher[5:withIdx]) // Skip "MATCH"
 
+	// Check for WHERE clause between MATCH and WITH
+	whereIdx := findKeywordIndex(matchPart, "WHERE")
+	var whereClause string
+	var nodePatternPart string
+
+	if whereIdx > 0 {
+		nodePatternPart = strings.TrimSpace(matchPart[:whereIdx])
+		whereClause = strings.TrimSpace(matchPart[whereIdx+5:]) // Skip "WHERE"
+	} else {
+		nodePatternPart = matchPart
+	}
+
 	// Parse node pattern
-	nodePattern := e.parseNodePattern(matchPart)
+	nodePattern := e.parseNodePattern(nodePatternPart)
 
 	// Get matching nodes
 	var nodes []*storage.Node
@@ -729,8 +812,27 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 		nodes = e.filterNodesByProperties(nodes, nodePattern.properties)
 	}
 
+	// Apply WHERE clause filter if present
+	if whereClause != "" {
+		nodes = e.filterNodesByWhereClause(nodes, whereClause, nodePattern.variable)
+	}
+
 	// Extract WITH clause expressions
-	withClause := strings.TrimSpace(cypher[withIdx+4 : returnIdx])
+	// Check for WHERE between WITH and RETURN (filters aggregated results, like SQL HAVING)
+	withSection := strings.TrimSpace(cypher[withIdx+4 : returnIdx])
+	var withClause string
+	var postWithWhere string
+
+	// Find WHERE in the section between WITH and RETURN
+	// Use findKeywordNotInBrackets to avoid matching WHERE inside list comprehensions like [x WHERE ...]
+	postWhereIdx := findKeywordNotInBrackets(strings.ToUpper(withSection), " WHERE ")
+	if postWhereIdx > 0 {
+		withClause = strings.TrimSpace(withSection[:postWhereIdx])
+		// Skip "WHERE" (5 chars) + any trailing whitespace
+		postWithWhere = strings.TrimSpace(withSection[postWhereIdx+5:])
+	} else {
+		withClause = withSection
+	}
 	withItems := e.splitWithItems(withClause)
 
 	// Extract RETURN clause
@@ -743,6 +845,52 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 	}
 	returnItems := e.parseReturnItems(returnClause)
 
+	// Parse WITH items to detect aggregations
+	type withItem struct {
+		expr        string
+		alias       string
+		isAggregate bool
+	}
+	var parsedWithItems []withItem
+	hasWithAggregation := false
+
+	for _, item := range withItems {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+
+		upperItem := strings.ToUpper(item)
+		asIdx := strings.Index(upperItem, " AS ")
+		var alias string
+		var expr string
+		if asIdx > 0 {
+			expr = strings.TrimSpace(item[:asIdx])
+			alias = strings.TrimSpace(item[asIdx+4:])
+		} else {
+			expr = item
+			alias = item
+		}
+
+		upperExpr := strings.ToUpper(expr)
+		isAgg := strings.HasPrefix(upperExpr, "COUNT(") ||
+			strings.HasPrefix(upperExpr, "SUM(") ||
+			strings.HasPrefix(upperExpr, "AVG(") ||
+			strings.HasPrefix(upperExpr, "COLLECT(") ||
+			strings.HasPrefix(upperExpr, "MIN(") ||
+			strings.HasPrefix(upperExpr, "MAX(")
+
+		if isAgg {
+			hasWithAggregation = true
+		}
+
+		parsedWithItems = append(parsedWithItems, withItem{
+			expr:        expr,
+			alias:       alias,
+			isAggregate: isAgg,
+		})
+	}
+
 	// Build computed values for each node
 	type computedRow struct {
 		node   *storage.Node
@@ -750,45 +898,209 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 	}
 	var computedRows []computedRow
 
-	for _, node := range nodes {
-		nodeMap := map[string]*storage.Node{nodePattern.variable: node}
-		values := make(map[string]interface{})
-
-		for _, item := range withItems {
-			item = strings.TrimSpace(item)
-			if item == "" {
-				continue
-			}
-
-			upperItem := strings.ToUpper(item)
-			asIdx := strings.Index(upperItem, " AS ")
-			var alias string
-			var expr string
-			if asIdx > 0 {
-				expr = strings.TrimSpace(item[:asIdx])
-				alias = strings.TrimSpace(item[asIdx+4:])
+	if hasWithAggregation {
+		// WITH clause has aggregation - need to GROUP BY non-aggregated columns
+		// First, identify grouping keys (non-aggregated WITH items)
+		var groupByExprs []withItem
+		var aggregateExprs []withItem
+		for _, wi := range parsedWithItems {
+			if wi.isAggregate {
+				aggregateExprs = append(aggregateExprs, wi)
 			} else {
-				expr = item
-				alias = item
-			}
-
-			// Check if this is a CASE expression
-			if isCaseExpression(expr) {
-				values[alias] = e.evaluateCaseExpression(expr, nodeMap, nil)
-			} else if strings.HasPrefix(expr, nodePattern.variable+".") {
-				// Property access
-				propName := expr[len(nodePattern.variable)+1:]
-				values[alias] = node.Properties[propName]
-			} else if expr == nodePattern.variable {
-				// Just the node variable
-				values[alias] = node
-			} else {
-				// Try to evaluate as expression
-				values[alias] = e.evaluateExpressionWithContext(expr, nodeMap, nil)
+				groupByExprs = append(groupByExprs, wi)
 			}
 		}
 
-		computedRows = append(computedRows, computedRow{node: node, values: values})
+		// Group nodes by their grouping column values
+		groups := make(map[string][]*storage.Node)
+		groupKeys := make(map[string]map[string]interface{}) // Store the key values for each group
+
+		for _, node := range nodes {
+			nodeMap := map[string]*storage.Node{nodePattern.variable: node}
+
+			// Build the group key from non-aggregated expressions
+			keyParts := make([]string, len(groupByExprs))
+			keyValues := make(map[string]interface{})
+
+			for i, ge := range groupByExprs {
+				var val interface{}
+				if strings.HasPrefix(ge.expr, nodePattern.variable+".") {
+					propName := ge.expr[len(nodePattern.variable)+1:]
+					val = node.Properties[propName]
+				} else if ge.expr == nodePattern.variable {
+					val = node
+				} else {
+					val = e.evaluateExpressionWithContext(ge.expr, nodeMap, nil)
+				}
+				keyParts[i] = fmt.Sprintf("%v", val)
+				keyValues[ge.alias] = val
+			}
+
+			key := strings.Join(keyParts, "|")
+			groups[key] = append(groups[key], node)
+			if _, exists := groupKeys[key]; !exists {
+				groupKeys[key] = keyValues
+			}
+		}
+
+		// Now calculate aggregates for each group
+		for key, groupNodes := range groups {
+			values := make(map[string]interface{})
+
+			// Copy non-aggregated values
+			for k, v := range groupKeys[key] {
+				values[k] = v
+			}
+
+			// Calculate aggregates
+			for _, ae := range aggregateExprs {
+				upperExpr := strings.ToUpper(ae.expr)
+				switch {
+				case strings.HasPrefix(upperExpr, "COUNT(DISTINCT "):
+					inner := ae.expr[15 : len(ae.expr)-1]
+					seen := make(map[string]bool)
+					for _, n := range groupNodes {
+						nodeMap := map[string]*storage.Node{nodePattern.variable: n}
+						var val interface{}
+						if strings.HasPrefix(inner, nodePattern.variable+".") {
+							propName := inner[len(nodePattern.variable)+1:]
+							val = n.Properties[propName]
+						} else if inner == nodePattern.variable {
+							val = string(n.ID)
+						} else {
+							val = e.evaluateExpressionWithContext(inner, nodeMap, nil)
+						}
+						if val != nil {
+							seen[fmt.Sprintf("%v", val)] = true
+						}
+					}
+					values[ae.alias] = int64(len(seen))
+
+				case strings.HasPrefix(upperExpr, "COUNT("):
+					inner := ae.expr[6 : len(ae.expr)-1]
+					if inner == "*" {
+						values[ae.alias] = int64(len(groupNodes))
+					} else {
+						count := int64(0)
+						for _, n := range groupNodes {
+							nodeMap := map[string]*storage.Node{nodePattern.variable: n}
+							var val interface{}
+							if strings.HasPrefix(inner, nodePattern.variable+".") {
+								propName := inner[len(nodePattern.variable)+1:]
+								val = n.Properties[propName]
+							} else if inner == nodePattern.variable {
+								count++ // Node itself is not null
+								continue
+							} else {
+								val = e.evaluateExpressionWithContext(inner, nodeMap, nil)
+							}
+							if val != nil {
+								count++
+							}
+						}
+						values[ae.alias] = count
+					}
+
+				case strings.HasPrefix(upperExpr, "SUM("):
+					inner := ae.expr[4 : len(ae.expr)-1]
+					sum := float64(0)
+					for _, n := range groupNodes {
+						nodeMap := map[string]*storage.Node{nodePattern.variable: n}
+						var val interface{}
+						if strings.HasPrefix(inner, nodePattern.variable+".") {
+							propName := inner[len(nodePattern.variable)+1:]
+							val = n.Properties[propName]
+						} else {
+							val = e.evaluateExpressionWithContext(inner, nodeMap, nil)
+						}
+						if num, ok := toFloat64(val); ok {
+							sum += num
+						}
+					}
+					values[ae.alias] = sum
+
+				case strings.HasPrefix(upperExpr, "COLLECT(DISTINCT "):
+					inner := ae.expr[17 : len(ae.expr)-1] // Skip "COLLECT(DISTINCT "
+					seen := make(map[string]bool)
+					var collected []interface{}
+					for _, n := range groupNodes {
+						nodeMap := map[string]*storage.Node{nodePattern.variable: n}
+						var val interface{}
+						if strings.HasPrefix(inner, nodePattern.variable+".") {
+							propName := inner[len(nodePattern.variable)+1:]
+							val = n.Properties[propName]
+						} else if inner == nodePattern.variable {
+							val = string(n.ID)
+						} else {
+							val = e.evaluateExpressionWithContext(inner, nodeMap, nil)
+						}
+						key := fmt.Sprintf("%v", val)
+						if !seen[key] {
+							seen[key] = true
+							collected = append(collected, val)
+						}
+					}
+					values[ae.alias] = collected
+
+				case strings.HasPrefix(upperExpr, "COLLECT("):
+					inner := ae.expr[8 : len(ae.expr)-1]
+					var collected []interface{}
+					for _, n := range groupNodes {
+						nodeMap := map[string]*storage.Node{nodePattern.variable: n}
+						var val interface{}
+						if strings.HasPrefix(inner, nodePattern.variable+".") {
+							propName := inner[len(nodePattern.variable)+1:]
+							val = n.Properties[propName]
+						} else if inner == nodePattern.variable {
+							val = n
+						} else {
+							val = e.evaluateExpressionWithContext(inner, nodeMap, nil)
+						}
+						collected = append(collected, val)
+					}
+					values[ae.alias] = collected
+				}
+			}
+
+			computedRows = append(computedRows, computedRow{node: groupNodes[0], values: values})
+		}
+	} else {
+		// No aggregation in WITH - process each node individually
+		for _, node := range nodes {
+			nodeMap := map[string]*storage.Node{nodePattern.variable: node}
+			values := make(map[string]interface{})
+
+			for _, wi := range parsedWithItems {
+				// Check if this is a CASE expression
+				if isCaseExpression(wi.expr) {
+					values[wi.alias] = e.evaluateCaseExpression(wi.expr, nodeMap, nil)
+				} else if strings.HasPrefix(wi.expr, nodePattern.variable+".") {
+					// Property access
+					propName := wi.expr[len(nodePattern.variable)+1:]
+					values[wi.alias] = node.Properties[propName]
+				} else if wi.expr == nodePattern.variable {
+					// Just the node variable
+					values[wi.alias] = node
+				} else {
+					// Try to evaluate as expression
+					values[wi.alias] = e.evaluateExpressionWithContext(wi.expr, nodeMap, nil)
+				}
+			}
+
+			computedRows = append(computedRows, computedRow{node: node, values: values})
+		}
+	}
+
+	// Apply WHERE filter after WITH (like SQL HAVING)
+	if postWithWhere != "" {
+		var filteredRows []computedRow
+		for _, cr := range computedRows {
+			// Evaluate the WHERE condition against the computed values
+			if e.evaluateWithWhereCondition(postWithWhere, cr.values) {
+				filteredRows = append(filteredRows, cr)
+			}
+		}
+		computedRows = filteredRows
 	}
 
 	// Now process aggregations in RETURN clause
@@ -895,10 +1207,104 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 			for i, item := range returnItems {
 				if val, ok := cr.values[item.expr]; ok {
 					row[i] = val
+				} else {
+					// Try to evaluate expression by substituting bound variables
+					expr := item.expr
+					hasSubstitution := false
+					for varName, varVal := range cr.values {
+						if strings.Contains(expr, varName) {
+							// Convert value to string representation for list comprehension
+							var replacement string
+							switch v := varVal.(type) {
+							case []interface{}:
+								parts := make([]string, len(v))
+								for j, elem := range v {
+									switch e := elem.(type) {
+									case string:
+										parts[j] = fmt.Sprintf("'%s'", e)
+									default:
+										parts[j] = fmt.Sprintf("%v", e)
+									}
+								}
+								replacement = "[" + strings.Join(parts, ", ") + "]"
+							case string:
+								replacement = fmt.Sprintf("'%s'", v)
+							case *storage.Node:
+								// Skip node values - can't substitute directly
+								continue
+							default:
+								replacement = fmt.Sprintf("%v", v)
+							}
+							expr = strings.ReplaceAll(expr, varName, replacement)
+							hasSubstitution = true
+						}
+					}
+					if hasSubstitution {
+						// Build node map for evaluation (for labels() etc)
+						nodeMap := make(map[string]*storage.Node)
+						for varName, varVal := range cr.values {
+							if node, ok := varVal.(*storage.Node); ok {
+								nodeMap[varName] = node
+							}
+						}
+						row[i] = e.evaluateExpressionWithContext(expr, nodeMap, nil)
+					}
 				}
 			}
 			result.Rows = append(result.Rows, row)
 		}
+	}
+
+	// Apply ORDER BY, SKIP, LIMIT to results
+	upper = strings.ToUpper(cypher)
+
+	// Apply ORDER BY
+	orderByIdx := strings.Index(upper, "ORDER BY")
+	if orderByIdx > 0 {
+		orderPart := upper[orderByIdx+8:]
+		endIdx := len(orderPart)
+		for _, kw := range []string{" SKIP ", " LIMIT "} {
+			if idx := strings.Index(orderPart, kw); idx >= 0 && idx < endIdx {
+				endIdx = idx
+			}
+		}
+		orderExpr := strings.TrimSpace(cypher[orderByIdx+8 : orderByIdx+8+endIdx])
+		result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
+	}
+
+	// Apply SKIP
+	skipIdx := strings.Index(upper, "SKIP")
+	skip := 0
+	if skipIdx > 0 {
+		skipPart := strings.TrimSpace(cypher[skipIdx+4:])
+		skipPart = strings.Split(skipPart, " ")[0]
+		if s, err := strconv.Atoi(skipPart); err == nil {
+			skip = s
+		}
+	}
+
+	// Apply LIMIT
+	limitIdx := strings.Index(upper, "LIMIT")
+	limit := -1
+	if limitIdx > 0 {
+		limitPart := strings.TrimSpace(cypher[limitIdx+5:])
+		limitPart = strings.Split(limitPart, " ")[0]
+		if l, err := strconv.Atoi(limitPart); err == nil {
+			limit = l
+		}
+	}
+
+	// Apply SKIP and LIMIT
+	if skip > 0 || limit >= 0 {
+		startIdx := skip
+		if startIdx > len(result.Rows) {
+			startIdx = len(result.Rows)
+		}
+		endIdx := len(result.Rows)
+		if limit >= 0 && startIdx+limit < endIdx {
+			endIdx = startIdx + limit
+		}
+		result.Rows = result.Rows[startIdx:endIdx]
 	}
 
 	return result, nil
@@ -991,6 +1397,152 @@ func splitArithmeticExpression(expr string) []string {
 	return parts
 }
 
+// evaluateWithWhereCondition evaluates a WHERE condition against computed WITH values.
+// This is for filtering after WITH aggregation (like SQL HAVING).
+func (e *StorageExecutor) evaluateWithWhereCondition(whereClause string, values map[string]interface{}) bool {
+	upperClause := strings.ToUpper(whereClause)
+
+	// Handle IS NULL / IS NOT NULL
+	if strings.Contains(upperClause, " IS NOT NULL") {
+		idx := strings.Index(upperClause, " IS NOT NULL")
+		varName := strings.TrimSpace(whereClause[:idx])
+		val, exists := values[varName]
+		return exists && val != nil
+	}
+	if strings.Contains(upperClause, " IS NULL") {
+		idx := strings.Index(upperClause, " IS NULL")
+		varName := strings.TrimSpace(whereClause[:idx])
+		val, exists := values[varName]
+		return !exists || val == nil
+	}
+
+	// Handle comparison operators
+	operators := []string{">=", "<=", "<>", "!=", ">", "<", "="}
+	for _, op := range operators {
+		if idx := strings.Index(whereClause, op); idx > 0 {
+			left := strings.TrimSpace(whereClause[:idx])
+			right := strings.TrimSpace(whereClause[idx+len(op):])
+
+			leftVal, exists := values[left]
+			if !exists {
+				leftVal = e.parseValue(left)
+			}
+			rightVal, exists := values[right]
+			if !exists {
+				rightVal = e.parseValue(right)
+			}
+
+			switch op {
+			case "=":
+				return e.compareEqual(leftVal, rightVal)
+			case "<>", "!=":
+				return !e.compareEqual(leftVal, rightVal)
+			case ">":
+				return e.compareGreater(leftVal, rightVal)
+			case "<":
+				return e.compareLess(leftVal, rightVal)
+			case ">=":
+				return e.compareEqual(leftVal, rightVal) || e.compareGreater(leftVal, rightVal)
+			case "<=":
+				return e.compareEqual(leftVal, rightVal) || e.compareLess(leftVal, rightVal)
+			}
+		}
+	}
+
+	return true // No recognized condition, include all
+}
+
+// filterNodesByWhereClause filters nodes based on a WHERE clause condition.
+// Uses evaluateWhere for consistent condition evaluation.
+func (e *StorageExecutor) filterNodesByWhereClause(nodes []*storage.Node, whereClause, variable string) []*storage.Node {
+	if whereClause == "" {
+		return nodes
+	}
+
+	filterFn := func(node *storage.Node) bool {
+		return e.evaluateWhere(node, variable, whereClause)
+	}
+
+	return parallelFilterNodes(nodes, filterFn)
+}
+
+// orderResultRows sorts result rows by the specified ORDER BY expression.
+// Used for ordering aggregated results.
+func (e *StorageExecutor) orderResultRows(rows [][]interface{}, columns []string, orderExpr string) [][]interface{} {
+	if len(rows) <= 1 {
+		return rows
+	}
+
+	// Parse order expression (e.g., "cnt DESC" or "ext ASC")
+	parts := strings.Fields(orderExpr)
+	if len(parts) == 0 {
+		return rows
+	}
+
+	orderCol := parts[0]
+	descending := len(parts) > 1 && strings.ToUpper(parts[1]) == "DESC"
+
+	// Find column index
+	colIdx := -1
+	for i, col := range columns {
+		if strings.EqualFold(col, orderCol) {
+			colIdx = i
+			break
+		}
+	}
+	if colIdx == -1 {
+		return rows // Column not found
+	}
+
+	// Sort rows
+	sort.Slice(rows, func(i, j int) bool {
+		valI := rows[i][colIdx]
+		valJ := rows[j][colIdx]
+
+		// Handle nil values (nulls last)
+		if valI == nil && valJ == nil {
+			return false
+		}
+		if valI == nil {
+			return false // nil goes last
+		}
+		if valJ == nil {
+			return true // non-nil before nil
+		}
+
+		// Compare based on type
+		var less bool
+		switch vI := valI.(type) {
+		case int64:
+			if vJ, ok := valJ.(int64); ok {
+				less = vI < vJ
+			}
+		case float64:
+			if vJ, ok := valJ.(float64); ok {
+				less = vI < vJ
+			}
+		case string:
+			if vJ, ok := valJ.(string); ok {
+				less = vI < vJ
+			}
+		default:
+			// Try numeric comparison
+			if numI, okI := toFloat64(valI); okI {
+				if numJ, okJ := toFloat64(valJ); okJ {
+					less = numI < numJ
+				}
+			}
+		}
+
+		if descending {
+			return !less
+		}
+		return less
+	})
+
+	return rows
+}
+
 // filterNodesByProperties filters nodes to only include those matching ALL specified properties.
 // This is used for MATCH pattern property filtering like MATCH (n:Label {prop: value}).
 // Uses parallel execution for large datasets (>1000 nodes) for improved performance.
@@ -1015,6 +1567,647 @@ func (e *StorageExecutor) filterNodesByProperties(nodes []*storage.Node, props m
 
 	// Use parallel filtering for large datasets
 	return parallelFilterNodes(nodes, filterFn)
+}
+
+// executeMatchUnwind handles MATCH ... UNWIND ... RETURN queries
+// This allows UNWIND to access variables defined in MATCH
+func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	upper := strings.ToUpper(cypher)
+
+	// Find clause boundaries
+	matchIdx := findKeywordIndex(cypher, "MATCH")
+	unwindIdx := findKeywordIndex(cypher, "UNWIND")
+	returnIdx := findKeywordIndex(cypher, "RETURN")
+
+	if matchIdx == -1 || unwindIdx == -1 {
+		return nil, fmt.Errorf("MATCH and UNWIND clauses required")
+	}
+
+	// Parse MATCH clause
+	matchPart := strings.TrimSpace(cypher[matchIdx+5 : unwindIdx])
+
+	// Check for WHERE clause in MATCH part
+	whereIdx := findKeywordIndex(matchPart, "WHERE")
+	var whereClause string
+	var nodePatternPart string
+
+	if whereIdx > 0 {
+		nodePatternPart = strings.TrimSpace(matchPart[:whereIdx])
+		whereClause = strings.TrimSpace(matchPart[whereIdx+5:])
+	} else {
+		nodePatternPart = matchPart
+	}
+
+	// Parse node pattern
+	nodePattern := e.parseNodePattern(nodePatternPart)
+
+	// Get matching nodes
+	var nodes []*storage.Node
+	var err error
+
+	if len(nodePattern.labels) > 0 {
+		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+	} else {
+		nodes, err = e.storage.AllNodes()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage error: %w", err)
+	}
+
+	// Apply property filter from MATCH pattern
+	if len(nodePattern.properties) > 0 {
+		nodes = e.filterNodesByProperties(nodes, nodePattern.properties)
+	}
+
+	// Apply WHERE clause filter if present
+	if whereClause != "" {
+		nodes = e.filterNodesByWhereClause(nodes, whereClause, nodePattern.variable)
+	}
+
+	// Parse UNWIND clause: UNWIND expr AS variable
+	unwindPart := strings.TrimSpace(cypher[unwindIdx+6:])
+	var unwindExpr, unwindVar string
+
+	// Find AS keyword
+	asIdx := strings.Index(strings.ToUpper(unwindPart), " AS ")
+	if asIdx == -1 {
+		return nil, fmt.Errorf("UNWIND requires AS clause")
+	}
+
+	unwindExpr = strings.TrimSpace(unwindPart[:asIdx])
+
+	// Find the end of the variable name (next clause)
+	remainder := strings.TrimSpace(unwindPart[asIdx+4:])
+	spaceIdx := strings.IndexAny(remainder, " \t\n")
+	if spaceIdx > 0 {
+		unwindVar = remainder[:spaceIdx]
+	} else {
+		unwindVar = remainder
+	}
+
+	// Find WHERE clause after UNWIND (if any)
+	postUnwindWhere := ""
+	unwindUpperRemainder := strings.ToUpper(unwindPart[asIdx+4:])
+	postWhereIdx := strings.Index(unwindUpperRemainder, " WHERE ")
+	if postWhereIdx > 0 {
+		// Find WHERE and RETURN boundaries
+		postWhereStart := asIdx + 4 + postWhereIdx + 7
+		postWhereEnd := len(unwindPart)
+		if returnIdx > unwindIdx {
+			relativeReturnIdx := returnIdx - unwindIdx - 6
+			if relativeReturnIdx > 0 && relativeReturnIdx < postWhereEnd {
+				postWhereEnd = relativeReturnIdx
+			}
+		}
+		postUnwindWhere = strings.TrimSpace(unwindPart[postWhereStart:postWhereEnd])
+	}
+
+	// Parse RETURN clause
+	var returnItems []returnItem
+	var returnColumns []string
+
+	if returnIdx > 0 {
+		returnClause := strings.TrimSpace(cypher[returnIdx+6:])
+		// Remove ORDER BY, SKIP, LIMIT
+		for _, keyword := range []string{" ORDER BY ", " SKIP ", " LIMIT "} {
+			if idx := strings.Index(strings.ToUpper(returnClause), keyword); idx >= 0 {
+				returnClause = returnClause[:idx]
+			}
+		}
+		returnItems = e.parseReturnItems(returnClause)
+		returnColumns = make([]string, len(returnItems))
+		for i, item := range returnItems {
+			if item.alias != "" {
+				returnColumns[i] = item.alias
+			} else {
+				returnColumns[i] = item.expr
+			}
+		}
+	}
+
+	// Build result by unwinding for each matched node
+	type unwoundRow struct {
+		nodeVar   string
+		node      *storage.Node
+		unwindVar string
+		unwindVal interface{}
+	}
+	var unwoundRows []unwoundRow
+
+	for _, node := range nodes {
+		// Evaluate the UNWIND expression in the context of this node
+		nodeMap := map[string]*storage.Node{nodePattern.variable: node}
+		listVal := e.evaluateExpressionWithContext(unwindExpr, nodeMap, nil)
+
+		// Convert to list
+		var items []interface{}
+		switch v := listVal.(type) {
+		case nil:
+			continue // null produces no rows
+		case []interface{}:
+			items = v
+		case []string:
+			items = make([]interface{}, len(v))
+			for i, s := range v {
+				items[i] = s
+			}
+		default:
+			items = []interface{}{listVal}
+		}
+
+		// Create a row for each item
+		for _, item := range items {
+			// Apply WHERE filter after UNWIND
+			if postUnwindWhere != "" {
+				// Simple filter: variable <> 'value' or variable = 'value'
+				if strings.Contains(postUnwindWhere, "<>") {
+					parts := strings.SplitN(postUnwindWhere, "<>", 2)
+					varName := strings.TrimSpace(parts[0])
+					valStr := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+					if varName == unwindVar && fmt.Sprintf("%v", item) == valStr {
+						continue // Skip this row
+					}
+				} else if strings.Contains(postUnwindWhere, "=") {
+					parts := strings.SplitN(postUnwindWhere, "=", 2)
+					varName := strings.TrimSpace(parts[0])
+					valStr := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+					if varName == unwindVar && fmt.Sprintf("%v", item) != valStr {
+						continue // Skip this row
+					}
+				}
+			}
+
+			unwoundRows = append(unwoundRows, unwoundRow{
+				nodeVar:   nodePattern.variable,
+				node:      node,
+				unwindVar: unwindVar,
+				unwindVal: item,
+			})
+		}
+	}
+
+	// Check for aggregation in RETURN
+	hasAggregation := false
+	for _, item := range returnItems {
+		upperExpr := strings.ToUpper(item.expr)
+		if strings.HasPrefix(upperExpr, "COUNT(") ||
+			strings.HasPrefix(upperExpr, "SUM(") ||
+			strings.HasPrefix(upperExpr, "AVG(") ||
+			strings.HasPrefix(upperExpr, "COLLECT(") {
+			hasAggregation = true
+			break
+		}
+	}
+
+	result := &ExecuteResult{
+		Columns: returnColumns,
+		Rows:    [][]interface{}{},
+	}
+
+	if hasAggregation {
+		// Group by non-aggregated columns
+		type groupKey struct {
+			key    string
+			values map[string]interface{}
+		}
+		groups := make(map[string]*groupKey)
+		groupOrder := []string{}
+
+		for _, ur := range unwoundRows {
+			keyParts := []string{}
+			keyValues := make(map[string]interface{})
+
+			for _, item := range returnItems {
+				upperExpr := strings.ToUpper(item.expr)
+				isAgg := strings.HasPrefix(upperExpr, "COUNT(") ||
+					strings.HasPrefix(upperExpr, "SUM(") ||
+					strings.HasPrefix(upperExpr, "AVG(") ||
+					strings.HasPrefix(upperExpr, "COLLECT(")
+
+				if !isAgg {
+					var val interface{}
+					if item.expr == unwindVar {
+						val = ur.unwindVal
+					} else if strings.HasPrefix(item.expr, ur.nodeVar+".") {
+						propName := item.expr[len(ur.nodeVar)+1:]
+						val = ur.node.Properties[propName]
+					}
+					keyParts = append(keyParts, fmt.Sprintf("%v", val))
+					alias := item.alias
+					if alias == "" {
+						alias = item.expr
+					}
+					keyValues[alias] = val
+				}
+			}
+
+			key := strings.Join(keyParts, "|")
+			if _, exists := groups[key]; !exists {
+				groups[key] = &groupKey{key: key, values: keyValues}
+				groupOrder = append(groupOrder, key)
+			}
+		}
+
+		// Calculate aggregates for each group
+		for _, key := range groupOrder {
+			group := groups[key]
+			row := make([]interface{}, len(returnItems))
+
+			// Count rows in this group
+			groupRows := []unwoundRow{}
+			for _, ur := range unwoundRows {
+				keyParts := []string{}
+				for _, item := range returnItems {
+					upperExpr := strings.ToUpper(item.expr)
+					isAgg := strings.HasPrefix(upperExpr, "COUNT(") ||
+						strings.HasPrefix(upperExpr, "SUM(") ||
+						strings.HasPrefix(upperExpr, "AVG(") ||
+						strings.HasPrefix(upperExpr, "COLLECT(")
+
+					if !isAgg {
+						var val interface{}
+						if item.expr == unwindVar {
+							val = ur.unwindVal
+						} else if strings.HasPrefix(item.expr, ur.nodeVar+".") {
+							propName := item.expr[len(ur.nodeVar)+1:]
+							val = ur.node.Properties[propName]
+						}
+						keyParts = append(keyParts, fmt.Sprintf("%v", val))
+					}
+				}
+				if strings.Join(keyParts, "|") == key {
+					groupRows = append(groupRows, ur)
+				}
+			}
+
+			for i, item := range returnItems {
+				upperExpr := strings.ToUpper(item.expr)
+				alias := item.alias
+				if alias == "" {
+					alias = item.expr
+				}
+
+				switch {
+				case strings.HasPrefix(upperExpr, "COUNT("):
+					row[i] = int64(len(groupRows))
+				case strings.HasPrefix(upperExpr, "COLLECT("):
+					inner := item.expr[8 : len(item.expr)-1]
+					collected := make([]interface{}, 0, len(groupRows))
+					for _, ur := range groupRows {
+						if inner == unwindVar {
+							collected = append(collected, ur.unwindVal)
+						}
+					}
+					row[i] = collected
+				default:
+					// Non-aggregate - use group value
+					if val, ok := group.values[alias]; ok {
+						row[i] = val
+					}
+				}
+			}
+
+			result.Rows = append(result.Rows, row)
+		}
+	} else {
+		// Non-aggregated - return all unwound rows
+		for _, ur := range unwoundRows {
+			row := make([]interface{}, len(returnItems))
+			for i, item := range returnItems {
+				if item.expr == unwindVar {
+					row[i] = ur.unwindVal
+				} else if strings.HasPrefix(item.expr, ur.nodeVar+".") {
+					propName := item.expr[len(ur.nodeVar)+1:]
+					row[i] = ur.node.Properties[propName]
+				} else if item.expr == ur.nodeVar {
+					row[i] = e.nodeToMap(ur.node)
+				}
+			}
+			result.Rows = append(result.Rows, row)
+		}
+	}
+
+	// Apply ORDER BY, SKIP, LIMIT
+	orderByIdx := strings.Index(upper, "ORDER BY")
+	if orderByIdx > 0 {
+		orderPart := upper[orderByIdx+8:]
+		endIdx := len(orderPart)
+		for _, kw := range []string{" SKIP ", " LIMIT "} {
+			if idx := strings.Index(orderPart, kw); idx >= 0 && idx < endIdx {
+				endIdx = idx
+			}
+		}
+		orderExpr := strings.TrimSpace(cypher[orderByIdx+8 : orderByIdx+8+endIdx])
+		result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
+	}
+
+	// Apply SKIP
+	skipIdx := strings.Index(upper, "SKIP")
+	skip := 0
+	if skipIdx > 0 {
+		skipPart := strings.TrimSpace(cypher[skipIdx+4:])
+		skipPart = strings.Split(skipPart, " ")[0]
+		if s, err := strconv.Atoi(skipPart); err == nil {
+			skip = s
+		}
+	}
+
+	// Apply LIMIT
+	limitIdx := strings.Index(upper, "LIMIT")
+	limit := -1
+	if limitIdx > 0 {
+		limitPart := strings.TrimSpace(cypher[limitIdx+5:])
+		limitPart = strings.Split(limitPart, " ")[0]
+		if l, err := strconv.Atoi(limitPart); err == nil {
+			limit = l
+		}
+	}
+
+	// Apply SKIP and LIMIT
+	if skip > 0 || limit >= 0 {
+		startIdx := skip
+		if startIdx > len(result.Rows) {
+			startIdx = len(result.Rows)
+		}
+		endIdx := len(result.Rows)
+		if limit >= 0 && startIdx+limit < endIdx {
+			endIdx = startIdx + limit
+		}
+		result.Rows = result.Rows[startIdx:endIdx]
+	}
+
+	return result, nil
+}
+
+// executeMatchWithUnwind handles MATCH ... WITH ... UNWIND ... RETURN queries
+// This is the complex pattern used by Mimir's byType query:
+// MATCH (f:File) WITH f, [...] as list UNWIND list as item WITH item, COUNT(*) RETURN item
+func (e *StorageExecutor) executeMatchWithUnwind(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	upper := strings.ToUpper(cypher)
+
+	// Find all clause boundaries
+	matchIdx := findKeywordIndex(cypher, "MATCH")
+	withIdx := findKeywordIndex(cypher, "WITH")
+	unwindIdx := findKeywordNotInBrackets(upper, " UNWIND ")
+	returnIdx := findKeywordIndex(cypher, "RETURN")
+
+	if matchIdx == -1 || withIdx == -1 || unwindIdx == -1 || returnIdx == -1 {
+		return nil, fmt.Errorf("MATCH, WITH, UNWIND, and RETURN clauses required")
+	}
+
+	// Step 1: Parse MATCH clause
+	matchPart := strings.TrimSpace(cypher[matchIdx+5 : withIdx])
+
+	// Check for WHERE clause in MATCH part
+	matchWhereIdx := findKeywordNotInBrackets(strings.ToUpper(matchPart), " WHERE ")
+	var matchWhere string
+	var nodePatternPart string
+
+	if matchWhereIdx > 0 {
+		nodePatternPart = strings.TrimSpace(matchPart[:matchWhereIdx])
+		matchWhere = strings.TrimSpace(matchPart[matchWhereIdx+7:])
+	} else {
+		nodePatternPart = matchPart
+	}
+
+	nodePattern := e.parseNodePattern(nodePatternPart)
+
+	// Get matching nodes
+	var nodes []*storage.Node
+	var err error
+
+	if len(nodePattern.labels) > 0 {
+		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+	} else {
+		nodes, err = e.storage.AllNodes()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("storage error: %w", err)
+	}
+
+	if len(nodePattern.properties) > 0 {
+		nodes = e.filterNodesByProperties(nodes, nodePattern.properties)
+	}
+
+	if matchWhere != "" {
+		nodes = e.filterNodesByWhereClause(nodes, matchWhere, nodePattern.variable)
+	}
+
+	// Step 2: Process first WITH clause - compute filteredLabels for each node
+	withSection := strings.TrimSpace(cypher[withIdx+4 : unwindIdx])
+	withItems := e.splitWithItems(withSection)
+
+	type nodeWithValues struct {
+		node   *storage.Node
+		values map[string]interface{}
+	}
+	var nodeRows []nodeWithValues
+
+	for _, node := range nodes {
+		nodeMap := map[string]*storage.Node{nodePattern.variable: node}
+		values := make(map[string]interface{})
+
+		for _, item := range withItems {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+
+			upperItem := strings.ToUpper(item)
+			asIdx := strings.Index(upperItem, " AS ")
+			var alias, expr string
+			if asIdx > 0 {
+				expr = strings.TrimSpace(item[:asIdx])
+				alias = strings.TrimSpace(item[asIdx+4:])
+			} else {
+				expr = item
+				alias = item
+			}
+
+			if expr == nodePattern.variable {
+				values[alias] = node
+			} else if strings.HasPrefix(expr, nodePattern.variable+".") {
+				propName := expr[len(nodePattern.variable)+1:]
+				values[alias] = node.Properties[propName]
+			} else {
+				values[alias] = e.evaluateExpressionWithContext(expr, nodeMap, nil)
+			}
+		}
+
+		nodeRows = append(nodeRows, nodeWithValues{node: node, values: values})
+	}
+
+	// Step 3: Parse UNWIND clause
+	unwindSection := strings.TrimSpace(cypher[unwindIdx+7:]) // Skip " UNWIND "
+	asIdx := strings.Index(strings.ToUpper(unwindSection), " AS ")
+	if asIdx == -1 {
+		return nil, fmt.Errorf("UNWIND requires AS clause")
+	}
+
+	unwindExpr := strings.TrimSpace(unwindSection[:asIdx])
+
+	// Find end of unwind var (next clause)
+	remainder := strings.TrimSpace(unwindSection[asIdx+4:])
+	spaceIdx := strings.IndexAny(remainder, " \t\n")
+	var unwindVar string
+	if spaceIdx > 0 {
+		unwindVar = remainder[:spaceIdx]
+	} else {
+		unwindVar = remainder
+	}
+
+	// Step 4: Expand UNWIND - create rows for each item in the list
+	type unwoundRow struct {
+		origNode   *storage.Node
+		origValues map[string]interface{}
+		unwindVar  string
+		unwindVal  interface{}
+	}
+	var unwoundRows []unwoundRow
+
+	for _, nr := range nodeRows {
+		// Get the list to unwind
+		var listToUnwind []interface{}
+
+		if val, ok := nr.values[unwindExpr]; ok {
+			switch v := val.(type) {
+			case []interface{}:
+				listToUnwind = v
+			case []string:
+				listToUnwind = make([]interface{}, len(v))
+				for i, s := range v {
+					listToUnwind[i] = s
+				}
+			}
+		}
+
+		// Empty list = no rows (skip)
+		if len(listToUnwind) == 0 {
+			continue
+		}
+
+		// Create a row for each item
+		for _, item := range listToUnwind {
+			unwoundRows = append(unwoundRows, unwoundRow{
+				origNode:   nr.node,
+				origValues: nr.values,
+				unwindVar:  unwindVar,
+				unwindVal:  item,
+			})
+		}
+	}
+
+	// Step 5: Find second WITH clause (between UNWIND and RETURN) for aggregation
+	secondWithIdx := findKeywordNotInBrackets(upper[unwindIdx:], " WITH ")
+	hasSecondWith := secondWithIdx > 0 && unwindIdx+secondWithIdx < returnIdx
+
+	// Parse RETURN clause
+	returnClause := strings.TrimSpace(cypher[returnIdx+6:])
+	for _, keyword := range []string{" ORDER BY ", " SKIP ", " LIMIT "} {
+		if idx := strings.Index(strings.ToUpper(returnClause), keyword); idx >= 0 {
+			returnClause = returnClause[:idx]
+		}
+	}
+	returnItems := e.parseReturnItems(returnClause)
+
+	result := &ExecuteResult{
+		Columns: make([]string, len(returnItems)),
+		Rows:    [][]interface{}{},
+	}
+
+	for i, item := range returnItems {
+		if item.alias != "" {
+			result.Columns[i] = item.alias
+		} else {
+			result.Columns[i] = item.expr
+		}
+	}
+
+	if hasSecondWith {
+		// Second WITH clause with aggregation - GROUP BY unwind value
+		secondWithSection := strings.TrimSpace(cypher[unwindIdx+secondWithIdx+5 : returnIdx])
+		secondWithItems := e.splitWithItems(secondWithSection)
+
+		// Group by unwind value
+		groups := make(map[interface{}][]unwoundRow)
+		groupOrder := []interface{}{}
+
+		for _, ur := range unwoundRows {
+			key := ur.unwindVal
+			if _, exists := groups[key]; !exists {
+				groupOrder = append(groupOrder, key)
+			}
+			groups[key] = append(groups[key], ur)
+		}
+
+		// Process each group
+		for _, key := range groupOrder {
+			groupRows := groups[key]
+			row := make([]interface{}, len(returnItems))
+
+			for i, item := range returnItems {
+				upperExpr := strings.ToUpper(item.expr)
+
+				switch {
+				case strings.HasPrefix(upperExpr, "COUNT("):
+					row[i] = int64(len(groupRows))
+				case item.expr == unwindVar || item.expr == "type":
+					// Return the unwind value (group key)
+					row[i] = key
+				default:
+					// Check if it matches a second WITH alias
+					for _, swi := range secondWithItems {
+						swi = strings.TrimSpace(swi)
+						swiUpper := strings.ToUpper(swi)
+						swiAsIdx := strings.Index(swiUpper, " AS ")
+						if swiAsIdx > 0 {
+							swiAlias := strings.TrimSpace(swi[swiAsIdx+4:])
+							if swiAlias == item.expr || item.alias == swiAlias {
+								swiExpr := strings.TrimSpace(swi[:swiAsIdx])
+								if swiExpr == unwindVar {
+									row[i] = key
+								} else if strings.HasPrefix(strings.ToUpper(swiExpr), "COUNT(") {
+									row[i] = int64(len(groupRows))
+								}
+							}
+						}
+					}
+				}
+			}
+
+			result.Rows = append(result.Rows, row)
+		}
+	} else {
+		// No second WITH - just return unwound rows
+		for _, ur := range unwoundRows {
+			row := make([]interface{}, len(returnItems))
+			for i, item := range returnItems {
+				if item.expr == unwindVar {
+					row[i] = ur.unwindVal
+				} else if strings.HasPrefix(item.expr, nodePattern.variable+".") {
+					propName := item.expr[len(nodePattern.variable)+1:]
+					row[i] = ur.origNode.Properties[propName]
+				}
+			}
+			result.Rows = append(result.Rows, row)
+		}
+	}
+
+	// Apply ORDER BY
+	orderByIdx := strings.Index(upper, "ORDER BY")
+	if orderByIdx > 0 {
+		orderPart := upper[orderByIdx+8:]
+		endIdx := len(orderPart)
+		for _, kw := range []string{" SKIP ", " LIMIT "} {
+			if idx := strings.Index(orderPart, kw); idx >= 0 && idx < endIdx {
+				endIdx = idx
+			}
+		}
+		orderExpr := strings.TrimSpace(cypher[orderByIdx+8 : orderByIdx+8+endIdx])
+		result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
+	}
+
+	return result, nil
 }
 
 // executeCreate handles CREATE queries.

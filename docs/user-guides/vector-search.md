@@ -277,7 +277,7 @@ for _, r := range results {
 response := llm.Generate(userQuery, context)
 ```
 
-### Semantic Clustering
+### Semantic K-Means Clustering
 
 ```go
 results, _ := db.Search(ctx, seed, 100)

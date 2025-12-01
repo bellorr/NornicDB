@@ -62,6 +62,69 @@ func isAlphanumeric(r rune) bool {
 	return (r >= 'A' && r <= 'Z') || (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_'
 }
 
+// findKeywordNotInBrackets finds the index of a keyword that is NOT inside brackets [] or parentheses ()
+// This is used to avoid matching keywords inside list comprehensions like [x IN list WHERE x > 2]
+// The keyword should be in the format " KEYWORD " with leading/trailing spaces.
+// This function normalizes whitespace (tabs, newlines) to match.
+func findKeywordNotInBrackets(s string, keyword string) int {
+	bracketDepth := 0
+	parenDepth := 0
+	upper := strings.ToUpper(s)
+
+	// Normalize the keyword - strip spaces for the core keyword search
+	keywordCore := strings.TrimSpace(keyword)
+
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '[':
+			bracketDepth++
+		case ']':
+			if bracketDepth > 0 {
+				bracketDepth--
+			}
+		case '(':
+			parenDepth++
+		case ')':
+			if parenDepth > 0 {
+				parenDepth--
+			}
+		}
+
+		// Only check for keyword when not inside brackets or parens
+		if bracketDepth == 0 && parenDepth == 0 {
+			// Check if this position could start our keyword
+			// First, check if preceded by whitespace (or is at start)
+			if i > 0 {
+				prevChar := s[i-1]
+				if !isWhitespace(prevChar) {
+					continue
+				}
+			}
+
+			// Check if we have enough characters for the keyword
+			if i+len(keywordCore) > len(s) {
+				continue
+			}
+
+			// Check if the keyword matches
+			if upper[i:i+len(keywordCore)] == keywordCore {
+				// Check if followed by whitespace (or is at end)
+				endPos := i + len(keywordCore)
+				if endPos < len(s) && !isWhitespace(s[endPos]) {
+					continue
+				}
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// isWhitespace returns true if the rune is a whitespace character
+func isWhitespace(ch byte) bool {
+	return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r'
+}
+
 // ========================================
 // WITH Clause
 // ========================================
@@ -88,7 +151,7 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 	nextClauses := []string{" MATCH ", " WHERE ", " RETURN ", " CREATE ", " MERGE ", " DELETE ", " SET ", " UNWIND ", " ORDER BY ", " SKIP ", " LIMIT "}
 	nextClauseIdx := len(cypher)
 	for _, clause := range nextClauses {
-		idx := strings.Index(upper[remainderStart:], clause)
+		idx := findKeywordNotInBrackets(upper[remainderStart:], clause)
 		if idx >= 0 && remainderStart+idx < nextClauseIdx {
 			nextClauseIdx = remainderStart + idx
 		}
@@ -127,6 +190,65 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 
 	if nextClauseIdx < len(cypher) {
 		remainder := strings.TrimSpace(cypher[nextClauseIdx:])
+
+		// If it's a RETURN clause, evaluate it with the bound variables
+		if strings.HasPrefix(strings.ToUpper(remainder), "RETURN") {
+			returnExpr := strings.TrimSpace(remainder[6:])
+
+			// Parse return items
+			returnItems := e.parseReturnItems(returnExpr)
+			returnColumns := make([]string, len(returnItems))
+			returnValues := make([]interface{}, len(returnItems))
+
+			for i, item := range returnItems {
+				if item.alias != "" {
+					returnColumns[i] = item.alias
+				} else {
+					returnColumns[i] = item.expr
+				}
+
+				// First check if it's a direct reference to a bound variable
+				if val, ok := boundVars[item.expr]; ok {
+					returnValues[i] = val
+				} else {
+					// Substitute bound variables in the expression
+					expr := item.expr
+					for varName, varVal := range boundVars {
+						// Replace the variable name in the expression
+						// Handle list comprehension: [x IN varName WHERE ...] -> [x IN [1,2,3] WHERE ...]
+						if strings.Contains(expr, varName) {
+							// Convert value to string representation
+							var replacement string
+							switch v := varVal.(type) {
+							case []interface{}:
+								parts := make([]string, len(v))
+								for j, elem := range v {
+									switch e := elem.(type) {
+									case string:
+										parts[j] = fmt.Sprintf("'%s'", e)
+									default:
+										parts[j] = fmt.Sprintf("%v", e)
+									}
+								}
+								replacement = "[" + strings.Join(parts, ", ") + "]"
+							case string:
+								replacement = fmt.Sprintf("'%s'", v)
+							default:
+								replacement = fmt.Sprintf("%v", v)
+							}
+							expr = strings.ReplaceAll(expr, varName, replacement)
+						}
+					}
+					returnValues[i] = e.evaluateExpressionWithContext(expr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+				}
+			}
+
+			return &ExecuteResult{
+				Columns: returnColumns,
+				Rows:    [][]interface{}{returnValues},
+			}, nil
+		}
+
 		return e.Execute(ctx, remainder, nil)
 	}
 
@@ -218,6 +340,9 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 
 	var items []interface{}
 	switch v := list.(type) {
+	case nil:
+		// UNWIND null produces no rows (Neo4j compatible)
+		items = []interface{}{}
 	case []interface{}:
 		items = v
 	case []string:
@@ -230,17 +355,142 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		for i, n := range v {
 			items[i] = n
 		}
+	case []float64:
+		items = make([]interface{}, len(v))
+		for i, n := range v {
+			items[i] = n
+		}
 	default:
+		// Single value gets wrapped in a list
 		items = []interface{}{list}
 	}
 
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "RETURN") {
+		returnClause := strings.TrimSpace(restQuery[6:])
+		returnItems := e.parseReturnItems(returnClause)
+
+		// Check if any return items are aggregation functions
+		hasAggregation := false
+		for _, item := range returnItems {
+			upperExpr := strings.ToUpper(item.expr)
+			if strings.HasPrefix(upperExpr, "SUM(") || strings.HasPrefix(upperExpr, "COUNT(") ||
+				strings.HasPrefix(upperExpr, "AVG(") || strings.HasPrefix(upperExpr, "MIN(") ||
+				strings.HasPrefix(upperExpr, "MAX(") || strings.HasPrefix(upperExpr, "COLLECT(") {
+				hasAggregation = true
+				break
+			}
+		}
+
+		if hasAggregation {
+			// Aggregate across all unwound items
+			result := &ExecuteResult{
+				Columns: make([]string, len(returnItems)),
+				Rows:    [][]interface{}{make([]interface{}, len(returnItems))},
+			}
+
+			for i, item := range returnItems {
+				if item.alias != "" {
+					result.Columns[i] = item.alias
+				} else {
+					result.Columns[i] = item.expr
+				}
+
+				upperExpr := strings.ToUpper(item.expr)
+				switch {
+				case strings.HasPrefix(upperExpr, "SUM("):
+					inner := item.expr[4 : len(item.expr)-1]
+					var sum float64
+					for _, it := range items {
+						if inner == variable {
+							if n, ok := toFloat64(it); ok {
+								sum += n
+							}
+						}
+					}
+					result.Rows[0][i] = int64(sum) // Return as int64 for integer sums
+				case strings.HasPrefix(upperExpr, "COUNT("):
+					result.Rows[0][i] = int64(len(items))
+				case strings.HasPrefix(upperExpr, "AVG("):
+					inner := item.expr[4 : len(item.expr)-1]
+					var sum float64
+					var count int
+					for _, it := range items {
+						if inner == variable {
+							if n, ok := toFloat64(it); ok {
+								sum += n
+								count++
+							}
+						}
+					}
+					if count > 0 {
+						result.Rows[0][i] = sum / float64(count)
+					} else {
+						result.Rows[0][i] = nil
+					}
+				case strings.HasPrefix(upperExpr, "MIN("):
+					inner := item.expr[4 : len(item.expr)-1]
+					var min *float64
+					for _, it := range items {
+						if inner == variable {
+							if n, ok := toFloat64(it); ok {
+								if min == nil || n < *min {
+									min = &n
+								}
+							}
+						}
+					}
+					if min != nil {
+						result.Rows[0][i] = *min
+					}
+				case strings.HasPrefix(upperExpr, "MAX("):
+					inner := item.expr[4 : len(item.expr)-1]
+					var max *float64
+					for _, it := range items {
+						if inner == variable {
+							if n, ok := toFloat64(it); ok {
+								if max == nil || n > *max {
+									max = &n
+								}
+							}
+						}
+					}
+					if max != nil {
+						result.Rows[0][i] = *max
+					}
+				case strings.HasPrefix(upperExpr, "COLLECT("):
+					inner := item.expr[8 : len(item.expr)-1]
+					collected := make([]interface{}, 0, len(items))
+					for _, it := range items {
+						if inner == variable {
+							collected = append(collected, it)
+						}
+					}
+					result.Rows[0][i] = collected
+				}
+			}
+			return result, nil
+		}
+
+		// No aggregation - return individual rows
 		result := &ExecuteResult{
-			Columns: []string{variable},
+			Columns: make([]string, len(returnItems)),
 			Rows:    make([][]interface{}, 0, len(items)),
 		}
+		for i, item := range returnItems {
+			if item.alias != "" {
+				result.Columns[i] = item.alias
+			} else {
+				result.Columns[i] = item.expr
+			}
+		}
 		for _, item := range items {
-			result.Rows = append(result.Rows, []interface{}{item})
+			row := make([]interface{}, len(returnItems))
+			for i, ri := range returnItems {
+				if ri.expr == variable {
+					row[i] = item
+				}
+			}
+			result.Rows = append(result.Rows, row)
 		}
 		return result, nil
 	}

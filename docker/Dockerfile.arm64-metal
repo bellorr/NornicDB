@@ -4,16 +4,25 @@
 # Build:  docker build -f docker/Dockerfile.arm64-metal -t nornicdb-arm64-metal .
 # With BGE model embedded:
 #         docker build -f docker/Dockerfile.arm64-metal --build-arg EMBED_MODEL=true -t nornicdb-arm64-metal-bge .
+# Headless (no UI):
+#         docker build -f docker/Dockerfile.arm64-metal --build-arg HEADLESS=true -t nornicdb-arm64-metal-headless .
 
 # =============================================================================
-# Stage 1: UI
+# Stage 1: UI (skipped in headless mode)
 # =============================================================================
 FROM node:20-alpine AS ui
+ARG HEADLESS=false
 WORKDIR /ui
 COPY ui/package*.json ./
-RUN npm ci 2>/dev/null || npm install --legacy-peer-deps
+RUN if [ "$HEADLESS" != "true" ]; then \
+      npm ci 2>/dev/null || npm install --legacy-peer-deps; \
+    fi
 COPY ui/ .
-RUN npm run build
+RUN if [ "$HEADLESS" != "true" ]; then \
+      npm run build; \
+    else \
+      mkdir -p dist && echo "Headless mode - UI skipped" > dist/HEADLESS; \
+    fi
 
 # =============================================================================
 # Stage 2: llama.cpp static library (ARM64)
@@ -49,6 +58,7 @@ RUN mkdir -p /out && \
 # Stage 3: Go build
 # =============================================================================
 FROM golang:1.23-bookworm AS builder
+ARG HEADLESS=false
 WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
@@ -61,14 +71,22 @@ COPY --from=llama /out/*.h /build/lib/llama/
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Source + UI
+# Source + UI (only copy UI dist if not headless)
 COPY . .
 COPY --from=ui /ui/dist ./ui/dist
 
-# Build
-RUN CGO_ENABLED=1 go build -tags=localllm \
-    -ldflags="-s -w -linkmode external -extldflags '-static' -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" \
-    -o nornicdb ./cmd/nornicdb
+# Build (with or without UI based on HEADLESS arg)
+RUN if [ "$HEADLESS" = "true" ]; then \
+      echo "Building headless (no UI)..." && \
+      CGO_ENABLED=1 go build -tags="localllm noui" \
+        -ldflags="-s -w -linkmode external -extldflags '-static' -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" \
+        -o nornicdb ./cmd/nornicdb; \
+    else \
+      echo "Building with UI..." && \
+      CGO_ENABLED=1 go build -tags=localllm \
+        -ldflags="-s -w -linkmode external -extldflags '-static' -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" \
+        -o nornicdb ./cmd/nornicdb; \
+    fi
 
 # =============================================================================
 # Stage 4: Runtime
@@ -86,6 +104,7 @@ RUN chmod +x /app/entrypoint.sh
 
 # Model embedding: only copy when EMBED_MODEL=true (uses BuildKit mount to avoid layer bloat)
 ARG EMBED_MODEL=false
+ARG HEADLESS=false
 RUN --mount=type=bind,source=models,target=/models,ro \
     if [ "$EMBED_MODEL" = "true" ]; then \
       if [ -f /models/bge-m3.gguf ]; then \
@@ -96,6 +115,9 @@ RUN --mount=type=bind,source=models,target=/models,ro \
       fi; \
     else \
       echo "→ BYOM mode (no embedded model)"; \
+    fi && \
+    if [ "$HEADLESS" = "true" ]; then \
+      echo "✓ Headless mode enabled (no UI)"; \
     fi
 
 EXPOSE 7474 7687
@@ -103,6 +125,7 @@ EXPOSE 7474 7687
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --spider -q http://localhost:7474/health || exit 1
 
+# Set NORNICDB_HEADLESS based on build arg
 ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_HTTP_PORT=7474 \
     NORNICDB_BOLT_PORT=7687 \
@@ -111,6 +134,7 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_EMBEDDING_DIMENSIONS=1024 \
     NORNICDB_MODELS_DIR=/app/models \
     NORNICDB_EMBEDDING_GPU_LAYERS=0 \
-    NORNICDB_NO_AUTH=true
+    NORNICDB_NO_AUTH=true \
+    NORNICDB_HEADLESS=${HEADLESS}
 
 ENTRYPOINT ["/app/entrypoint.sh"]

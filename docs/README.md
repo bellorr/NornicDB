@@ -1,52 +1,44 @@
 # NornicDB Documentation
 
-Welcome to **NornicDB** - A production-ready graph database with GPU acceleration, Neo4j compatibility, and advanced indexing.
+Welcome to **NornicDB** - A production-ready graph database with GPU acceleration, Neo4j compatibility, and advanced AI integration.
 
-## 🚀 Quick Links
+## 🚀 Quick Start Paths
 
-- **[Getting Started](guides/GETTING_STARTED.md)** - Set up NornicDB in 5 minutes
-- **[Chat Modes Guide](guides/CHATMODES_GUIDE.md)** - Use with AI agents (Cursor, etc.)
-- **[MCP Tools Quick Reference](MCP_TOOLS_QUICKREF.md)** - 6-tool cheat sheet
-- **[Architecture Overview](ARCHITECTURE.md)** - System design and components
-- **[Vector Search Guide](guides/VECTOR_SEARCH.md)** - Semantic search with auto-embedding
-- **[Feature Flags](FEATURE_FLAGS.md)** - Runtime configuration
+### New to NornicDB?
+👉 **[Getting Started Guide](getting-started/)** - Installation and first queries in 5 minutes
 
-## 📚 Documentation Sections
+### Migrating from Neo4j?
+👉 **[Neo4j Migration Guide](neo4j-migration/)** - 96% feature parity, easy migration
+
+### Building AI Agents?
+👉 **[AI Integration Guide](ai-agents/)** - Cursor, MCP, and agent patterns
+
+### Need API Reference?
+👉 **[API Documentation](api-reference/)** - Complete function reference
+
+---
+
+## 📖 Documentation Sections
 
 ### For Users
-
-- **[Getting Started](guides/GETTING_STARTED.md)** - Installation and first steps
-- **[Vector Search Guide](guides/VECTOR_SEARCH.md)** - Semantic search with string queries
-- **[Search Implementation](RRF_SEARCH_IMPLEMENTATION.md)** - How search works
-- **[Complete Examples](COMPLETE_EXAMPLES.md)** - Full code examples
-- **[Link Prediction](LINK_PREDICTION_INTEGRATION.md)** - ML-based relationship prediction
+- **[Getting Started](getting-started/)** - Installation, quick start, first queries
+- **[User Guides](user-guides/)** - Cypher queries, vector search, transactions
+- **[API Reference](api-reference/)** - Complete function and endpoint documentation
+- **[Features](features/)** - Memory decay, GPU acceleration, link prediction
 
 ### For Developers
+- **[Architecture](architecture/)** - System design, storage engine, query execution
+- **[Performance](performance/)** - Benchmarks, optimization, GPU acceleration
+- **[Advanced Topics](advanced/)** - K-Means clustering, embeddings, custom functions
+- **[Development](development/)** - Contributing, testing, code style
 
-- **[Architecture](ARCHITECTURE.md)** - System design and components
-- **[Neo4j Feature Audit](NEO4J_NORNICDB_FEATURE_AUDIT.md)** - 96% parity comparison
-- **[Cypher Audit](CYPHER_AUDIT.md)** - Cypher compatibility
-- **[Feature Flags](FEATURE_FLAGS.md)** - Runtime configuration
-- **[Transaction Implementation](TRANSACTION_IMPLEMENTATION.md)** - ACID guarantees
-- **[Eval Harness](guides/EVAL_HARNESS.md)** - Search quality testing & validation
-- **[Cross-Encoder Reranking](guides/CROSS_ENCODER_RERANKING.md)** - Two-stage retrieval for accuracy
+### For Operations
+- **[Operations Guide](operations/)** - Deployment, monitoring, backup, scaling
+- **[Compliance](compliance/)** - GDPR, HIPAA, SOC2, encryption, audit logging
 
-### GPU & Performance
-
-- **[GPU K-Means Implementation](GPU_KMEANS_IMPLEMENTATION_PLAN.md)** - GPU clustering plan
-- **[K-Means Clustering](K-MEANS.md)** - K-Means for embeddings
-- **[Real-Time K-Means](K-MEANS-RT.md)** - Live cluster updates
-- **[Metal Atomic Fix](GPU_KMEANS_METAL_ATOMIC_SUMMARY.md)** - Apple Silicon fix
-
-### For AI/Agent Integration
-
-- **[Chat Modes Guide](guides/CHATMODES_GUIDE.md)** - Use NornicDB with Cursor IDE
-- **[MCP Tools Quick Reference](MCP_TOOLS_QUICKREF.md)** - 6-tool cheat sheet
-- **[Agent Preamble (claudette-mimir)](../../docs/agents/claudette-mimir-v2.md)** - Memory-augmented AI agent
-
-### For DevOps
-
-- **[Quick Start](guides/QUICK_START.md)** - Docker setup and deployment
+### For AI Integration
+- **[AI Agents](ai-agents/)** - Cursor integration, chat modes, MCP tools
+- **[Neo4j Migration](neo4j-migration/)** - Feature parity, migration guide
 
 ## 🎯 Key Features
 
@@ -91,11 +83,23 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 - **40+ ELI12 explanations** for complex concepts
 - **4.1:1 documentation-to-code ratio**
 
+## 🎯 Popular Topics
+
+- [Vector Search Guide](user-guides/vector-search.md)
+- [Hybrid Search (RRF)](user-guides/hybrid-search.md)
+- [GPU Acceleration](features/gpu-acceleration.md)
+- [Memory Decay System](features/memory-decay.md)
+- [Cypher Function Reference](api-reference/cypher-functions/)
+- [Benchmarks vs Neo4j](performance/benchmarks-vs-neo4j.md)
+- [Docker Deployment](getting-started/docker-deployment.md)
+- [Feature Flags](features/feature-flags.md)
+
 ## 📋 Project Status
 
-- **[Development Roadmap](ROADMAP_POST_TLP.md)** - Current progress and next steps
-- **[Transaction Implementation](TRANSACTION_IMPLEMENTATION.md)** - ACID guarantees
-- **[Local GGUF Embeddings](LOCAL_GGUF_EMBEDDING_IMPLEMENTATION.md)** - Local embedding models
+- **Version:** 0.1.4
+- **Status:** Production Ready ✅
+- **Docker:** `timothyswt/nornicdb-arm64-metal:latest`
+- **[Changelog](CHANGELOG.md)** - Version history and release notes
 
 ## 🤝 Contributing
 

@@ -3615,7 +3615,97 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 		return result
 	}
 
-	// [x IN list | expression] - list comprehension
+	// [x IN list WHERE condition] - list comprehension with filter
+	if strings.HasPrefix(expr, "[") && strings.HasSuffix(expr, "]") && strings.Contains(expr, " IN ") && strings.Contains(strings.ToUpper(expr), " WHERE ") {
+		inner := strings.TrimSpace(expr[1 : len(expr)-1])
+		upperInner := strings.ToUpper(inner)
+		inIdx := strings.Index(upperInner, " IN ")
+		whereIdx := strings.Index(upperInner, " WHERE ")
+
+		if inIdx > 0 && whereIdx > inIdx {
+			varName := strings.TrimSpace(inner[:inIdx])
+			listExpr := strings.TrimSpace(inner[inIdx+4 : whereIdx])
+			condition := strings.TrimSpace(inner[whereIdx+7:])
+
+			// Evaluate the list expression
+			list := e.evaluateExpressionWithContext(listExpr, nodes, rels)
+
+			// Convert to []interface{} if needed
+			var items []interface{}
+			switch v := list.(type) {
+			case []interface{}:
+				items = v
+			case []string:
+				items = make([]interface{}, len(v))
+				for i, s := range v {
+					items[i] = s
+				}
+			default:
+				return []interface{}{}
+			}
+
+			// Filter by condition
+			result := make([]interface{}, 0, len(items))
+			for _, item := range items {
+				// Evaluate condition with item substituted
+				itemStr := fmt.Sprintf("%v", item)
+
+				// Handle different condition patterns
+				matches := true
+				if strings.Contains(condition, "<>") {
+					parts := strings.SplitN(condition, "<>", 2)
+					condVar := strings.TrimSpace(parts[0])
+					condVal := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+					if condVar == varName {
+						matches = itemStr != condVal
+					}
+				} else if strings.Contains(condition, "!=") {
+					parts := strings.SplitN(condition, "!=", 2)
+					condVar := strings.TrimSpace(parts[0])
+					condVal := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+					if condVar == varName {
+						matches = itemStr != condVal
+					}
+				} else if strings.Contains(condition, ">=") {
+					parts := strings.SplitN(condition, ">=", 2)
+					condVar := strings.TrimSpace(parts[0])
+					condVal := strings.TrimSpace(parts[1])
+					if condVar == varName {
+						if itemNum, ok := toFloat64(item); ok {
+							if condNum, ok := toFloat64(e.parseValue(condVal)); ok {
+								matches = itemNum >= condNum
+							}
+						}
+					}
+				} else if strings.Contains(condition, ">") {
+					parts := strings.SplitN(condition, ">", 2)
+					condVar := strings.TrimSpace(parts[0])
+					condVal := strings.TrimSpace(parts[1])
+					if condVar == varName {
+						if itemNum, ok := toFloat64(item); ok {
+							if condNum, ok := toFloat64(e.parseValue(condVal)); ok {
+								matches = itemNum > condNum
+							}
+						}
+					}
+				} else if strings.Contains(condition, "=") {
+					parts := strings.SplitN(condition, "=", 2)
+					condVar := strings.TrimSpace(parts[0])
+					condVal := strings.Trim(strings.TrimSpace(parts[1]), "'\"")
+					if condVar == varName {
+						matches = itemStr == condVal
+					}
+				}
+
+				if matches {
+					result = append(result, item)
+				}
+			}
+			return result
+		}
+	}
+
+	// [x IN list | expression] - list comprehension with transformation
 	if strings.HasPrefix(expr, "[") && strings.HasSuffix(expr, "]") && strings.Contains(expr, " IN ") && strings.Contains(expr, " | ") {
 		inner := strings.TrimSpace(expr[1 : len(expr)-1])
 		inIdx := strings.Index(strings.ToUpper(inner), " IN ")
@@ -3639,6 +3729,31 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 					result[i] = e.evaluateExpressionWithContext(transformWithVal, nodes, rels)
 				}
 				return result
+			}
+		}
+	}
+
+	// [x IN list] - simple list comprehension (identity)
+	if strings.HasPrefix(expr, "[") && strings.HasSuffix(expr, "]") && strings.Contains(expr, " IN ") {
+		inner := strings.TrimSpace(expr[1 : len(expr)-1])
+		upperInner := strings.ToUpper(inner)
+		inIdx := strings.Index(upperInner, " IN ")
+		// Only if no WHERE or | (those are handled above)
+		if inIdx > 0 && !strings.Contains(upperInner, " WHERE ") && !strings.Contains(inner, " | ") {
+			listExpr := strings.TrimSpace(inner[inIdx+4:])
+			list := e.evaluateExpressionWithContext(listExpr, nodes, rels)
+
+			switch v := list.(type) {
+			case []interface{}:
+				return v
+			case []string:
+				result := make([]interface{}, len(v))
+				for i, s := range v {
+					result[i] = s
+				}
+				return result
+			default:
+				return []interface{}{list}
 			}
 		}
 	}

@@ -123,6 +123,8 @@ Features:
 	serveCmd.Flags().String("query-cache-ttl", "5m", "Query plan cache TTL")
 	// Logging flags
 	serveCmd.Flags().Bool("log-queries", getEnvBool("NORNICDB_LOG_QUERIES", false), "Log all Bolt queries to stdout (for debugging)")
+	// Headless mode
+	serveCmd.Flags().Bool("headless", getEnvBool("NORNICDB_HEADLESS", false), "Disable web UI and browser-related endpoints")
 	rootCmd.AddCommand(serveCmd)
 
 	// Init command
@@ -211,6 +213,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	queryCacheSize, _ := cmd.Flags().GetInt("query-cache-size")
 	queryCacheTTL, _ := cmd.Flags().GetString("query-cache-ttl")
 	logQueries, _ := cmd.Flags().GetBool("log-queries")
+	headless, _ := cmd.Flags().GetBool("headless")
 
 	// Apply memory configuration FIRST (before heavy allocations)
 	cfg := config.LoadFromEnv()
@@ -402,9 +405,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	serverConfig.EmbeddingModel = embeddingModel
 	serverConfig.EmbeddingDimensions = embeddingDim
 	serverConfig.EmbeddingCacheSize = embeddingCache
+	serverConfig.Headless = headless
 
-	// Enable embedded UI from the ui package
-	server.SetUIAssets(ui.Assets)
+	// Enable embedded UI from the ui package (unless headless mode)
+	if !headless {
+		server.SetUIAssets(ui.Assets)
+	}
 
 	httpServer, err := server.New(db, authenticator, serverConfig)
 	if err != nil {

@@ -893,11 +893,12 @@ func (e *StorageExecutor) executeReturn(ctx context.Context, cypher string) (*Ex
 	}, nil
 }
 
-// splitReturnExpressions splits RETURN expressions by comma, respecting parentheses depth
+// splitReturnExpressions splits RETURN expressions by comma, respecting parentheses and brackets depth
 func splitReturnExpressions(clause string) []string {
 	var parts []string
 	var current strings.Builder
-	depth := 0
+	parenDepth := 0
+	bracketDepth := 0
 	inQuote := false
 	quoteChar := rune(0)
 
@@ -912,12 +913,18 @@ func splitReturnExpressions(clause string) []string {
 			quoteChar = 0
 			current.WriteRune(ch)
 		case ch == '(' && !inQuote:
-			depth++
+			parenDepth++
 			current.WriteRune(ch)
 		case ch == ')' && !inQuote:
-			depth--
+			parenDepth--
 			current.WriteRune(ch)
-		case ch == ',' && depth == 0 && !inQuote:
+		case ch == '[' && !inQuote:
+			bracketDepth++
+			current.WriteRune(ch)
+		case ch == ']' && !inQuote:
+			bracketDepth--
+			current.WriteRune(ch)
+		case ch == ',' && parenDepth == 0 && bracketDepth == 0 && !inQuote:
 			parts = append(parts, current.String())
 			current.Reset()
 		default:
@@ -3150,6 +3157,12 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 	// Check for CASE expression FIRST (before property access check)
 	// CASE expressions contain dots (like p.age) but should not be treated as property access
 	if isCaseExpression(expr) {
+		return e.evaluateExpression(expr, variable, node)
+	}
+
+	// Check for function calls - these should be evaluated, not treated as property access
+	// e.g., coalesce(p.nickname, p.name), toString(p.age), etc.
+	if strings.Contains(expr, "(") {
 		return e.evaluateExpression(expr, variable, node)
 	}
 

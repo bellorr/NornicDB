@@ -65,18 +65,18 @@ with driver.session() as session:
 Drop-in replacement for Neo4j. Your existing code works unchanged.
 
 - **Bolt Protocol** — Use official Neo4j drivers
-- **Cypher Queries** — Full query language support  
+- **Cypher Queries** — Full query language support
 - **Schema Management** — Constraints, indexes, vector indexes
 
 ### 🧠 Intelligent Memory
 
 Memory that behaves like human cognition.
 
-| Memory Tier | Half-Life | Use Case |
-|-------------|-----------|----------|
-| **Episodic** | 7 days | Chat context, sessions |
-| **Semantic** | 69 days | Facts, decisions |
-| **Procedural** | 693 days | Skills, patterns |
+| Memory Tier    | Half-Life | Use Case               |
+| -------------- | --------- | ---------------------- |
+| **Episodic**   | 7 days    | Chat context, sessions |
+| **Semantic**   | 69 days   | Facts, decisions       |
+| **Procedural** | 693 days  | Skills, patterns       |
 
 ```cypher
 // Find memories that are still strong
@@ -97,31 +97,32 @@ NornicDB weaves connections automatically:
 
 **LDBC Social Network Benchmark** (M3 Max, 64GB):
 
-| Query Type | NornicDB | Neo4j | Speedup |
-|------------|----------|-------|---------|
-| **Message content lookup** | 6,389 ops/sec | 518 ops/sec | **12x** |
+| Query Type                    | NornicDB      | Neo4j       | Speedup |
+| ----------------------------- | ------------- | ----------- | ------- |
+| **Message content lookup**    | 6,389 ops/sec | 518 ops/sec | **12x** |
 | **Recent messages (friends)** | 2,769 ops/sec | 108 ops/sec | **25x** |
-| **Avg friends per city** | 4,713 ops/sec | 91 ops/sec | **52x** |
-| **Tag co-occurrence** | 2,076 ops/sec | 65 ops/sec | **32x** |
+| **Avg friends per city**      | 4,713 ops/sec | 91 ops/sec  | **52x** |
+| **Tag co-occurrence**         | 2,076 ops/sec | 65 ops/sec  | **32x** |
 
 **Northwind Benchmark** (M3 Max vs Neo4j, same hardware):
 
-| Operation | NornicDB | Neo4j | Speedup |
-|-----------|----------|-------|---------|
+| Operation        | NornicDB      | Neo4j         | Speedup  |
+| ---------------- | ------------- | ------------- | -------- |
 | **Index lookup** | 7,623 ops/sec | 2,143 ops/sec | **3.6x** |
-| **Count nodes** | 5,253 ops/sec | 798 ops/sec | **6.6x** |
-| **Write: node** | 5,578 ops/sec | 1,690 ops/sec | **3.3x** |
-| **Write: edge** | 6,626 ops/sec | 1,611 ops/sec | **4.1x** |
+| **Count nodes**  | 5,253 ops/sec | 798 ops/sec   | **6.6x** |
+| **Write: node**  | 5,578 ops/sec | 1,690 ops/sec | **3.3x** |
+| **Write: edge**  | 6,626 ops/sec | 1,611 ops/sec | **4.1x** |
 
 **Cross-Platform (CUDA on Windows i9-9900KF + RTX 2080 Ti):**
 
-| Operation | Throughput |
-|-----------|------------|
-| **Orders by customer** | 4,252 ops/sec |
+| Operation                 | Throughput    |
+| ------------------------- | ------------- |
+| **Orders by customer**    | 4,252 ops/sec |
 | **Products out of stock** | 4,174 ops/sec |
-| **Find category** | 4,071 ops/sec |
+| **Find category**         | 4,071 ops/sec |
 
 **Additional advantages:**
+
 - **Memory footprint**: 100-500 MB vs 1-4 GB for Neo4j
 - **Cold start**: <1s vs 10-30s for Neo4j
 
@@ -134,8 +135,8 @@ Native semantic search with GPU acceleration.
 ```cypher
 // Find similar memories
 CALL db.index.vector.queryNodes(
-  'memory_embeddings', 
-  10, 
+  'memory_embeddings',
+  10,
   $queryVector
 ) YIELD node, score
 RETURN node.content, score
@@ -143,12 +144,14 @@ RETURN node.content, score
 
 ## Docker Images
 
-| Image | Platform | Size | Model |
-|-------|----------|------|-------|
-| `nornicdb-arm64-metal` | Apple Silicon | ~50MB | BYOM |
-| `nornicdb-arm64-metal-bge` | Apple Silicon | ~1.6GB | Included |
-| `nornicdb-amd64-cuda` | NVIDIA GPU | ~3GB | BYOM |
-| `nornicdb-amd64-cuda-bge` | NVIDIA GPU | ~4.5GB | Included |
+| Image                           | Platform      | Size   | Model    | UI  |
+| ------------------------------- | ------------- | ------ | -------- | --- |
+| `nornicdb-arm64-metal`          | Apple Silicon | ~50MB  | BYOM     | ✓   |
+| `nornicdb-arm64-metal-bge`      | Apple Silicon | ~1.6GB | Included | ✓   |
+| `nornicdb-arm64-metal-headless` | Apple Silicon | ~40MB  | BYOM     | ✗   |
+| `nornicdb-amd64-cuda`           | NVIDIA GPU    | ~3GB   | BYOM     | ✓   |
+| `nornicdb-amd64-cuda-bge`       | NVIDIA GPU    | ~4.5GB | Included | ✓   |
+| `nornicdb-amd64-cuda-headless`  | NVIDIA GPU    | ~2.9GB | BYOM     | ✗   |
 
 **BYOM** = Bring Your Own Model (mount at `/app/models`)
 
@@ -157,6 +160,37 @@ RETURN node.content, score
 docker run -d -p 7474:7474 -p 7687:7687 \
   -v /path/to/models:/app/models \
   timothyswt/nornicdb-arm64-metal:latest
+
+# Headless mode (API only, no web UI)
+docker run -d -p 7474:7474 -p 7687:7687 \
+  -v nornicdb-data:/data \
+  timothyswt/nornicdb-arm64-metal-headless:latest
+```
+
+### Headless Mode
+
+For embedded deployments, microservices, or API-only use cases, NornicDB supports headless mode which disables the web UI for a smaller binary and reduced attack surface.
+
+**Runtime flag:**
+
+```bash
+nornicdb serve --headless
+```
+
+**Environment variable:**
+
+```bash
+NORNICDB_HEADLESS=true nornicdb serve
+```
+
+**Build without UI (smaller binary):**
+
+```bash
+# Native build
+make build-headless
+
+# Docker build
+docker build --build-arg HEADLESS=true -f docker/Dockerfile.arm64-metal .
 ```
 
 ## Configuration
@@ -169,7 +203,7 @@ server:
   data_dir: ./data
 
 embeddings:
-  provider: local  # or ollama, openai
+  provider: local # or ollama, openai
   model: bge-m3
   dimensions: 1024
 
@@ -192,25 +226,25 @@ auto_links:
 
 ## Documentation
 
-| Guide | Description |
-|-------|-------------|
-| [Functions Reference](docs/FUNCTIONS_INDEX.md) | All 52 Cypher functions |
+| Guide                                             | Description             |
+| ------------------------------------------------- | ----------------------- |
+| [Functions Reference](docs/FUNCTIONS_INDEX.md)    | All 52 Cypher functions |
 | [Memory Decay](docs/functions/07_DECAY_SYSTEM.md) | Cognitive memory system |
-| [Docker Guide](docker/README.md) | Build & deployment |
-| [Complete Examples](docs/COMPLETE_EXAMPLES.md) | Real-world patterns |
+| [Docker Guide](docker/README.md)                  | Build & deployment      |
+| [Complete Examples](docs/COMPLETE_EXAMPLES.md)    | Real-world patterns     |
 
 ## Comparison
 
-| Feature | Neo4j | NornicDB |
-|---------|-------|----------|
-| Protocol | Bolt ✓ | Bolt ✓ |
-| Query Language | Cypher ✓ | Cypher ✓ |
-| Memory Decay | Manual | Automatic |
-| Auto-Relationships | No | Built-in |
-| Vector Search | Plugin | Native |
-| GPU Acceleration | No | Metal/CUDA |
-| Embedded Mode | No | Yes |
-| License | GPL | MIT |
+| Feature            | Neo4j    | NornicDB   |
+| ------------------ | -------- | ---------- |
+| Protocol           | Bolt ✓   | Bolt ✓     |
+| Query Language     | Cypher ✓ | Cypher ✓   |
+| Memory Decay       | Manual   | Automatic  |
+| Auto-Relationships | No       | Built-in   |
+| Vector Search      | Plugin   | Native     |
+| GPU Acceleration   | No       | Metal/CUDA |
+| Embedded Mode      | No       | Yes        |
+| License            | GPL      | MIT        |
 
 ## Building
 

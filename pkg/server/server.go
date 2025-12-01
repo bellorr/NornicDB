@@ -245,6 +245,12 @@ type Config struct {
 	// SlowQueryLogFile is optional file path for slow query log
 	// If empty, logs to stderr with other server logs
 	SlowQueryLogFile string
+
+	// Headless Mode Configuration
+	// Headless disables the web UI and browser-related endpoints
+	// Set to true for API-only deployments (e.g., embedded use, microservices)
+	// Env: NORNICDB_HEADLESS=true|false
+	Headless bool
 }
 
 // DefaultConfig returns Neo4j-compatible default server configuration.
@@ -319,6 +325,12 @@ func DefaultConfig() *Config {
 		SlowQueryEnabled:   false,
 		SlowQueryThreshold: 100 * time.Millisecond,
 		SlowQueryLogFile:   "", // Empty = log to stderr
+
+		// Headless mode disabled by default (UI enabled)
+		// Override via:
+		//   NORNICDB_HEADLESS=true
+		//   --headless flag
+		Headless: false,
 	}
 }
 
@@ -685,25 +697,31 @@ func (s *Server) buildRouter() http.Handler {
 	mux := http.NewServeMux()
 
 	// ==========================================================================
-	// UI Browser (if enabled)
+	// UI Browser (if enabled and not in headless mode)
 	// ==========================================================================
-	uiHandler, uiErr := newUIHandler()
-	if uiErr != nil {
-		log.Printf("⚠️  UI initialization failed: %v", uiErr)
-	}
-	if uiHandler != nil {
-		log.Println("📱 UI Browser enabled at /")
-		// Serve UI assets
-		mux.Handle("/assets/", uiHandler)
-		mux.HandleFunc("/nornicdb.svg", func(w http.ResponseWriter, r *http.Request) {
-			uiHandler.ServeHTTP(w, r)
-		})
-		// UI routes (SPA)
-		mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
-			uiHandler.ServeHTTP(w, r)
-		})
-		// Auth config endpoint for UI
-		mux.HandleFunc("/auth/config", s.handleAuthConfig)
+	var uiHandler *uiHandler
+	if !s.config.Headless {
+		var uiErr error
+		uiHandler, uiErr = newUIHandler()
+		if uiErr != nil {
+			log.Printf("⚠️  UI initialization failed: %v", uiErr)
+		}
+		if uiHandler != nil {
+			log.Println("📱 UI Browser enabled at /")
+			// Serve UI assets
+			mux.Handle("/assets/", uiHandler)
+			mux.HandleFunc("/nornicdb.svg", func(w http.ResponseWriter, r *http.Request) {
+				uiHandler.ServeHTTP(w, r)
+			})
+			// UI routes (SPA)
+			mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
+				uiHandler.ServeHTTP(w, r)
+			})
+			// Auth config endpoint for UI
+			mux.HandleFunc("/auth/config", s.handleAuthConfig)
+		}
+	} else {
+		log.Println("🔇 Headless mode: UI disabled")
 	}
 
 	// ==========================================================================
@@ -711,9 +729,9 @@ func (s *Server) buildRouter() http.Handler {
 	// ==========================================================================
 
 	// Discovery endpoint (no auth required) - Neo4j compatible
-	// Also serves UI for browser requests
+	// Also serves UI for browser requests (unless headless)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Serve UI for browser requests at root
+		// Serve UI for browser requests at root (unless headless)
 		if uiHandler != nil && isUIRequest(r) && r.URL.Path == "/" {
 			uiHandler.ServeHTTP(w, r)
 			return

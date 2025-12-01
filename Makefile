@@ -35,20 +35,25 @@ endif
 # Image names: nornicdb-{architecture}[-{feature}]:latest
 IMAGE_ARM64 := $(REGISTRY)/nornicdb-arm64-metal:$(VERSION)
 IMAGE_ARM64_BGE := $(REGISTRY)/nornicdb-arm64-metal-bge:$(VERSION)
+IMAGE_ARM64_HEADLESS := $(REGISTRY)/nornicdb-arm64-metal-headless:$(VERSION)
 IMAGE_AMD64 := $(REGISTRY)/nornicdb-amd64-cuda:$(VERSION)
 IMAGE_AMD64_BGE := $(REGISTRY)/nornicdb-amd64-cuda-bge:$(VERSION)
+IMAGE_AMD64_HEADLESS := $(REGISTRY)/nornicdb-amd64-cuda-headless:$(VERSION)
 LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:b4785
 
 # Dockerfiles
 DOCKER_DIR := docker
 
-.PHONY: build-arm64-metal build-arm64-metal-bge build-amd64-cuda build-amd64-cuda-bge
+.PHONY: build-arm64-metal build-arm64-metal-bge build-arm64-metal-headless
+.PHONY: build-amd64-cuda build-amd64-cuda-bge build-amd64-cuda-headless
 .PHONY: build-all build-arm64-all build-amd64-all
-.PHONY: push-arm64-metal push-arm64-metal-bge push-amd64-cuda push-amd64-cuda-bge
-.PHONY: deploy-arm64-metal deploy-arm64-metal-bge deploy-amd64-cuda deploy-amd64-cuda-bge
+.PHONY: push-arm64-metal push-arm64-metal-bge push-arm64-metal-headless
+.PHONY: push-amd64-cuda push-amd64-cuda-bge push-amd64-cuda-headless
+.PHONY: deploy-arm64-metal deploy-arm64-metal-bge deploy-arm64-metal-headless
+.PHONY: deploy-amd64-cuda deploy-amd64-cuda-bge deploy-amd64-cuda-headless
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
-.PHONY: build build-localllm test clean images help
+.PHONY: build build-localllm build-headless build-localllm-headless test clean images help
 
 # ==============================================================================
 # Build (local only, no push)
@@ -66,6 +71,12 @@ build-arm64-metal-bge:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build --platform linux/arm64 --build-arg EMBED_MODEL=true -t $(IMAGE_ARM64_BGE) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
 
+build-arm64-metal-headless:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_ARM64_HEADLESS) [headless, no UI]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build --platform linux/arm64 --build-arg HEADLESS=true -t $(IMAGE_ARM64_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
+
 build-amd64-cuda:
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64) [BYOM]"
@@ -78,11 +89,17 @@ build-amd64-cuda-bge:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build --platform linux/amd64 --build-arg EMBED_MODEL=true -t $(IMAGE_AMD64_BGE) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
 
+build-amd64-cuda-headless:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_AMD64_HEADLESS) [headless, no UI]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build --platform linux/amd64 --build-arg HEADLESS=true -t $(IMAGE_AMD64_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
+
 # Build both variants for an architecture
-build-arm64-all: build-arm64-metal build-arm64-metal-bge
+build-arm64-all: build-arm64-metal build-arm64-metal-bge build-arm64-metal-headless
 	@echo "✓ Built all ARM64 Metal images"
 
-build-amd64-all: build-amd64-cuda build-amd64-cuda-bge
+build-amd64-all: build-amd64-cuda build-amd64-cuda-bge build-amd64-cuda-headless
 	@echo "✓ Built all AMD64 CUDA images"
 
 # Build based on detected host architecture
@@ -107,6 +124,10 @@ push-arm64-metal-bge:
 	@echo "→ Pushing $(IMAGE_ARM64_BGE)"
 	docker push $(IMAGE_ARM64_BGE)
 
+push-arm64-metal-headless:
+	@echo "→ Pushing $(IMAGE_ARM64_HEADLESS)"
+	docker push $(IMAGE_ARM64_HEADLESS)
+
 push-amd64-cuda:
 	@echo "→ Pushing $(IMAGE_AMD64)"
 	docker push $(IMAGE_AMD64)
@@ -114,6 +135,10 @@ push-amd64-cuda:
 push-amd64-cuda-bge:
 	@echo "→ Pushing $(IMAGE_AMD64_BGE)"
 	docker push $(IMAGE_AMD64_BGE)
+
+push-amd64-cuda-headless:
+	@echo "→ Pushing $(IMAGE_AMD64_HEADLESS)"
+	docker push $(IMAGE_AMD64_HEADLESS)
 
 # ==============================================================================
 # Deploy (Build + Push)
@@ -125,17 +150,23 @@ deploy-arm64-metal: build-arm64-metal push-arm64-metal
 deploy-arm64-metal-bge: build-arm64-metal-bge push-arm64-metal-bge
 	@echo "✓ Deployed $(IMAGE_ARM64_BGE)"
 
+deploy-arm64-metal-headless: build-arm64-metal-headless push-arm64-metal-headless
+	@echo "✓ Deployed $(IMAGE_ARM64_HEADLESS)"
+
 deploy-amd64-cuda: build-amd64-cuda push-amd64-cuda
 	@echo "✓ Deployed $(IMAGE_AMD64)"
 
 deploy-amd64-cuda-bge: build-amd64-cuda-bge push-amd64-cuda-bge
 	@echo "✓ Deployed $(IMAGE_AMD64_BGE)"
 
-# Deploy both variants for an architecture
-deploy-arm64-all: deploy-arm64-metal deploy-arm64-metal-bge
+deploy-amd64-cuda-headless: build-amd64-cuda-headless push-amd64-cuda-headless
+	@echo "✓ Deployed $(IMAGE_AMD64_HEADLESS)"
+
+# Deploy both variants for an architecture (including headless)
+deploy-arm64-all: deploy-arm64-metal deploy-arm64-metal-bge deploy-arm64-metal-headless
 	@echo "✓ Deployed all ARM64 Metal images"
 
-deploy-amd64-all: deploy-amd64-cuda deploy-amd64-cuda-bge
+deploy-amd64-all: deploy-amd64-cuda deploy-amd64-cuda-bge deploy-amd64-cuda-headless
 	@echo "✓ Deployed all AMD64 CUDA images"
 
 # Deploy based on detected host architecture
@@ -175,6 +206,13 @@ build:
 build-localllm:
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb ./cmd/nornicdb
 
+# Build without UI (headless mode)
+build-headless:
+	go build -tags noui -o bin/nornicdb-headless ./cmd/nornicdb
+
+build-localllm-headless:
+	CGO_ENABLED=1 go build -tags "localllm noui" -o bin/nornicdb-headless ./cmd/nornicdb
+
 test:
 	go test ./...
 
@@ -186,42 +224,59 @@ images:
 	@echo "Host architecture: $(HOST_ARCH)"
 	@echo ""
 	@echo "ARM64 Metal images:"
-	@echo "  $(IMAGE_ARM64)        [BYOM]"
-	@echo "  $(IMAGE_ARM64_BGE)    [BGE embedded]"
+	@echo "  $(IMAGE_ARM64)            [BYOM]"
+	@echo "  $(IMAGE_ARM64_BGE)        [BGE embedded]"
+	@echo "  $(IMAGE_ARM64_HEADLESS)   [headless, no UI]"
 	@echo ""
 	@echo "AMD64 CUDA images:"
-	@echo "  $(IMAGE_AMD64)        [BYOM]"
-	@echo "  $(IMAGE_AMD64_BGE)    [BGE embedded]"
+	@echo "  $(IMAGE_AMD64)            [BYOM]"
+	@echo "  $(IMAGE_AMD64_BGE)        [BGE embedded]"
+	@echo "  $(IMAGE_AMD64_HEADLESS)   [headless, no UI]"
 	@echo ""
 	@echo "CUDA prerequisite:"
 	@echo "  $(LLAMA_CUDA)"
 
 clean:
-	rm -rf bin/nornicdb bin/nornicdb.exe
+	rm -rf bin/nornicdb bin/nornicdb-headless bin/nornicdb.exe
 
 help:
 	@echo "NornicDB Build System (detected arch: $(HOST_ARCH))"
 	@echo ""
-	@echo "Build (local only):"
-	@echo "  make build-arm64-metal       Base image (BYOM)"
-	@echo "  make build-arm64-metal-bge   With embedded BGE model"
-	@echo "  make build-amd64-cuda        Base image (BYOM)"
-	@echo "  make build-amd64-cuda-bge    With embedded BGE model"
-	@echo "  make build-arm64-all         Build both ARM64 variants"
-	@echo "  make build-amd64-all         Build both AMD64 variants"
-	@echo "  make build-all               Build both variants for $(HOST_ARCH)"
+	@echo "Local Development:"
+	@echo "  make build                   Build native binary with UI"
+	@echo "  make build-headless          Build native binary without UI"
+	@echo "  make build-localllm          Build with local LLM support"
+	@echo "  make build-localllm-headless Build headless with local LLM"
 	@echo ""
-	@echo "Deploy (build + push):"
-	@echo "  make deploy-arm64-metal      Deploy base ARM64"
-	@echo "  make deploy-arm64-metal-bge  Deploy ARM64 with BGE"
-	@echo "  make deploy-amd64-cuda       Deploy base AMD64"
-	@echo "  make deploy-amd64-cuda-bge   Deploy AMD64 with BGE"
-	@echo "  make deploy-arm64-all        Deploy both ARM64 variants"
-	@echo "  make deploy-amd64-all        Deploy both AMD64 variants"
-	@echo "  make deploy-all              Deploy both variants for $(HOST_ARCH)"
+	@echo "Docker Build (local only):"
+	@echo "  make build-arm64-metal          Base image (BYOM)"
+	@echo "  make build-arm64-metal-bge      With embedded BGE model"
+	@echo "  make build-arm64-metal-headless Headless (no UI)"
+	@echo "  make build-amd64-cuda           Base image (BYOM)"
+	@echo "  make build-amd64-cuda-bge       With embedded BGE model"
+	@echo "  make build-amd64-cuda-headless  Headless (no UI)"
+	@echo "  make build-arm64-all            Build all ARM64 variants"
+	@echo "  make build-amd64-all            Build all AMD64 variants"
+	@echo "  make build-all                  Build all variants for $(HOST_ARCH)"
+	@echo ""
+	@echo "Docker Deploy (build + push):"
+	@echo "  make deploy-arm64-metal         Deploy base ARM64"
+	@echo "  make deploy-arm64-metal-bge     Deploy ARM64 with BGE"
+	@echo "  make deploy-arm64-metal-headless Deploy ARM64 headless"
+	@echo "  make deploy-amd64-cuda          Deploy base AMD64"
+	@echo "  make deploy-amd64-cuda-bge      Deploy AMD64 with BGE"
+	@echo "  make deploy-amd64-cuda-headless Deploy AMD64 headless"
+	@echo "  make deploy-arm64-all           Deploy all ARM64 variants"
+	@echo "  make deploy-amd64-all           Deploy all AMD64 variants"
+	@echo "  make deploy-all                 Deploy all variants for $(HOST_ARCH)"
 	@echo ""
 	@echo "CUDA prereq (one-time, run on x86 machine):"
 	@echo "  make build-llama-cuda"
 	@echo "  make deploy-llama-cuda"
+	@echo ""
+	@echo "Headless mode:"
+	@echo "  - Build:  -tags noui (excludes UI from binary)"
+	@echo "  - Docker: --build-arg HEADLESS=true"
+	@echo "  - Runtime: --headless flag or NORNICDB_HEADLESS=true"
 	@echo ""
 	@echo "Config: REGISTRY=name VERSION=tag make ..."

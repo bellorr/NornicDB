@@ -1,4 +1,8 @@
 // Package ui provides the embedded NornicDB web UI assets.
+// This file is used for normal builds that include the UI.
+//
+//go:build !noui
+
 package ui
 
 import "embed"

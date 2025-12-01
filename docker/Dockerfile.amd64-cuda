@@ -6,18 +6,27 @@
 # Build:  docker build -f docker/Dockerfile.amd64-cuda -t nornicdb-amd64-cuda .
 # With BGE model embedded:
 #         docker build -f docker/Dockerfile.amd64-cuda --build-arg EMBED_MODEL=true -t nornicdb-amd64-cuda-bge .
+# Headless (no UI):
+#         docker build -f docker/Dockerfile.amd64-cuda --build-arg HEADLESS=true -t nornicdb-amd64-cuda-headless .
 
 ARG LLAMA_CUDA_IMAGE=timothyswt/llama-cuda-libs:b4785
 
 # =============================================================================
-# Stage 1: UI
+# Stage 1: UI (skipped in headless mode)
 # =============================================================================
 FROM node:20-alpine AS ui
+ARG HEADLESS=false
 WORKDIR /ui
 COPY ui/package*.json ./
-RUN npm ci 2>/dev/null || npm install --legacy-peer-deps
+RUN if [ "$HEADLESS" != "true" ]; then \
+      npm ci 2>/dev/null || npm install --legacy-peer-deps; \
+    fi
 COPY ui/ .
-RUN npm run build
+RUN if [ "$HEADLESS" != "true" ]; then \
+      npm run build; \
+    else \
+      mkdir -p dist && echo "Headless mode - UI skipped" > dist/HEADLESS; \
+    fi
 
 # =============================================================================
 # Stage 2: Pre-built CUDA libs
@@ -28,6 +37,7 @@ FROM ${LLAMA_CUDA_IMAGE} AS llama
 # Stage 3: Go build
 # =============================================================================
 FROM nvidia/cuda:12.6.3-devel-ubuntu22.04 AS builder
+ARG HEADLESS=false
 
 ENV GO_VERSION=1.23.4
 RUN apt-get update && apt-get install -y wget git gcc g++ libgomp1 && \
@@ -45,14 +55,22 @@ COPY --from=llama /output/include/*.h /build/lib/llama/
 COPY go.mod go.sum ./
 RUN go mod download
 
-# Source + UI
+# Source + UI (only copy UI dist if not headless)
 COPY . .
 COPY --from=ui /ui/dist ./ui/dist
 
-# Build with CUDA + localllm
-RUN CGO_ENABLED=1 go build -tags "cuda localllm" \
-    -ldflags="-s -w -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" \
-    -o nornicdb ./cmd/nornicdb
+# Build with CUDA + localllm (with or without UI based on HEADLESS arg)
+RUN if [ "$HEADLESS" = "true" ]; then \
+      echo "Building headless (no UI)..." && \
+      CGO_ENABLED=1 go build -tags "cuda localllm noui" \
+        -ldflags="-s -w -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" \
+        -o nornicdb ./cmd/nornicdb; \
+    else \
+      echo "Building with UI..." && \
+      CGO_ENABLED=1 go build -tags "cuda localllm" \
+        -ldflags="-s -w -X main.buildTime=$(date -u +%Y%m%d-%H%M%S)" \
+        -o nornicdb ./cmd/nornicdb; \
+    fi
 
 # =============================================================================
 # Stage 4: Runtime
@@ -70,6 +88,7 @@ RUN chmod +x /app/entrypoint.sh
 
 # Model embedding: only copy when EMBED_MODEL=true (uses BuildKit mount to avoid layer bloat)
 ARG EMBED_MODEL=false
+ARG HEADLESS=false
 RUN --mount=type=bind,source=models,target=/models,ro \
     if [ "$EMBED_MODEL" = "true" ]; then \
       if [ -f /models/bge-m3.gguf ]; then \
@@ -80,6 +99,9 @@ RUN --mount=type=bind,source=models,target=/models,ro \
       fi; \
     else \
       echo "→ BYOM mode (no embedded model)"; \
+    fi && \
+    if [ "$HEADLESS" = "true" ]; then \
+      echo "✓ Headless mode enabled (no UI)"; \
     fi
 
 EXPOSE 7474 7687
@@ -87,6 +109,7 @@ EXPOSE 7474 7687
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --spider -q http://localhost:7474/health || exit 1
 
+# Set NORNICDB_HEADLESS based on build arg
 ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_HTTP_PORT=7474 \
     NORNICDB_BOLT_PORT=7687 \
@@ -97,6 +120,7 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_EMBEDDING_GPU_LAYERS=-1 \
     NORNICDB_NO_AUTH=true \
     NORNICDB_GPU_ENABLED=true \
+    NORNICDB_HEADLESS=${HEADLESS} \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 
