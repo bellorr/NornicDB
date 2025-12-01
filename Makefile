@@ -1,0 +1,227 @@
+# NornicDB Build System
+# ==============================================================================
+# Cross-platform Docker image build and deployment
+#
+# Architectures:
+#   - arm64-metal  : Apple Silicon with Metal acceleration
+#   - amd64-cuda   : x86_64 with NVIDIA CUDA acceleration
+#
+# Each architecture has two variants:
+#   - Base (BYOM)  : Bring Your Own Model - mount models at runtime
+#   - BGE          : Pre-packaged with bge-m3.gguf embedding model
+#
+# Usage:
+#   make build-arm64-metal          # Build base image (no model)
+#   make build-arm64-metal-bge      # Build with embedded BGE model
+#   make deploy-arm64-metal         # Build + Push base image
+#   make deploy-arm64-metal-bge     # Build + Push BGE image
+#   make deploy-all                 # Deploy both variants for current arch
+# ==============================================================================
+
+# Configuration
+REGISTRY ?= timothyswt
+VERSION ?= latest
+
+# Detect architecture: arm64 (Apple Silicon) or x86_64/amd64 (Intel/AMD)
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),arm64)
+    HOST_ARCH := arm64
+else ifeq ($(UNAME_M),aarch64)
+    HOST_ARCH := arm64
+else
+    HOST_ARCH := amd64
+endif
+
+# Image names: nornicdb-{architecture}[-{feature}]:latest
+IMAGE_ARM64 := $(REGISTRY)/nornicdb-arm64-metal:$(VERSION)
+IMAGE_ARM64_BGE := $(REGISTRY)/nornicdb-arm64-metal-bge:$(VERSION)
+IMAGE_AMD64 := $(REGISTRY)/nornicdb-amd64-cuda:$(VERSION)
+IMAGE_AMD64_BGE := $(REGISTRY)/nornicdb-amd64-cuda-bge:$(VERSION)
+LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:b4785
+
+# Dockerfiles
+DOCKER_DIR := docker
+
+.PHONY: build-arm64-metal build-arm64-metal-bge build-amd64-cuda build-amd64-cuda-bge
+.PHONY: build-all build-arm64-all build-amd64-all
+.PHONY: push-arm64-metal push-arm64-metal-bge push-amd64-cuda push-amd64-cuda-bge
+.PHONY: deploy-arm64-metal deploy-arm64-metal-bge deploy-amd64-cuda deploy-amd64-cuda-bge
+.PHONY: deploy-all deploy-arm64-all deploy-amd64-all
+.PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
+.PHONY: build build-localllm test clean images help
+
+# ==============================================================================
+# Build (local only, no push)
+# ==============================================================================
+
+build-arm64-metal:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_ARM64) [BYOM]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build --platform linux/arm64 -t $(IMAGE_ARM64) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
+
+build-arm64-metal-bge:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_ARM64_BGE) [with BGE model]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build --platform linux/arm64 --build-arg EMBED_MODEL=true -t $(IMAGE_ARM64_BGE) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
+
+build-amd64-cuda:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_AMD64) [BYOM]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build --platform linux/amd64 -t $(IMAGE_AMD64) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
+
+build-amd64-cuda-bge:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_AMD64_BGE) [with BGE model]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build --platform linux/amd64 --build-arg EMBED_MODEL=true -t $(IMAGE_AMD64_BGE) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
+
+# Build both variants for an architecture
+build-arm64-all: build-arm64-metal build-arm64-metal-bge
+	@echo "✓ Built all ARM64 Metal images"
+
+build-amd64-all: build-amd64-cuda build-amd64-cuda-bge
+	@echo "✓ Built all AMD64 CUDA images"
+
+# Build based on detected host architecture
+build-all:
+	@echo "Detected architecture: $(HOST_ARCH)"
+ifeq ($(HOST_ARCH),arm64)
+	@$(MAKE) build-arm64-all
+else
+	@$(MAKE) build-amd64-all
+endif
+	@echo "✓ All images for $(HOST_ARCH) built"
+
+# ==============================================================================
+# Push (registry only, assumes already built)
+# ==============================================================================
+
+push-arm64-metal:
+	@echo "→ Pushing $(IMAGE_ARM64)"
+	docker push $(IMAGE_ARM64)
+
+push-arm64-metal-bge:
+	@echo "→ Pushing $(IMAGE_ARM64_BGE)"
+	docker push $(IMAGE_ARM64_BGE)
+
+push-amd64-cuda:
+	@echo "→ Pushing $(IMAGE_AMD64)"
+	docker push $(IMAGE_AMD64)
+
+push-amd64-cuda-bge:
+	@echo "→ Pushing $(IMAGE_AMD64_BGE)"
+	docker push $(IMAGE_AMD64_BGE)
+
+# ==============================================================================
+# Deploy (Build + Push)
+# ==============================================================================
+
+deploy-arm64-metal: build-arm64-metal push-arm64-metal
+	@echo "✓ Deployed $(IMAGE_ARM64)"
+
+deploy-arm64-metal-bge: build-arm64-metal-bge push-arm64-metal-bge
+	@echo "✓ Deployed $(IMAGE_ARM64_BGE)"
+
+deploy-amd64-cuda: build-amd64-cuda push-amd64-cuda
+	@echo "✓ Deployed $(IMAGE_AMD64)"
+
+deploy-amd64-cuda-bge: build-amd64-cuda-bge push-amd64-cuda-bge
+	@echo "✓ Deployed $(IMAGE_AMD64_BGE)"
+
+# Deploy both variants for an architecture
+deploy-arm64-all: deploy-arm64-metal deploy-arm64-metal-bge
+	@echo "✓ Deployed all ARM64 Metal images"
+
+deploy-amd64-all: deploy-amd64-cuda deploy-amd64-cuda-bge
+	@echo "✓ Deployed all AMD64 CUDA images"
+
+# Deploy based on detected host architecture
+deploy-all:
+	@echo "Detected architecture: $(HOST_ARCH)"
+ifeq ($(HOST_ARCH),arm64)
+	@$(MAKE) deploy-arm64-all
+else
+	@$(MAKE) deploy-amd64-all
+endif
+	@echo "✓ All images for $(HOST_ARCH) deployed"
+
+# ==============================================================================
+# CUDA Prerequisite (one-time build, ~15 min)
+# ==============================================================================
+
+build-llama-cuda:
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building CUDA libs (one-time): $(LLAMA_CUDA)"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build --platform linux/amd64 -t $(LLAMA_CUDA) -f $(DOCKER_DIR)/Dockerfile.llama-cuda .
+
+push-llama-cuda:
+	@echo "→ Pushing $(LLAMA_CUDA)"
+	docker push $(LLAMA_CUDA)
+
+deploy-llama-cuda: build-llama-cuda push-llama-cuda
+	@echo "✓ Deployed $(LLAMA_CUDA)"
+
+# ==============================================================================
+# Local Development (native binary, not Docker)
+# ==============================================================================
+
+build:
+	go build -o bin/nornicdb ./cmd/nornicdb
+
+build-localllm:
+	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb ./cmd/nornicdb
+
+test:
+	go test ./...
+
+# ==============================================================================
+# Utilities
+# ==============================================================================
+
+images:
+	@echo "Host architecture: $(HOST_ARCH)"
+	@echo ""
+	@echo "ARM64 Metal images:"
+	@echo "  $(IMAGE_ARM64)        [BYOM]"
+	@echo "  $(IMAGE_ARM64_BGE)    [BGE embedded]"
+	@echo ""
+	@echo "AMD64 CUDA images:"
+	@echo "  $(IMAGE_AMD64)        [BYOM]"
+	@echo "  $(IMAGE_AMD64_BGE)    [BGE embedded]"
+	@echo ""
+	@echo "CUDA prerequisite:"
+	@echo "  $(LLAMA_CUDA)"
+
+clean:
+	rm -rf bin/nornicdb bin/nornicdb.exe
+
+help:
+	@echo "NornicDB Build System (detected arch: $(HOST_ARCH))"
+	@echo ""
+	@echo "Build (local only):"
+	@echo "  make build-arm64-metal       Base image (BYOM)"
+	@echo "  make build-arm64-metal-bge   With embedded BGE model"
+	@echo "  make build-amd64-cuda        Base image (BYOM)"
+	@echo "  make build-amd64-cuda-bge    With embedded BGE model"
+	@echo "  make build-arm64-all         Build both ARM64 variants"
+	@echo "  make build-amd64-all         Build both AMD64 variants"
+	@echo "  make build-all               Build both variants for $(HOST_ARCH)"
+	@echo ""
+	@echo "Deploy (build + push):"
+	@echo "  make deploy-arm64-metal      Deploy base ARM64"
+	@echo "  make deploy-arm64-metal-bge  Deploy ARM64 with BGE"
+	@echo "  make deploy-amd64-cuda       Deploy base AMD64"
+	@echo "  make deploy-amd64-cuda-bge   Deploy AMD64 with BGE"
+	@echo "  make deploy-arm64-all        Deploy both ARM64 variants"
+	@echo "  make deploy-amd64-all        Deploy both AMD64 variants"
+	@echo "  make deploy-all              Deploy both variants for $(HOST_ARCH)"
+	@echo ""
+	@echo "CUDA prereq (one-time, run on x86 machine):"
+	@echo "  make build-llama-cuda"
+	@echo "  make deploy-llama-cuda"
+	@echo ""
+	@echo "Config: REGISTRY=name VERSION=tag make ..."
