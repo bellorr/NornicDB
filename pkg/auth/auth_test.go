@@ -1,4 +1,4 @@
-// Package auth tests for Mimir-compatible authentication.
+// Package auth tests for authentication.
 package auth
 
 import (
@@ -91,7 +91,7 @@ func TestCreateUser(t *testing.T) {
 
 func TestAuthenticate(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	// Create test user
 	_, err := auth.CreateUser("testuser", "password123", []Role{RoleAdmin})
 	if err != nil {
@@ -136,7 +136,7 @@ func TestAuthenticateWithExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuthenticator() error = %v", err)
 	}
-	
+
 	_, err = auth.CreateUser("testuser", "password123", []Role{RoleViewer})
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -146,7 +146,7 @@ func TestAuthenticateWithExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Authenticate() error = %v", err)
 	}
-	
+
 	// Should have expires_in when expiry is configured
 	if token.ExpiresIn != 3600 {
 		t.Errorf("expected expires_in 3600, got %d", token.ExpiresIn)
@@ -164,7 +164,7 @@ func TestAccountLockout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewAuthenticator() error = %v", err)
 	}
-	
+
 	_, err = auth.CreateUser("locktest", "password123", nil)
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -198,7 +198,7 @@ func TestAccountLockout(t *testing.T) {
 
 func TestDisabledUser(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	_, err := auth.CreateUser("disabletest", "password123", nil)
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -229,7 +229,7 @@ func TestDisabledUser(t *testing.T) {
 
 func TestValidateToken(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	_, err := auth.CreateUser("tokentest", "password123", []Role{RoleAdmin, RoleEditor})
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -301,12 +301,12 @@ func TestTokenExpiration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected valid token initially, got %v", err)
 	}
-	
+
 	// Verify expiration is set
 	if claims.Exp == 0 {
 		t.Fatal("expected exp claim to be set")
 	}
-	
+
 	// Calculate actual remaining time
 	remaining := claims.Exp - time.Now().Unix()
 	t.Logf("Token expires in %d seconds (exp=%d, now=%d)", remaining, claims.Exp, time.Now().Unix())
@@ -345,7 +345,7 @@ func TestSecurityDisabled(t *testing.T) {
 
 func TestChangePassword(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	_, err := auth.CreateUser("passchange", "oldpassword1", nil)
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -384,7 +384,7 @@ func TestChangePassword(t *testing.T) {
 
 func TestUpdateRoles(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	_, err := auth.CreateUser("rolechange", "password123", []Role{RoleViewer})
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -413,7 +413,7 @@ func TestUpdateRoles(t *testing.T) {
 
 func TestDeleteUser(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	_, err := auth.CreateUser("deletetest", "password123", nil)
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -440,7 +440,7 @@ func TestDeleteUser(t *testing.T) {
 
 func TestListUsers(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	// Create multiple users
 	_, _ = auth.CreateUser("user1", "password123", []Role{RoleAdmin})
 	_, _ = auth.CreateUser("user2", "password123", []Role{RoleEditor})
@@ -461,7 +461,7 @@ func TestListUsers(t *testing.T) {
 
 func TestGetUserByID(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	created, err := auth.CreateUser("idtest", "password123", nil)
 	if err != nil {
 		t.Fatalf("CreateUser() error = %v", err)
@@ -483,7 +483,7 @@ func TestGetUserByID(t *testing.T) {
 
 func TestUserCount(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	if auth.UserCount() != 0 {
 		t.Error("expected 0 users initially")
 	}
@@ -658,7 +658,7 @@ func TestSecureCompare(t *testing.T) {
 
 func TestAuditLogging(t *testing.T) {
 	auth := newTestAuthenticator(t)
-	
+
 	var events []AuditEvent
 	auth.SetAuditLogger(func(e AuditEvent) {
 		events = append(events, e)
@@ -666,10 +666,10 @@ func TestAuditLogging(t *testing.T) {
 
 	// Create user should log
 	_, _ = auth.CreateUser("audituser", "password123", nil)
-	
+
 	// Failed login should log
 	_, _, _ = auth.Authenticate("audituser", "wrongpassword", "127.0.0.1", "TestAgent")
-	
+
 	// Successful login should log
 	_, _, _ = auth.Authenticate("audituser", "password123", "127.0.0.1", "TestAgent")
 
@@ -681,7 +681,7 @@ func TestAuditLogging(t *testing.T) {
 	foundCreate := false
 	foundFailedLogin := false
 	foundSuccessLogin := false
-	
+
 	for _, e := range events {
 		if e.EventType == "user_create" && e.Success {
 			foundCreate = true

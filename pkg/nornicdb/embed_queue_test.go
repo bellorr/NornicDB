@@ -698,7 +698,7 @@ func TestLargeContentEmbedding(t *testing.T) {
 		node, err := engine.GetNode("large-file-node")
 		require.NoError(t, err)
 
-		// MIMIR-COMPATIBLE: Large files create FileChunk nodes, NOT a single embedding on parent
+		// Large files create FileChunk nodes, NOT a single embedding on parent
 		// The parent File node has has_chunks=true and chunk_count=N
 		// Each FileChunk has its own embedding
 		assert.True(t, node.Properties["has_chunks"].(bool), "Parent should have has_chunks=true")

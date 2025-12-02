@@ -1,6 +1,6 @@
 // Package auth provides authentication and authorization for NornicDB.
 //
-// This package implements Mimir-compatible JWT authentication with role-based access control,
+// This package implements JWT authentication with role-based access control,
 // designed to meet regulatory compliance requirements:
 //   - GDPR Art.32: Technical and organizational measures to ensure security
 //   - HIPAA §164.312(a): Access Control - Unique User Identification
@@ -307,12 +307,12 @@ func (u *User) HasPermission(perm Permission) bool {
 // JWTClaims represents the claims in a JWT token.
 // Compatible with Mimir's JWT structure.
 type JWTClaims struct {
-	Sub      string   `json:"sub"`                   // Subject (user ID)
-	Email    string   `json:"email,omitempty"`       // User email
-	Username string   `json:"username,omitempty"`    // Username
-	Roles    []string `json:"roles"`                 // User roles
-	Iat      int64    `json:"iat"`                   // Issued at (Unix timestamp)
-	Exp      int64    `json:"exp,omitempty"`         // Expiration (Unix timestamp, 0 = never)
+	Sub      string   `json:"sub"`                // Subject (user ID)
+	Email    string   `json:"email,omitempty"`    // User email
+	Username string   `json:"username,omitempty"` // Username
+	Roles    []string `json:"roles"`              // User roles
+	Iat      int64    `json:"iat"`                // Issued at (Unix timestamp)
+	Exp      int64    `json:"exp,omitempty"`      // Expiration (Unix timestamp, 0 = never)
 }
 
 // TokenResponse follows OAuth 2.0 RFC 6749 token response format.
@@ -358,9 +358,9 @@ func DefaultAuthConfig() AuthConfig {
 
 // Authenticator manages users and authentication.
 type Authenticator struct {
-	mu       sync.RWMutex
-	users    map[string]*User // keyed by username
-	config   AuthConfig
+	mu     sync.RWMutex
+	users  map[string]*User // keyed by username
+	config AuthConfig
 
 	// Audit callback for compliance logging
 	auditLog func(event AuditEvent)
@@ -428,12 +428,12 @@ type AuditEvent struct {
 //	config.MaxFailedAttempts = 5
 //	config.LockoutDuration = 30 * time.Minute
 //	config.TokenExpiry = 4 * time.Hour
-//	
+//
 //	authenticator, err := auth.NewAuthenticator(config)
 //	if err != nil {
 //		log.Fatal("Failed to initialize auth:", err)
 //	}
-//	
+//
 //	// Set up HIPAA-required audit logging
 //	authenticator.SetAuditLogger(func(event auth.AuditEvent) {
 //		auditLogger.Log(audit.Event{
@@ -445,7 +445,7 @@ type AuditEvent struct {
 //			Metadata:  map[string]string{"reason": event.Message},
 //		})
 //	})
-//	
+//
 //	// Create admin user with strong password
 //	admin, err := authenticator.CreateUser("admin",
 //		"Str0ng!P@ssw0rd#2024", []auth.Role{auth.RoleAdmin})
@@ -457,12 +457,12 @@ type AuditEvent struct {
 //	config.JWTSecret = loadSecretFromVault()
 //	config.TokenExpiry = 15 * time.Minute // Short-lived tokens
 //	config.MaxFailedAttempts = 3          // Strict lockout
-//	
+//
 //	authenticator, err := auth.NewAuthenticator(config)
 //	if err != nil {
 //		return nil, fmt.Errorf("auth init failed: %w", err)
 //	}
-//	
+//
 //	// Create per-tenant users
 //	for _, tenant := range tenants {
 //		user, err := authenticator.CreateUser(
@@ -479,12 +479,12 @@ type AuditEvent struct {
 //
 //	config := auth.DefaultAuthConfig()
 //	config.SecurityEnabled = false // Bypass all auth checks
-//	
+//
 //	authenticator, err := auth.NewAuthenticator(config)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	// In dev mode, any token is accepted
 //	// WARNING: Never use in production!
 //	claims, _ := authenticator.ValidateToken("any-token") // Always succeeds
@@ -494,12 +494,12 @@ type AuditEvent struct {
 //	config := auth.DefaultAuthConfig()
 //	config.JWTSecret = []byte("secure-secret-32-chars-minimum!!")
 //	config.MaxFailedAttempts = 5
-//	
+//
 //	authenticator, err := auth.NewAuthenticator(config)
 //	if err != nil {
 //		return nil, err
 //	}
-//	
+//
 //	// Track failed attempts for rate limiting
 //	authenticator.SetAuditLogger(func(event auth.AuditEvent) {
 //		if event.EventType == "login_failed" {
@@ -524,20 +524,22 @@ type AuditEvent struct {
 // SecurityEnabled = false means "anyone can walk in" (development only!)
 //
 // Real-world Analogy:
-//   JWT tokens are like temporary wristbands:
-//   - When you log in, you get a wristband (token)
-//   - Show the wristband to access stuff (no need to login again)
-//   - Wristband expires after a few hours (token expiry)
-//   - If you lose it, get a new one by logging in again
+//
+//	JWT tokens are like temporary wristbands:
+//	- When you log in, you get a wristband (token)
+//	- Show the wristband to access stuff (no need to login again)
+//	- Wristband expires after a few hours (token expiry)
+//	- If you lose it, get a new one by logging in again
 //
 // Why JWT Instead of Sessions?
-//   Sessions: "I'll remember you" (server stores state)
-//   JWT: "Here's a signed badge, prove yourself each time" (stateless)
-//   
-//   JWT Benefits:
-//   - Works across multiple servers (no shared session storage)
-//   - Scales better (no memory for sessions)
-//   - Mobile-friendly (just store the token)
+//
+//	Sessions: "I'll remember you" (server stores state)
+//	JWT: "Here's a signed badge, prove yourself each time" (stateless)
+//
+//	JWT Benefits:
+//	- Works across multiple servers (no shared session storage)
+//	- Scales better (no memory for sessions)
+//	- Mobile-friendly (just store the token)
 //
 // Security Features:
 //   - Passwords hashed with bcrypt (can't be reversed)
@@ -557,7 +559,8 @@ type AuditEvent struct {
 //   - Thread-safe for concurrent authentication
 //
 // Thread Safety:
-//   All methods are thread-safe for concurrent use.
+//
+//	All methods are thread-safe for concurrent use.
 func NewAuthenticator(config AuthConfig) (*Authenticator, error) {
 	if config.SecurityEnabled && len(config.JWTSecret) == 0 {
 		return nil, ErrMissingSecret
@@ -692,11 +695,11 @@ func (a *Authenticator) CreateUser(username, password string, roles []Role) (*Us
 //
 // This implements the OAuth 2.0 password grant flow (RFC 6749 Section 4.3).
 // On successful authentication:
-//   1. Password is verified with bcrypt
-//   2. Failed login counter is reset
-//   3. LastLogin timestamp is updated
-//   4. JWT token is generated
-//   5. Audit event is logged
+//  1. Password is verified with bcrypt
+//  2. Failed login counter is reset
+//  3. LastLogin timestamp is updated
+//  4. JWT token is generated
+//  5. Audit event is logged
 //
 // Security features:
 //   - Account lockout after MaxFailedLogins attempts
@@ -821,7 +824,7 @@ func (a *Authenticator) Authenticate(username, password, ipAddress, userAgent st
 	user.LastLogin = time.Now()
 	user.UpdatedAt = time.Now()
 
-	// Generate JWT token (Mimir-compatible)
+	// Generate JWT token
 	token, err := a.generateJWT(user)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to generate token: %w", err)
@@ -858,10 +861,10 @@ func (a *Authenticator) Authenticate(username, password, ipAddress, userAgent st
 // including user ID, username, roles, and expiration.
 //
 // Validation checks:
-//   1. Token format (header.payload.signature)
-//   2. Signature verification (HMAC-SHA256)
-//   3. Expiration (if Exp > 0)
-//   4. Not before (if configured)
+//  1. Token format (header.payload.signature)
+//  2. Signature verification (HMAC-SHA256)
+//  3. Expiration (if Exp > 0)
+//  4. Not before (if configured)
 //
 // If SecurityEnabled=false, returns dummy claims allowing all access.
 //
@@ -1136,7 +1139,7 @@ func (a *Authenticator) IsSecurityEnabled() bool {
 	return a.config.SecurityEnabled
 }
 
-// JWT Generation and Validation (Mimir-compatible)
+// JWT Generation and Validation
 
 // generateJWT creates a JWT token for the user.
 // Uses HS256 algorithm matching Mimir's implementation.

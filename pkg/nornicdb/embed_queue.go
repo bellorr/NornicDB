@@ -292,7 +292,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 
 	if needsChunkNodes {
 		// =====================================================================
-		// MIMIR-COMPATIBLE CHUNKING:
+		// CHUNKING:
 		// - Create separate FileChunk:Node for EACH chunk
 		// - Each chunk gets its OWN embedding (NO averaging!)
 		// - Create HAS_CHUNK relationships from File to each FileChunk
@@ -337,17 +337,11 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		node.Properties["embedding"] = true // Marker for IS NOT NULL check
 	}
 
-	fmt.Printf("📝 Saving node %s: embedding length=%d\n",
-		node.ID, len(node.Embedding))
-
-	// Use embedding-specific update if available (uses OpUpdateEmbedding in WAL)
-	// This is safe to skip during recovery since embeddings can be regenerated
+	// Save the parent node (either with embedding for single chunk, or metadata for chunked files)
 	var updateErr error
 	if embedUpdater, ok := ew.storage.(interface{ UpdateNodeEmbedding(*storage.Node) error }); ok {
-		fmt.Printf("   Using UpdateNodeEmbedding for node %s\n", node.ID)
 		updateErr = embedUpdater.UpdateNodeEmbedding(node)
 	} else {
-		fmt.Printf("   Using UpdateNode for node %s\n", node.ID)
 		updateErr = ew.storage.UpdateNode(node)
 	}
 	if updateErr != nil {
@@ -356,20 +350,6 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		ew.failed++
 		ew.mu.Unlock()
 		return true // Failed but we tried - continue to next node
-	}
-
-	// Verify the update was persisted
-	if getter, ok := ew.storage.(interface {
-		GetNode(storage.NodeID) (*storage.Node, error)
-	}); ok {
-		verified, verifyErr := getter.GetNode(node.ID)
-		if verifyErr != nil {
-			fmt.Printf("⚠️  Failed to verify update for %s: %v\n", node.ID, verifyErr)
-		} else if len(verified.Embedding) == 0 {
-			fmt.Printf("🔴 VERIFY FAILED: Node %s has NO embedding after update!\n", node.ID)
-		} else {
-			fmt.Printf("✓ Verified: Node %s has %d-dim embedding stored\n", node.ID, len(verified.Embedding))
-		}
 	}
 
 	// Call callback to update search index
@@ -383,7 +363,12 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	ew.recentlyProcessed[string(node.ID)] = time.Now()
 	ew.mu.Unlock()
 
-	fmt.Printf("✅ Embedded node %s (%d dims, %d chunks)\n", node.ID, ew.embedder.Dimensions(), len(chunks))
+	// Log success with appropriate message
+	if needsChunkNodes {
+		fmt.Printf("✅ Embedded %s with %d FileChunks\n", node.ID, len(chunks))
+	} else {
+		fmt.Printf("✅ Embedded %s (%d dims)\n", node.ID, len(node.Embedding))
+	}
 
 	// Small delay before next
 	time.Sleep(ew.config.BatchDelay)
@@ -739,7 +724,7 @@ func (ew *EmbedWorker) createFileChunksWithEmbeddings(parentFile *storage.Node, 
 			fmt.Printf("   Note: HAS_CHUNK edge for chunk %d may already exist\n", i)
 		}
 
-		fmt.Printf("   ✓ Created FileChunk %d/%d with %d-dim embedding (Mimir-compatible)\n",
+		fmt.Printf("   ✓ Created FileChunk %d/%d with %d-dim embedding\n",
 			i+1, totalChunks, len(embeddings[i]))
 	}
 
