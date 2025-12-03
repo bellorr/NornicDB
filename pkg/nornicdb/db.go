@@ -141,6 +141,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/decay"
 	"github.com/orneryd/nornicdb/pkg/embed"
+	"github.com/orneryd/nornicdb/pkg/encryption"
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/search"
@@ -326,6 +327,12 @@ type Config struct {
 	AsyncWritesEnabled bool          `yaml:"async_writes_enabled"` // Enable async writes for faster performance
 	AsyncFlushInterval time.Duration `yaml:"async_flush_interval"` // How often to flush pending writes (default: 50ms)
 
+	// Encryption (data-at-rest) - AES-256-GCM with key rotation
+	// Disabled by default for performance. Enable for HIPAA/GDPR/SOC2 compliance.
+	EncryptionEnabled  bool     `yaml:"encryption_enabled"`  // Enable AES-256-GCM encryption for sensitive fields
+	EncryptionPassword string   `yaml:"encryption_password"` // Master password for key derivation (env: NORNICDB_ENCRYPTION_PASSWORD)
+	EncryptionFields   []string `yaml:"encryption_fields"`   // Fields to encrypt (nil = default PHI/PII fields)
+
 	// Server
 	BoltPort int `yaml:"bolt_port"`
 	HTTPPort int `yaml:"http_port"`
@@ -367,6 +374,9 @@ func DefaultConfig() *Config {
 		ParallelMinBatchSize:         1000,                  // Parallelize for 1000+ items
 		AsyncWritesEnabled:           true,                  // Enable async writes for eventual consistency (faster writes)
 		AsyncFlushInterval:           50 * time.Millisecond, // Flush pending writes every 50ms
+		EncryptionEnabled:            false,                 // Encryption disabled by default (opt-in)
+		EncryptionPassword:           "",                    // Must be set if encryption enabled
+		EncryptionFields:             nil,                   // nil = use default PHI fields
 		BoltPort:                     7687,
 		HTTPPort:                     7474,
 	}
@@ -422,6 +432,10 @@ type DB struct {
 	// Async embedding queue for auto-generating embeddings
 	embedQueue        *EmbedQueue
 	embedWorkerConfig *EmbedWorkerConfig // Configurable via ENV vars
+
+	// Encryption for data-at-rest (PHI/PII fields)
+	encryptor     *encryption.Encryptor
+	encryptFields *encryption.FieldEncryptionConfig
 
 	// Background goroutine tracking
 	bgWg sync.WaitGroup
@@ -845,6 +859,75 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Initialize search service (uses pre-computed embeddings from Mimir)
 	db.searchService = search.NewService(db.storage)
 
+	// Initialize encryption if enabled (AES-256-GCM with PBKDF2 key derivation)
+	if config.EncryptionEnabled {
+		// Get password from config or environment (env takes precedence for security)
+		password := config.EncryptionPassword
+		if envPass := os.Getenv("NORNICDB_ENCRYPTION_PASSWORD"); envPass != "" {
+			password = envPass
+		}
+
+		if password == "" {
+			// Clean up resources before returning error
+			db.closeInternal()
+			return nil, fmt.Errorf("encryption enabled but no password provided (set NORNICDB_ENCRYPTION_PASSWORD or config.EncryptionPassword)")
+		}
+
+		// Generate installation-specific salt (or load existing)
+		saltFile := dataDir + "/encryption.salt"
+		var salt []byte
+		if saltData, err := os.ReadFile(saltFile); err == nil && len(saltData) == 32 {
+			salt = saltData
+		} else {
+			// Generate new salt for this installation
+			salt, err = encryption.GenerateSalt()
+			if err != nil {
+				db.closeInternal()
+				return nil, fmt.Errorf("failed to generate encryption salt: %w", err)
+			}
+			// Persist salt (required for decryption after restart)
+			if dataDir != "" {
+				if err := os.WriteFile(saltFile, salt, 0600); err != nil {
+					db.closeInternal()
+					return nil, fmt.Errorf("failed to save encryption salt: %w", err)
+				}
+			}
+		}
+
+		// Configure encryption with OWASP 2023 recommended settings
+		encConfig := encryption.Config{
+			Enabled: true,
+			KeyDerivation: encryption.KeyDerivationConfig{
+				Salt:       salt,
+				Iterations: 600000, // OWASP 2023 PBKDF2-SHA256 recommendation
+				UseArgon2:  false,  // PBKDF2 for broader compatibility
+			},
+			Rotation: encryption.KeyRotationConfig{
+				Enabled:     true,
+				Interval:    90 * 24 * time.Hour, // 90-day key rotation (compliance best practice)
+				RetainCount: 8,                   // Keep 2 years of keys for decryption
+			},
+		}
+
+		encryptor, err := encryption.NewEncryptorWithPassword(password, encConfig)
+		if err != nil {
+			db.closeInternal()
+			return nil, fmt.Errorf("failed to initialize encryption: %w", err)
+		}
+		db.encryptor = encryptor
+
+		// Configure which fields to encrypt
+		db.encryptFields = &encryption.FieldEncryptionConfig{
+			PHIFields: encryption.DefaultPHIFields(), // SSN, MRN, DOB, etc.
+		}
+		if len(config.EncryptionFields) > 0 {
+			db.encryptFields.EncryptFields = config.EncryptionFields
+		}
+
+		fmt.Println("🔐 Encryption enabled (AES-256-GCM, PBKDF2-SHA256, 90-day key rotation)")
+		fmt.Printf("   Encrypted fields: %v\n", append(db.encryptFields.PHIFields, db.encryptFields.EncryptFields...))
+	}
+
 	// Build search indexes from existing data (including embeddings)
 	// This runs in background to not block startup
 	db.bgWg.Add(1)
@@ -965,6 +1048,12 @@ func (db *DB) Close() error {
 	}
 	db.closed = true
 
+	return db.closeInternal()
+}
+
+// closeInternal performs cleanup without requiring the lock.
+// Used during initialization failures and normal close.
+func (db *DB) closeInternal() error {
 	// Wait for background goroutines to complete
 	db.bgWg.Wait()
 
@@ -1066,6 +1155,9 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 	// Convert to storage node
 	node := memoryToNode(mem)
 
+	// Encrypt sensitive fields in properties before storage
+	node.Properties = db.encryptProperties(node.Properties)
+
 	// Store in storage engine
 	if err := db.storage.CreateNode(node); err != nil {
 		return nil, fmt.Errorf("storing memory: %w", err)
@@ -1130,6 +1222,9 @@ func (db *DB) Remember(ctx context.Context, embedding []float32, limit int) ([]*
 			return nil
 		}
 
+		// Decrypt properties before converting to memory
+		node.Properties = db.decryptProperties(node.Properties)
+
 		mem := nodeToMemory(node)
 		sim := vector.CosineSimilarity(embedding, mem.Embedding)
 
@@ -1189,6 +1284,9 @@ func (db *DB) Recall(ctx context.Context, id string) (*Memory, error) {
 	if err != nil {
 		return nil, ErrNotFound
 	}
+
+	// Decrypt properties before converting to memory
+	node.Properties = db.decryptProperties(node.Properties)
 
 	mem := nodeToMemory(node)
 
@@ -1374,6 +1472,8 @@ func (db *DB) Neighbors(ctx context.Context, id string, depth int, edgeType stri
 	for _, nid := range neighborIDs {
 		node, err := db.storage.GetNode(storage.NodeID(nid))
 		if err == nil {
+			// Decrypt properties before converting to memory
+			node.Properties = db.decryptProperties(node.Properties)
 			memories = append(memories, nodeToMemory(node))
 		}
 	}
@@ -1862,10 +1962,13 @@ func (db *DB) ListNodes(ctx context.Context, label string, limit, offset int) ([
 			return storage.ErrIterationStopped
 		}
 
+		// Decrypt sensitive fields before returning
+		decryptedProps := db.decryptProperties(n.Properties)
+
 		nodes = append(nodes, &Node{
 			ID:         string(n.ID),
 			Labels:     n.Labels,
-			Properties: n.Properties,
+			Properties: decryptedProps,
 			CreatedAt:  n.CreatedAt,
 		})
 		count++
@@ -1893,10 +1996,13 @@ func (db *DB) GetNode(ctx context.Context, id string) (*Node, error) {
 		return nil, ErrNotFound
 	}
 
+	// Decrypt sensitive fields after retrieval
+	decryptedProps := db.decryptProperties(n.Properties)
+
 	return &Node{
 		ID:         string(n.ID),
 		Labels:     n.Labels,
-		Properties: n.Properties,
+		Properties: decryptedProps,
 		CreatedAt:  n.CreatedAt,
 	}, nil
 }
@@ -1919,10 +2025,13 @@ func (db *DB) CreateNode(ctx context.Context, labels []string, properties map[st
 	delete(properties, "embeddings")
 	delete(properties, "vector")
 
+	// Encrypt sensitive fields before storage (PHI/PII protection)
+	encryptedProps := db.encryptProperties(properties)
+
 	node := &storage.Node{
 		ID:         storage.NodeID(id),
 		Labels:     labels,
-		Properties: properties,
+		Properties: encryptedProps,
 		CreatedAt:  now,
 	}
 
@@ -1967,8 +2076,11 @@ func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]i
 	delete(properties, "embeddings")
 	delete(properties, "vector")
 
-	// Merge properties
-	for k, v := range properties {
+	// Encrypt sensitive fields before merging
+	encryptedProps := db.encryptProperties(properties)
+
+	// Merge properties (encrypted values replace existing)
+	for k, v := range encryptedProps {
 		n.Properties[k] = v
 	}
 
@@ -1976,10 +2088,13 @@ func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]i
 		return nil, err
 	}
 
+	// Decrypt for return
+	decryptedProps := db.decryptProperties(n.Properties)
+
 	return &Node{
 		ID:         string(n.ID),
 		Labels:     n.Labels,
-		Properties: n.Properties,
+		Properties: decryptedProps,
 		CreatedAt:  n.CreatedAt,
 	}, nil
 }
@@ -2491,4 +2606,88 @@ func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
 	}
 
 	return nil
+}
+
+// encryptProperties encrypts sensitive fields in a properties map.
+// Only encrypts string values for fields matching the encryption config.
+// Thread-safe: uses read lock on db.encryptor.
+func (db *DB) encryptProperties(props map[string]interface{}) map[string]interface{} {
+	if db.encryptor == nil || !db.encryptor.IsEnabled() || db.encryptFields == nil {
+		return props
+	}
+
+	result := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		if strVal, ok := v.(string); ok && db.encryptFields.ShouldEncryptField(k) {
+			// Skip empty strings - no point encrypting them
+			if strVal == "" {
+				result[k] = v
+				continue
+			}
+			encrypted, err := db.encryptor.EncryptField(strVal)
+			if err != nil {
+				// Log but don't fail - return original value
+				log.Printf("⚠️  Failed to encrypt field %s: %v", k, err)
+				result[k] = v
+			} else {
+				result[k] = encrypted
+			}
+		} else {
+			result[k] = v
+		}
+	}
+	return result
+}
+
+// decryptProperties decrypts sensitive fields in a properties map.
+// Only decrypts values that were previously encrypted (have enc: prefix).
+// Thread-safe: uses read lock on db.encryptor.
+func (db *DB) decryptProperties(props map[string]interface{}) map[string]interface{} {
+	if db.encryptor == nil || !db.encryptor.IsEnabled() {
+		return props
+	}
+
+	result := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		if strVal, ok := v.(string); ok {
+			// DecryptField handles both encrypted and non-encrypted values
+			decrypted, err := db.encryptor.DecryptField(strVal)
+			if err != nil {
+				// Log but don't fail - return original value
+				log.Printf("⚠️  Failed to decrypt field %s: %v", k, err)
+				result[k] = v
+			} else {
+				result[k] = decrypted
+			}
+		} else {
+			result[k] = v
+		}
+	}
+	return result
+}
+
+// IsEncryptionEnabled returns whether data-at-rest encryption is enabled.
+func (db *DB) IsEncryptionEnabled() bool {
+	return db.encryptor != nil && db.encryptor.IsEnabled()
+}
+
+// EncryptionStats returns encryption statistics for monitoring.
+func (db *DB) EncryptionStats() map[string]interface{} {
+	if db.encryptor == nil {
+		return map[string]interface{}{
+			"enabled": false,
+		}
+	}
+	km := db.encryptor.KeyManager()
+	if km == nil {
+		return map[string]interface{}{
+			"enabled": db.encryptor.IsEnabled(),
+		}
+	}
+	return map[string]interface{}{
+		"enabled":        db.encryptor.IsEnabled(),
+		"key_count":      km.KeyCount(),
+		"algorithm":      "AES-256-GCM",
+		"key_derivation": "PBKDF2-SHA256 (600k iterations)",
+	}
 }

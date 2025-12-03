@@ -300,13 +300,11 @@ func (e *StorageExecutor) pathToValue(path PathResult, expr, pathVar string) int
 	}
 
 	// Handle path functions: length(p), nodes(p), relationships(p)
-	lowerExpr := strings.ToLower(expr)
-
-	if strings.HasPrefix(lowerExpr, "length(") {
+	if matchFuncStart(expr, "length") {
 		return int64(path.Length)
 	}
 
-	if strings.HasPrefix(lowerExpr, "nodes(") {
+	if matchFuncStart(expr, "nodes") {
 		nodes := make([]interface{}, len(path.Nodes))
 		for i, n := range path.Nodes {
 			nodes[i] = e.nodeToMap(n)
@@ -314,7 +312,7 @@ func (e *StorageExecutor) pathToValue(path PathResult, expr, pathVar string) int
 		return nodes
 	}
 
-	if strings.HasPrefix(lowerExpr, "relationships(") {
+	if matchFuncStart(expr, "relationships") {
 		rels := make([]interface{}, len(path.Relationships))
 		for i, r := range path.Relationships {
 			rels[i] = e.edgeToMap(r)

@@ -320,14 +320,14 @@ func (e *StorageExecutor) evaluateSetExpression(expr string) interface{} {
 	}
 
 	// Handle toString(expr)
-	if strings.HasPrefix(lowerExpr, "tostring(") && strings.HasSuffix(expr, ")") {
-		inner := expr[9 : len(expr)-1]
+	if matchFuncStartAndSuffix(expr, "tostring") {
+		inner := extractFuncArgs(expr, "tostring")
 		val := e.evaluateSetExpression(inner)
 		return fmt.Sprintf("%v", val)
 	}
 
 	// Handle substring(str, start, length)
-	if strings.HasPrefix(lowerExpr, "substring(") && strings.HasSuffix(expr, ")") {
+	if matchFuncStartAndSuffix(expr, "substring") {
 		return e.evaluateSubstringForSet(expr)
 	}
 
@@ -541,6 +541,7 @@ func (e *StorageExecutor) splitFunctionArgs(args string) []string {
 	var result []string
 	var current strings.Builder
 	parenDepth := 0
+	bracketDepth := 0
 	inSingleQuote := false
 	inDoubleQuote := false
 
@@ -581,8 +582,18 @@ func (e *StorageExecutor) splitFunctionArgs(args string) []string {
 				parenDepth--
 			}
 			current.WriteByte(c)
+		case '[':
+			if !inSingleQuote && !inDoubleQuote {
+				bracketDepth++
+			}
+			current.WriteByte(c)
+		case ']':
+			if !inSingleQuote && !inDoubleQuote {
+				bracketDepth--
+			}
+			current.WriteByte(c)
 		case ',':
-			if parenDepth == 0 && !inSingleQuote && !inDoubleQuote {
+			if parenDepth == 0 && bracketDepth == 0 && !inSingleQuote && !inDoubleQuote {
 				result = append(result, strings.TrimSpace(current.String()))
 				current.Reset()
 			} else {
