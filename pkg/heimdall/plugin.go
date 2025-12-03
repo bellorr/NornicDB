@@ -68,6 +68,7 @@ package heimdall
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -160,6 +161,16 @@ type HeimdallPlugin interface {
 	// RecentEvents returns recent notable events from this subsystem
 	// Used by SLM for contextual awareness
 	RecentEvents(limit int) []SubsystemEvent
+
+	// === Optional Hooks ===
+	// Plugins can OPTIONALLY implement these interfaces for extended functionality:
+	//   - PrePromptHook: Called before each SLM request (modify prompts)
+	//   - PreExecuteHook: Called before action execution (validate/modify params)
+	//   - PostExecuteHook: Called after action execution (logging/metrics)
+	//   - DatabaseEventHook: Called on database operations (audit/monitoring)
+	//
+	// Plugins only need to implement the hooks they actually use.
+	// See types.go for interface definitions.
 }
 
 // SubsystemContext is provided to plugins during initialization.
@@ -179,6 +190,197 @@ type SubsystemContext struct {
 	// Bifrost provides the communication bridge to connected clients
 	// Plugins can use this to send messages, notifications, and request input
 	Bifrost BifrostBridge
+
+	// Heimdall provides autonomous action invocation for plugins.
+	// Plugins can use this to trigger actions or send prompts to the SLM
+	// based on accumulated events or other triggers.
+	Heimdall HeimdallInvoker
+}
+
+// HeimdallInvoker allows plugins to autonomously trigger SLM actions.
+// This enables event-driven automation where plugins can analyze accumulated
+// events and trigger appropriate responses.
+//
+// Example: A security plugin monitors failed auth events and after N failures
+// triggers "heimdall.security.analyze" to investigate.
+type HeimdallInvoker interface {
+	// InvokeAction directly invokes a registered action by name.
+	// The action must be registered (e.g., "heimdall.watcher.status").
+	// Results are returned synchronously.
+	//
+	// Example:
+	//   result, err := ctx.Heimdall.InvokeAction("heimdall.anomaly.detect", map[string]interface{}{
+	//       "threshold": 0.8,
+	//   })
+	InvokeAction(action string, params map[string]interface{}) (*ActionResult, error)
+
+	// SendPrompt sends a natural language prompt to the SLM for processing.
+	// The SLM will interpret the prompt and may invoke registered actions.
+	// Results are returned after the SLM processes the request.
+	//
+	// Example:
+	//   result, err := ctx.Heimdall.SendPrompt("Analyze recent error patterns")
+	SendPrompt(prompt string) (*ActionResult, error)
+
+	// InvokeActionAsync invokes an action without waiting for result.
+	// Use this for fire-and-forget scenarios where you don't need the result.
+	// Results will be broadcast via Bifrost to connected clients.
+	InvokeActionAsync(action string, params map[string]interface{})
+
+	// SendPromptAsync sends a prompt without waiting for result.
+	// Results will be broadcast via Bifrost to connected clients.
+	SendPromptAsync(prompt string)
+}
+
+// NoOpHeimdallInvoker is a no-op implementation when Heimdall is not available.
+type NoOpHeimdallInvoker struct{}
+
+func (n *NoOpHeimdallInvoker) InvokeAction(action string, params map[string]interface{}) (*ActionResult, error) {
+	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
+}
+func (n *NoOpHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
+	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
+}
+func (n *NoOpHeimdallInvoker) InvokeActionAsync(action string, params map[string]interface{}) {}
+func (n *NoOpHeimdallInvoker) SendPromptAsync(prompt string)                                  {}
+
+// LiveHeimdallInvoker is the production implementation of HeimdallInvoker.
+// It uses the SubsystemManager to invoke actions and can optionally use
+// a Generator for SLM prompt processing.
+type LiveHeimdallInvoker struct {
+	manager   *SubsystemManager
+	generator Generator
+	bifrost   BifrostBridge
+	database  DatabaseReader
+	metrics   MetricsReader
+}
+
+// NewLiveHeimdallInvoker creates a new invoker with the required dependencies.
+func NewLiveHeimdallInvoker(manager *SubsystemManager, generator Generator, bifrost BifrostBridge, database DatabaseReader, metrics MetricsReader) *LiveHeimdallInvoker {
+	return &LiveHeimdallInvoker{
+		manager:   manager,
+		generator: generator,
+		bifrost:   bifrost,
+		database:  database,
+		metrics:   metrics,
+	}
+}
+
+// InvokeAction directly invokes a registered action.
+func (h *LiveHeimdallInvoker) InvokeAction(action string, params map[string]interface{}) (*ActionResult, error) {
+	ctx := ActionContext{
+		Context:  context.Background(),
+		Params:   params,
+		Bifrost:  h.bifrost,
+		Database: h.database,
+		Metrics:  h.metrics,
+	}
+	return ExecuteAction(action, ctx)
+}
+
+// SendPrompt sends a prompt to the SLM and processes the response.
+func (h *LiveHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
+	if h.generator == nil {
+		return &ActionResult{Success: false, Message: "SLM not available"}, nil
+	}
+
+	// Build system prompt with available actions
+	actionPrompt := ActionPrompt() // Use the global action prompt generator
+	fullPrompt := actionPrompt + "\n\nUser: " + prompt
+
+	// Generate response from SLM
+	response, err := h.generator.Generate(context.Background(), fullPrompt, DefaultGenerateParams())
+	if err != nil {
+		return &ActionResult{Success: false, Message: fmt.Sprintf("SLM error: %v", err)}, nil
+	}
+
+	// Try to parse as action
+	if parsedAction := tryParseActionResponse(response); parsedAction != nil {
+		return h.InvokeAction(parsedAction.Action, parsedAction.Params)
+	}
+
+	// Return raw response if not an action
+	return &ActionResult{
+		Success: true,
+		Message: response,
+	}, nil
+}
+
+// InvokeActionAsync invokes an action asynchronously, broadcasting results via Bifrost.
+func (h *LiveHeimdallInvoker) InvokeActionAsync(action string, params map[string]interface{}) {
+	go func() {
+		result, err := h.InvokeAction(action, params)
+		if h.bifrost != nil && h.bifrost.IsConnected() {
+			if err != nil {
+				h.bifrost.SendNotification("error", "Action Failed", err.Error())
+			} else if result != nil {
+				h.bifrost.SendNotification("info", "Action Complete", result.Message)
+			}
+		}
+	}()
+}
+
+// SendPromptAsync sends a prompt asynchronously, broadcasting results via Bifrost.
+func (h *LiveHeimdallInvoker) SendPromptAsync(prompt string) {
+	go func() {
+		result, err := h.SendPrompt(prompt)
+		if h.bifrost != nil && h.bifrost.IsConnected() {
+			if err != nil {
+				h.bifrost.SendNotification("error", "Prompt Failed", err.Error())
+			} else if result != nil {
+				h.bifrost.SendNotification("info", "Heimdall Response", result.Message)
+			}
+		}
+	}()
+}
+
+// parsedActionCmd is used internally to parse SLM action responses.
+type parsedActionCmd struct {
+	Action string                 `json:"action"`
+	Params map[string]interface{} `json:"params"`
+}
+
+// tryParseActionResponse attempts to parse an action from SLM response.
+func tryParseActionResponse(response string) *parsedActionCmd {
+	// Simple JSON extraction - look for {"action": ...}
+	start := -1
+	for i, c := range response {
+		if c == '{' {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return nil
+	}
+
+	// Find matching closing brace
+	depth := 0
+	end := -1
+	for i := start; i < len(response); i++ {
+		if response[i] == '{' {
+			depth++
+		} else if response[i] == '}' {
+			depth--
+			if depth == 0 {
+				end = i + 1
+				break
+			}
+		}
+	}
+	if end < 0 {
+		return nil
+	}
+
+	jsonStr := response[start:end]
+	var action parsedActionCmd
+	if err := json.Unmarshal([]byte(jsonStr), &action); err != nil {
+		return nil
+	}
+	if action.Action == "" {
+		return nil
+	}
+	return &action
 }
 
 // BifrostBridge is the interface for plugins to communicate via Bifrost.
@@ -709,6 +911,32 @@ func (p *reflectHeimdallPlugin) RecentEvents(limit int) []SubsystemEvent {
 	}
 	return nil
 }
+func (p *reflectHeimdallPlugin) PrePrompt(ctx *PromptContext) error {
+	method := p.val.MethodByName("PrePrompt")
+	if !method.IsValid() {
+		return nil // Optional method
+	}
+	result := method.Call([]reflect.Value{reflect.ValueOf(ctx)})
+	if len(result) > 0 && !result[0].IsNil() {
+		return result[0].Interface().(error)
+	}
+	return nil
+}
+func (p *reflectHeimdallPlugin) PreExecute(ctx *PreExecuteContext, done func(PreExecuteResult)) {
+	method := p.val.MethodByName("PreExecute")
+	if !method.IsValid() {
+		done(PreExecuteResult{Continue: true}) // Default: continue
+		return
+	}
+	method.Call([]reflect.Value{reflect.ValueOf(ctx), reflect.ValueOf(done)})
+}
+func (p *reflectHeimdallPlugin) PostExecute(ctx *PostExecuteContext) {
+	method := p.val.MethodByName("PostExecute")
+	if !method.IsValid() {
+		return // Optional method
+	}
+	method.Call([]reflect.Value{reflect.ValueOf(ctx)})
+}
 
 // GetHeimdallAction returns an action by full name (e.g., "heimdall.anomaly.detect").
 func GetHeimdallAction(name string) (ActionFunc, bool) {
@@ -897,4 +1125,236 @@ func (i *ActionInvoker) Invoke(ctx context.Context, parsed ParsedAction, userMes
 		result.Data["duration_ms"] = time.Since(start).Milliseconds()
 	}
 	return result, err
+}
+
+// =============================================================================
+// Optional Hook Dispatch Functions
+// =============================================================================
+
+// CallPrePromptHooks calls PrePrompt on all plugins that implement PrePromptHook.
+// Plugins that don't implement the hook are silently skipped.
+// Returns the first cancellation encountered, or nil if no cancellations.
+func CallPrePromptHooks(ctx *PromptContext) {
+	if !HeimdallPluginsInitialized() {
+		return
+	}
+
+	plugins := ListHeimdallPlugins()
+	for _, p := range plugins {
+		// Check if plugin implements PrePromptHook
+		if hook, ok := p.Plugin.(PrePromptHook); ok {
+			if err := hook.PrePrompt(ctx); err != nil {
+				// Log warning but don't abort
+				fmt.Printf("[Heimdall] PrePrompt warning from %s: %v\n", p.Plugin.Name(), err)
+			}
+			// Check for cancellation after each plugin
+			if ctx.Cancelled() {
+				return
+			}
+		}
+	}
+}
+
+// CallPreExecuteHooks calls PreExecute on all plugins that implement PreExecuteHook.
+// Plugins that don't implement the hook are silently skipped.
+// This is synchronous - waits for each plugin with a timeout.
+func CallPreExecuteHooks(ctx *PreExecuteContext) PreExecuteResult {
+	if !HeimdallPluginsInitialized() {
+		return PreExecuteResult{Continue: true}
+	}
+
+	plugins := ListHeimdallPlugins()
+	result := PreExecuteResult{Continue: true}
+
+	for _, p := range plugins {
+		// Check if plugin implements PreExecuteHook
+		if hook, ok := p.Plugin.(PreExecuteHook); ok {
+			done := make(chan PreExecuteResult, 1)
+			hook.PreExecute(ctx, func(r PreExecuteResult) {
+				done <- r
+			})
+
+			select {
+			case r := <-done:
+				if !r.Continue {
+					return r // Abort on first Continue=false
+				}
+				if r.ModifiedParams != nil {
+					ctx.Params = r.ModifiedParams
+				}
+			case <-time.After(5 * time.Second):
+				fmt.Printf("[Heimdall] PreExecute timeout from %s\n", p.Plugin.Name())
+			}
+
+			// Check for cancellation via context method
+			if ctx.Cancelled() {
+				return PreExecuteResult{Continue: false, AbortMessage: ctx.CancelReason()}
+			}
+		}
+	}
+
+	return result
+}
+
+// CallPostExecuteHooks calls PostExecute on all plugins that implement PostExecuteHook.
+// Plugins that don't implement the hook are silently skipped.
+// This is fire-and-forget - runs asynchronously.
+func CallPostExecuteHooks(ctx *PostExecuteContext) {
+	if !HeimdallPluginsInitialized() {
+		return
+	}
+
+	plugins := ListHeimdallPlugins()
+	for _, p := range plugins {
+		// Check if plugin implements PostExecuteHook
+		if hook, ok := p.Plugin.(PostExecuteHook); ok {
+			go hook.PostExecute(ctx) // Fire and forget
+		}
+	}
+}
+
+// =============================================================================
+// Database Event Dispatcher
+// =============================================================================
+
+// dbEventDispatcher manages asynchronous delivery of database events to plugins.
+type dbEventDispatcher struct {
+	mu      sync.RWMutex
+	running bool
+	events  chan *DatabaseEvent
+	done    chan struct{}
+}
+
+var globalEventDispatcher = &dbEventDispatcher{
+	events: make(chan *DatabaseEvent, 1000), // Buffer up to 1000 events
+	done:   make(chan struct{}),
+}
+
+// StartEventDispatcher starts the background event dispatcher.
+// This should be called when Heimdall is initialized.
+func StartEventDispatcher() {
+	d := globalEventDispatcher
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if d.running {
+		return
+	}
+
+	d.running = true
+	d.events = make(chan *DatabaseEvent, 1000)
+	d.done = make(chan struct{})
+
+	go func() {
+		for {
+			select {
+			case event := <-d.events:
+				dispatchEventToPlugins(event)
+			case <-d.done:
+				return
+			}
+		}
+	}()
+}
+
+// StopEventDispatcher stops the background event dispatcher.
+func StopEventDispatcher() {
+	d := globalEventDispatcher
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if !d.running {
+		return
+	}
+
+	d.running = false
+	close(d.done)
+}
+
+// dispatchEventToPlugins sends an event to all plugins that implement DatabaseEventHook.
+func dispatchEventToPlugins(event *DatabaseEvent) {
+	if !HeimdallPluginsInitialized() {
+		return
+	}
+
+	plugins := ListHeimdallPlugins()
+	for _, p := range plugins {
+		// Check if plugin implements DatabaseEventHook
+		if hook, ok := p.Plugin.(DatabaseEventHook); ok {
+			// Fire and forget - don't block on slow plugins
+			go func(h DatabaseEventHook, e *DatabaseEvent) {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Printf("[Heimdall] DatabaseEventHook panic in %T: %v\n", h, r)
+					}
+				}()
+				h.OnDatabaseEvent(e)
+			}(hook, event)
+		}
+	}
+}
+
+// EmitDatabaseEvent sends a database event to all registered plugins.
+// This is non-blocking - events are queued for async delivery.
+// If the queue is full, the event is dropped (with a warning).
+func EmitDatabaseEvent(event *DatabaseEvent) {
+	d := globalEventDispatcher
+	d.mu.RLock()
+	running := d.running
+	d.mu.RUnlock()
+
+	if !running {
+		return // Dispatcher not running
+	}
+
+	// Set timestamp if not already set
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+
+	// Non-blocking send
+	select {
+	case d.events <- event:
+		// Event queued successfully
+	default:
+		// Queue full - drop event with warning
+		fmt.Printf("[Heimdall] Event queue full, dropping event: %s\n", event.Type)
+	}
+}
+
+// EmitNodeEvent is a convenience function for emitting node-related events.
+func EmitNodeEvent(eventType DatabaseEventType, nodeID string, labels []string, props map[string]interface{}) {
+	EmitDatabaseEvent(&DatabaseEvent{
+		Type:       eventType,
+		NodeID:     nodeID,
+		NodeLabels: labels,
+		Properties: props,
+	})
+}
+
+// EmitRelationshipEvent is a convenience function for emitting relationship-related events.
+func EmitRelationshipEvent(eventType DatabaseEventType, relID, relType, sourceID, targetID string, props map[string]interface{}) {
+	EmitDatabaseEvent(&DatabaseEvent{
+		Type:             eventType,
+		RelationshipID:   relID,
+		RelationshipType: relType,
+		SourceNodeID:     sourceID,
+		TargetNodeID:     targetID,
+		Properties:       props,
+	})
+}
+
+// EmitQueryEvent is a convenience function for emitting query-related events.
+func EmitQueryEvent(eventType DatabaseEventType, query string, params map[string]interface{}, duration time.Duration, rowsAffected int64, err error) {
+	event := &DatabaseEvent{
+		Type:         eventType,
+		Query:        query,
+		QueryParams:  params,
+		Duration:     duration,
+		RowsAffected: rowsAffected,
+	}
+	if err != nil {
+		event.Error = err.Error()
+	}
+	EmitDatabaseEvent(event)
 }

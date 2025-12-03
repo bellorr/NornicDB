@@ -52,11 +52,28 @@ func NewMockGenerator(modelPath string) *MockGenerator {
 }
 
 // mockResponseForPrompt generates predictable responses based on prompt content.
+// It extracts the last user message from the prompt to determine the response.
 func mockResponseForPrompt(prompt string) string {
-	lower := strings.ToLower(prompt)
+	// Extract the last user message from the ChatML format
+	// Look for the last "<|im_start|>user\n" section
+	userStart := strings.LastIndex(prompt, "<|im_start|>user\n")
+	userContent := prompt
+	if userStart != -1 {
+		// Extract from after the user tag to the next tag or end
+		contentStart := userStart + len("<|im_start|>user\n")
+		contentEnd := strings.Index(prompt[contentStart:], "<|im_end|>")
+		if contentEnd != -1 {
+			userContent = prompt[contentStart : contentStart+contentEnd]
+		} else {
+			userContent = prompt[contentStart:]
+		}
+	}
 
-	// Health check
-	if strings.Contains(lower, "health") || strings.Contains(lower, "status") {
+	lower := strings.ToLower(userContent)
+
+	// Health check - explicit status/health queries
+	if strings.Contains(lower, "health") ||
+		(strings.Contains(lower, "status") && !strings.Contains(lower, "who")) {
 		return `{"action": "heimdall.watcher.health", "params": {}}`
 	}
 

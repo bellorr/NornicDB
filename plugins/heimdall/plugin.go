@@ -37,6 +37,7 @@ package heimdall
 
 import (
 	"fmt"
+	"log"
 	"runtime"
 	"sync"
 	"time"
@@ -50,6 +51,11 @@ var Plugin heimdall.HeimdallPlugin = &WatcherPlugin{}
 
 // WatcherPlugin implements heimdall.HeimdallPlugin for SLM management.
 // The Watcher is Heimdall's core guardian - the all-seeing eye of the system.
+//
+// This plugin also demonstrates autonomous action invocation:
+// - Implements DatabaseEventHook to monitor database events
+// - Accumulates events and triggers analysis when thresholds are exceeded
+// - Uses HeimdallInvoker to autonomously invoke SLM actions
 type WatcherPlugin struct {
 	mu       sync.RWMutex
 	ctx      heimdall.SubsystemContext
@@ -59,6 +65,13 @@ type WatcherPlugin struct {
 	started  time.Time
 	requests int64
 	errors   int64
+
+	// === Event Accumulation for Autonomous Actions ===
+	// These track database events for autonomous action triggering
+	queryFailures     int64     // Count of failed queries
+	lastFailureReset  time.Time // When failure count was last reset
+	nodeCreations     int64     // Track node creation rate
+	lastCreationReset time.Time
 }
 
 // === Identity Methods ===
@@ -725,6 +738,185 @@ func (p *WatcherPlugin) RecentEvents(limit int) []heimdall.SubsystemEvent {
 	return result
 }
 
+// === Request Lifecycle Hooks ===
+
+// PrePrompt is called before the prompt is sent to Heimdall.
+// The ActionPrompt is immutable (already set). We can add context here.
+//
+// This demonstrates:
+// - Adding custom examples to help the SLM
+// - Storing state in PluginData for later hooks
+// - Sending fire-and-forget notifications to the UI
+// - Cancelling requests when needed
+func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	msgPreview := ctx.UserMessage
+	if len(msgPreview) > 50 {
+		msgPreview = msgPreview[:50] + "..."
+	}
+	log.Printf("[Watcher] PrePrompt: request=%s user_msg=%q", ctx.RequestID, msgPreview)
+
+	// === EXAMPLE: Send non-blocking notification to UI ===
+	// This is fire-and-forget - it won't block the request
+	ctx.NotifyInfo("Watcher", "Processing your request...")
+
+	// Add watcher-specific context to help Heimdall understand the system
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	// Store current metrics in PluginData for later phases
+	if ctx.PluginData == nil {
+		ctx.PluginData = make(map[string]interface{})
+	}
+	ctx.PluginData["watcher_preprompt_time"] = time.Now()
+	ctx.PluginData["watcher_goroutines"] = runtime.NumGoroutine()
+	ctx.PluginData["watcher_memory_mb"] = m.Alloc / 1024 / 1024
+
+	// Add status examples to help with natural language → action mapping
+	ctx.Examples = append(ctx.Examples,
+		heimdall.PromptExample{
+			UserSays:   "check the system",
+			ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "show database info",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+	)
+
+	// === EXAMPLE: Conditional cancellation ===
+	// Uncomment to see cancellation in action:
+	// if strings.Contains(ctx.UserMessage, "dangerous") {
+	//     ctx.Cancel("Message contains dangerous content", "PrePrompt:watcher")
+	//     return nil
+	// }
+
+	// === EXAMPLE: Send progress notification (async, non-blocking) ===
+	ctx.NotifyProgress("Watcher", fmt.Sprintf("System state: %d goroutines, %d MB memory",
+		runtime.NumGoroutine(), m.Alloc/1024/1024))
+
+	p.addEvent("info", "PrePrompt hook executed", map[string]interface{}{
+		"request_id":  ctx.RequestID,
+		"user_msg":    ctx.UserMessage[:min(50, len(ctx.UserMessage))],
+		"has_history": len(ctx.Messages) > 0,
+	})
+
+	return nil
+}
+
+// PreExecute is called after Heimdall responds, before action execution.
+// We can fetch additional data or modify params here.
+//
+// This demonstrates:
+// - Async validation with callback
+// - Sending notifications before action runs
+// - Cancelling with ctx.Cancel() method
+// - Modifying params before execution
+func (p *WatcherPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(heimdall.PreExecuteResult)) {
+	p.mu.Lock()
+	p.requests++
+	p.mu.Unlock()
+
+	log.Printf("[Watcher] PreExecute: request=%s action=%s params=%v", ctx.RequestID, ctx.Action, ctx.Params)
+
+	// === EXAMPLE: Send notification that we're about to execute ===
+	ctx.NotifyInfo("Watcher", fmt.Sprintf("Executing action: %s", ctx.Action))
+
+	// Log the action being executed
+	p.addEvent("info", fmt.Sprintf("PreExecute: %s", ctx.Action), map[string]interface{}{
+		"request_id": ctx.RequestID,
+		"action":     ctx.Action,
+		"params":     ctx.Params,
+	})
+
+	// For certain actions, we might want to fetch additional context
+	// This is async so we don't block the response
+	go func() {
+		// === EXAMPLE: Validation for query actions ===
+		if ctx.Action == "heimdall.watcher.query" {
+			if cypher, ok := ctx.Params["cypher"].(string); ok {
+				// Basic safety check
+				if len(cypher) > 10000 {
+					// Send warning notification (async)
+					ctx.NotifyWarning("Query Validation", "Query too long, aborting")
+
+					done(heimdall.PreExecuteResult{
+						Continue:     false,
+						AbortMessage: "Query too long (max 10000 chars)",
+					})
+					return
+				}
+
+				// === EXAMPLE: Notify about query analysis ===
+				ctx.NotifyProgress("Query Analysis", "Validating Cypher query...")
+			}
+		}
+
+		// === EXAMPLE: Cancel via context method (alternative to callback) ===
+		// This is another way to cancel - useful when you want to
+		// cancel from deep in nested code
+		// if someCondition {
+		//     ctx.Cancel("Validation failed", "PreExecute:watcher")
+		//     done(heimdall.PreExecuteResult{Continue: false})
+		//     return
+		// }
+
+		// Default: continue with execution
+		done(heimdall.PreExecuteResult{
+			Continue: true,
+		})
+	}()
+}
+
+// PostExecute is called after action execution completes.
+// We log metrics and update state here.
+//
+// This demonstrates:
+// - Logging execution metrics
+// - Sending completion notifications to UI
+// - Tracking error counts
+// - Accessing execution timing from context
+func (p *WatcherPlugin) PostExecute(ctx *heimdall.PostExecuteContext) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	log.Printf("[Watcher] PostExecute: request=%s action=%s duration=%v", ctx.RequestID, ctx.Action, ctx.Duration)
+
+	// === EXAMPLE: Check if request was cancelled in earlier phase ===
+	if ctx.WasCancelled && ctx.CancellationInfo != nil {
+		p.addEvent("warning", fmt.Sprintf("Request was cancelled: %s", ctx.CancellationInfo.Reason), map[string]interface{}{
+			"request_id":   ctx.RequestID,
+			"cancelled_by": ctx.CancellationInfo.CancelledBy,
+			"phase":        ctx.CancellationInfo.Phase,
+		})
+		return
+	}
+
+	// Log execution metrics
+	executionTime := float64(ctx.Duration.Microseconds()) / 1000
+	p.addEvent("info", fmt.Sprintf("PostExecute: %s (%.2fms)", ctx.Action, executionTime), map[string]interface{}{
+		"request_id": ctx.RequestID,
+		"action":     ctx.Action,
+		"duration":   ctx.Duration.String(),
+		"success":    ctx.Result != nil && ctx.Result.Success,
+	})
+
+	// Track errors
+	if ctx.Result != nil && !ctx.Result.Success {
+		p.errors++
+	}
+
+	// === Send completion notification inline ===
+	// PostExecute notifications are queued and sent after the action result
+	if ctx.Result != nil && ctx.Result.Success {
+		ctx.NotifySuccess("Watcher", fmt.Sprintf("Action completed in %.2fms", executionTime))
+	} else if ctx.Result != nil {
+		ctx.NotifyError("Watcher", fmt.Sprintf("Action failed: %s", ctx.Result.Message))
+	}
+}
+
 // === Internal Helpers ===
 
 func (p *WatcherPlugin) addEvent(eventType, message string, data map[string]interface{}) {
@@ -743,9 +935,114 @@ func (p *WatcherPlugin) addEvent(eventType, message string, data map[string]inte
 	}
 }
 
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 func max(a, b int64) int64 {
 	if a > b {
 		return a
 	}
 	return b
+}
+
+// =============================================================================
+// DatabaseEventHook Implementation - Autonomous Action Triggering
+// =============================================================================
+
+// OnDatabaseEvent is called when database operations occur.
+// This demonstrates AUTONOMOUS ACTION INVOCATION:
+// - Accumulates events over time
+// - When thresholds are exceeded, triggers SLM analysis automatically
+// - Uses HeimdallInvoker to invoke actions without user prompting
+//
+// Example scenarios:
+//  1. Multiple query failures → trigger anomaly detection
+//  2. High node creation rate → trigger memory curation
+//  3. Security-related events → trigger security analysis
+func (p *WatcherPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// === Track Query Failures ===
+	if event.Type == heimdall.EventQueryFailed {
+		// Reset counter every 5 minutes
+		if time.Since(p.lastFailureReset) > 5*time.Minute {
+			p.queryFailures = 0
+			p.lastFailureReset = time.Now()
+		}
+		p.queryFailures++
+
+		// AUTONOMOUS ACTION: After 5 failures in 5 minutes, analyze
+		if p.queryFailures >= 5 && p.ctx.Heimdall != nil {
+			log.Printf("[Watcher] Autonomous action: %d query failures detected, triggering analysis", p.queryFailures)
+
+			// Option 1: Directly invoke an action
+			p.ctx.Heimdall.InvokeActionAsync("heimdall.watcher.status", map[string]interface{}{
+				"trigger":  "autonomous",
+				"reason":   "query_failures",
+				"failures": p.queryFailures,
+			})
+
+			// Reset counter after triggering
+			p.queryFailures = 0
+			p.lastFailureReset = time.Now()
+
+			// Log the autonomous action
+			p.addEvent("info", "Autonomous analysis triggered due to query failures", map[string]interface{}{
+				"failures_count": p.queryFailures,
+				"time_window":    "5m",
+			})
+		}
+	}
+
+	// === Track High Node Creation Rate ===
+	if event.Type == heimdall.EventNodeCreated {
+		// Reset counter every minute
+		if time.Since(p.lastCreationReset) > time.Minute {
+			p.nodeCreations = 0
+			p.lastCreationReset = time.Now()
+		}
+		p.nodeCreations++
+
+		// AUTONOMOUS ACTION: After 1000 nodes/minute, notify about high creation rate
+		if p.nodeCreations >= 1000 && p.ctx.Bifrost != nil && p.ctx.Bifrost.IsConnected() {
+			log.Printf("[Watcher] Autonomous notification: High node creation rate (%d/min)", p.nodeCreations)
+
+			// Send notification to connected clients
+			p.ctx.Bifrost.SendNotification("warning", "High Activity",
+				fmt.Sprintf("Detected %d node creations in the last minute", p.nodeCreations))
+
+			// Option 2: Send a natural language prompt to the SLM
+			// The SLM will interpret this and decide what action to take
+			if p.ctx.Heimdall != nil {
+				p.ctx.Heimdall.SendPromptAsync(
+					fmt.Sprintf("Analyze high node creation rate: %d nodes created in 1 minute. Should we investigate?",
+						p.nodeCreations))
+			}
+
+			// Reset counter after notification
+			p.nodeCreations = 0
+			p.lastCreationReset = time.Now()
+		}
+	}
+
+	// === Log interesting events ===
+	switch event.Type {
+	case heimdall.EventNodeDeleted:
+		p.addEvent("info", "Node deleted", map[string]interface{}{
+			"node_id": event.NodeID,
+			"labels":  event.NodeLabels,
+		})
+	case heimdall.EventQueryExecuted:
+		if event.Duration > 5*time.Second {
+			p.addEvent("warning", "Slow query detected", map[string]interface{}{
+				"query":    event.Query,
+				"duration": event.Duration.String(),
+			})
+		}
+	}
 }

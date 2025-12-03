@@ -319,6 +319,30 @@
   text-shadow: 0 0 15px rgba(16, 185, 129, 0.4);
 }
 
+/* Heimdall messages - Violet/Purple (distinct from SLM chat) */
+.bifrost-message-heimdall {
+  color: #d8b4fe;
+  background: rgba(139, 92, 246, 0.08);
+  border-left: 2px solid rgba(139, 92, 246, 0.5);
+  padding-left: 12px;
+  margin-left: -12px;
+  border-radius: 0 4px 4px 0;
+}
+
+.bifrost-message-heimdall .bifrost-message-prefix {
+  color: #a78bfa;
+  text-shadow: 0 0 20px rgba(167, 139, 250, 0.5);
+}
+
+.bifrost-message-heimdall .bifrost-message-role {
+  color: #a78bfa;
+  text-shadow: 0 0 12px rgba(167, 139, 250, 0.4);
+}
+
+.bifrost-message-heimdall .bifrost-message-content {
+  text-shadow: 0 0 30px rgba(139, 92, 246, 0.15);
+}
+
 /* Message prefixes (legacy) */
 .bifrost-message-prefix {
   font-weight: 700;

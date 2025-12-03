@@ -169,6 +169,20 @@ func (m *MockHeimdallPlugin) RecentEvents(limit int) []SubsystemEvent {
 	return m.events[:limit]
 }
 
+func (m *MockHeimdallPlugin) PrePrompt(ctx *PromptContext) error {
+	// No-op for mock
+	return nil
+}
+
+func (m *MockHeimdallPlugin) PreExecute(ctx *PreExecuteContext, done func(PreExecuteResult)) {
+	// Default: continue with execution
+	done(PreExecuteResult{Continue: true})
+}
+
+func (m *MockHeimdallPlugin) PostExecute(ctx *PostExecuteContext) {
+	// No-op for mock
+}
+
 // MockBifrost implements BifrostBridge for testing
 type MockBifrost struct {
 	mu            sync.Mutex

@@ -17,6 +17,17 @@ NornicDB v1.0.0 marks the first production-ready release of the cognitive graph 
   - Plugin architecture for extending AI capabilities
   - Action system for executing database operations via natural language
   - BYOM (Bring Your Own Model) support for custom GGUF models
+  - **Optional Lifecycle Hooks** for plugins:
+    - `PrePromptHook` - Modify prompts before SLM processing
+    - `PreExecuteHook` - Validate/modify action parameters before execution
+    - `PostExecuteHook` - Post-execution logging and state updates
+    - `DatabaseEventHook` - React to database operations (CRUD, queries, etc.)
+  - **Autonomous Action Invocation** - Plugins can trigger SLM actions based on events
+    - `HeimdallInvoker` interface for direct action invocation
+    - Event accumulation patterns for intelligent triggers
+    - Async fire-and-forget action execution
+  - **Inline Notification System** - Proper ordering of plugin notifications with chat content
+  - **Request Cancellation** - Lifecycle hooks can cancel requests with reasons
 - **Comprehensive Documentation** - 40+ guides covering all features
 - **Graph Traversal Guide** - Path queries and pattern matching
 - **Data Import/Export Guide** - Neo4j migration and backup procedures

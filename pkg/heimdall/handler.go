@@ -153,11 +153,57 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 	<-r.Context().Done()
 }
 
+// sendCancellationResponse sends a cancellation response to the client.
+// This is called when a lifecycle hook cancels the request.
+func (h *Handler) sendCancellationResponse(w http.ResponseWriter, requestID, phase, cancelledBy, reason string) {
+	// Log the cancellation
+	log.Printf("[Bifrost] Request %s cancelled in %s by %s: %s", requestID, phase, cancelledBy, reason)
+
+	// Send notification via Bifrost if available
+	if h.bifrost != nil {
+		h.bifrost.SendNotification("warning", "Request Cancelled",
+			fmt.Sprintf("Request cancelled by %s: %s", cancelledBy, reason))
+	}
+
+	// Build cancellation response (OpenAI-compatible format)
+	resp := ChatResponse{
+		ID:      requestID,
+		Object:  "chat.completion",
+		Model:   h.config.Model,
+		Created: time.Now().Unix(),
+		Choices: []ChatChoice{
+			{
+				Index: 0,
+				Message: &ChatMessage{
+					Role: "assistant",
+					Content: fmt.Sprintf("⚠️ Request cancelled by plugin\n\n"+
+						"**Phase:** %s\n"+
+						"**Cancelled by:** %s\n"+
+						"**Reason:** %s",
+						phase, cancelledBy, reason),
+				},
+				FinishReason: "stop",
+			},
+		},
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
 // handleChatCompletions handles OpenAI-compatible chat completion requests via Bifrost.
 // POST /api/bifrost/chat/completions
 //
 // Non-streaming returns JSON response.
 // Streaming uses Server-Sent Events (SSE) - standard HTTP, no WebSocket needed.
+//
+// Request Lifecycle:
+//  1. PrePrompt hook - plugins can modify prompt context
+//  2. Build prompt with immutable ActionPrompt first
+//  3. Send to Heimdall SLM
+//  4. PreExecute hook - plugins can validate/modify before action runs
+//  5. Execute action
+//  6. PostExecute hook - plugins can log/update state
 func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -175,36 +221,53 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		req.Model = h.config.Model
 	}
 
-	// Inject action prompt as system message so SLM knows available actions
-	// Only inject if not already present
-	hasActionPrompt := false
-	for _, msg := range req.Messages {
-		if msg.Role == "system" && len(msg.Content) > 100 {
-			hasActionPrompt = true
+	// Extract user message for lifecycle context
+	userMessage := ""
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].Role == "user" {
+			userMessage = req.Messages[i].Content
 			break
 		}
 	}
-	if !hasActionPrompt && HeimdallPluginsInitialized() {
-		actionSystemPrompt := ChatMessage{
-			Role: "system",
-			Content: `You are the AI assistant for NornicDB graph database.
-AVAILABLE ACTIONS:
-` + ActionPrompt() + `
 
-EXAMPLES - Translate user requests to JSON:
+	// Create PromptContext with immutable ActionPrompt
+	requestID := generateID()
+	promptCtx := &PromptContext{
+		RequestID:    requestID,
+		RequestTime:  time.Now(),
+		ActionPrompt: ActionPrompt(), // IMMUTABLE - always first
+		UserMessage:  userMessage,
+		Messages:     req.Messages,
+		Examples:     defaultExamples(),
+		PluginData:   make(map[string]interface{}),
+	}
+	// Set Bifrost for notifications (fire-and-forget SSE messages)
+	promptCtx.SetBifrost(h.bifrost)
 
-User: "what is the status" → {"action": "heimdall.watcher.status", "params": {}}
-User: "show me metrics" → {"action": "heimdall.watcher.metrics", "params": {}}  
-User: "database stats" → {"action": "heimdall.watcher.db_stats", "params": {}}
-User: "how many nodes" → {"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) RETURN count(n)"}}
-`,
-		}
-		// Prepend system message
-		req.Messages = append([]ChatMessage{actionSystemPrompt}, req.Messages...)
+	// === Phase 1: PrePrompt hooks (optional) ===
+	// Plugins that implement PrePromptHook can modify the prompt context
+	// Plugins can call promptCtx.Cancel() to abort the request
+	CallPrePromptHooks(promptCtx)
+	if promptCtx.Cancelled() {
+		log.Printf("[Bifrost] Request cancelled by %s: %s", promptCtx.CancelledBy(), promptCtx.CancelReason())
+		h.sendCancellationResponse(w, promptCtx.RequestID, "PrePrompt", promptCtx.CancelledBy(), promptCtx.CancelReason())
+		return
 	}
 
-	// Build prompt from messages
-	prompt := BuildPrompt(req.Messages)
+	// === Phase 2: Build final prompt ===
+	// ActionPrompt is always at the start (immutable)
+	systemContent := promptCtx.BuildFinalPrompt()
+	systemMsg := ChatMessage{Role: "system", Content: systemContent}
+
+	// Build messages: system + user message
+	messages := []ChatMessage{systemMsg}
+	for _, msg := range promptCtx.Messages {
+		if msg.Role != "system" { // Skip original system messages
+			messages = append(messages, msg)
+		}
+	}
+
+	prompt := BuildPrompt(messages)
 
 	// Generation params
 	params := GenerateParams{
@@ -224,15 +287,41 @@ User: "how many nodes" → {"action": "heimdall.watcher.query", "params": {"cyph
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
+	// Store PromptContext in request context for later phases
+	lifecycleCtx := &requestLifecycle{
+		promptCtx: promptCtx,
+		requestID: requestID,
+		database:  h.database,
+		metrics:   h.metrics,
+	}
+
 	if req.Stream {
-		h.handleStreamingResponse(w, ctx, prompt, params, req.Model)
+		h.handleStreamingResponse(w, ctx, prompt, params, req.Model, lifecycleCtx)
 	} else {
-		h.handleNonStreamingResponse(w, ctx, prompt, params, req.Model)
+		h.handleNonStreamingResponse(w, ctx, prompt, params, req.Model, lifecycleCtx)
 	}
 }
 
-// handleNonStreamingResponse generates complete response.
-func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.Context, prompt string, params GenerateParams, model string) {
+// requestLifecycle holds state through the request lifecycle for hooks.
+type requestLifecycle struct {
+	promptCtx *PromptContext
+	requestID string
+	database  DatabaseReader
+	metrics   MetricsReader
+}
+
+// defaultExamples returns built-in examples for action mapping.
+func defaultExamples() []PromptExample {
+	return []PromptExample{
+		{UserSays: "what is the status", ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`},
+		{UserSays: "show me metrics", ActionJSON: `{"action": "heimdall.watcher.metrics", "params": {}}`},
+		{UserSays: "database stats", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
+		{UserSays: "how many nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) RETURN count(n)"}}`},
+	}
+}
+
+// handleNonStreamingResponse generates complete response with lifecycle hooks.
+func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.Context, prompt string, params GenerateParams, model string, lifecycle *requestLifecycle) {
 	response, err := h.manager.Generate(ctx, prompt, params)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Generation error: %v", err), http.StatusInternalServerError)
@@ -244,38 +333,84 @@ func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.
 	finalResponse := response
 	if parsedAction := h.tryParseAction(response); parsedAction != nil {
 		log.Printf("[Bifrost] Action detected: %s with params: %v", parsedAction.Action, parsedAction.Params)
-		// Execute the action
-		actCtx := ActionContext{
-			Context:     ctx,
-			UserMessage: prompt,
+
+		// === Phase 4: PreExecute hooks ===
+		preExecCtx := &PreExecuteContext{
+			RequestID:   lifecycle.requestID,
+			RequestTime: lifecycle.promptCtx.RequestTime,
+			Action:      parsedAction.Action,
 			Params:      parsedAction.Params,
-			Bifrost:     h.bifrost,
-			Database:    h.database,
-			Metrics:     h.metrics,
+			RawResponse: response,
+			PluginData:  lifecycle.promptCtx.PluginData,
+			Database:    lifecycle.database,
+			Metrics:     lifecycle.metrics,
 		}
-		result, err := ExecuteAction(parsedAction.Action, actCtx)
-		if err != nil {
-			log.Printf("[Bifrost] Action execution failed: %v", err)
-			finalResponse = fmt.Sprintf("Action failed: %v", err)
-		} else if result != nil {
-			log.Printf("[Bifrost] Action result: success=%v message=%s", result.Success, result.Message)
-			// Format action result as response
-			if result.Success {
-				finalResponse = result.Message
-				if result.Data != nil && len(result.Data) > 0 {
-					dataJSON, _ := json.MarshalIndent(result.Data, "", "  ")
-					finalResponse += "\n\n```json\n" + string(dataJSON) + "\n```"
-				}
-			} else {
-				finalResponse = "Action failed: " + result.Message
+		// Set Bifrost for notifications (fire-and-forget SSE messages)
+		preExecCtx.SetBifrost(h.bifrost)
+
+		// === Phase 4: PreExecute hooks (optional) ===
+		// Plugins that implement PreExecuteHook can validate/modify params
+		preExecResult := CallPreExecuteHooks(preExecCtx)
+		if preExecCtx.Cancelled() {
+			log.Printf("[Bifrost] Request cancelled by %s: %s", preExecCtx.CancelledBy(), preExecCtx.CancelReason())
+			h.sendCancellationResponse(w, lifecycle.requestID, "PreExecute", preExecCtx.CancelledBy(), preExecCtx.CancelReason())
+			return
+		}
+
+		if !preExecResult.Continue {
+			finalResponse = preExecResult.AbortMessage
+			if finalResponse == "" {
+				finalResponse = "Action aborted by plugin"
 			}
+		} else {
+			// === Phase 5: Execute action ===
+			startTime := time.Now()
+			actCtx := ActionContext{
+				Context:     ctx,
+				UserMessage: prompt,
+				Params:      parsedAction.Params,
+				Bifrost:     h.bifrost,
+				Database:    h.database,
+				Metrics:     h.metrics,
+			}
+			result, err := ExecuteAction(parsedAction.Action, actCtx)
+			execDuration := time.Since(startTime)
+
+			if err != nil {
+				log.Printf("[Bifrost] Action execution failed: %v", err)
+				finalResponse = fmt.Sprintf("Action failed: %v", err)
+			} else if result != nil {
+				log.Printf("[Bifrost] Action result: success=%v message=%s", result.Success, result.Message)
+				// Format action result as response
+				if result.Success {
+					finalResponse = result.Message
+					if result.Data != nil && len(result.Data) > 0 {
+						dataJSON, _ := json.MarshalIndent(result.Data, "", "  ")
+						finalResponse += "\n\n```json\n" + string(dataJSON) + "\n```"
+					}
+				} else {
+					finalResponse = "Action failed: " + result.Message
+				}
+			}
+
+			// === Phase 6: PostExecute hooks ===
+			// Uses optional interface - plugins that don't implement PostExecuteHook are skipped
+			postExecCtx := &PostExecuteContext{
+				RequestID:  lifecycle.requestID,
+				Action:     parsedAction.Action,
+				Params:     parsedAction.Params,
+				Result:     result,
+				Duration:   execDuration,
+				PluginData: lifecycle.promptCtx.PluginData,
+			}
+			CallPostExecuteHooks(postExecCtx)
 		}
 	} else {
 		log.Printf("[Bifrost] No action detected in response")
 	}
 
 	resp := ChatResponse{
-		ID:      generateID(),
+		ID:      lifecycle.requestID,
 		Object:  "chat.completion", // OpenAI API compatible
 		Model:   model,
 		Created: time.Now().Unix(),
@@ -339,10 +474,10 @@ func (h *Handler) tryParseAction(response string) *ParsedAction {
 	return &parsed
 }
 
-// handleStreamingResponse uses Server-Sent Events (SSE) for streaming.
+// handleStreamingResponse uses Server-Sent Events (SSE) for streaming with lifecycle hooks.
 // SSE is standard HTTP - works with any HTTP client, no WebSocket needed.
 // After streaming completes, checks for action commands and executes them.
-func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Context, prompt string, params GenerateParams, model string) {
+func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Context, prompt string, params GenerateParams, model string, lifecycle *requestLifecycle) {
 	// Set SSE headers
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -355,7 +490,43 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 		return
 	}
 
-	id := generateID()
+	id := lifecycle.requestID
+
+	// === Send queued notifications from PrePrompt hooks inline ===
+	// This ensures proper ordering - notifications appear before the AI response
+	notifications := lifecycle.promptCtx.DrainNotifications()
+	for _, notif := range notifications {
+		icon := "ℹ️"
+		switch notif.Type {
+		case "error":
+			icon = "❌"
+		case "warning":
+			icon = "⚠️"
+		case "success":
+			icon = "✅"
+		case "progress":
+			icon = "🔄"
+		}
+
+		notifChunk := ChatResponse{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Model:   model,
+			Created: time.Now().Unix(),
+			Choices: []ChatChoice{
+				{
+					Index: 0,
+					Delta: &ChatMessage{
+						Role:    "heimdall",
+						Content: fmt.Sprintf("[Heimdall]: %s %s: %s\n", icon, notif.Title, notif.Message),
+					},
+				},
+			},
+		}
+		data, _ := json.Marshal(notifChunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
 
 	// Collect full response to check for actions
 	var fullResponse strings.Builder
@@ -399,32 +570,169 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 	if parsedAction := h.tryParseAction(response); parsedAction != nil {
 		log.Printf("[Bifrost] Action detected in stream: %s", parsedAction.Action)
 
-		// Execute the action
-		actCtx := ActionContext{
-			Context:     ctx,
-			UserMessage: prompt,
+		// === Phase 4: PreExecute hooks ===
+		preExecCtx := &PreExecuteContext{
+			RequestID:   lifecycle.requestID,
+			RequestTime: lifecycle.promptCtx.RequestTime,
+			Action:      parsedAction.Action,
 			Params:      parsedAction.Params,
-			Bifrost:     h.bifrost,
-			Database:    h.database,
-			Metrics:     h.metrics,
+			RawResponse: response,
+			PluginData:  lifecycle.promptCtx.PluginData,
+			Database:    lifecycle.database,
+			Metrics:     lifecycle.metrics,
+		}
+		// Set Bifrost for notifications (fire-and-forget SSE messages)
+		preExecCtx.SetBifrost(h.bifrost)
+
+		// === PreExecute hooks (optional) ===
+		// Plugins that implement PreExecuteHook can validate/modify params
+		preExecResult := CallPreExecuteHooks(preExecCtx)
+		cancelled := preExecCtx.Cancelled()
+		if cancelled {
+			log.Printf("[Bifrost] Request cancelled by %s: %s", preExecCtx.CancelledBy(), preExecCtx.CancelReason())
+			// Send cancellation as SSE chunk
+			cancelChunk := ChatResponse{
+				ID:      id,
+				Object:  "chat.completion.chunk",
+				Model:   model,
+				Created: time.Now().Unix(),
+				Choices: []ChatChoice{
+					{
+						Index: 0,
+						Delta: &ChatMessage{
+							Content: fmt.Sprintf("\n\n⚠️ Request cancelled by %s: %s",
+								preExecCtx.CancelledBy(), preExecCtx.CancelReason()),
+						},
+					},
+				},
+			}
+			data, _ := json.Marshal(cancelChunk)
+			fmt.Fprintf(w, "data: %s\n\n", data)
+			flusher.Flush()
 		}
 
-		result, err := ExecuteAction(parsedAction.Action, actCtx)
-		if err != nil {
-			log.Printf("[Bifrost] Action execution failed: %v", err)
-		} else if result != nil {
-			log.Printf("[Bifrost] Action result: success=%v", result.Success)
+		if !cancelled {
+			// === Send PreExecute notifications inline ===
+			preExecNotifications := preExecCtx.DrainNotifications()
+			for _, notif := range preExecNotifications {
+				icon := "ℹ️"
+				switch notif.Type {
+				case "error":
+					icon = "❌"
+				case "warning":
+					icon = "⚠️"
+				case "success":
+					icon = "✅"
+				case "progress":
+					icon = "🔄"
+				}
+				notifChunk := ChatResponse{
+					ID:      id,
+					Object:  "chat.completion.chunk",
+					Model:   model,
+					Created: time.Now().Unix(),
+					Choices: []ChatChoice{
+						{
+							Index: 0,
+							Delta: &ChatMessage{
+								Role:    "heimdall",
+								Content: fmt.Sprintf("[Heimdall]: %s %s: %s\n", icon, notif.Title, notif.Message),
+							},
+						},
+					},
+				}
+				data, _ := json.Marshal(notifChunk)
+				fmt.Fprintf(w, "data: %s\n\n", data)
+				flusher.Flush()
+			}
 
-			// Send action result as additional chunk
 			var actionResponse string
-			if result.Success {
-				actionResponse = "\n\n" + result.Message
-				if result.Data != nil && len(result.Data) > 0 {
-					dataJSON, _ := json.MarshalIndent(result.Data, "", "  ")
-					actionResponse += "\n\n```json\n" + string(dataJSON) + "\n```"
+			var result *ActionResult
+			var execDuration time.Duration
+
+			if !preExecResult.Continue {
+				actionResponse = preExecResult.AbortMessage
+				if actionResponse == "" {
+					actionResponse = "Action aborted by plugin"
 				}
 			} else {
-				actionResponse = "\n\nAction failed: " + result.Message
+				// === Phase 5: Execute action ===
+				startTime := time.Now()
+				actCtx := ActionContext{
+					Context:     ctx,
+					UserMessage: prompt,
+					Params:      parsedAction.Params,
+					Bifrost:     h.bifrost,
+					Database:    h.database,
+					Metrics:     h.metrics,
+				}
+
+				var err error
+				result, err = ExecuteAction(parsedAction.Action, actCtx)
+				execDuration = time.Since(startTime)
+
+				if err != nil {
+					log.Printf("[Bifrost] Action execution failed: %v", err)
+					actionResponse = fmt.Sprintf("Action failed: %v", err)
+				} else if result != nil {
+					log.Printf("[Bifrost] Action result: success=%v", result.Success)
+
+					if result.Success {
+						actionResponse = "\n\n" + result.Message
+						if result.Data != nil && len(result.Data) > 0 {
+							dataJSON, _ := json.MarshalIndent(result.Data, "", "  ")
+							actionResponse += "\n\n```json\n" + string(dataJSON) + "\n```"
+						}
+					} else {
+						actionResponse = "\n\nAction failed: " + result.Message
+					}
+				}
+
+				// === Phase 6: PostExecute hooks (optional) ===
+				// Plugins that implement PostExecuteHook get notified
+				postExecCtx := &PostExecuteContext{
+					RequestID:  lifecycle.requestID,
+					Action:     parsedAction.Action,
+					Params:     parsedAction.Params,
+					Result:     result,
+					Duration:   execDuration,
+					PluginData: lifecycle.promptCtx.PluginData,
+				}
+				CallPostExecuteHooks(postExecCtx)
+
+				// === Send PostExecute notifications inline ===
+				postExecNotifications := postExecCtx.DrainNotifications()
+				for _, notif := range postExecNotifications {
+					icon := "ℹ️"
+					switch notif.Type {
+					case "error":
+						icon = "❌"
+					case "warning":
+						icon = "⚠️"
+					case "success":
+						icon = "✅"
+					case "progress":
+						icon = "🔄"
+					}
+					notifChunk := ChatResponse{
+						ID:      id,
+						Object:  "chat.completion.chunk",
+						Model:   model,
+						Created: time.Now().Unix(),
+						Choices: []ChatChoice{
+							{
+								Index: 0,
+								Delta: &ChatMessage{
+									Role:    "heimdall",
+									Content: fmt.Sprintf("[Heimdall]: %s %s: %s\n", icon, notif.Title, notif.Message),
+								},
+							},
+						},
+					}
+					data, _ := json.Marshal(notifChunk)
+					fmt.Fprintf(w, "data: %s\n\n", data)
+					flusher.Flush()
+				}
 			}
 
 			// Send action result chunk

@@ -262,6 +262,121 @@ Create custom plugins to add new capabilities:
 - [Writing Heimdall Plugins](./heimdall-plugins.md)
 - [Plugin Architecture](../architecture/COGNITIVE_SLM_PROPOSAL.md)
 
+### Plugin Features
+
+Heimdall plugins support advanced features:
+
+#### Lifecycle Hooks
+
+Plugins can implement optional interfaces to hook into the request lifecycle:
+
+| Hook | When Called | Use Case |
+|------|-------------|----------|
+| `PrePromptHook` | Before SLM request | Modify prompts, add context, validate |
+| `PreExecuteHook` | Before action execution | Validate params, fetch data, authorize |
+| `PostExecuteHook` | After action execution | Logging, metrics, cleanup |
+| `DatabaseEventHook` | On database operations | Audit, monitoring, triggers |
+
+#### Autonomous Actions
+
+Plugins can trigger SLM actions based on accumulated events:
+
+```go
+// Example: Trigger analysis after multiple failures
+func (p *SecurityPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
+    if event.Type == heimdall.EventQueryFailed {
+        p.failureCount++
+        if p.failureCount >= 5 {
+            // Directly invoke an action
+            p.ctx.Heimdall.InvokeActionAsync("heimdall.anomaly.detect", nil)
+            
+            // Or send a natural language prompt
+            p.ctx.Heimdall.SendPromptAsync("Analyze recent query failures")
+        }
+    }
+}
+```
+
+#### Inline Notifications
+
+Plugin notifications appear in proper order within the chat stream:
+
+```go
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    ctx.NotifyInfo("Processing", "Analyzing your request...")
+    return nil
+}
+```
+
+Notifications from lifecycle hooks are queued and sent inline with the streaming response, ensuring proper ordering.
+
+#### Request Cancellation
+
+Plugins can cancel requests with a reason:
+
+```go
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    if !p.isAuthorized(ctx.UserMessage) {
+        ctx.Cancel("Unauthorized request", "PrePrompt:myplugin")
+        return nil
+    }
+    return nil
+}
+```
+
+## Architecture Overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  User: "Check database status"                                  │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Bifrost (Chat Interface)                                       │
+│  └─ Creates PromptContext                                       │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PrePrompt Hooks                                                │
+│  └─ Plugins can modify prompt, add context, or cancel           │
+│  └─ Notifications queued for inline delivery                    │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Heimdall SLM                                                   │
+│  └─ Interprets user intent                                      │
+│  └─ Outputs: {"action": "heimdall.watcher.status", "params": {}}│
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PreExecute Hooks                                               │
+│  └─ Plugins can validate/modify params or cancel                │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Action Execution                                               │
+│  └─ Registered handler executes (heimdall.watcher.status)       │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  PostExecute Hooks                                              │
+│  └─ Plugins receive result, can log and send notifications      │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Response streamed to user with inline notifications            │
+│  [Heimdall]: ✅ Watcher: Action completed in 1.23ms             │
+│  {"status": "running", "goroutines": 35, ...}                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 **See Also:**

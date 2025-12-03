@@ -56,6 +56,23 @@
 **Extend Heimdall with custom actions**
 → [Heimdall Plugins](heimdall-plugins.md)
 
+**Build event-driven automation**
+→ [Heimdall Plugins - Autonomous Actions](heimdall-plugins.md#autonomous-action-invocation-heimdallinvoker)
+
+## 🤖 Heimdall Plugin Features
+
+Heimdall plugins support advanced capabilities:
+
+| Feature | Description |
+|---------|-------------|
+| **Lifecycle Hooks** | Modify prompts, validate actions, log results |
+| **Database Events** | React to CRUD operations, queries, transactions |
+| **Autonomous Actions** | Trigger SLM analysis based on accumulated events |
+| **Inline Notifications** | Send ordered messages to the chat interface |
+| **Request Cancellation** | Cancel requests with reasons from any hook |
+
+See [Heimdall Plugins Guide](heimdall-plugins.md) for complete documentation.
+
 ## 📖 Learning Path
 
 ### Beginner

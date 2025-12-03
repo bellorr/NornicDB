@@ -10,8 +10,9 @@
 6. [Building and Loading Plugins](#building-and-loading-plugins)
 7. [Testing Plugins](#testing-plugins)
 8. [Example: Complete Plugin](#example-complete-plugin)
-9. [Best Practices](#best-practices)
-10. [Troubleshooting](#troubleshooting)
+9. [Optional Lifecycle Hooks](#optional-lifecycle-hooks)
+10. [Best Practices](#best-practices)
+11. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -604,6 +605,232 @@ func (p *AnomalyPlugin) addEvent(eventType, message string) {
 
 ---
 
+## Optional Lifecycle Hooks
+
+Plugins can implement optional interfaces to hook into the request lifecycle. These are **opt-in** - plugins only implement what they need.
+
+### Available Hooks
+
+| Interface | When Called | Purpose |
+|-----------|-------------|---------|
+| `PrePromptHook` | Before SLM request | Modify prompts, add context, validate |
+| `PreExecuteHook` | Before action execution | Validate params, fetch data, authorize |
+| `PostExecuteHook` | After action execution | Logging, metrics, cleanup |
+| `DatabaseEventHook` | On database operations | Audit, monitoring, triggers |
+
+### PrePromptHook (Modify Prompts)
+
+```go
+// Implement this interface to modify prompts before SLM processing
+type PrePromptHook interface {
+    PrePrompt(ctx *PromptContext) error
+}
+
+// Example implementation
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    // Add context to the prompt
+    ctx.AdditionalInstructions += "\nUser is querying the analytics database."
+    
+    // Send notification (appears before AI response)
+    ctx.NotifyInfo("Context", "Added analytics context")
+    
+    // Optionally cancel the request
+    if !p.isAuthorized(ctx.UserMessage) {
+        ctx.Cancel("Unauthorized request", "PrePrompt:myplugin")
+    }
+    return nil
+}
+```
+
+### PreExecuteHook (Before Action Execution)
+
+```go
+// Implement this interface to validate/modify action parameters
+type PreExecuteHook interface {
+    PreExecute(ctx *PreExecuteContext, done func(PreExecuteResult))
+}
+
+// Example: Validate parameters asynchronously
+func (p *MyPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(heimdall.PreExecuteResult)) {
+    // Async validation - call done() when finished
+    go func() {
+        // Fetch additional data
+        data, err := p.fetchContext(ctx.Action.Params)
+        if err != nil {
+            done(heimdall.PreExecuteResult{Error: err})
+            return
+        }
+        
+        // Modify parameters
+        ctx.Action.Params["extra_data"] = data
+        done(heimdall.PreExecuteResult{})
+    }()
+}
+```
+
+### PostExecuteHook (After Action Execution)
+
+```go
+// Implement this interface for post-action processing
+type PostExecuteHook interface {
+    PostExecute(ctx *PostExecuteContext)
+}
+
+// Example: Log all action results
+func (p *MyPlugin) PostExecute(ctx *heimdall.PostExecuteContext) {
+    p.logger.Info("Action completed",
+        "action", ctx.Action.Action,
+        "success", ctx.Result.Success,
+        "duration", ctx.Duration,
+    )
+}
+```
+
+### DatabaseEventHook (React to DB Operations)
+
+```go
+// Implement this interface to react to database events
+type DatabaseEventHook interface {
+	OnDatabaseEvent(event *DatabaseEvent)
+}
+
+// Event types: node.created, node.updated, node.deleted, node.read,
+// relationship.created, relationship.updated, relationship.deleted,
+// query.executed, query.failed, index.created, index.dropped,
+// transaction.commit, transaction.rollback,
+// database.started, database.shutdown, backup.started, backup.completed
+
+// Example: Audit node deletions
+func (p *MyPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
+    if event.Type == heimdall.EventNodeDeleted {
+        p.auditLog.Record(event.NodeID, event.UserID, event.Timestamp)
+    }
+}
+```
+
+### Autonomous Action Invocation (HeimdallInvoker)
+
+Plugins can autonomously trigger SLM actions based on accumulated events.
+The `SubsystemContext` provides a `Heimdall` invoker for this purpose.
+
+```go
+// HeimdallInvoker interface methods:
+type HeimdallInvoker interface {
+    // Directly invoke a registered action
+    InvokeAction(action string, params map[string]interface{}) (*ActionResult, error)
+    
+    // Send a natural language prompt to the SLM
+    SendPrompt(prompt string) (*ActionResult, error)
+    
+    // Async versions (fire-and-forget, results via Bifrost)
+    InvokeActionAsync(action string, params map[string]interface{})
+    SendPromptAsync(prompt string)
+}
+```
+
+**Example: Autonomous Anomaly Detection Based on Event Accumulation**
+
+```go
+type SecurityPlugin struct {
+    ctx             heimdall.SubsystemContext
+    failedQueries   int64
+    lastReset       time.Time
+}
+
+func (p *SecurityPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
+    // Track query failures
+    if event.Type == heimdall.EventQueryFailed {
+        // Reset counter every 5 minutes
+        if time.Since(p.lastReset) > 5*time.Minute {
+            p.failedQueries = 0
+            p.lastReset = time.Now()
+        }
+        p.failedQueries++
+
+        // AUTONOMOUS ACTION: After 5 failures, trigger analysis
+        if p.failedQueries >= 5 && p.ctx.Heimdall != nil {
+            // Option 1: Directly invoke an action
+            p.ctx.Heimdall.InvokeActionAsync("heimdall.anomaly.detect", map[string]interface{}{
+                "trigger": "autonomous",
+                "reason":  "query_failures",
+            })
+
+            // Option 2: Send natural language prompt to SLM
+            p.ctx.Heimdall.SendPromptAsync(
+                "Multiple query failures detected. Analyze for potential issues.")
+
+            p.failedQueries = 0
+        }
+    }
+}
+```
+
+**Use Cases for Autonomous Actions:**
+
+1. **Security Monitoring**: Track failed auth attempts → trigger security analysis
+2. **Performance Alerts**: Monitor slow queries → trigger optimization suggestions  
+3. **Anomaly Detection**: Detect unusual patterns → trigger investigation
+4. **Resource Management**: Monitor memory usage → trigger cleanup recommendations
+5. **Compliance Auditing**: Track sensitive operations → trigger audit reports
+
+### Notification Methods
+
+Within lifecycle hooks, use `PromptContext` notification methods:
+
+```go
+// All notifications are queued and sent inline with the streaming response
+ctx.NotifyInfo("Title", "Message")      // ℹ️ Info
+ctx.NotifyWarning("Title", "Message")   // ⚠️ Warning  
+ctx.NotifyError("Title", "Message")     // ❌ Error
+ctx.NotifyProgress("Title", "Message")  // 🔄 Progress
+ctx.Notify("success", "Title", "Msg")   // ✅ Custom type
+```
+
+### Cancellation
+
+Any hook can cancel the request:
+
+```go
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    if reason := p.shouldCancel(ctx.UserMessage); reason != "" {
+        ctx.Cancel(reason, "PrePrompt:myplugin")
+        // Request stops here, user sees cancellation message
+    }
+    return nil
+}
+```
+
+### Full Lifecycle Plugin Example
+
+```go
+// Implement all hooks (convenience interface)
+var _ heimdall.FullLifecycleHook = (*MyPlugin)(nil)
+
+type MyPlugin struct {
+    // ... your fields ...
+}
+
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    ctx.NotifyInfo("Processing", "Preparing your request...")
+    return nil
+}
+
+func (p *MyPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(heimdall.PreExecuteResult)) {
+    // Synchronous validation
+    done(heimdall.PreExecuteResult{})
+}
+
+func (p *MyPlugin) PostExecute(ctx *heimdall.PostExecuteContext) {
+    log.Printf("Action %s completed in %v", ctx.Action.Action, ctx.Duration)
+}
+
+func (p *MyPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
+    // React to database operations
+}
+```
+
+---
+
 ## Best Practices
 
 ### 1. Action Naming
@@ -634,14 +861,24 @@ if err != nil {
 }
 ```
 
-### 4. Progress Updates
+### 4. Progress Updates (Inline Notifications)
 
 ```go
-// Keep users informed for long operations
+// Notifications are sent inline with the streaming response
+// They appear in proper order - before/after the content they relate to
+// Use PromptContext.Notify() in lifecycle hooks:
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    ctx.NotifyInfo("Processing", "Analyzing your request...")
+    return nil
+}
+
+// In action handlers, use the ActionContext:
 if ctx.Bifrost.IsConnected() {
     ctx.Bifrost.SendNotification("info", "Progress", "50% complete...")
 }
 ```
+
+**Note:** Notifications from lifecycle hooks (PrePrompt) are queued and sent at the start of the streaming response, ensuring proper ordering with chat content.
 
 ### 5. Thread Safety
 
@@ -709,8 +946,21 @@ Write clear descriptions - they're shown to both the SLM and users:
 
 ### Bifrost Communication Fails
 
-1. Check `ctx.Bifrost.IsConnected()` before sending
+1. Check `ctx.Bifrost.IsConnected()` before sending in action handlers
 2. Use `NoOpBifrost` in tests to avoid panics
+3. For lifecycle hooks, notifications are queued - they won't fail but may not display if the request is cancelled
+
+### Notifications Out of Order
+
+Notifications from lifecycle hooks are **queued and sent inline** with the streaming response:
+
+- PrePrompt notifications appear **before** the AI response
+- They're sent as special SSE chunks with `role: "heimdall"`
+- No separate EventSource subscription is needed in the UI
+
+If you see ordering issues:
+1. Ensure you're using `ctx.NotifyInfo()` etc. in PrePrompt hooks
+2. Action handler notifications via `ctx.Bifrost.SendNotification()` may arrive later
 
 ---
 
@@ -746,6 +996,10 @@ Write clear descriptions - they're shown to both the SLM and users:
 
 ---
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **Last Updated:** 2024-12-03  
 **Maintainer:** NornicDB Team
+
+### Changelog
+
+- **1.1.0**: Added optional lifecycle hooks (PrePromptHook, PreExecuteHook, PostExecuteHook, DatabaseEventHook), inline notification system for proper ordering

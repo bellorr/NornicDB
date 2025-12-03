@@ -1709,3 +1709,173 @@ NORNICDB_HEIMDALL_PORTAL_ALLOWED_ROLES=admin
 | WebSocket hijacking | Origin validation, CSRF tokens |
 
 ---
+
+## 16. Implemented Features (v1.0.0)
+
+The following features from this proposal have been implemented:
+
+### Core Heimdall System
+- ✅ Multi-model management (embedding + reasoning)
+- ✅ GPU-accelerated inference via llama.cpp
+- ✅ BYOM (Bring Your Own Model) support
+- ✅ CPU fallback when GPU unavailable
+
+### Bifrost Chat Interface
+- ✅ OpenAI-compatible API endpoints
+- ✅ Server-Sent Events (SSE) for streaming
+- ✅ Norse-themed UI with translucent terminal styling
+- ✅ Session-persistent chat history
+- ✅ Built-in commands (/help, /clear, /status, /model)
+
+### Plugin Architecture
+- ✅ `HeimdallPlugin` interface for subsystem management
+- ✅ Action registration and invocation system
+- ✅ Built-in Watcher plugin with hello-world example
+
+### Advanced Plugin Features (NEW)
+
+#### Optional Lifecycle Hooks
+
+Plugins can implement optional interfaces:
+
+```go
+// PrePromptHook - Modify prompts before SLM processing
+type PrePromptHook interface {
+    PrePrompt(ctx *PromptContext) error
+}
+
+// PreExecuteHook - Validate/modify before action execution
+type PreExecuteHook interface {
+    PreExecute(ctx *PreExecuteContext, done func(PreExecuteResult))
+}
+
+// PostExecuteHook - Post-execution logging/state updates
+type PostExecuteHook interface {
+    PostExecute(ctx *PostExecuteContext)
+}
+
+// DatabaseEventHook - React to database operations
+type DatabaseEventHook interface {
+    OnDatabaseEvent(event *DatabaseEvent)
+}
+```
+
+#### Database Event Types
+
+The `DatabaseEventHook` receives events for:
+
+| Event Type | Description |
+|------------|-------------|
+| `node.created`, `node.updated`, `node.deleted`, `node.read` | Node operations |
+| `relationship.created`, `relationship.updated`, `relationship.deleted` | Relationship operations |
+| `query.executed`, `query.failed` | Query execution |
+| `index.created`, `index.dropped` | Index operations |
+| `transaction.commit`, `transaction.rollback` | Transaction events |
+| `database.started`, `database.shutdown` | System events |
+| `backup.started`, `backup.completed` | Backup events |
+
+#### Autonomous Action Invocation
+
+Plugins can autonomously trigger SLM actions via `HeimdallInvoker`:
+
+```go
+type HeimdallInvoker interface {
+    // Synchronous action invocation
+    InvokeAction(action string, params map[string]interface{}) (*ActionResult, error)
+    
+    // Send natural language prompt to SLM
+    SendPrompt(prompt string) (*ActionResult, error)
+    
+    // Async versions (fire-and-forget)
+    InvokeActionAsync(action string, params map[string]interface{})
+    SendPromptAsync(prompt string)
+}
+```
+
+**Example: Autonomous Anomaly Detection**
+
+```go
+func (p *SecurityPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
+    if event.Type == heimdall.EventQueryFailed {
+        p.failureCount++
+        if p.failureCount >= 5 && p.ctx.Heimdall != nil {
+            // Trigger analysis after threshold exceeded
+            p.ctx.Heimdall.InvokeActionAsync("heimdall.anomaly.detect", map[string]interface{}{
+                "trigger": "autonomous",
+                "reason":  "query_failures",
+            })
+        }
+    }
+}
+```
+
+#### Inline Notification System
+
+Notifications from lifecycle hooks are queued and sent inline with streaming responses:
+
+```go
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    ctx.NotifyInfo("Processing", "Analyzing your request...")
+    return nil
+}
+```
+
+Notification flow:
+1. PrePrompt notifications → sent before AI response
+2. PreExecute notifications → sent after AI response, before action result
+3. PostExecute notifications → sent after action result
+
+UI displays notifications with `[Heimdall]:` prefix and distinct styling.
+
+#### Request Cancellation
+
+Any lifecycle hook can cancel a request:
+
+```go
+func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
+    if !p.isAuthorized(ctx.UserMessage) {
+        ctx.Cancel("Unauthorized request", "PrePrompt:myplugin")
+        return nil
+    }
+    return nil
+}
+```
+
+Cancellation:
+- Stops the request immediately
+- Sends cancellation message to user via Bifrost
+- Logs reason and cancelling hook
+
+### Data Flow Architecture
+
+```
+User Message → Bifrost → PromptContext
+                              │
+                    ┌─────────▼─────────┐
+                    │  PrePrompt Hooks  │ → Notifications queued
+                    │  (can cancel)     │
+                    └─────────┬─────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │   Heimdall SLM    │ → Generates action JSON
+                    └─────────┬─────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │  PreExecute Hooks │ → Validate/modify params
+                    │  (can cancel)     │
+                    └─────────┬─────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │  Action Execution │ → Plugin handler runs
+                    └─────────┬─────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │ PostExecute Hooks │ → Log, notify, update state
+                    └─────────┬─────────┘
+                              │
+                    ┌─────────▼─────────┐
+                    │ Streaming Response│ → Notifications + result
+                    └───────────────────┘
+```
+
+---

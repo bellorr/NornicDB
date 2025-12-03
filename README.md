@@ -174,6 +174,28 @@ CALL db.index.vector.queryNodes(
 RETURN node.content, score
 ```
 
+### 🤖 Heimdall AI Assistant
+
+Built-in AI that understands your database.
+
+```bash
+# Enable Heimdall
+NORNICDB_HEIMDALL_ENABLED=true ./nornicdb serve
+```
+
+**Natural Language Queries:**
+- "Get the database status"
+- "Show me system metrics"
+- "Run health check"
+
+**Plugin System:**
+- Create custom actions the AI can execute
+- Lifecycle hooks (PrePrompt, PreExecute, PostExecute)
+- Database event monitoring for autonomous actions
+- Inline notifications with proper ordering
+
+See [Heimdall AI Assistant Guide](docs/user-guides/heimdall-ai-assistant.md) and [Plugin Development](docs/user-guides/heimdall-plugins.md).
+
 ### 🧩 APOC Functions
 
 60+ built-in functions for text, math, collections, and more. Plus a plugin system for custom extensions.

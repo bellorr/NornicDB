@@ -3,7 +3,7 @@ import './Bifrost.css';
 
 interface Message {
   id: string;
-  role: 'user' | 'assistant' | 'system';
+  role: 'user' | 'assistant' | 'system' | 'heimdall';
   content: string;
   timestamp: Date;
   streaming?: boolean;
@@ -122,6 +122,10 @@ export const Bifrost: React.FC<BifrostProps> = ({
       abortControllerRef.current?.abort();
     };
   }, [isOpen]);
+
+  // NOTE: Heimdall notifications are now sent inline with streaming responses
+  // No separate EventSource needed - this simplifies the architecture and ensures
+  // proper ordering of notifications with chat content
 
   const checkStatus = async () => {
     try {
@@ -301,9 +305,28 @@ export const Bifrost: React.FC<BifrostProps> = ({
             
             try {
               const parsed = JSON.parse(data);
-              const delta = parsed.choices?.[0]?.delta?.content;
-              if (delta) {
-                fullContent += delta;
+              const delta = parsed.choices?.[0]?.delta;
+              
+              // Check if this is a Heimdall notification (inline with stream)
+              if (delta?.role === 'heimdall' && delta?.content) {
+                // Insert Heimdall message before the current assistant message
+                setMessages(prev => {
+                  const heimdallMsg: Message = {
+                    id: crypto.randomUUID(),
+                    role: 'heimdall',
+                    content: delta.content.trim(),
+                    timestamp: new Date()
+                  };
+                  // Find the streaming assistant message and insert before it
+                  const idx = prev.findIndex(m => m.id === assistantId);
+                  if (idx > 0) {
+                    return [...prev.slice(0, idx), heimdallMsg, ...prev.slice(idx)];
+                  }
+                  return [...prev, heimdallMsg];
+                });
+              } else if (delta?.content) {
+                // Regular assistant content
+                fullContent += delta.content;
                 setMessages(prev => prev.map(m => 
                   m.id === assistantId 
                     ? { ...m, content: fullContent }
@@ -459,7 +482,9 @@ export const Bifrost: React.FC<BifrostProps> = ({
             >
               <div className="bifrost-message-header">
                 <span className="bifrost-message-role">
-                  {message.role === 'user' ? '>' : message.role === 'assistant' ? '◈' : '⚙'}
+                  {message.role === 'user' ? '>' : 
+                   message.role === 'assistant' ? '◈' : 
+                   message.role === 'heimdall' ? '⛊' : '⚙'}
                 </span>
                 <span className="bifrost-message-time">
                   {formatTimestamp(message.timestamp)}

@@ -943,3 +943,285 @@ func TestHandler_ActionExecution(t *testing.T) {
 	// Response should contain the action result message
 	assert.Contains(t, response.Choices[0].Message.Content, "Hello from test action!")
 }
+
+// =============================================================================
+// Lifecycle Hook Tests
+// =============================================================================
+
+func TestPromptContext_BuildFinalPrompt(t *testing.T) {
+	tests := []struct {
+		name     string
+		ctx      *PromptContext
+		contains []string
+	}{
+		{
+			name: "basic_prompt",
+			ctx: &PromptContext{
+				ActionPrompt: "- status: Get status\n",
+				UserMessage:  "What's up?",
+			},
+			contains: []string{
+				"You are Heimdall",
+				"AVAILABLE ACTIONS:",
+				"status: Get status",
+				"Respond with JSON action command only",
+			},
+		},
+		{
+			name: "with_additional_instructions",
+			ctx: &PromptContext{
+				ActionPrompt:           "- status: Get status\n",
+				AdditionalInstructions: "Be concise and helpful.",
+			},
+			contains: []string{
+				"ADDITIONAL CONTEXT:",
+				"Be concise and helpful.",
+			},
+		},
+		{
+			name: "with_examples",
+			ctx: &PromptContext{
+				ActionPrompt: "- status: Get status\n",
+				Examples: []PromptExample{
+					{UserSays: "check status", ActionJSON: `{"action": "status"}`},
+				},
+			},
+			contains: []string{
+				"EXAMPLES:",
+				`User: "check status"`,
+				`{"action": "status"}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := tt.ctx.BuildFinalPrompt()
+			for _, expected := range tt.contains {
+				assert.Contains(t, result, expected)
+			}
+		})
+	}
+}
+
+func TestPromptContext_ActionPromptImmutable(t *testing.T) {
+	// Verify ActionPrompt is always first in the final prompt
+	ctx := &PromptContext{
+		ActionPrompt:           "- test_action: Test\n",
+		AdditionalInstructions: "Additional context here",
+		Examples: []PromptExample{
+			{UserSays: "test", ActionJSON: `{"action": "test"}`},
+		},
+	}
+
+	result := ctx.BuildFinalPrompt()
+
+	// Find positions
+	actionPos := strings.Index(result, "AVAILABLE ACTIONS:")
+	contextPos := strings.Index(result, "ADDITIONAL CONTEXT:")
+	examplesPos := strings.Index(result, "EXAMPLES:")
+
+	// ActionPrompt section should come first (after header)
+	assert.Less(t, actionPos, contextPos, "ActionPrompt should come before AdditionalContext")
+	assert.Less(t, actionPos, examplesPos, "ActionPrompt should come before Examples")
+}
+
+func TestDefaultExamples(t *testing.T) {
+	examples := defaultExamples()
+
+	assert.Greater(t, len(examples), 0, "Should have default examples")
+
+	// Check structure
+	for _, ex := range examples {
+		assert.NotEmpty(t, ex.UserSays)
+		assert.NotEmpty(t, ex.ActionJSON)
+		assert.Contains(t, ex.ActionJSON, "action")
+	}
+}
+
+func TestRequestLifecycle_Structure(t *testing.T) {
+	lifecycle := &requestLifecycle{
+		promptCtx: &PromptContext{
+			RequestID:    "test-123",
+			ActionPrompt: "- test: Test action\n",
+			PluginData:   map[string]interface{}{"key": "value"},
+		},
+		requestID: "test-123",
+		database:  &mockDBReader{},
+		metrics:   &mockMetricsReader{},
+	}
+
+	assert.Equal(t, "test-123", lifecycle.requestID)
+	assert.NotNil(t, lifecycle.promptCtx)
+	assert.NotNil(t, lifecycle.database)
+	assert.NotNil(t, lifecycle.metrics)
+}
+
+func TestPreExecuteContext_Fields(t *testing.T) {
+	ctx := &PreExecuteContext{
+		RequestID:   "req-456",
+		Action:      "heimdall.watcher.status",
+		Params:      map[string]interface{}{"param1": "value1"},
+		RawResponse: `{"action": "heimdall.watcher.status"}`,
+		PluginData:  map[string]interface{}{"from_preprompt": true},
+		Database:    &mockDBReader{},
+		Metrics:     &mockMetricsReader{},
+	}
+
+	assert.Equal(t, "req-456", ctx.RequestID)
+	assert.Equal(t, "heimdall.watcher.status", ctx.Action)
+	assert.Equal(t, "value1", ctx.Params["param1"])
+	assert.NotNil(t, ctx.Database)
+	assert.NotNil(t, ctx.Metrics)
+}
+
+func TestPreExecuteResult_Continue(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   PreExecuteResult
+		expected bool
+	}{
+		{
+			name:     "default_continue",
+			result:   PreExecuteResult{Continue: true},
+			expected: true,
+		},
+		{
+			name:     "abort_execution",
+			result:   PreExecuteResult{Continue: false, AbortMessage: "Validation failed"},
+			expected: false,
+		},
+		{
+			name: "modified_params",
+			result: PreExecuteResult{
+				Continue:       true,
+				ModifiedParams: map[string]interface{}{"new_param": "new_value"},
+			},
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, tt.result.Continue)
+		})
+	}
+}
+
+func TestPostExecuteContext_Duration(t *testing.T) {
+	ctx := &PostExecuteContext{
+		RequestID: "req-789",
+		Action:    "heimdall.watcher.query",
+		Params:    map[string]interface{}{"cypher": "MATCH (n) RETURN n"},
+		Result: &ActionResult{
+			Success: true,
+			Message: "Query completed",
+			Data:    map[string]interface{}{"count": 42},
+		},
+		Duration:   100 * 1000000, // 100ms
+		PluginData: map[string]interface{}{},
+	}
+
+	assert.Equal(t, "req-789", ctx.RequestID)
+	assert.Equal(t, "heimdall.watcher.query", ctx.Action)
+	assert.True(t, ctx.Result.Success)
+}
+
+func TestHandler_LifecycleFlow_NonStreaming(t *testing.T) {
+	// Register a test action
+	actionExecuted := false
+	RegisterBuiltinAction(ActionFunc{
+		Name:        "heimdall.test.lifecycle",
+		Description: "Test lifecycle action",
+		Category:    "test",
+		Handler: func(ctx ActionContext) (*ActionResult, error) {
+			actionExecuted = true
+			return &ActionResult{
+				Success: true,
+				Message: "Lifecycle test complete",
+			}, nil
+		},
+	})
+	defer func() {
+		m := GetSubsystemManager()
+		m.mu.Lock()
+		delete(m.actions, "heimdall.test.lifecycle")
+		m.mu.Unlock()
+	}()
+
+	mockGen := NewMockGenerator("/test/model.gguf")
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	// Mock generator returns action
+	mockGen.generateFunc = func(ctx context.Context, prompt string, params GenerateParams) (string, error) {
+		return `{"action": "heimdall.test.lifecycle", "params": {}}`, nil
+	}
+
+	chatReq := ChatRequest{
+		Messages: []ChatMessage{
+			{Role: "user", Content: "run lifecycle test"},
+		},
+		Stream: false,
+	}
+	body, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/bifrost/chat/completions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+	assert.True(t, actionExecuted, "Action should have been executed")
+}
+
+func TestHandler_LifecycleFlow_Streaming(t *testing.T) {
+	// Register a test action
+	actionExecuted := false
+	RegisterBuiltinAction(ActionFunc{
+		Name:        "heimdall.test.stream_lifecycle",
+		Description: "Test streaming lifecycle",
+		Category:    "test",
+		Handler: func(ctx ActionContext) (*ActionResult, error) {
+			actionExecuted = true
+			return &ActionResult{
+				Success: true,
+				Message: "Stream lifecycle complete",
+			}, nil
+		},
+	})
+	defer func() {
+		m := GetSubsystemManager()
+		m.mu.Lock()
+		delete(m.actions, "heimdall.test.stream_lifecycle")
+		m.mu.Unlock()
+	}()
+
+	mockGen := NewMockGenerator("/test/model.gguf")
+	manager := newTestManager(mockGen)
+	handler := testHandler(manager, manager.config)
+
+	// Mock generator streams action
+	mockGen.streamFunc = func(ctx context.Context, prompt string, params GenerateParams, callback func(string) error) error {
+		callback(`{"action": `)
+		callback(`"heimdall.test.stream_lifecycle", `)
+		callback(`"params": {}}`)
+		return nil
+	}
+
+	chatReq := ChatRequest{
+		Messages: []ChatMessage{
+			{Role: "user", Content: "run stream test"},
+		},
+		Stream: true,
+	}
+	body, _ := json.Marshal(chatReq)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/bifrost/chat/completions", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Result().StatusCode)
+	assert.True(t, actionExecuted, "Action should have been executed in streaming mode")
+}
