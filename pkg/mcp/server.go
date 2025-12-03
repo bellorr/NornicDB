@@ -524,7 +524,7 @@ func (s *Server) handleRecall(ctx context.Context, args map[string]interface{}) 
 					Type:       getLabelType(node.Labels),
 					Title:      getStringProp(node.Properties, "title"),
 					Content:    getStringProp(node.Properties, "content"),
-					Properties: node.Properties,
+					Properties: sanitizePropertiesForLLM(node.Properties),
 				}},
 				Count: 1,
 			}, nil
@@ -565,7 +565,7 @@ func (s *Server) handleRecall(ctx context.Context, args map[string]interface{}) 
 				Type:       getLabelType(n.Labels),
 				Title:      getStringProp(n.Properties, "title"),
 				Content:    getStringProp(n.Properties, "content"),
-				Properties: n.Properties,
+				Properties: sanitizePropertiesForLLM(n.Properties),
 			})
 
 			if len(nodes) >= limit {
@@ -622,7 +622,7 @@ func (s *Server) handleDiscover(ctx context.Context, args map[string]interface{}
 							Title:          getStringProp(r.Node.Properties, "title"),
 							ContentPreview: preview,
 							Similarity:     r.Score,
-							Properties:     r.Node.Properties,
+							Properties:     sanitizePropertiesForLLM(r.Node.Properties),
 						})
 					}
 					return DiscoverResult{
@@ -647,7 +647,7 @@ func (s *Server) handleDiscover(ctx context.Context, args map[string]interface{}
 					Title:          getStringProp(r.Node.Properties, "title"),
 					ContentPreview: preview,
 					Similarity:     r.Score,
-					Properties:     r.Node.Properties,
+					Properties:     sanitizePropertiesForLLM(r.Node.Properties),
 				})
 			}
 			return DiscoverResult{
@@ -794,7 +794,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 					Type:       "Task",
 					Title:      getStringProp(updatedNode.Properties, "title"),
 					Content:    getStringProp(updatedNode.Properties, "description"),
-					Properties: updatedNode.Properties,
+					Properties: sanitizePropertiesForLLM(updatedNode.Properties),
 				},
 			}, nil
 		}
@@ -1222,6 +1222,41 @@ func truncateString(s string, maxLen int) string {
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."
+}
+
+// sanitizePropertiesForLLM removes large fields like embeddings from properties
+// before returning them to LLMs. Embeddings can be 1024+ floats which wastes
+// tokens and provides no value to the LLM.
+func sanitizePropertiesForLLM(props map[string]interface{}) map[string]interface{} {
+	if props == nil {
+		return nil
+	}
+	// Create a filtered copy
+	filtered := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		// Skip embedding-related fields
+		switch k {
+		case "embedding", "embedding_model", "embedding_dimensions",
+			"has_embedding", "embedded_at":
+			continue
+		}
+		// Skip any []float32 or []float64 arrays (likely embeddings)
+		switch v.(type) {
+		case []float32, []float64, []interface{}:
+			// Check if it's a large numeric array (likely embedding)
+			if arr, ok := v.([]interface{}); ok && len(arr) > 100 {
+				continue
+			}
+			if arr, ok := v.([]float32); ok && len(arr) > 100 {
+				continue
+			}
+			if arr, ok := v.([]float64); ok && len(arr) > 100 {
+				continue
+			}
+		}
+		filtered[k] = v
+	}
+	return filtered
 }
 
 // generateTitle creates a title from content if none provided

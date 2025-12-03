@@ -522,6 +522,88 @@ func TestCORSMiddleware(t *testing.T) {
 }
 
 // =============================================================================
+// Sanitize Properties Tests
+// =============================================================================
+
+func TestSanitizePropertiesForLLM(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    map[string]interface{}
+		wantKeys []string
+		skipKeys []string
+	}{
+		{
+			name:     "nil input",
+			input:    nil,
+			wantKeys: nil,
+		},
+		{
+			name: "removes embedding fields",
+			input: map[string]interface{}{
+				"title":                "Test",
+				"content":              "Some content",
+				"embedding":            make([]float32, 1024),
+				"embedding_model":      "bge-m3",
+				"embedding_dimensions": 1024,
+				"has_embedding":        true,
+				"embedded_at":          "2024-01-01",
+			},
+			wantKeys: []string{"title", "content"},
+			skipKeys: []string{"embedding", "embedding_model", "embedding_dimensions", "has_embedding", "embedded_at"},
+		},
+		{
+			name: "removes large float arrays",
+			input: map[string]interface{}{
+				"title":     "Test",
+				"bigArray":  make([]float32, 500),
+				"smallTags": []interface{}{"tag1", "tag2"},
+			},
+			wantKeys: []string{"title", "smallTags"},
+			skipKeys: []string{"bigArray"},
+		},
+		{
+			name: "keeps normal properties",
+			input: map[string]interface{}{
+				"title":      "Test Title",
+				"content":    "Some content",
+				"tags":       []interface{}{"a", "b"},
+				"priority":   "high",
+				"count":      42,
+				"is_active":  true,
+			},
+			wantKeys: []string{"title", "content", "tags", "priority", "count", "is_active"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := sanitizePropertiesForLLM(tt.input)
+
+			if tt.input == nil {
+				if result != nil {
+					t.Error("Expected nil result for nil input")
+				}
+				return
+			}
+
+			// Check wanted keys are present
+			for _, key := range tt.wantKeys {
+				if _, ok := result[key]; !ok {
+					t.Errorf("Expected key %q to be present", key)
+				}
+			}
+
+			// Check skipped keys are absent
+			for _, key := range tt.skipKeys {
+				if _, ok := result[key]; ok {
+					t.Errorf("Expected key %q to be filtered out", key)
+				}
+			}
+		})
+	}
+}
+
+// =============================================================================
 // Store with Embedding Tests
 // =============================================================================
 
