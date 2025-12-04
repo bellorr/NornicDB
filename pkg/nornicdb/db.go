@@ -1111,10 +1111,25 @@ func (db *DB) EmbedExisting(ctx context.Context) (int, error) {
 // ClearAllEmbeddings removes embeddings from all nodes, allowing them to be regenerated.
 // This is useful for re-embedding with a new model or fixing corrupted embeddings.
 func (db *DB) ClearAllEmbeddings() (int, error) {
-	// Check if storage supports ClearAllEmbeddings
-	if badgerStorage, ok := db.storage.(*storage.BadgerEngine); ok {
+	// Unwrap storage layers to find the BadgerEngine
+	// The storage chain can be: AsyncEngine -> WALEngine -> BadgerEngine
+	engine := db.storage
+
+	// Unwrap AsyncEngine if present
+	if asyncEngine, ok := engine.(*storage.AsyncEngine); ok {
+		engine = asyncEngine.GetEngine()
+	}
+
+	// Unwrap WALEngine if present
+	if walEngine, ok := engine.(*storage.WALEngine); ok {
+		engine = walEngine.GetEngine()
+	}
+
+	// Now check if we have a BadgerEngine
+	if badgerStorage, ok := engine.(*storage.BadgerEngine); ok {
 		return badgerStorage.ClearAllEmbeddings()
 	}
+
 	return 0, fmt.Errorf("storage engine does not support ClearAllEmbeddings")
 }
 
@@ -1528,6 +1543,11 @@ func (db *DB) Forget(ctx context.Context, id string) error {
 	// Check if memory exists
 	if _, err := db.storage.GetNode(storage.NodeID(id)); err != nil {
 		return ErrNotFound
+	}
+
+	// Remove from search indexes first (before storage deletion)
+	if db.searchService != nil {
+		_ = db.searchService.RemoveNode(storage.NodeID(id))
 	}
 
 	// Delete the node (storage should handle edge cleanup)
@@ -2137,6 +2157,11 @@ func (db *DB) DeleteNode(ctx context.Context, id string) error {
 
 	if db.closed {
 		return ErrClosed
+	}
+
+	// Remove from search indexes first (before storage deletion)
+	if db.searchService != nil {
+		_ = db.searchService.RemoveNode(storage.NodeID(id))
 	}
 
 	return db.storage.DeleteNode(storage.NodeID(id))
@@ -2779,6 +2804,10 @@ func (db *DB) DeleteUserData(ctx context.Context, userID string) error {
 
 	// Now delete the collected nodes
 	for _, id := range toDelete {
+		// Remove from search indexes first (before storage deletion)
+		if db.searchService != nil {
+			_ = db.searchService.RemoveNode(id)
+		}
 		if err := db.storage.DeleteNode(id); err != nil {
 			return err
 		}

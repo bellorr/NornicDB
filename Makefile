@@ -30,14 +30,26 @@ else
     DOCKER_BUILD_FLAGS :=
 endif
 
-# Detect architecture: arm64 (Apple Silicon) or x86_64/amd64 (Intel/AMD)
-UNAME_M := $(shell uname -m)
-ifeq ($(UNAME_M),arm64)
-    HOST_ARCH := arm64
-else ifeq ($(UNAME_M),aarch64)
-    HOST_ARCH := arm64
+# Detect OS first (Windows doesn't have uname)
+ifeq ($(OS),Windows_NT)
+    HOST_OS := windows
+    # Windows is always amd64 for our purposes (or override with HOST_ARCH=arm64)
+    HOST_ARCH ?= amd64
+    # Windows binaries need .exe extension
+    BIN_EXT := .exe
 else
-    HOST_ARCH := amd64
+    HOST_OS := $(shell uname -s | tr '[:upper:]' '[:lower:]')
+    # Detect architecture: arm64 (Apple Silicon) or x86_64/amd64 (Intel/AMD)
+    UNAME_M := $(shell uname -m)
+    ifeq ($(UNAME_M),arm64)
+        HOST_ARCH := arm64
+    else ifeq ($(UNAME_M),aarch64)
+        HOST_ARCH := arm64
+    else
+        HOST_ARCH := amd64
+    endif
+    # Unix binaries have no extension
+    BIN_EXT :=
 endif
 
 # Image names: nornicdb-{architecture}[-{feature}]:latest
@@ -286,7 +298,7 @@ build: build-binary build-plugins-if-supported
 	@echo "✓ Build complete: bin/nornicdb + plugins (if supported)"
 
 build-binary:
-	go build -o bin/nornicdb ./cmd/nornicdb
+	go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 
 # Build plugins only if platform supports Go plugins (Linux/macOS, not Windows)
 build-plugins-if-supported:
@@ -297,14 +309,14 @@ else
 endif
 
 build-localllm: build-plugins-if-supported
-	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb ./cmd/nornicdb
+	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 
 # Build without UI (headless mode)
 build-headless: build-plugins-if-supported
-	go build -tags noui -o bin/nornicdb-headless ./cmd/nornicdb
+	go build -tags noui -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 
 build-localllm-headless: build-plugins-if-supported
-	CGO_ENABLED=1 go build -tags "localllm noui" -o bin/nornicdb-headless ./cmd/nornicdb
+	CGO_ENABLED=1 go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 
 test:
 	go test ./...
