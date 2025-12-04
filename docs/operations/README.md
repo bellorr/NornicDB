@@ -6,6 +6,7 @@
 
 - **[Deployment](deployment.md)** - Production deployment guide
 - **[Docker](docker.md)** - Docker and Kubernetes
+- **[Low Memory Mode](low-memory-mode.md)** - Run NornicDB with minimal RAM (Docker, Pi, VMs)
 - **[Monitoring](monitoring.md)** - Metrics and alerting
 - **[Backup & Restore](backup-restore.md)** - Data protection
 - **[WAL Compaction](wal-compaction.md)** - Automatic disk space management

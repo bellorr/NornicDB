@@ -120,6 +120,7 @@ Features:
 	serveCmd.Flags().String("memory-limit", "", "Memory limit (e.g., 2GB, 512MB, 0 for unlimited)")
 	serveCmd.Flags().Int("gc-percent", 100, "GC aggressiveness (100=default, lower=more aggressive)")
 	serveCmd.Flags().Bool("pool-enabled", true, "Enable object pooling for reduced allocations")
+	serveCmd.Flags().Bool("low-memory", getEnvBool("NORNICDB_LOW_MEMORY", false), "Use minimal RAM (for resource constrained environments)")
 	serveCmd.Flags().Int("query-cache-size", 1000, "Query plan cache size (0 to disable)")
 	serveCmd.Flags().String("query-cache-ttl", "5m", "Query plan cache TTL")
 	// Logging flags
@@ -310,6 +311,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	dbConfig.ParallelEnabled = parallelEnabled
 	dbConfig.ParallelMaxWorkers = parallelWorkers
 	dbConfig.ParallelMinBatchSize = parallelBatchSize
+
+	// Memory mode
+	lowMemory, _ := cmd.Flags().GetBool("low-memory")
+	dbConfig.LowMemoryMode = lowMemory
 
 	// Open database
 	fmt.Println("📂 Opening database...")

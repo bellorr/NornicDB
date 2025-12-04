@@ -337,6 +337,9 @@ type Config struct {
 	// Server
 	BoltPort int `yaml:"bolt_port"`
 	HTTPPort int `yaml:"http_port"`
+
+	// Memory management
+	LowMemoryMode bool `yaml:"low_memory_mode"` // Use minimal RAM (for containers with limited memory)
 }
 
 // DefaultConfig returns sensible default configuration for NornicDB.
@@ -731,12 +734,17 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Initialize storage - use BadgerEngine for persistence, MemoryEngine for testing
 	if dataDir != "" {
-		// Use high-performance BadgerDB settings by default
-		// This uses more RAM but provides much faster read/write performance
-		badgerEngine, err := storage.NewBadgerEngineWithOptions(storage.BadgerOptions{
+		// Configure BadgerDB based on memory mode
+		// HighPerformance uses ~1GB RAM, LowMemory uses ~50MB
+		badgerOpts := storage.BadgerOptions{
 			DataDir:         dataDir,
-			HighPerformance: true,
-		})
+			HighPerformance: !config.LowMemoryMode,
+			LowMemory:       config.LowMemoryMode,
+		}
+		if config.LowMemoryMode {
+			fmt.Println("⚡ Using low-memory storage mode (reduced RAM usage)")
+		}
+		badgerEngine, err := storage.NewBadgerEngineWithOptions(badgerOpts)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open persistent storage: %w", err)
 		}
@@ -744,6 +752,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		// Initialize WAL for durability (uses batch sync mode by default for better performance)
 		walConfig := storage.DefaultWALConfig()
 		walConfig.Dir = dataDir + "/wal"
+		walConfig.SnapshotInterval = 5 * time.Minute // Compact WAL every 5 minutes (not 1 hour!)
 		wal, err := storage.NewWAL(walConfig.Dir, walConfig)
 		if err != nil {
 			badgerEngine.Close()
@@ -753,6 +762,15 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 		// Wrap storage with WAL for durability
 		walEngine := storage.NewWALEngine(badgerEngine, wal)
+
+		// Enable auto-compaction to prevent unbounded WAL growth
+		// This creates periodic snapshots and truncates the WAL
+		snapshotDir := dataDir + "/snapshots"
+		if err := walEngine.EnableAutoCompaction(snapshotDir); err != nil {
+			fmt.Printf("⚠️  WAL auto-compaction failed to enable: %v\n", err)
+		} else {
+			fmt.Printf("🗜️  WAL auto-compaction enabled (snapshot interval: %v)\n", walConfig.SnapshotInterval)
+		}
 
 		// Optionally wrap with AsyncEngine for faster writes (eventual consistency)
 		if config.AsyncWritesEnabled {

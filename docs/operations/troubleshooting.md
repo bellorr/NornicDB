@@ -154,15 +154,22 @@ htop
 ### High Memory Usage
 
 **Symptoms:**
-- OOM errors
+- OOM errors (exit code 137 in Docker)
+- Container restarts repeatedly
 - Slow performance
 
 **Solutions:**
 
-1. **Set memory limit:**
+1. **Enable Low Memory Mode (recommended):**
    ```bash
-   nornicdb serve --memory-limit=2GB
+   # Reduces BadgerDB RAM from ~1GB to ~50MB
+   nornicdb serve --low-memory
+   
+   # Or via environment variable
+   NORNICDB_LOW_MEMORY=true nornicdb serve
    ```
+   
+   See **[Low Memory Mode Guide](low-memory-mode.md)** for details.
 
 2. **Increase GC frequency:**
    ```bash
@@ -174,12 +181,21 @@ htop
    nornicdb serve --pool-enabled=true
    ```
 
-4. **Docker memory limit:**
+4. **Docker: Increase memory limit:**
    ```yaml
    deploy:
      resources:
        limits:
          memory: 4G
+   ```
+
+5. **Docker: Check for WAL bloat:**
+   ```bash
+   # Large WAL files can cause OOM on startup
+   du -sh /path/to/data/wal/
+   
+   # If >1GB, delete it (data is safe in BadgerDB)
+   rm /path/to/data/wal/wal.log
    ```
 
 ### High CPU Usage

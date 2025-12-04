@@ -42,6 +42,12 @@ NornicDB v1.0.0 marks the first production-ready release of the cognitive graph 
   - `EnableAutoCompaction()` - Background snapshot + truncation every 5 minutes
   - 99%+ disk savings vs unbounded WAL growth
   - 300x faster crash recovery with recent snapshots
+- **Low Memory Mode** - Run NornicDB in resource-constrained environments
+  - `NORNICDB_LOW_MEMORY=true` environment variable
+  - `--low-memory` CLI flag
+  - Reduces BadgerDB RAM from ~1GB to ~50MB (50-70% reduction)
+  - Essential for Docker containers with default 2GB limits
+  - [Low Memory Mode Guide](operations/low-memory-mode.md)
 - **Storage & WAL Durability Improvements** - Critical fixes for data integrity
   - **Proper CRC32 checksums** - Replaced weak XOR-based checksum with CRC32-C (hardware-accelerated)
   - **Atomic WAL writes** - Length-prefixed binary format detects partial writes on crash recovery

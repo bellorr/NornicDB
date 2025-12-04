@@ -158,7 +158,8 @@ volumes:
 | `NORNICDB_AUTH_USERNAME` | `admin` | Admin username |
 | `NORNICDB_AUTH_PASSWORD` | - | Admin password (required if auth enabled) |
 | `NORNICDB_GPU_ENABLED` | `true` | Enable GPU acceleration |
-| `NORNICDB_EMBEDDING_PROVIDER` | `ollama` | Embedding provider (ollama/openai) |
+| `NORNICDB_LOW_MEMORY` | `false` | Enable low memory mode (~50MB vs ~1GB RAM) |
+| `NORNICDB_EMBEDDING_PROVIDER` | `ollama` | Embedding provider (ollama/openai/local) |
 | `NORNICDB_EMBEDDING_URL` | `http://localhost:11434` | Ollama URL |
 | `NORNICDB_EMBEDDING_MODEL` | `mxbai-embed-large` | Embedding model |
 | `NORNICDB_OPENAI_API_KEY` | - | OpenAI API key (if using OpenAI) |
@@ -385,6 +386,20 @@ docker run --gpus all ...
 
 ### Out of Memory
 
+NornicDB's default high-performance mode uses ~1GB RAM. Combined with embedding models, this can exceed Docker's default 2GB limit.
+
+**Option 1: Enable Low Memory Mode (recommended)**
+
+```yaml
+services:
+  nornicdb:
+    environment:
+      - NORNICDB_LOW_MEMORY=true  # Reduces RAM to ~50MB
+      - GOGC=100
+```
+
+**Option 2: Increase Memory Limit**
+
 ```bash
 # Increase memory limit
 docker update --memory 8g nornicdb
@@ -392,8 +407,10 @@ docker update --memory 8g nornicdb
 # Or in docker-compose
 services:
   nornicdb:
-    mem_limit: 8g
+    mem_limit: 4g
 ```
+
+See **[Low Memory Mode Guide](../operations/low-memory-mode.md)** for details.
 
 ### Data Corruption
 
