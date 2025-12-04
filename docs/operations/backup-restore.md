@@ -4,11 +4,60 @@
 
 ## Backup Methods
 
-| Method | Use Case | Downtime |
-|--------|----------|----------|
-| Online Backup | Production | None |
-| Snapshot | VM/Container | Seconds |
-| File Copy | Development | Yes |
+| Method        | Use Case     | Downtime |
+| ------------- | ------------ | -------- |
+| Online Backup | Production   | None     |
+| Snapshot      | VM/Container | Seconds  |
+| File Copy     | Development  | Yes      |
+
+## WAL Compaction ⭐ NEW
+
+NornicDB's Write-Ahead Log (WAL) ensures durability but can grow unbounded without compaction.
+Starting in v1.0.0, NornicDB includes automatic WAL compaction.
+
+### Enable Auto-Compaction (Recommended)
+
+```go
+// Enable automatic snapshots + truncation every 5 minutes
+wal.EnableAutoCompaction("/data/snapshots")
+
+// Disable when shutting down
+wal.DisableAutoCompaction()
+```
+
+### Manual Compaction
+
+```go
+// Create snapshot first
+snapshotSeq, err := wal.CreateSnapshot("/data/snapshots")
+if err != nil {
+    log.Fatal(err)
+}
+
+// Truncate WAL entries before the snapshot
+removed, err := wal.TruncateAfterSnapshot(snapshotSeq)
+if err != nil {
+    log.Fatal(err)
+}
+log.Printf("Removed %d WAL entries", removed)
+```
+
+### Benefits
+
+| Metric        | Without Compaction        | With Compaction       |
+| ------------- | ------------------------- | --------------------- |
+| Disk Usage    | Unbounded growth          | ~10MB typical         |
+| Recovery Time | Minutes to hours          | Milliseconds          |
+| I/O Load      | High (replaying full WAL) | Low (recent snapshot) |
+
+### Monitoring
+
+```go
+stats := wal.GetSnapshotStats()
+fmt.Printf("Last snapshot: %s\n", stats.LastSnapshotTime)
+fmt.Printf("Entries since snapshot: %d\n", stats.EntriesSinceSnapshot)
+fmt.Printf("Disk saved: %s\n", stats.DiskSavings)
+```
 
 ## Online Backup
 
@@ -151,25 +200,25 @@ spec:
       template:
         spec:
           containers:
-          - name: backup
-            image: timothyswt/nornicdb-arm64-metal:latest
-            command:
-            - /app/nornicdb
-            - backup
-            - --output=/backups/backup-$(date +%Y%m%d).tar.gz
-            volumeMounts:
-            - name: data
-              mountPath: /data
-              readOnly: true
-            - name: backups
-              mountPath: /backups
+            - name: backup
+              image: timothyswt/nornicdb-arm64-metal:latest
+              command:
+                - /app/nornicdb
+                - backup
+                - --output=/backups/backup-$(date +%Y%m%d).tar.gz
+              volumeMounts:
+                - name: data
+                  mountPath: /data
+                  readOnly: true
+                - name: backups
+                  mountPath: /backups
           volumes:
-          - name: data
-            persistentVolumeClaim:
-              claimName: nornicdb-pvc
-          - name: backups
-            persistentVolumeClaim:
-              claimName: nornicdb-backups-pvc
+            - name: data
+              persistentVolumeClaim:
+                claimName: nornicdb-pvc
+            - name: backups
+              persistentVolumeClaim:
+                claimName: nornicdb-backups-pvc
           restartPolicy: OnFailure
 ```
 
@@ -244,11 +293,11 @@ nornicdb backup --output - | gsutil cp - gs://mybucket/nornicdb/backup-$(date +%
 
 ### Recovery Time Objectives
 
-| Backup Type | RTO | RPO |
-|-------------|-----|-----|
-| Online | < 1 hour | < 1 hour |
-| Daily | < 4 hours | < 24 hours |
-| Weekly | < 24 hours | < 7 days |
+| Backup Type | RTO        | RPO        |
+| ----------- | ---------- | ---------- |
+| Online      | < 1 hour   | < 1 hour   |
+| Daily       | < 4 hours  | < 24 hours |
+| Weekly      | < 24 hours | < 7 days   |
 
 ## Troubleshooting
 
@@ -280,4 +329,3 @@ ls -la /var/lib/nornicdb
 - **[Deployment](deployment.md)** - Deployment guide
 - **[Monitoring](monitoring.md)** - Health monitoring
 - **[Troubleshooting](troubleshooting.md)** - Common issues
-

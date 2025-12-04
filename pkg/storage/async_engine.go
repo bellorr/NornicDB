@@ -12,6 +12,7 @@
 package storage
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -100,19 +101,56 @@ func (ae *AsyncEngine) flushLoop() {
 	}
 }
 
+// FlushResult tracks the outcome of a flush operation for observability.
+type FlushResult struct {
+	NodesWritten  int
+	NodesFailed   int
+	EdgesWritten  int
+	EdgesFailed   int
+	NodesDeleted  int
+	EdgesDeleted  int
+	DeletesFailed int
+	FailedNodeIDs []NodeID // IDs that failed - still in cache for retry
+	FailedEdgeIDs []EdgeID // IDs that failed - still in cache for retry
+}
+
+// HasErrors returns true if any flush operations failed.
+func (r FlushResult) HasErrors() bool {
+	return r.NodesFailed > 0 || r.EdgesFailed > 0 || r.DeletesFailed > 0
+}
+
 // Flush writes all pending changes to the underlying engine.
 // Uses batched operations for better performance - all deletes in one transaction.
+//
+// CRITICAL FIX: Failed items are NOT removed from cache - they will be retried
+// on the next flush. This prevents silent data loss.
 //
 // Design: Snapshot caches, clear them, UNLOCK, then write to engine.
 // Reads during write see engine data (consistent since cache is empty).
 // This avoids blocking reads during I/O which kills Mac M-series performance.
 func (ae *AsyncEngine) Flush() error {
+	result := ae.FlushWithResult()
+	if result.HasErrors() {
+		return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed",
+			result.NodesFailed, result.EdgesFailed, result.DeletesFailed)
+	}
+	return nil
+}
+
+// FlushWithResult writes pending changes and returns detailed results.
+// Use this for programmatic access to flush statistics.
+func (ae *AsyncEngine) FlushWithResult() FlushResult {
+	result := FlushResult{
+		FailedNodeIDs: make([]NodeID, 0),
+		FailedEdgeIDs: make([]EdgeID, 0),
+	}
+
 	ae.mu.Lock()
 
 	// Nothing to flush
 	if len(ae.nodeCache) == 0 && len(ae.edgeCache) == 0 && len(ae.deleteNodes) == 0 && len(ae.deleteEdges) == 0 {
 		ae.mu.Unlock()
-		return nil
+		return result
 	}
 
 	ae.totalFlushes++
@@ -137,20 +175,57 @@ func (ae *AsyncEngine) Flush() error {
 
 	ae.mu.Unlock()
 
+	// Track successful operations
+	successfulNodeWrites := make(map[NodeID]bool)
+	successfulEdgeWrites := make(map[EdgeID]bool)
+	successfulNodeDeletes := make(map[NodeID]bool)
+	successfulEdgeDeletes := make(map[EdgeID]bool)
+
 	// Apply bulk deletes first
 	if len(nodesToDelete) > 0 {
 		nodeIDs := make([]NodeID, 0, len(nodesToDelete))
 		for id := range nodesToDelete {
 			nodeIDs = append(nodeIDs, id)
 		}
-		ae.engine.BulkDeleteNodes(nodeIDs)
+		if err := ae.engine.BulkDeleteNodes(nodeIDs); err != nil {
+			// Bulk failed - try individual deletes
+			for _, id := range nodeIDs {
+				if err := ae.engine.DeleteNode(id); err != nil {
+					result.DeletesFailed++
+				} else {
+					successfulNodeDeletes[id] = true
+					result.NodesDeleted++
+				}
+			}
+		} else {
+			for _, id := range nodeIDs {
+				successfulNodeDeletes[id] = true
+			}
+			result.NodesDeleted = len(nodeIDs)
+		}
 	}
+
 	if len(edgesToDelete) > 0 {
 		edgeIDs := make([]EdgeID, 0, len(edgesToDelete))
 		for id := range edgesToDelete {
 			edgeIDs = append(edgeIDs, id)
 		}
-		ae.engine.BulkDeleteEdges(edgeIDs)
+		if err := ae.engine.BulkDeleteEdges(edgeIDs); err != nil {
+			// Bulk failed - try individual deletes
+			for _, id := range edgeIDs {
+				if err := ae.engine.DeleteEdge(id); err != nil {
+					result.DeletesFailed++
+				} else {
+					successfulEdgeDeletes[id] = true
+					result.EdgesDeleted++
+				}
+			}
+		} else {
+			for _, id := range edgeIDs {
+				successfulEdgeDeletes[id] = true
+			}
+			result.EdgesDeleted = len(edgeIDs)
+		}
 	}
 
 	// Apply creates/updates using UpdateNode (upsert) for each node
@@ -160,13 +235,17 @@ func (ae *AsyncEngine) Flush() error {
 			if !nodesToDelete[node.ID] {
 				// UpdateNode now has upsert behavior - creates if not exists, updates if exists
 				if err := ae.engine.UpdateNode(node); err != nil {
-					// Log but don't fail the entire flush
-					// This allows partial flushes to succeed
-					continue
+					// CRITICAL FIX: Track failed node - DON'T remove from cache
+					result.NodesFailed++
+					result.FailedNodeIDs = append(result.FailedNodeIDs, node.ID)
+				} else {
+					successfulNodeWrites[node.ID] = true
+					result.NodesWritten++
 				}
 			}
 		}
 	}
+
 	if len(edgesToWrite) > 0 {
 		edges := make([]*Edge, 0, len(edgesToWrite))
 		for _, edge := range edgesToWrite {
@@ -175,35 +254,58 @@ func (ae *AsyncEngine) Flush() error {
 			}
 		}
 		if len(edges) > 0 {
-			ae.engine.BulkCreateEdges(edges)
+			if err := ae.engine.BulkCreateEdges(edges); err != nil {
+				// Bulk failed - try individual creates
+				for _, edge := range edges {
+					if err := ae.engine.CreateEdge(edge); err != nil {
+						// Try update if create fails (might already exist)
+						if err := ae.engine.UpdateEdge(edge); err != nil {
+							result.EdgesFailed++
+							result.FailedEdgeIDs = append(result.FailedEdgeIDs, edge.ID)
+						} else {
+							successfulEdgeWrites[edge.ID] = true
+							result.EdgesWritten++
+						}
+					} else {
+						successfulEdgeWrites[edge.ID] = true
+						result.EdgesWritten++
+					}
+				}
+			} else {
+				for _, edge := range edges {
+					successfulEdgeWrites[edge.ID] = true
+				}
+				result.EdgesWritten = len(edges)
+			}
 		}
 	}
 
-	// Clear flushed items
+	// CRITICAL FIX: Only clear SUCCESSFULLY flushed items
 	ae.mu.Lock()
 	for id := range nodesToWrite {
-		if ae.nodeCache[id] == nodesToWrite[id] {
+		// Only clear if successfully written AND still the same object in cache
+		if successfulNodeWrites[id] && ae.nodeCache[id] == nodesToWrite[id] {
 			delete(ae.nodeCache, id)
 		}
 	}
 	for id := range edgesToWrite {
-		if ae.edgeCache[id] == edgesToWrite[id] {
+		if successfulEdgeWrites[id] && ae.edgeCache[id] == edgesToWrite[id] {
 			delete(ae.edgeCache, id)
 		}
 	}
 	for id := range nodesToDelete {
-		if ae.deleteNodes[id] {
+		if successfulNodeDeletes[id] && ae.deleteNodes[id] {
 			delete(ae.deleteNodes, id)
 		}
 	}
 	for id := range edgesToDelete {
-		if ae.deleteEdges[id] {
+		if successfulEdgeDeletes[id] && ae.deleteEdges[id] {
 			delete(ae.deleteEdges, id)
 		}
 	}
 	ae.mu.Unlock()
 
-	return nil
+	return result
 }
 
 // GetEngine returns the underlying storage engine.
@@ -721,16 +823,49 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 	return count, nil
 }
 
+// Close stops the background flush goroutine and flushes all pending data.
+// Returns an error if the final flush fails or if data remains unflushed.
 func (ae *AsyncEngine) Close() error {
 	// Stop flush loop
 	close(ae.stopChan)
 	ae.flushTicker.Stop()
 	ae.wg.Wait()
 
-	// Final flush
-	ae.Flush()
+	// Final flush with error tracking
+	result := ae.FlushWithResult()
 
-	return ae.engine.Close()
+	// Check for unflushed data after final flush attempt
+	ae.mu.RLock()
+	pendingNodes := len(ae.nodeCache)
+	pendingEdges := len(ae.edgeCache)
+	pendingNodeDeletes := len(ae.deleteNodes)
+	pendingEdgeDeletes := len(ae.deleteEdges)
+	ae.mu.RUnlock()
+
+	// Close underlying engine
+	engineErr := ae.engine.Close()
+
+	// Build error message if there are issues
+	if result.HasErrors() || pendingNodes > 0 || pendingEdges > 0 {
+		var errMsg string
+		if result.HasErrors() {
+			errMsg = fmt.Sprintf("flush errors: %d nodes failed, %d edges failed, %d deletes failed",
+				result.NodesFailed, result.EdgesFailed, result.DeletesFailed)
+		}
+		if pendingNodes > 0 || pendingEdges > 0 || pendingNodeDeletes > 0 || pendingEdgeDeletes > 0 {
+			if errMsg != "" {
+				errMsg += "; "
+			}
+			errMsg += fmt.Sprintf("unflushed: %d nodes, %d edges, %d node deletes, %d edge deletes (POTENTIAL DATA LOSS)",
+				pendingNodes, pendingEdges, pendingNodeDeletes, pendingEdgeDeletes)
+		}
+		if engineErr != nil {
+			return fmt.Errorf("%s; engine close: %w", errMsg, engineErr)
+		}
+		return fmt.Errorf("async engine close: %s", errMsg)
+	}
+
+	return engineErr
 }
 
 // BulkCreateNodes creates nodes in batch (async).

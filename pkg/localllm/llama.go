@@ -54,6 +54,7 @@ package localllm
 
 // Initialize backend once (handles GPU detection)
 static int initialized = 0;
+
 void init_backend() {
     if (!initialized) {
         llama_backend_init();
@@ -264,6 +265,197 @@ int detokenize(struct llama_model* model, int32_t token, char* buf, int buf_size
 int is_eos(struct llama_model* model, int32_t token) {
     const struct llama_vocab* vocab = llama_model_get_vocab(model);
     return llama_vocab_is_eog(vocab, token);
+}
+
+// ============================================================================
+// ROBUSTNESS & ERROR HANDLING (using correct llama.cpp API)
+// ============================================================================
+
+// Helper to get vocab size using correct API
+int get_vocab_size(struct llama_model* model) {
+    const struct llama_vocab* vocab = llama_model_get_vocab(model);
+    return llama_vocab_n_tokens(vocab);
+}
+
+// Check if context is healthy (not NULL, has valid state)
+int ctx_is_healthy(struct llama_context* ctx) {
+    if (!ctx) return 0;
+    // Try to get KV cache info - if this works, context is alive
+    int32_t n_cells = llama_get_kv_cache_used_cells(ctx);
+    return n_cells >= 0 ? 1 : 0;
+}
+
+// Check if model is healthy
+int model_is_healthy(struct llama_model* model) {
+    if (!model) return 0;
+    int n_vocab = get_vocab_size(model);
+    int n_embd = llama_model_n_embd(model);
+    return (n_vocab > 0 && n_embd > 0) ? 1 : 0;
+}
+
+// Get context size
+int get_ctx_size(struct llama_context* ctx) {
+    return llama_n_ctx(ctx);
+}
+
+// Validate tokens before decode
+int validate_tokens(struct llama_model* model, int32_t* tokens, int n_tokens) {
+    if (!model || !tokens || n_tokens <= 0) return -1;
+    int vocab_size = get_vocab_size(model);
+    for (int i = 0; i < n_tokens; i++) {
+        if (tokens[i] < 0 || tokens[i] >= vocab_size) {
+            return i;  // Return index of invalid token
+        }
+    }
+    return -1;  // All tokens valid
+}
+
+// Safe decode with validation
+int safe_gen_decode(struct llama_context* ctx, struct llama_model* model,
+                    int32_t* tokens, int n_tokens, int start_pos, char* error_buf, int error_buf_size) {
+    if (!ctx) {
+        snprintf(error_buf, error_buf_size, "context is NULL");
+        return -100;
+    }
+    if (!model) {
+        snprintf(error_buf, error_buf_size, "model is NULL");
+        return -101;
+    }
+    if (!tokens) {
+        snprintf(error_buf, error_buf_size, "tokens is NULL");
+        return -102;
+    }
+    if (n_tokens <= 0) {
+        snprintf(error_buf, error_buf_size, "n_tokens must be positive, got %d", n_tokens);
+        return -103;
+    }
+
+    // Context size check
+    int ctx_size = llama_n_ctx(ctx);
+    if (start_pos + n_tokens > ctx_size) {
+        snprintf(error_buf, error_buf_size,
+            "tokens exceed context: pos=%d + n=%d > ctx=%d",
+            start_pos, n_tokens, ctx_size);
+        return -104;
+    }
+
+    // Token validation
+    int invalid_idx = validate_tokens(model, tokens, n_tokens);
+    if (invalid_idx >= 0) {
+        int vocab_size = get_vocab_size(model);
+        snprintf(error_buf, error_buf_size,
+            "invalid token at index %d: value=%d, vocab_size=%d",
+            invalid_idx, tokens[invalid_idx], vocab_size);
+        return -105;
+    }
+
+    // Context health check
+    if (!ctx_is_healthy(ctx)) {
+        snprintf(error_buf, error_buf_size, "context health check failed");
+        return -106;
+    }
+
+    // Clear KV cache for fresh decode
+    llama_kv_cache_clear(ctx);
+
+    // Create batch
+    struct llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+    if (!batch.token) {
+        snprintf(error_buf, error_buf_size, "failed to allocate batch");
+        return -107;
+    }
+
+    for (int i = 0; i < n_tokens; i++) {
+        batch.token[i] = tokens[i];
+        batch.pos[i] = start_pos + i;
+        batch.n_seq_id[i] = 1;
+        batch.seq_id[i][0] = 0;
+        batch.logits[i] = (i == n_tokens - 1) ? 1 : 0;
+    }
+    batch.n_tokens = n_tokens;
+
+    // Actual decode
+    int result = llama_decode(ctx, batch);
+    llama_batch_free(batch);
+
+    if (result != 0) {
+        snprintf(error_buf, error_buf_size, "llama_decode returned %d", result);
+        return result;
+    }
+
+    error_buf[0] = '\0';
+    return 0;
+}
+
+// Safe single token decode
+int safe_gen_decode_token(struct llama_context* ctx, struct llama_model* model,
+                          int32_t token, int pos, char* error_buf, int error_buf_size) {
+    if (!ctx) {
+        snprintf(error_buf, error_buf_size, "context is NULL");
+        return -100;
+    }
+    if (!model) {
+        snprintf(error_buf, error_buf_size, "model is NULL");
+        return -101;
+    }
+
+    // Validate token
+    int vocab_size = get_vocab_size(model);
+    if (token < 0 || token >= vocab_size) {
+        snprintf(error_buf, error_buf_size,
+            "invalid token %d (vocab_size=%d)", token, vocab_size);
+        return -105;
+    }
+
+    // Check position
+    int ctx_size = llama_n_ctx(ctx);
+    if (pos >= ctx_size) {
+        snprintf(error_buf, error_buf_size,
+            "position %d exceeds context size %d", pos, ctx_size);
+        return -104;
+    }
+
+    struct llama_batch batch = llama_batch_init(1, 0, 1);
+    if (!batch.token) {
+        snprintf(error_buf, error_buf_size, "failed to allocate batch");
+        return -107;
+    }
+
+    batch.token[0] = token;
+    batch.pos[0] = pos;
+    batch.n_seq_id[0] = 1;
+    batch.seq_id[0][0] = 0;
+    batch.logits[0] = 1;
+    batch.n_tokens = 1;
+
+    int result = llama_decode(ctx, batch);
+    llama_batch_free(batch);
+
+    if (result != 0) {
+        snprintf(error_buf, error_buf_size, "llama_decode returned %d", result);
+        return result;
+    }
+
+    error_buf[0] = '\0';
+    return 0;
+}
+
+// Get memory usage estimate (returns 0 if not available)
+size_t get_model_memory_size(struct llama_model* model) {
+    if (!model) return 0;
+    // This is an approximation based on model parameters
+    int n_vocab = get_vocab_size(model);
+    int n_embd = llama_model_n_embd(model);
+    int n_layer = llama_model_n_layer(model);
+    // Rough estimate: vocab embeddings + layer params
+    return (size_t)(n_vocab * n_embd * 4) + (size_t)(n_layer * n_embd * n_embd * 4 * 4);
+}
+
+// Reset context state (clear KV cache, etc.)
+void reset_context(struct llama_context* ctx) {
+    if (ctx) {
+        llama_kv_cache_clear(ctx);
+    }
 }
 */
 import "C"
@@ -618,9 +810,15 @@ func (g *GenerationModel) Generate(ctx context.Context, prompt string, params Ge
 }
 
 // GenerateStream produces tokens via callback for streaming.
+// Uses safe decode functions with signal handling and detailed error reporting.
 func (g *GenerationModel) GenerateStream(ctx context.Context, prompt string, params GenerateParams, callback func(token string) error) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+
+	// Pre-flight health check
+	if g.model == nil || g.ctx == nil {
+		return fmt.Errorf("model or context is nil - model may have been closed")
+	}
 
 	// Tokenize prompt
 	cText := C.CString(prompt)
@@ -629,15 +827,28 @@ func (g *GenerationModel) GenerateStream(ctx context.Context, prompt string, par
 	tokens := make([]C.int, params.MaxTokens+len(prompt))
 	n := C.tokenize(g.model, cText, C.int(len(prompt)), &tokens[0], C.int(len(tokens)))
 	if n < 0 {
-		return fmt.Errorf("tokenization failed")
+		return fmt.Errorf("tokenization failed (result=%d)", n)
 	}
 	if n == 0 {
 		return fmt.Errorf("prompt produced no tokens")
 	}
 
-	// Process prompt (prefill)
-	if C.gen_decode(g.ctx, (*C.int)(&tokens[0]), n, 0) != 0 {
-		return fmt.Errorf("prefill failed")
+	// Error buffer for detailed error messages from C
+	errorBuf := make([]byte, 512)
+
+	// Process prompt (prefill) with validation
+	result := C.safe_gen_decode(
+		g.ctx,
+		g.model,
+		(*C.int)(&tokens[0]),
+		n,
+		0,
+		(*C.char)(unsafe.Pointer(&errorBuf[0])),
+		C.int(len(errorBuf)),
+	)
+	if result != 0 {
+		errMsg := C.GoString((*C.char)(unsafe.Pointer(&errorBuf[0])))
+		return fmt.Errorf("prefill failed: %s (code=%d)", errMsg, result)
 	}
 
 	// Autoregressive generation
@@ -676,9 +887,18 @@ func (g *GenerationModel) GenerateStream(ctx context.Context, prompt string, par
 			}
 		}
 
-		// Decode the new token for next iteration
-		if C.gen_decode_token(g.ctx, token, C.int(pos)) != 0 {
-			return fmt.Errorf("decode failed at position %d", pos)
+		// Decode the new token for next iteration with validation
+		result := C.safe_gen_decode_token(
+			g.ctx,
+			g.model,
+			token,
+			C.int(pos),
+			(*C.char)(unsafe.Pointer(&errorBuf[0])),
+			C.int(len(errorBuf)),
+		)
+		if result != 0 {
+			errMsg := C.GoString((*C.char)(unsafe.Pointer(&errorBuf[0])))
+			return fmt.Errorf("decode failed at position %d: %s (code=%d)", pos, errMsg, result)
 		}
 		pos++
 	}

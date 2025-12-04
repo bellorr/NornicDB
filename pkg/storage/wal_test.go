@@ -997,6 +997,363 @@ func TestBatchWriter_AppendEdge(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestWAL_TruncateAfterSnapshot(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	t.Run("truncate_removes_old_entries", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		snapshotPath := filepath.Join(dir, "snapshot.json")
+
+		// Create WAL and engine
+		cfg := &WALConfig{Dir: walDir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		engine := NewMemoryEngine()
+
+		// Add entries before snapshot
+		for i := 1; i <= 5; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i)), Labels: []string{"BeforeSnapshot"}}
+			engine.CreateNode(node)
+			wal.Append(OpCreateNode, WALNodeData{Node: node})
+		}
+
+		// Create snapshot (gets sequence number)
+		snapshot, err := wal.CreateSnapshot(engine)
+		require.NoError(t, err)
+		snapshotSeq := snapshot.Sequence
+
+		// Save snapshot
+		err = SaveSnapshot(snapshot, snapshotPath)
+		require.NoError(t, err)
+
+		// Add entries after snapshot
+		for i := 6; i <= 10; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i)), Labels: []string{"AfterSnapshot"}}
+			engine.CreateNode(node)
+			wal.Append(OpCreateNode, WALNodeData{Node: node})
+		}
+
+		// Get WAL size before truncation
+		walPath := filepath.Join(walDir, "wal.log")
+		statBefore, err := os.Stat(walPath)
+		require.NoError(t, err)
+		sizeBefore := statBefore.Size()
+
+		// Truncate WAL to remove entries before snapshot
+		err = wal.TruncateAfterSnapshot(snapshotSeq)
+		require.NoError(t, err)
+
+		// Get WAL size after truncation
+		statAfter, err := os.Stat(walPath)
+		require.NoError(t, err)
+		sizeAfter := statAfter.Size()
+
+		// WAL should be significantly smaller
+		assert.Less(t, sizeAfter, sizeBefore, "WAL should shrink after truncation")
+
+		// Read WAL entries to verify only post-snapshot entries remain
+		entries, err := ReadWALEntries(walPath)
+		require.NoError(t, err)
+
+		// All remaining entries should have sequence > snapshotSeq
+		for _, entry := range entries {
+			assert.Greater(t, entry.Sequence, snapshotSeq,
+				"All entries should be after snapshot sequence")
+		}
+
+		// Should have ~5 entries (nodes 6-10 + checkpoint is possible)
+		assert.GreaterOrEqual(t, len(entries), 5, "Should have at least 5 post-snapshot entries")
+		assert.LessOrEqual(t, len(entries), 6, "Should have at most 6 entries (5 nodes + possible checkpoint)")
+	})
+
+	t.Run("truncate_preserves_data_integrity", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		snapshotPath := filepath.Join(dir, "snapshot.json")
+
+		cfg := &WALConfig{Dir: walDir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+
+		engine := NewMemoryEngine()
+
+		// Add 100 nodes
+		for i := 1; i <= 100; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i))}
+			engine.CreateNode(node)
+			wal.Append(OpCreateNode, WALNodeData{Node: node})
+		}
+
+		// Snapshot at node 50
+		snapshot, err := wal.CreateSnapshot(engine)
+		require.NoError(t, err)
+		SaveSnapshot(snapshot, snapshotPath)
+
+		// Add 50 more nodes
+		for i := 101; i <= 150; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i))}
+			engine.CreateNode(node)
+			wal.Append(OpCreateNode, WALNodeData{Node: node})
+		}
+
+		// Truncate
+		err = wal.TruncateAfterSnapshot(snapshot.Sequence)
+		require.NoError(t, err)
+
+		// Verify we can still append after truncation
+		newNode := &Node{ID: "n-after-truncate", Labels: []string{"PostTruncate"}}
+		err = wal.Append(OpCreateNode, WALNodeData{Node: newNode})
+		require.NoError(t, err)
+
+		wal.Close()
+
+		// Recover from snapshot + truncated WAL
+		recovered, err := RecoverFromWAL(walDir, snapshotPath)
+		require.NoError(t, err)
+
+		// Should have all 100 nodes from snapshot + 50 post-snapshot + 1 after truncate
+		count, err := recovered.NodeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(151), count, "Should have 151 nodes after recovery")
+
+		// Verify specific nodes exist
+		n1, err := recovered.GetNode("n1")
+		assert.NoError(t, err)
+		assert.NotNil(t, n1)
+
+		n150, err := recovered.GetNode("n150")
+		assert.NoError(t, err)
+		assert.NotNil(t, n150)
+
+		nAfter, err := recovered.GetNode("n-after-truncate")
+		assert.NoError(t, err)
+		assert.NotNil(t, nAfter)
+	})
+
+	t.Run("truncate_with_empty_wal_after_snapshot", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		snapshotPath := filepath.Join(dir, "snapshot.json")
+
+		cfg := &WALConfig{Dir: walDir, SyncMode: "immediate"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		engine := NewMemoryEngine()
+
+		// Add nodes
+		for i := 1; i <= 10; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i))}
+			engine.CreateNode(node)
+			wal.Append(OpCreateNode, WALNodeData{Node: node})
+		}
+
+		// Snapshot everything
+		snapshot, err := wal.CreateSnapshot(engine)
+		require.NoError(t, err)
+		SaveSnapshot(snapshot, snapshotPath)
+
+		// NO new entries after snapshot
+
+		// Truncate should leave WAL nearly empty (just checkpoint possibly)
+		err = wal.TruncateAfterSnapshot(snapshot.Sequence)
+		require.NoError(t, err)
+
+		// WAL should be very small or empty
+		walPath := filepath.Join(walDir, "wal.log")
+		stat, err := os.Stat(walPath)
+		require.NoError(t, err)
+		assert.Less(t, stat.Size(), int64(1000), "WAL should be nearly empty after full truncation")
+
+		// Verify we can still use WAL after truncation
+		newNode := &Node{ID: "n-new"}
+		err = wal.Append(OpCreateNode, WALNodeData{Node: newNode})
+		require.NoError(t, err)
+	})
+}
+
+func TestWALEngine_AutoCompaction(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	t.Run("auto_compaction_truncates_wal_periodically", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		snapshotDir := filepath.Join(dir, "snapshots")
+
+		// Create WAL with short snapshot interval for testing
+		cfg := &WALConfig{
+			Dir:              walDir,
+			SyncMode:         "immediate",
+			SnapshotInterval: 100 * time.Millisecond, // Very frequent for testing
+		}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		engine := NewMemoryEngine()
+		walEngine := NewWALEngine(engine, wal)
+
+		// Enable auto-compaction
+		err = walEngine.EnableAutoCompaction(snapshotDir)
+		require.NoError(t, err)
+		defer walEngine.DisableAutoCompaction()
+
+		// Add many nodes to WAL
+		for i := 1; i <= 50; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i))}
+			walEngine.CreateNode(node)
+		}
+
+		// Get WAL size before compaction
+		walPath := filepath.Join(walDir, "wal.log")
+		statBefore, err := os.Stat(walPath)
+		require.NoError(t, err)
+		sizeBefore := statBefore.Size()
+
+		// Wait for at least one snapshot cycle
+		time.Sleep(250 * time.Millisecond)
+
+		// Check that snapshot was created
+		files, err := os.ReadDir(snapshotDir)
+		require.NoError(t, err)
+		assert.GreaterOrEqual(t, len(files), 1, "At least one snapshot should be created")
+
+		// Check stats
+		totalSnapshots, lastSnapshot := walEngine.GetSnapshotStats()
+		assert.GreaterOrEqual(t, totalSnapshots, int64(1), "Should have created at least 1 snapshot")
+		assert.False(t, lastSnapshot.IsZero(), "Last snapshot time should be set")
+
+		// Add more nodes after first compaction
+		for i := 51; i <= 100; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i))}
+			walEngine.CreateNode(node)
+		}
+
+		// Wait for another snapshot cycle
+		time.Sleep(250 * time.Millisecond)
+
+		// WAL should have been truncated - size should be manageable
+		statAfter, err := os.Stat(walPath)
+		require.NoError(t, err)
+		sizeAfter := statAfter.Size()
+
+		// WAL should not grow unbounded - truncation keeps it under control
+		// It should be much smaller than if we had all 100 nodes in it
+		assert.Less(t, sizeAfter, sizeBefore*3, "WAL should not grow unbounded due to truncation")
+
+		// Verify all nodes are still accessible (data not lost)
+		for i := 1; i <= 100; i++ {
+			node, err := walEngine.GetNode(NodeID(fmt.Sprintf("n%d", i)))
+			assert.NoError(t, err)
+			assert.NotNil(t, node)
+		}
+	})
+
+	t.Run("auto_compaction_recoverable", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		snapshotDir := filepath.Join(dir, "snapshots")
+
+		// First session: create data with auto-compaction
+		func() {
+			cfg := &WALConfig{
+				Dir:              walDir,
+				SyncMode:         "immediate",
+				SnapshotInterval: 50 * time.Millisecond,
+			}
+			wal, err := NewWAL("", cfg)
+			require.NoError(t, err)
+			defer wal.Close()
+
+			engine := NewMemoryEngine()
+			walEngine := NewWALEngine(engine, wal)
+
+			err = walEngine.EnableAutoCompaction(snapshotDir)
+			require.NoError(t, err)
+
+			// Create nodes
+			for i := 1; i <= 100; i++ {
+				node := &Node{ID: NodeID(fmt.Sprintf("n%d", i))}
+				walEngine.CreateNode(node)
+			}
+
+			// Wait for snapshot
+			time.Sleep(150 * time.Millisecond)
+
+			walEngine.DisableAutoCompaction()
+		}()
+
+		// Find latest snapshot
+		files, err := os.ReadDir(snapshotDir)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(files), 1, "Should have at least one snapshot")
+
+		// Use the most recent snapshot
+		latestSnapshot := filepath.Join(snapshotDir, files[len(files)-1].Name())
+
+		// Second session: recover from snapshot + WAL
+		recovered, err := RecoverFromWAL(walDir, latestSnapshot)
+		require.NoError(t, err)
+
+		// Verify all data recovered
+		count, err := recovered.NodeCount()
+		require.NoError(t, err)
+		assert.Equal(t, int64(100), count, "All nodes should be recovered")
+
+		// Spot check nodes
+		n1, err := recovered.GetNode("n1")
+		assert.NoError(t, err)
+		assert.NotNil(t, n1)
+
+		n100, err := recovered.GetNode("n100")
+		assert.NoError(t, err)
+		assert.NotNil(t, n100)
+	})
+
+	t.Run("disable_auto_compaction_stops_snapshots", func(t *testing.T) {
+		dir := t.TempDir()
+		walDir := filepath.Join(dir, "wal")
+		snapshotDir := filepath.Join(dir, "snapshots")
+
+		cfg := &WALConfig{
+			Dir:              walDir,
+			SyncMode:         "immediate",
+			SnapshotInterval: 50 * time.Millisecond,
+		}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		engine := NewMemoryEngine()
+		walEngine := NewWALEngine(engine, wal)
+
+		// Enable then immediately disable
+		err = walEngine.EnableAutoCompaction(snapshotDir)
+		require.NoError(t, err)
+		walEngine.DisableAutoCompaction()
+
+		// Add nodes
+		for i := 1; i <= 20; i++ {
+			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i))}
+			walEngine.CreateNode(node)
+		}
+
+		// Wait longer than snapshot interval
+		time.Sleep(200 * time.Millisecond)
+
+		// No snapshots should be created
+		files, err := os.ReadDir(snapshotDir)
+		require.NoError(t, err)
+		assert.Equal(t, 0, len(files), "No snapshots should be created after disable")
+	})
+}
+
 func TestBatchWriter_AppendDelete(t *testing.T) {
 	config.EnableWAL()
 	defer config.DisableWAL()

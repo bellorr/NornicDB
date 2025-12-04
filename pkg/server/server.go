@@ -149,6 +149,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/orneryd/nornicdb/pkg/mcp"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
+	"github.com/orneryd/nornicdb/pkg/security"
 	heimdallplugin "github.com/orneryd/nornicdb/plugins/heimdall"
 )
 
@@ -1071,7 +1072,10 @@ func (s *Server) buildRouter() http.Handler {
 	}
 
 	// Wrap with middleware (order matters: outermost runs first)
-	handler := s.corsMiddleware(mux)
+	// Security middleware validates all tokens, URLs, and headers FIRST
+	securityMiddleware := security.NewSecurityMiddleware()
+	handler := securityMiddleware.ValidateRequest(mux)
+	handler = s.corsMiddleware(handler)
 	handler = s.rateLimitMiddleware(handler) // Rate limit after CORS preflight
 	handler = s.loggingMiddleware(handler)
 	handler = s.recoveryMiddleware(handler)

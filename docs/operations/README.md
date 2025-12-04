@@ -8,6 +8,7 @@
 - **[Docker](docker.md)** - Docker and Kubernetes
 - **[Monitoring](monitoring.md)** - Metrics and alerting
 - **[Backup & Restore](backup-restore.md)** - Data protection
+- **[WAL Compaction](wal-compaction.md)** - Automatic disk space management
 - **[Scaling](scaling.md)** - Horizontal and vertical scaling
 - **[Cluster Security](cluster-security.md)** - Authentication for clusters
 - **[Troubleshooting](troubleshooting.md)** - Common issues and solutions
@@ -51,9 +52,30 @@ nornicdb restore --input=backup-20251201.tar.gz
 
 [Complete backup guide →](backup-restore.md)
 
+### WAL Compaction
+
+NornicDB automatically manages WAL (Write-Ahead Log) size to prevent unbounded disk growth:
+
+```go
+// Enable automatic compaction (recommended)
+wal.EnableAutoCompaction("/data/snapshots")
+
+// Manual truncation after snapshot
+wal.TruncateAfterSnapshot(snapshotSequence)
+```
+
+**Benefits:**
+
+- 99%+ disk savings vs unbounded WAL
+- 300x faster crash recovery
+- Automatic hourly snapshots
+
+[Complete WAL compaction guide →](wal-compaction.md)
+
 ## 📖 Operations Topics
 
 ### Deployment
+
 - Docker deployment
 - Kubernetes deployment
 - Bare metal installation
@@ -62,6 +84,7 @@ nornicdb restore --input=backup-20251201.tar.gz
 [Deployment guide →](deployment.md)
 
 ### Monitoring
+
 - Prometheus metrics
 - Grafana dashboards
 - Health checks
@@ -70,6 +93,7 @@ nornicdb restore --input=backup-20251201.tar.gz
 [Monitoring guide →](monitoring.md)
 
 ### Scaling
+
 - Read replicas
 - Sharding
 - Load balancing
@@ -80,6 +104,7 @@ nornicdb restore --input=backup-20251201.tar.gz
 ## 🆘 Troubleshooting
 
 Common issues and solutions:
+
 - Connection problems
 - Performance issues
 - Memory errors

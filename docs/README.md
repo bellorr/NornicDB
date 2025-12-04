@@ -5,15 +5,19 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 ## 🚀 Quick Start Paths
 
 ### New to NornicDB?
+
 👉 **[Getting Started Guide](getting-started/)** - Installation and first queries in 5 minutes
 
 ### Migrating from Neo4j?
+
 👉 **[Neo4j Migration Guide](neo4j-migration/)** - 96% feature parity, easy migration
 
 ### Building AI Agents?
+
 👉 **[AI Integration Guide](ai-agents/)** - Cursor, MCP, and agent patterns
 
 ### Need API Reference?
+
 👉 **[API Documentation](api-reference/)** - Complete function reference
 
 ---
@@ -21,41 +25,49 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 ## 📖 Documentation Sections
 
 ### For Users
+
 - **[Getting Started](getting-started/)** - Installation, quick start, first queries
 - **[User Guides](user-guides/)** - Cypher queries, vector search, transactions
 - **[API Reference](api-reference/)** - Complete function and endpoint documentation
 - **[Features](features/)** - Memory decay, GPU acceleration, link prediction
 
 ### For Developers
+
 - **[Architecture](architecture/)** - System design, storage engine, query execution
 - **[Performance](performance/)** - Benchmarks, optimization, GPU acceleration
 - **[Advanced Topics](advanced/)** - K-Means clustering, embeddings, custom functions
 - **[Development](development/)** - Contributing, testing, code style
 
 ### For Operations
+
 - **[Operations Guide](operations/)** - Deployment, monitoring, backup, scaling
+- **[Security Guide](security/)** - HTTP security, CSRF/SSRF/XSS protection
 - **[Clustering Guide](user-guides/clustering.md)** - Hot Standby, Raft, Multi-Region
 - **[Compliance](compliance/)** - GDPR, HIPAA, SOC2, encryption, audit logging
 
 ### For AI Integration
+
 - **[AI Agents](ai-agents/)** - Cursor integration, chat modes, MCP tools
 - **[Neo4j Migration](neo4j-migration/)** - Feature parity, migration guide
 
 ## 🎯 Key Features
 
 ### 🧠 Graph-Powered Memory
+
 - Semantic relationships between data
 - Multi-hop graph traversal
 - Automatic relationship inference
 - Memory decay simulation
 
 ### 🚀 GPU Acceleration
+
 - 10-100x speedup for vector search
 - Multi-backend support (CUDA, OpenCL, Metal, Vulkan)
 - Automatic CPU fallback
 - Memory-optimized embeddings
 
 ### 🔍 Advanced Search
+
 - Vector similarity search with cosine similarity
 - Full-text search with BM25 scoring
 - Hybrid search (RRF) combining both methods
@@ -65,13 +77,17 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 - Eval harness for search quality validation
 
 ### 🔗 Neo4j Compatible
+
 - Bolt protocol support
 - Cypher query language
 - Standard Neo4j drivers work out-of-the-box
 - Easy migration from Neo4j
 
 ### 🔐 Enterprise-Ready
+
 - **High Availability** - Hot Standby, Raft consensus, Multi-Region
+- **Security Middleware** - CSRF/SSRF/XSS protection on all HTTP endpoints
+- **WAL Auto-Compaction** - Automatic snapshots prevent unbounded disk growth
 - GDPR, HIPAA, SOC2 compliance
 - Field-level encryption
 - RBAC and audit logging
@@ -87,7 +103,9 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 
 ## 🎯 Popular Topics
 
-- [Clustering & High Availability](user-guides/clustering.md) ⭐ **NEW**
+- [HTTP Security Guide](security/http-security.md) ⭐ **NEW**
+- [WAL Compaction Guide](operations/wal-compaction.md) ⭐ **NEW**
+- [Clustering & High Availability](user-guides/clustering.md)
 - [Vector Search Guide](user-guides/vector-search.md)
 - [Hybrid Search (RRF)](user-guides/hybrid-search.md)
 - [GPU Acceleration](features/gpu-acceleration.md)
@@ -99,7 +117,7 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 
 ## 📋 Project Status
 
-- **Version:** 0.1.4
+- **Version:** 1.0.0 🎉
 - **Status:** Production Ready ✅
 - **Docker:** `timothyswt/nornicdb-arm64-metal:latest`
 - **[Changelog](CHANGELOG.md)** - Version history and release notes
@@ -114,7 +132,7 @@ NornicDB is MIT licensed. See [LICENSE](../LICENSE) for details.
 
 ---
 
-**Last Updated:** December 1, 2025  
-**Version:** 0.1.4  
+**Last Updated:** December 4, 2025  
+**Version:** 1.0.0 🎉  
 **Docker:** `timothyswt/nornicdb-arm64-metal:latest`  
 **Status:** Production Ready ✅

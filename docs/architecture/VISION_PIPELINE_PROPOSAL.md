@@ -1524,7 +1524,104 @@ POST /api/models/load
 
 ---
 
-## 15. Implementation Roadmap
+## 15. LLM Robustness & Error Handling
+
+### Problem: CGO Crashes
+
+Running LLMs via `llama.cpp` CGO bindings can crash with:
+- `SIGABRT` during token decoding (invalid tokens, context overflow)
+- `SIGSEGV` from corrupted contexts or memory issues
+- Silent failures from GPU memory exhaustion
+
+### Solution: Validation Layer in C
+
+We added comprehensive validation functions in the CGO code:
+
+```c
+// Safe decode with validation (in llama.go CGO block)
+int safe_gen_decode(struct llama_context* ctx, struct llama_model* model,
+                    int32_t* tokens, int n_tokens, int start_pos, 
+                    char* error_buf, int error_buf_size) {
+    // 1. Null checks (context, model, tokens)
+    // 2. Context size validation (tokens + pos < ctx_size)
+    // 3. Token validation (0 <= token < vocab_size)
+    // 4. Context health check (KV cache accessible)
+    // 5. Protected decode with detailed error messages
+}
+
+int safe_gen_decode_token(struct llama_context* ctx, struct llama_model* model,
+                          int32_t token, int pos, 
+                          char* error_buf, int error_buf_size) {
+    // Same validations for single-token generation
+}
+```
+
+### Error Codes
+
+| Code | Meaning |
+|------|---------|
+| -100 | Context is NULL |
+| -101 | Model is NULL |
+| -102 | Tokens pointer is NULL |
+| -103 | Invalid token count (n_tokens <= 0) |
+| -104 | Context overflow (pos + n > ctx_size) |
+| -105 | Invalid token (outside vocabulary) |
+| -106 | Context health check failed |
+| -107 | Batch allocation failed |
+
+### Go-Side Error Handling
+
+```go
+// GenerateStream uses safe decode with detailed error reporting
+func (g *GenerationModel) GenerateStream(ctx context.Context, prompt string, 
+                                         params GenerateParams, 
+                                         callback func(token string) error) error {
+    // Pre-flight health check
+    if g.model == nil || g.ctx == nil {
+        return fmt.Errorf("model or context is nil - model may have been closed")
+    }
+    
+    // Safe decode with error buffer
+    errorBuf := make([]byte, 512)
+    result := C.safe_gen_decode(g.ctx, g.model, tokens, n, 0,
+        (*C.char)(unsafe.Pointer(&errorBuf[0])), C.int(len(errorBuf)))
+    if result != 0 {
+        errMsg := C.GoString((*C.char)(unsafe.Pointer(&errorBuf[0])))
+        return fmt.Errorf("prefill failed: %s (code=%d)", errMsg, result)
+    }
+    
+    // Generation loop with per-token validation
+    for i := 0; i < params.MaxTokens; i++ {
+        token := C.sample_token(g.ctx, g.model, temp, top_p, top_k)
+        
+        result := C.safe_gen_decode_token(g.ctx, g.model, token, C.int(pos),
+            (*C.char)(unsafe.Pointer(&errorBuf[0])), C.int(len(errorBuf)))
+        if result != 0 {
+            errMsg := C.GoString((*C.char)(unsafe.Pointer(&errorBuf[0])))
+            return fmt.Errorf("decode failed at position %d: %s (code=%d)", 
+                pos, errMsg, result)
+        }
+    }
+}
+```
+
+### Benefits
+
+1. **Crash Prevention**: Invalid inputs caught before they reach llama.cpp
+2. **Detailed Errors**: Know exactly what failed and why
+3. **Debug Info**: Error messages include actual values (token ID, vocab size, etc.)
+4. **Graceful Degradation**: Errors return to Go instead of crashing the process
+
+### Future Enhancements
+
+- Signal handling (`setjmp`/`longjmp`) to catch and recover from crashes
+- Memory pressure detection before allocation
+- Automatic context reset on recoverable errors
+- Prometheus metrics for decode failures by type
+
+---
+
+## 16. Implementation Roadmap
 
 ### Phase 1: Model Lifecycle Manager (Week 1-2)
 - [ ] Create `pkg/models` package
