@@ -177,6 +177,29 @@ func (s *Server) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/mcp/health", s.handleHealth)
 }
 
+// ServeHTTP implements http.Handler for routing MCP requests.
+// Use this when integrating with a server that wraps handlers (e.g., for auth middleware).
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.started.IsZero() {
+		s.started = time.Now()
+	}
+
+	switch r.URL.Path {
+	case "/mcp":
+		s.handleMCP(w, r)
+	case "/mcp/initialize":
+		s.handleInitialize(w, r)
+	case "/mcp/tools/list":
+		s.handleListTools(w, r)
+	case "/mcp/tools/call":
+		s.handleCallTool(w, r)
+	case "/mcp/health":
+		s.handleHealth(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
 // Start begins listening for HTTP connections on a SEPARATE server.
 // For integration with the main NornicDB server on port 7474, use RegisterRoutes() instead.
 func (s *Server) Start(addr string) error {

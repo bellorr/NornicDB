@@ -875,25 +875,42 @@ func (s *Server) buildRouter() http.Handler {
 	// ==========================================================================
 	// Register MCP routes on the same server (port 7474)
 	// Routes: /mcp, /mcp/initialize, /mcp/tools/list, /mcp/tools/call, /mcp/health
+	// All MCP endpoints require authentication (PermRead minimum for tool calls)
 	if s.mcpServer != nil {
-		s.mcpServer.RegisterRoutes(mux)
+		// Wrap MCP endpoints with auth - MCP is a powerful API that allows full DB access
+		mux.HandleFunc("/mcp", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+			s.mcpServer.ServeHTTP(w, r)
+		}, auth.PermWrite))
+		mux.HandleFunc("/mcp/initialize", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+			s.mcpServer.ServeHTTP(w, r)
+		}, auth.PermRead))
+		mux.HandleFunc("/mcp/tools/list", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+			s.mcpServer.ServeHTTP(w, r)
+		}, auth.PermRead))
+		mux.HandleFunc("/mcp/tools/call", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+			s.mcpServer.ServeHTTP(w, r)
+		}, auth.PermWrite))
+		mux.HandleFunc("/mcp/health", s.handleHealth) // Health check can remain public
 	}
 
 	// ==========================================================================
 	// Heimdall AI Assistant Endpoints (Bifrost chat interface)
 	// ==========================================================================
 	// Routes: /api/bifrost/status, /api/bifrost/chat/completions, /api/bifrost/events
+	// All Bifrost endpoints require authentication (PermRead minimum)
 	if s.heimdallHandler != nil {
-		// Register each endpoint explicitly for proper routing
-		mux.HandleFunc("/api/bifrost/status", func(w http.ResponseWriter, r *http.Request) {
+		// Status endpoint - read access required
+		mux.HandleFunc("/api/bifrost/status", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 			s.heimdallHandler.ServeHTTP(w, r)
-		})
-		mux.HandleFunc("/api/bifrost/chat/completions", func(w http.ResponseWriter, r *http.Request) {
+		}, auth.PermRead))
+		// Chat completions - write access required (modifies state/generates content)
+		mux.HandleFunc("/api/bifrost/chat/completions", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 			s.heimdallHandler.ServeHTTP(w, r)
-		})
-		mux.HandleFunc("/api/bifrost/events", func(w http.ResponseWriter, r *http.Request) {
+		}, auth.PermWrite))
+		// SSE events - read access required
+		mux.HandleFunc("/api/bifrost/events", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 			s.heimdallHandler.ServeHTTP(w, r)
-		})
+		}, auth.PermRead))
 	}
 
 	// Wrap with middleware
