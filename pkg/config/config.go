@@ -119,6 +119,31 @@ type DatabaseConfig struct {
 	TransactionTimeout time.Duration
 	// MaxConcurrentTransactions limit
 	MaxConcurrentTransactions int
+
+	// === Durability Settings ===
+	// These control the trade-off between performance and data safety.
+	// Default settings provide good balance; opt-in to stricter settings
+	// for financial or critical data.
+
+	// WALSyncMode controls when WAL writes are synced to disk.
+	// - "batch" (default): fsync every WALSyncInterval - good balance
+	// - "immediate": fsync after each write - safest but 2-5x slower
+	// - "none": no fsync - fastest but data loss on crash
+	// Environment: NORNICDB_WAL_SYNC_MODE
+	WALSyncMode string
+
+	// WALSyncInterval for batch sync mode (default: 100ms).
+	// Smaller = safer but slower, larger = faster but more data at risk.
+	// Environment: NORNICDB_WAL_SYNC_INTERVAL
+	WALSyncInterval time.Duration
+
+	// StrictDurability enables maximum safety settings (opt-in):
+	// - WAL: immediate sync (fsync every write)
+	// - Badger: SyncWrites=true
+	// - AsyncEngine: smaller flush interval (10ms)
+	// WARNING: 2-5x slower writes. Use for financial/critical data only.
+	// Environment: NORNICDB_STRICT_DURABILITY
+	StrictDurability bool
 }
 
 // ServerConfig holds server settings.
@@ -574,6 +599,19 @@ func LoadFromEnv() *Config {
 	config.Database.ReadOnly = getEnvBool("NEO4J_dbms_read__only", false)
 	config.Database.TransactionTimeout = getEnvDuration("NEO4J_dbms_transaction_timeout", 30*time.Second)
 	config.Database.MaxConcurrentTransactions = getEnvInt("NEO4J_dbms_transaction_concurrent_maximum", 1000)
+
+	// Durability settings - defaults optimized for performance
+	// Set NORNICDB_STRICT_DURABILITY=true for maximum safety (financial/critical data)
+	config.Database.StrictDurability = getEnvBool("NORNICDB_STRICT_DURABILITY", false)
+	if config.Database.StrictDurability {
+		// Strict mode: override to maximum safety
+		config.Database.WALSyncMode = "immediate"
+		config.Database.WALSyncInterval = 0 // Not used in immediate mode
+	} else {
+		// Default mode: good balance of performance and safety
+		config.Database.WALSyncMode = getEnv("NORNICDB_WAL_SYNC_MODE", "batch")
+		config.Database.WALSyncInterval = getEnvDuration("NORNICDB_WAL_SYNC_INTERVAL", 100*time.Millisecond)
+	}
 
 	// Server settings - Bolt
 	config.Server.BoltEnabled = getEnvBool("NEO4J_dbms_connector_bolt_enabled", true)

@@ -105,6 +105,7 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 
 - [HTTP Security Guide](security/http-security.md) ⭐ **NEW**
 - [WAL Compaction Guide](operations/wal-compaction.md) ⭐ **NEW**
+- [Durability Configuration](operations/durability.md) ⭐ **NEW**
 - [Clustering & High Availability](user-guides/clustering.md)
 - [Vector Search Guide](user-guides/vector-search.md)
 - [Hybrid Search (RRF)](user-guides/hybrid-search.md)

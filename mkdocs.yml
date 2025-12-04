@@ -10,13 +10,13 @@ theme:
   palette:
     - scheme: slate
       primary: amber
-      accent: cyan
+      accent: purple
       toggle:
         icon: material/brightness-7
         name: Switch to light mode
     - scheme: default
       primary: amber
-      accent: cyan
+      accent: purple
       toggle:
         icon: material/brightness-4
         name: Switch to dark mode
@@ -120,6 +120,18 @@ nav:
       - Overview: performance/README.md
   - Operations:
       - Overview: operations/README.md
+      - Deployment: operations/deployment.md
+      - Docker: operations/docker.md
+      - Monitoring: operations/monitoring.md
+      - Backup & Restore: operations/backup-restore.md
+      - WAL Compaction: operations/wal-compaction.md
+      - Durability: operations/durability.md
+      - Scaling: operations/scaling.md
+      - Cluster Security: operations/cluster-security.md
+      - Troubleshooting: operations/troubleshooting.md
+  - Security:
+      - Overview: security/README.md
+      - HTTP Security: security/http-security.md
   - Compliance:
       - Overview: compliance/README.md
   - Development:

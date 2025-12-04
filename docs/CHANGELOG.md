@@ -56,6 +56,12 @@ NornicDB v1.0.0 marks the first production-ready release of the cognitive graph 
   - `UndoWALEntry()` - Reverses operations using stored before-images
   - `RecoverWithTransactions()` - Rolls back incomplete transactions on recovery
   - Full ACID guarantees for multi-operation transactions
+- **Configurable Durability Settings** - Balance data safety vs performance
+  - `NORNICDB_STRICT_DURABILITY=true` for maximum safety (financial data)
+  - `NORNICDB_WAL_SYNC_MODE=batch|immediate|none` for fine-grained control
+  - `NORNICDB_WAL_SYNC_INTERVAL=100ms` for batch sync interval
+  - Defaults optimized for performance, opt-in to stricter settings
+  - [Durability Configuration Guide](operations/durability.md)
 - **Comprehensive Documentation** - 40+ guides covering all features
 - **Graph Traversal Guide** - Path queries and pattern matching
 - **Data Import/Export Guide** - Neo4j migration and backup procedures

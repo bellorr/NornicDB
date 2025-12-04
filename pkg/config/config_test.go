@@ -126,6 +126,98 @@ func TestLoadFromEnv_Defaults(t *testing.T) {
 	if cfg.Logging.Format != "json" {
 		t.Errorf("expected log format 'json', got %q", cfg.Logging.Format)
 	}
+
+	// Durability defaults - optimized for performance
+	if cfg.Database.StrictDurability {
+		t.Error("expected StrictDurability to be false by default")
+	}
+	if cfg.Database.WALSyncMode != "batch" {
+		t.Errorf("expected WALSyncMode 'batch', got %q", cfg.Database.WALSyncMode)
+	}
+	if cfg.Database.WALSyncInterval != 100*time.Millisecond {
+		t.Errorf("expected WALSyncInterval 100ms, got %v", cfg.Database.WALSyncInterval)
+	}
+}
+
+// TestLoadFromEnv_DurabilitySettings tests durability configuration options.
+func TestLoadFromEnv_DurabilitySettings(t *testing.T) {
+	t.Run("default_batch_mode", func(t *testing.T) {
+		clearEnvVars(t)
+
+		cfg := LoadFromEnv()
+
+		if cfg.Database.WALSyncMode != "batch" {
+			t.Errorf("expected default WALSyncMode 'batch', got %q", cfg.Database.WALSyncMode)
+		}
+		if cfg.Database.WALSyncInterval != 100*time.Millisecond {
+			t.Errorf("expected default WALSyncInterval 100ms, got %v", cfg.Database.WALSyncInterval)
+		}
+		if cfg.Database.StrictDurability {
+			t.Error("expected StrictDurability to be false by default")
+		}
+	})
+
+	t.Run("strict_durability_mode", func(t *testing.T) {
+		clearEnvVars(t)
+		os.Setenv("NORNICDB_STRICT_DURABILITY", "true")
+
+		cfg := LoadFromEnv()
+
+		if !cfg.Database.StrictDurability {
+			t.Error("expected StrictDurability to be true")
+		}
+		if cfg.Database.WALSyncMode != "immediate" {
+			t.Errorf("strict mode should set WALSyncMode to 'immediate', got %q", cfg.Database.WALSyncMode)
+		}
+		// WALSyncInterval is ignored in immediate mode, but we set it to 0
+		if cfg.Database.WALSyncInterval != 0 {
+			t.Errorf("strict mode should set WALSyncInterval to 0, got %v", cfg.Database.WALSyncInterval)
+		}
+	})
+
+	t.Run("custom_wal_sync_mode", func(t *testing.T) {
+		clearEnvVars(t)
+		os.Setenv("NORNICDB_WAL_SYNC_MODE", "immediate")
+		os.Setenv("NORNICDB_WAL_SYNC_INTERVAL", "50ms")
+
+		cfg := LoadFromEnv()
+
+		if cfg.Database.WALSyncMode != "immediate" {
+			t.Errorf("expected WALSyncMode 'immediate', got %q", cfg.Database.WALSyncMode)
+		}
+		if cfg.Database.WALSyncInterval != 50*time.Millisecond {
+			t.Errorf("expected WALSyncInterval 50ms, got %v", cfg.Database.WALSyncInterval)
+		}
+	})
+
+	t.Run("strict_overrides_custom", func(t *testing.T) {
+		clearEnvVars(t)
+		// Set custom values that should be overridden by strict mode
+		os.Setenv("NORNICDB_WAL_SYNC_MODE", "none")
+		os.Setenv("NORNICDB_WAL_SYNC_INTERVAL", "1s")
+		os.Setenv("NORNICDB_STRICT_DURABILITY", "true")
+
+		cfg := LoadFromEnv()
+
+		// Strict mode should override custom settings
+		if cfg.Database.WALSyncMode != "immediate" {
+			t.Errorf("strict mode should override to 'immediate', got %q", cfg.Database.WALSyncMode)
+		}
+		if cfg.Database.WALSyncInterval != 0 {
+			t.Errorf("strict mode should override to 0, got %v", cfg.Database.WALSyncInterval)
+		}
+	})
+
+	t.Run("none_sync_mode_for_testing", func(t *testing.T) {
+		clearEnvVars(t)
+		os.Setenv("NORNICDB_WAL_SYNC_MODE", "none")
+
+		cfg := LoadFromEnv()
+
+		if cfg.Database.WALSyncMode != "none" {
+			t.Errorf("expected WALSyncMode 'none', got %q", cfg.Database.WALSyncMode)
+		}
+	})
 }
 
 // TestLoadFromEnv_Neo4jAuth tests NEO4J_AUTH parsing.
@@ -768,6 +860,10 @@ func clearEnvVars(t *testing.T) {
 		"NORNICDB_BREACH_NOTIFY_WEBHOOK",
 		"NORNICDB_LOG_FORMAT",
 		"NORNICDB_LOG_OUTPUT",
+		// Durability settings
+		"NORNICDB_STRICT_DURABILITY",
+		"NORNICDB_WAL_SYNC_MODE",
+		"NORNICDB_WAL_SYNC_INTERVAL",
 	}
 	for _, v := range envVars {
 		os.Unsetenv(v)
