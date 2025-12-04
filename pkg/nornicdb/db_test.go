@@ -665,7 +665,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, "./data", config.DataDir)
 	assert.Equal(t, "openai", config.EmbeddingProvider)
 	assert.Equal(t, "http://localhost:11434", config.EmbeddingAPIURL)
-	assert.Equal(t, "mxbai-embed-large", config.EmbeddingModel)
+	assert.Equal(t, "bge-m3", config.EmbeddingModel)
 	assert.Equal(t, 1024, config.EmbeddingDimensions)
 	assert.True(t, config.DecayEnabled)
 	assert.Equal(t, time.Hour, config.DecayRecalculateInterval)

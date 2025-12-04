@@ -342,7 +342,7 @@ type Config struct {
 // DefaultConfig returns sensible default configuration for NornicDB.
 //
 // The defaults are optimized for development and small-scale deployments:
-//   - Local Ollama for embeddings (mxbai-embed-large model)
+//   - Local Ollama for embeddings (bge-m3 model)
 //   - Memory decay enabled with 1-hour recalculation
 //   - Auto-linking enabled with 0.82 similarity threshold
 //   - Standard Neo4j ports (7687 Bolt, 7474 HTTP)
@@ -361,7 +361,7 @@ func DefaultConfig() *Config {
 		EmbeddingProvider:            "openai", // Use OpenAI-compatible endpoint (llama.cpp, vLLM, etc.)
 		EmbeddingAPIURL:              "http://localhost:11434",
 		EmbeddingAPIKey:              "not-needed", // Dummy key for llama.cpp (doesn't validate)
-		EmbeddingModel:               "mxbai-embed-large",
+		EmbeddingModel:               "bge-m3",
 		EmbeddingDimensions:          1024,
 		AutoEmbedEnabled:             true, // Auto-generate embeddings on node creation
 		DecayEnabled:                 true,

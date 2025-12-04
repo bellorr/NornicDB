@@ -371,7 +371,7 @@ func TestMultiLineSetWithArray(t *testing.T) {
 		MATCH (n:Node {id: 'test-multi'})
 		SET n.embedding = [0.7, 0.2, 0.05, 0.05],
 		    n.embedding_dimensions = 4,
-		    n.embedding_model = 'mxbai-embed-large',
+		    n.embedding_model = 'bge-m3',
 		    n.has_embedding = true
 	`, nil)
 	require.NoError(t, err)
@@ -389,7 +389,7 @@ func TestMultiLineSetWithArray(t *testing.T) {
 
 	// Check other properties were set - integers stored as int64 (Neo4j compatible)
 	assert.Equal(t, int64(4), node.Properties["embedding_dimensions"])
-	assert.Equal(t, "mxbai-embed-large", node.Properties["embedding_model"])
+	assert.Equal(t, "bge-m3", node.Properties["embedding_model"])
 	assert.Equal(t, true, node.Properties["has_embedding"])
 }
 

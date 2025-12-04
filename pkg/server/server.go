@@ -245,7 +245,7 @@ type Config struct {
 	EmbeddingProvider string
 	// EmbeddingAPIURL is the base URL (e.g., http://localhost:11434)
 	EmbeddingAPIURL string
-	// EmbeddingModel is the model name (e.g., mxbai-embed-large)
+	// EmbeddingModel is the model name (e.g., bge-m3)
 	EmbeddingModel string
 	// EmbeddingDimensions is expected vector size (e.g., 1024)
 	EmbeddingDimensions int
@@ -283,7 +283,7 @@ type Config struct {
 //
 // Embedding defaults (for MCP vector search):
 //   - Enabled by default, connects to localhost:11434 (llama.cpp/Ollama)
-//   - Model: mxbai-embed-large (1024 dimensions)
+//   - Model: bge-m3 (1024 dimensions)
 //   - Falls back to text search if embeddings unavailable
 //
 // Environment Variables to override embedding config:
@@ -291,7 +291,7 @@ type Config struct {
 //	NORNICDB_EMBEDDING_ENABLED=true|false  - Enable/disable embeddings
 //	NORNICDB_EMBEDDING_PROVIDER=openai     - API format: "openai" or "ollama"
 //	NORNICDB_EMBEDDING_URL=http://...      - Embeddings API URL
-//	NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
+//	NORNICDB_EMBEDDING_MODEL=bge-m3
 //	NORNICDB_EMBEDDING_DIM=1024            - Vector dimensions
 //
 // Example:
@@ -308,12 +308,12 @@ func DefaultConfig() *Config {
 	return &Config{
 		// SECURITY: Bind to localhost only by default - prevents external access
 		// Set Address to "0.0.0.0" for Docker/container deployments or external access
-		Address:           "127.0.0.1",
-		Port:              7474,
-		ReadTimeout:       30 * time.Second,
-		WriteTimeout:      60 * time.Second,
-		IdleTimeout:       120 * time.Second,
-		MaxRequestSize:    10 * 1024 * 1024, // 10MB
+		Address:        "127.0.0.1",
+		Port:           7474,
+		ReadTimeout:    30 * time.Second,
+		WriteTimeout:   60 * time.Second,
+		IdleTimeout:    120 * time.Second,
+		MaxRequestSize: 10 * 1024 * 1024, // 10MB
 		// SECURITY: CORS disabled by default - enable only for known origins
 		// To enable: config.EnableCORS = true; config.CORSOrigins = []string{"https://yourapp.com"}
 		// WARNING: Never use "*" with credentials in production (CSRF risk)
@@ -341,7 +341,7 @@ func DefaultConfig() *Config {
 		EmbeddingEnabled:    true,
 		EmbeddingProvider:   "openai", // llama.cpp uses OpenAI-compatible format
 		EmbeddingAPIURL:     "http://localhost:11434",
-		EmbeddingModel:      "mxbai-embed-large",
+		EmbeddingModel:      "bge-m3",
 		EmbeddingDimensions: 1024,
 		EmbeddingCacheSize:  10000, // ~40MB cache for 1024-dim vectors
 

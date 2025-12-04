@@ -24,7 +24,7 @@ func TestLlamaCppEmbeddings(t *testing.T) {
 		Provider:   "openai", // llama.cpp uses OpenAI format
 		APIURL:     "http://localhost:11434",
 		APIPath:    "/v1/embeddings",
-		Model:      "mxbai-embed-large",
+		Model:      "bge-m3",
 		Dimensions: 1024,
 		Timeout:    30 * time.Second,
 	}

@@ -29,7 +29,7 @@
 //   - NORNICDB_MEMORY_DECAY_ENABLED=true
 //   - NORNICDB_MEMORY_DECAY_INTERVAL=1h
 //   - NORNICDB_EMBEDDING_PROVIDER="ollama" or "openai"
-//   - NORNICDB_EMBEDDING_MODEL="mxbai-embed-large"
+//   - NORNICDB_EMBEDDING_MODEL=bge-m3
 //   - NORNICDB_AUDIT_ENABLED=true
 //
 // For a complete list, see the Config struct field documentation.
@@ -552,7 +552,7 @@ func (f *FeatureFlagsConfig) GetHeimdallMemoryCuration() bool   { return f.Heimd
 //	Memory (NornicDB-specific):
 //	- NORNICDB_MEMORY_DECAY_ENABLED=true
 //	- NORNICDB_EMBEDDING_PROVIDER=ollama
-//	- NORNICDB_EMBEDDING_MODEL=mxbai-embed-large
+//	- NORNICDB_EMBEDDING_MODEL=bge-m3
 //
 //	Compliance:
 //	- NORNICDB_AUDIT_ENABLED=true
@@ -647,7 +647,7 @@ func LoadFromEnv() *Config {
 	config.Memory.DecayInterval = getEnvDuration("NORNICDB_MEMORY_DECAY_INTERVAL", time.Hour)
 	config.Memory.ArchiveThreshold = getEnvFloat("NORNICDB_MEMORY_ARCHIVE_THRESHOLD", 0.05)
 	config.Memory.EmbeddingProvider = getEnv("NORNICDB_EMBEDDING_PROVIDER", "ollama")
-	config.Memory.EmbeddingModel = getEnv("NORNICDB_EMBEDDING_MODEL", "mxbai-embed-large")
+	config.Memory.EmbeddingModel = getEnv("NORNICDB_EMBEDDING_MODEL", "bge-m3")
 	config.Memory.EmbeddingAPIURL = getEnv("NORNICDB_EMBEDDING_API_URL", "http://localhost:11434")
 	config.Memory.EmbeddingDimensions = getEnvInt("NORNICDB_EMBEDDING_DIMENSIONS", 1024)
 	config.Memory.EmbeddingCacheSize = getEnvInt("NORNICDB_EMBEDDING_CACHE_SIZE", 10000) // Default: 10K (~40MB)
