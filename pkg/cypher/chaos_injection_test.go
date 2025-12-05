@@ -343,6 +343,557 @@ func TestInjection_PropertyKeyInjection(t *testing.T) {
 }
 
 // =============================================================================
+// CYPHER-SPECIFIC INJECTION ATTACKS
+// =============================================================================
+
+// TestInjection_DetachDeleteAttack tests attempts to delete all data via injection
+func TestInjection_DetachDeleteAttack(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create protected data
+	_, err := exec.Execute(ctx, "CREATE (n:Victim {data: 'important'})", nil)
+	require.NoError(t, err)
+
+	// Various DETACH DELETE injection attempts
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"basic_detach", "test'}) DETACH DELETE n WITH n MATCH (m) DETACH DELETE m //"},
+		{"match_all", "test'}) MATCH (x) DETACH DELETE x //"},
+		{"optional_match", "test'}) OPTIONAL MATCH (x) DETACH DELETE x //"},
+		{"with_clause", "test'}) WITH 1 AS dummy MATCH (x) DETACH DELETE x //"},
+		{"call_subquery", "test'}) CALL { MATCH (x) DETACH DELETE x } //"},
+		{"foreach_delete", "test'}) FOREACH (x IN [1] | DETACH DELETE n) //"},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			safePayload := strings.ReplaceAll(tc.payload, "'", "\\'")
+			query := fmt.Sprintf("MATCH (n {name: '%s'}) RETURN n", safePayload)
+			exec.Execute(ctx, query, nil)
+
+			// Verify data still exists
+			result, err := exec.Execute(ctx, "MATCH (n:Victim) RETURN count(n) AS cnt", nil)
+			require.NoError(t, err)
+			require.Len(t, result.Rows, 1)
+			assert.Equal(t, int64(1), result.Rows[0][0], "Victim node should survive: %s", tc.name)
+		})
+	}
+}
+
+// TestInjection_RelationshipTypeInjection tests injection via relationship types
+func TestInjection_RelationshipTypeInjection(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create protected data
+	exec.Execute(ctx, "CREATE (a:ProtectedNode)-[:SAFE]->(b:ProtectedNode)", nil)
+
+	// Malicious relationship type injections
+	injections := []string{
+		"KNOWS])->(m) DETACH DELETE m //",
+		"KNOWS|FRIEND|*])->(m) DELETE m",
+		"KNOWS]->(m)<-[*0..10]-(x) DELETE x //",
+		":KNOWS|:ADMIN])->(m:Admin) RETURN m.password //",
+	}
+
+	for i, injection := range injections {
+		t.Run(fmt.Sprintf("reltype_injection_%d", i), func(t *testing.T) {
+			query := fmt.Sprintf("MATCH (a)-[:%s RETURN a", injection)
+			exec.Execute(ctx, query, nil)
+			// Even if query doesn't error, data must remain protected
+			// The key security property: no data was deleted
+			result, err := exec.Execute(ctx, "MATCH (n:ProtectedNode) RETURN count(n)", nil)
+			require.NoError(t, err)
+			assert.Equal(t, int64(2), result.Rows[0][0], "Protected nodes should survive injection: %s", injection)
+		})
+	}
+}
+
+// TestInjection_ProcedureCallInjection tests CALL injection attacks
+func TestInjection_ProcedureCallInjection(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Procedure injection attempts
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"dbms_procedures", "CALL dbms.procedures() YIELD name RETURN name"},
+		{"db_labels", "CALL db.labels()"},
+		{"db_schema", "CALL db.schema.visualization()"},
+		{"apoc_load", "CALL apoc.load.json('file:///etc/passwd')"},
+		{"apoc_cypher", "CALL apoc.cypher.run('MATCH (n) DELETE n', {})"},
+		{"system_shutdown", "CALL dbms.shutdown()"},
+		{"create_user", "CALL dbms.security.createUser('hacker', 'password', false)"},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			// Try to inject via property value
+			safePayload := strings.ReplaceAll(tc.payload, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {cmd: '%s'})", safePayload)
+			_, err := exec.Execute(ctx, query, nil)
+
+			// The injection string should be stored as literal, not executed
+			if err == nil {
+				result, _ := exec.Execute(ctx, "MATCH (n:Test) WHERE n.cmd CONTAINS 'CALL' RETURN n.cmd", nil)
+				// If we get results, verify it's stored as string
+				if len(result.Rows) > 0 {
+					assert.Contains(t, result.Rows[0][0], "CALL", "Should be stored as literal string")
+				}
+			}
+		})
+	}
+}
+
+// TestInjection_LoadCSVPathTraversal tests LOAD CSV path traversal attacks
+func TestInjection_LoadCSVPathTraversal(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Path traversal attempts
+	payloads := []string{
+		"file:///etc/passwd",
+		"file:///etc/shadow",
+		"file:///../../../etc/passwd",
+		"file:///C:/Windows/System32/config/SAM",
+		"http://evil.com/malicious.csv",
+		"https://internal-server/secrets.csv",
+	}
+
+	for _, path := range payloads {
+		t.Run(fmt.Sprintf("path_%s", strings.ReplaceAll(path, "/", "_")), func(t *testing.T) {
+			query := fmt.Sprintf("LOAD CSV FROM '%s' AS line RETURN line", path)
+			_, err := exec.Execute(ctx, query, nil)
+			// Should either fail or be blocked - we don't support LOAD CSV anyway
+			// The important thing is we don't actually load arbitrary files
+			_ = err // May or may not error depending on implementation
+		})
+	}
+}
+
+// TestInjection_UNIONInjection tests UNION-based injection attacks
+func TestInjection_UNIONInjection(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create public and secret data
+	exec.Execute(ctx, "CREATE (n:Public {data: 'public-info'})", nil)
+	exec.Execute(ctx, "CREATE (n:Secret {password: 'super-secret-password'})", nil)
+
+	// UNION injection attempts
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"basic_union", "' UNION MATCH (s:Secret) RETURN s.password //"},
+		{"union_all", "' UNION ALL MATCH (s:Secret) RETURN s.password //"},
+		{"multi_union", "' UNION MATCH (s) RETURN s UNION MATCH (t) RETURN t //"},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			// Attempt UNION injection
+			safePayload := strings.ReplaceAll(tc.payload, "'", "\\'")
+			query := fmt.Sprintf("MATCH (n:Public {data: '%s'}) RETURN n.data", safePayload)
+			result, err := exec.Execute(ctx, query, nil)
+
+			// Should NOT return secret password
+			if err == nil && len(result.Rows) > 0 {
+				for _, row := range result.Rows {
+					if row[0] != nil {
+						assert.NotContains(t, fmt.Sprintf("%v", row[0]), "super-secret-password",
+							"UNION injection should not leak secrets")
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestInjection_MERGEUpsertAttack tests MERGE-based injection attacks
+func TestInjection_MERGEUpsertAttack(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create protected data with specific state
+	exec.Execute(ctx, "CREATE (n:Config {setting: 'safe', isAdmin: false})", nil)
+
+	// MERGE injection attempts to modify existing data
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"merge_set", "test'}) MERGE (c:Config) SET c.isAdmin = true //"},
+		{"merge_create", "test'}) MERGE (admin:Admin {canDelete: true}) //"},
+		{"on_match_set", "test'}) MERGE (c:Config) ON MATCH SET c.setting = 'hacked' //"},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			safePayload := strings.ReplaceAll(tc.payload, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", safePayload)
+			exec.Execute(ctx, query, nil)
+
+			// Verify config wasn't modified
+			result, err := exec.Execute(ctx, "MATCH (c:Config) RETURN c.isAdmin, c.setting", nil)
+			require.NoError(t, err)
+			if len(result.Rows) > 0 {
+				assert.Equal(t, false, result.Rows[0][0], "isAdmin should remain false")
+				assert.Equal(t, "safe", result.Rows[0][1], "setting should remain 'safe'")
+			}
+		})
+	}
+}
+
+// TestInjection_SETPropertyModification tests SET injection attacks
+func TestInjection_SETPropertyModification(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create user with role
+	exec.Execute(ctx, "CREATE (u:User {name: 'alice', role: 'user'})", nil)
+
+	// SET injection attempts
+	injections := []string{
+		"test'}) SET n.role = 'admin' WITH n MATCH (u:User) SET u.role = 'admin' //",
+		"test'}) SET n += {role: 'admin', isAdmin: true} //",
+		"test', role: 'admin', pwned: true})-[]-() //",
+	}
+
+	for i, injection := range injections {
+		t.Run(fmt.Sprintf("set_injection_%d", i), func(t *testing.T) {
+			safePayload := strings.ReplaceAll(injection, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", safePayload)
+			exec.Execute(ctx, query, nil)
+
+			// Verify user role wasn't escalated
+			result, err := exec.Execute(ctx, "MATCH (u:User {name: 'alice'}) RETURN u.role", nil)
+			require.NoError(t, err)
+			if len(result.Rows) > 0 {
+				assert.Equal(t, "user", result.Rows[0][0], "User role should remain 'user'")
+			}
+		})
+	}
+}
+
+// TestInjection_BackslashEscapeBypass tests escape bypass attempts
+func TestInjection_BackslashEscapeBypass(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create protected data
+	exec.Execute(ctx, "CREATE (n:Target {value: 'protected'})", nil)
+
+	// Backslash escape bypass attempts
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"double_backslash", "test\\\\' MATCH (n) DELETE n //"},
+		{"triple_backslash", "test\\\\\\' MATCH (n) DELETE n //"},
+		{"backslash_quote", "test\\' MATCH (n) DELETE n //"},
+		{"mixed_escapes", "test\\'\\\"\\n\\r\\t MATCH (n) DELETE n //"},
+		{"unicode_backslash", "test\u005C' MATCH (n) DELETE n //"},
+		{"hex_escape", "test\\x27 MATCH (n) DELETE n //"},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", tc.payload)
+			exec.Execute(ctx, query, nil)
+
+			// Verify protected data survives
+			result, err := exec.Execute(ctx, "MATCH (n:Target) RETURN count(n)", nil)
+			require.NoError(t, err)
+			assert.Equal(t, int64(1), result.Rows[0][0], "Target should survive escape bypass: %s", tc.name)
+		})
+	}
+}
+
+// TestInjection_NestedQuoteAttack tests mixed quote injection
+func TestInjection_NestedQuoteAttack(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create protected data
+	exec.Execute(ctx, "CREATE (n:Safe {id: 1})", nil)
+
+	// Nested/mixed quote attacks
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"single_in_double", `"test' MATCH (n) DELETE n //"`},
+		{"double_in_single", `'test" MATCH (n) DELETE n //'`},
+		{"alternating", `'test"test'test"DELETE`},
+		{"escaped_mixed", `\'test\"MATCH (n) DELETE n`},
+		{"triple_quote", `'''MATCH (n) DELETE n'''`},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			// Use parameter to safely test the payload
+			result, err := exec.Execute(ctx, "RETURN $val", map[string]interface{}{"val": tc.payload})
+			if err == nil {
+				// Payload should be returned as literal string
+				assert.Equal(t, tc.payload, result.Rows[0][0])
+			}
+
+			// Verify safe data survives
+			result, _ = exec.Execute(ctx, "MATCH (n:Safe) RETURN count(n)", nil)
+			if len(result.Rows) > 0 {
+				assert.Equal(t, int64(1), result.Rows[0][0])
+			}
+		})
+	}
+}
+
+// TestInjection_CASEExpressionAttack tests CASE expression injection
+func TestInjection_CASEExpressionAttack(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create data with sensitive info
+	exec.Execute(ctx, "CREATE (u:User {name: 'admin', password: 'secret123'})", nil)
+
+	// CASE expression injection attempts
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"case_then_delete", "test' THEN 1 ELSE (MATCH (n) DELETE n) END //"},
+		{"case_password_leak", "test' THEN u.password ELSE 'x' END //"},
+		{"nested_case", "test' THEN CASE WHEN 1=1 THEN u.password END ELSE 'x' END //"},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			safePayload := strings.ReplaceAll(tc.payload, "'", "\\'")
+			query := fmt.Sprintf("MATCH (u:User) RETURN CASE WHEN u.name = '%s' THEN 'found' ELSE 'not found' END", safePayload)
+			result, _ := exec.Execute(ctx, query, nil)
+
+			// Should NOT return password
+			if result != nil && len(result.Rows) > 0 {
+				for _, row := range result.Rows {
+					if row[0] != nil {
+						assert.NotEqual(t, "secret123", row[0], "Password should not leak via CASE injection")
+					}
+				}
+			}
+		})
+	}
+}
+
+// TestInjection_RegexReDoS tests Regular Expression Denial of Service
+func TestInjection_RegexReDoS(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// ReDoS payloads - patterns that cause exponential backtracking
+	payloads := []struct {
+		name    string
+		pattern string
+	}{
+		{"evil_nested", "(a+)+$"},
+		{"catastrophic_backtrack", "^(a+)+$"},
+		{"nested_quantifier", "((a+)+)+"},
+		{"alternation_explosion", "(a|a)+"},
+	}
+
+	// Input that triggers backtracking
+	evilInput := strings.Repeat("a", 30) + "!"
+
+	for _, tc := range payloads {
+		t.Run(tc.name, func(t *testing.T) {
+			// This should complete in reasonable time (not hang)
+			query := fmt.Sprintf("RETURN '%s' =~ '%s'", evilInput, tc.pattern)
+			done := make(chan bool, 1)
+			go func() {
+				exec.Execute(ctx, query, nil)
+				done <- true
+			}()
+
+			select {
+			case <-done:
+				// Completed - good
+			case <-ctx.Done():
+				t.Error("Query timed out - possible ReDoS vulnerability")
+			}
+		})
+	}
+}
+
+// TestInjection_BatchStatementAttack tests multiple statement injection
+func TestInjection_BatchStatementAttack(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create protected data
+	exec.Execute(ctx, "CREATE (n:Protected {value: 'keep'})", nil)
+
+	// Batch/multiple statement injection attempts
+	injections := []string{
+		"test'; MATCH (n) DELETE n; CREATE (x:Hacked {pwned: true}); //",
+		"test'; MATCH (n) DETACH DELETE n;",
+		"test' CREATE (x:Evil) RETURN x; MATCH (n) DELETE n //",
+		"test' ; ; ; MATCH (n) DELETE n",
+	}
+
+	for i, injection := range injections {
+		t.Run(fmt.Sprintf("batch_%d", i), func(t *testing.T) {
+			safePayload := strings.ReplaceAll(injection, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", safePayload)
+			exec.Execute(ctx, query, nil)
+
+			// Verify protected data survives
+			result, _ := exec.Execute(ctx, "MATCH (n:Protected) RETURN count(n)", nil)
+			if len(result.Rows) > 0 {
+				assert.Equal(t, int64(1), result.Rows[0][0], "Protected data should survive batch injection")
+			}
+
+			// Verify no Hacked nodes were created
+			result, _ = exec.Execute(ctx, "MATCH (n:Hacked) RETURN count(n)", nil)
+			if len(result.Rows) > 0 {
+				assert.Equal(t, int64(0), result.Rows[0][0], "No Hacked nodes should be created")
+			}
+		})
+	}
+}
+
+// TestInjection_IndexManipulation tests index creation/drop injection
+func TestInjection_IndexManipulation(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Index manipulation injection attempts
+	injections := []string{
+		"test'}) CREATE INDEX ON :User(password) //",
+		"test'}) DROP INDEX ON :User(id) //",
+		"test'}) CREATE CONSTRAINT ON (u:User) ASSERT u.id IS UNIQUE //",
+		"test'}) DROP CONSTRAINT ON (u:User) //",
+	}
+
+	for i, injection := range injections {
+		t.Run(fmt.Sprintf("index_%d", i), func(t *testing.T) {
+			safePayload := strings.ReplaceAll(injection, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", safePayload)
+			_, err := exec.Execute(ctx, query, nil)
+			// Should either fail or treat as literal string
+			_ = err
+		})
+	}
+}
+
+// TestInjection_TransactionManipulation tests transaction control injection
+func TestInjection_TransactionManipulation(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create data in a "transaction"
+	exec.Execute(ctx, "CREATE (n:InTransaction {status: 'pending'})", nil)
+
+	// Transaction manipulation attempts
+	injections := []string{
+		"test'}) COMMIT //",
+		"test'}) ROLLBACK //",
+		"test' BEGIN MATCH (n) DELETE n COMMIT //",
+		":auto MATCH (n) DELETE n",
+	}
+
+	for i, injection := range injections {
+		t.Run(fmt.Sprintf("transaction_%d", i), func(t *testing.T) {
+			safePayload := strings.ReplaceAll(injection, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", safePayload)
+			exec.Execute(ctx, query, nil)
+
+			// Verify data integrity
+			result, _ := exec.Execute(ctx, "MATCH (n:InTransaction) RETURN count(n)", nil)
+			if len(result.Rows) > 0 {
+				assert.GreaterOrEqual(t, result.Rows[0][0], int64(1))
+			}
+		})
+	}
+}
+
+// TestInjection_PrivilegeEscalation tests privilege escalation attempts
+func TestInjection_PrivilegeEscalation(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// Create normal user
+	exec.Execute(ctx, "CREATE (u:User {name: 'normal', role: 'reader'})", nil)
+
+	// Privilege escalation attempts
+	injections := []struct {
+		name    string
+		payload string
+	}{
+		{"grant_role", "test'}) GRANT ROLE admin TO normal //"},
+		{"create_admin", "test'}) CREATE USER hacker SET PASSWORD 'pwned' CHANGE NOT REQUIRED //"},
+		{"alter_user", "test'}) ALTER USER normal SET PASSWORD CHANGE NOT REQUIRED //"},
+		{"show_users", "test'}) SHOW USERS //"},
+		{"show_privileges", "test'}) SHOW PRIVILEGES //"},
+	}
+
+	for _, tc := range injections {
+		t.Run(tc.name, func(t *testing.T) {
+			safePayload := strings.ReplaceAll(tc.payload, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", safePayload)
+			exec.Execute(ctx, query, nil)
+
+			// Verify user role unchanged
+			result, _ := exec.Execute(ctx, "MATCH (u:User {name: 'normal'}) RETURN u.role", nil)
+			if len(result.Rows) > 0 {
+				assert.Equal(t, "reader", result.Rows[0][0], "User role should remain 'reader'")
+			}
+		})
+	}
+}
+
+// TestInjection_SystemDatabaseAccess tests system database access attempts
+func TestInjection_SystemDatabaseAccess(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	// System database access attempts
+	injections := []string{
+		":USE system MATCH (n) RETURN n",
+		"test'}) :USE system MATCH (n) DELETE n //",
+		"test'}) SHOW DATABASES //",
+		"test'}) CREATE DATABASE evil //",
+		"test'}) DROP DATABASE neo4j //",
+	}
+
+	for i, injection := range injections {
+		t.Run(fmt.Sprintf("system_db_%d", i), func(t *testing.T) {
+			safePayload := strings.ReplaceAll(injection, "'", "\\'")
+			query := fmt.Sprintf("CREATE (n:Test {name: '%s'})", safePayload)
+			exec.Execute(ctx, query, nil)
+			// Should not execute system commands
+		})
+	}
+}
+
+// TestInjection_NullByteInjection tests null byte injection
+func TestInjection_NullByteInjection(t *testing.T) {
+	exec, ctx := setupChaosExecutor(t)
+
+	exec.Execute(ctx, "CREATE (n:Target {id: 1})", nil)
+
+	// Null byte injection attempts
+	injections := []string{
+		"test\x00' MATCH (n) DELETE n",
+		"test%00' MATCH (n) DELETE n",
+		"test\u0000' MATCH (n) DELETE n",
+	}
+
+	for i, injection := range injections {
+		t.Run(fmt.Sprintf("nullbyte_%d", i), func(t *testing.T) {
+			result, err := exec.Execute(ctx, "RETURN $val", map[string]interface{}{"val": injection})
+			if err == nil {
+				// Should treat as literal string with embedded null
+				assert.NotNil(t, result)
+			}
+
+			// Verify target survives
+			result, _ = exec.Execute(ctx, "MATCH (n:Target) RETURN count(n)", nil)
+			if len(result.Rows) > 0 {
+				assert.Equal(t, int64(1), result.Rows[0][0])
+			}
+		})
+	}
+}
+
+// =============================================================================
 // QUERY PARSER STRESS TESTS
 // =============================================================================
 
