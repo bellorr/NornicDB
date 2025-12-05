@@ -42,7 +42,7 @@ go run cmd/kmeans-test-data/main.go -mode download -download large-text -db ./da
 go run cmd/kmeans-test-data/main.go -mode clusters -count 5000 -clusters 50 -db ./data/kmeans-test
 
 # 2. Enable clustering and start NornicDB
-export NORNICDB_GPU_CLUSTERING_ENABLED=true
+export NORNICDB_KMEANS_CLUSTERING_ENABLED=true
 go run cmd/nornicdb/main.go -data ./data/kmeans-test
 
 # 3. Watch logs for k-means activity
@@ -55,7 +55,7 @@ go run cmd/nornicdb/main.go -data ./data/kmeans-test
 
 ### How to Enable
 ```bash
-export NORNICDB_GPU_CLUSTERING_ENABLED=true
+export NORNICDB_KMEANS_CLUSTERING_ENABLED=true
 ```
 
 ### What Happens

@@ -239,6 +239,10 @@ type Engine struct {
 	evidenceBuffer  *EvidenceBuffer          // Requires multiple signals before materializing
 	edgeMetaStore   *storage.EdgeMetaStore   // Logs edge provenance for audit trails
 	nodeConfigStore *storage.NodeConfigStore // Per-node edge creation rules
+
+	// Heimdall SLM quality control - validates edges before creation
+	// Enabled via NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
+	heimdallQC *HeimdallQC
 }
 
 type accessRecord struct {
@@ -411,6 +415,38 @@ func (e *Engine) GetKalmanAdapter() *KalmanAdapter {
 	return e.kalmanAdapter
 }
 
+// SetHeimdallQC sets the Heimdall SLM quality control for edge validation.
+//
+// When set and enabled (via NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true), each
+// edge suggestion from OnStore() and OnAccess() will be validated by
+// the Heimdall SLM before being returned. The SLM can approve, reject,
+// or modify the suggested relationship type.
+//
+// Example:
+//
+//	// Create Heimdall QC with your SLM function
+//	qc := inference.NewHeimdallQC(func(ctx context.Context, prompt string) (string, error) {
+//		return myOllamaClient.Complete(ctx, prompt)
+//	}, nil)
+//
+//	engine.SetHeimdallQC(qc)
+//
+//	// Now suggestions are validated by Heimdall
+//	suggestions, _ := engine.OnStore(ctx, nodeID, embedding)
+//	// Only returns approved suggestions
+func (e *Engine) SetHeimdallQC(qc *HeimdallQC) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.heimdallQC = qc
+}
+
+// GetHeimdallQC returns the current Heimdall QC (or nil if not configured).
+func (e *Engine) GetHeimdallQC() *HeimdallQC {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.heimdallQC
+}
+
 // OnStore is called when a new node is stored in the graph.
 //
 // This method analyzes the new node and suggests relationships based on
@@ -503,7 +539,48 @@ func (e *Engine) OnStore(ctx context.Context, nodeID string, embedding []float32
 		}
 	}
 
+	// 3. Heimdall QC validation (if enabled)
+	// Each suggestion is sent to the SLM for approval before returning
+	if e.heimdallQC != nil && config.IsAutoTLPLLMQCEnabled() {
+		suggestions = e.validateSuggestionsWithHeimdall(ctx, nodeID, suggestions)
+	}
+
 	return suggestions, nil
+}
+
+// validateSuggestionsWithHeimdall filters suggestions through Heimdall SLM batch review.
+// Returns approved suggestions + any augmented suggestions from Heimdall.
+func (e *Engine) validateSuggestionsWithHeimdall(ctx context.Context, sourceNodeID string, suggestions []EdgeSuggestion) []EdgeSuggestion {
+	if len(suggestions) == 0 || e.heimdallQC == nil {
+		return suggestions
+	}
+
+	// Build source node summary
+	// Note: In a full implementation, we'd look up the node from storage
+	sourceNode := NodeSummary{
+		ID:     sourceNodeID,
+		Labels: []string{}, // Would be populated from storage
+		Props:  make(map[string]string),
+	}
+
+	// Build candidate pool for augmentation (empty for now - could be populated from similarity search)
+	var candidatePool []NodeSummary
+
+	// Call Heimdall batch review
+	approved, augmented, err := e.heimdallQC.ReviewBatch(ctx, sourceNode, suggestions, candidatePool)
+	if err != nil {
+		// On error, return original suggestions (fail-open)
+		return suggestions
+	}
+
+	// Set source ID on augmented edges
+	for i := range augmented {
+		augmented[i].SourceID = sourceNodeID
+	}
+
+	// Combine approved + augmented
+	result := append(approved, augmented...)
+	return result
 }
 
 // OnAccess is called when a node is accessed (read).

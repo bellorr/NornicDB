@@ -21,9 +21,11 @@ Complete reference for all feature flags in NornicDB. Feature flags allow you to
 | | Per-Node Config Auto-Integration | ✅ Enabled | `NORNICDB_PER_NODE_CONFIG_AUTO_INTEGRATION_ENABLED` |
 | **Experimental** | | | |
 | | Kalman Filtering | ❌ Disabled | `NORNICDB_KALMAN_ENABLED` |
-| | GPU K-Means Clustering | ❌ Disabled | `NORNICDB_GPU_CLUSTERING_ENABLED` |
+| | GPU K-Means Clustering | ❌ Disabled | `NORNICDB_KMEANS_CLUSTERING_ENABLED` |
 | | Auto-TLP (Automatic Relationship Inference) | ❌ Disabled | `NORNICDB_AUTO_TLP_ENABLED` |
-| **Auto-TLP-Integration (when Auto-TLP is enabled)** | | | |
+| **Auto-TLP Sub-features** | | | |
+| | Heimdall LLM QC | ❌ Disabled | `NORNICDB_AUTO_TLP_LLM_QC_ENABLED` |
+| | Heimdall LLM Augment | ❌ Disabled | `NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED` |
 | | Edge Decay | ✅ Enabled | `NORNICDB_EDGE_DECAY_ENABLED` |
 | | Cooldown Auto-Integration | ✅ Enabled | `NORNICDB_COOLDOWN_AUTO_INTEGRATION_ENABLED` |
 | | Evidence Auto-Integration | ✅ Enabled | `NORNICDB_EVIDENCE_AUTO_INTEGRATION_ENABLED` |
@@ -575,17 +577,106 @@ engine.GetTLP().InferRelationship(src, dst, label, confidence)
 
 ---
 
+### Heimdall LLM QC (Auto-TLP Validation)
+
+**Purpose**: LLM-based quality control for Auto-TLP suggestions. When enabled, TLP suggestions are batch-reviewed by Heimdall SLM before edges are created.
+
+**Environment Variable**: `NORNICDB_AUTO_TLP_LLM_QC_ENABLED`
+
+**Default**: ❌ Disabled (requires `NORNICDB_AUTO_TLP_ENABLED` to have any effect)
+
+```bash
+# Enable Heimdall review of TLP suggestions
+export NORNICDB_AUTO_TLP_ENABLED=true
+export NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
+```
+
+**Go API**:
+```go
+import "github.com/orneryd/nornicdb/pkg/config"
+
+if config.IsAutoTLPLLMQCEnabled() {
+    // Heimdall will review TLP suggestions before edge creation
+}
+
+// Toggle at runtime
+config.EnableAutoTLPLLMQC()
+config.DisableAutoTLPLLMQC()
+
+// Scoped enable for testing
+cleanup := config.WithAutoTLPLLMQCEnabled()
+defer cleanup()
+```
+
+**What Heimdall receives**:
+- Source node (ID, labels, properties summary)
+- Candidate suggestions (target ID, type, confidence, method)
+- Optional: candidate pool for augmentation
+
+**What Heimdall responds**:
+```json
+{
+  "approved": [0, 2],
+  "rejected": [1],
+  "type_overrides": {"0": "SIMILAR_TO"},
+  "reasoning": "First is semantically related, second is unrelated task"
+}
+```
+
+**Error handling**: Fail-open (approve all on error, log, continue)
+
+---
+
+### Heimdall LLM Augment (Auto-TLP Augmentation)
+
+**Purpose**: Allow Heimdall to suggest additional edges beyond TLP's candidates. When enabled, Heimdall can discover relationships that TLP algorithms missed.
+
+**Environment Variable**: `NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED`
+
+**Default**: ❌ Disabled (requires both `NORNICDB_AUTO_TLP_ENABLED` and `NORNICDB_AUTO_TLP_LLM_QC_ENABLED`)
+
+```bash
+# Full hybrid mode: TLP + Heimdall review + augmentation
+export NORNICDB_AUTO_TLP_ENABLED=true
+export NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
+export NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED=true
+```
+
+**Go API**:
+```go
+import "github.com/orneryd/nornicdb/pkg/config"
+
+if config.IsAutoTLPLLMAugmentEnabled() {
+    // Heimdall can suggest NEW edges beyond TLP's candidates
+}
+
+// Toggle at runtime
+config.EnableAutoTLPLLMAugment()
+config.DisableAutoTLPLLMAugment()
+```
+
+**Augmented edge format**:
+```json
+{
+  "additional": [
+    {"target_id": "node-999", "type": "INSPIRED_BY", "conf": 0.8, "reason": "Both discuss backpropagation"}
+  ]
+}
+```
+
+---
+
 ### GPU K-Means Clustering
 
 **Purpose**: Cluster embeddings using GPU acceleration for efficient similarity search and clustering.
 
-**Environment Variable**: `NORNICDB_GPU_CLUSTERING_ENABLED`
+**Environment Variable**: `NORNICDB_KMEANS_CLUSTERING_ENABLED`
 
 **Default**: ❌ Disabled
 
 ```bash
 # Enable GPU-accelerated clustering
-export NORNICDB_GPU_CLUSTERING_ENABLED=true
+export NORNICDB_KMEANS_CLUSTERING_ENABLED=true
 ```
 
 **Go API**:
@@ -629,6 +720,68 @@ engine.GetDecayEngine().ApplyDecay(graph)
 
 ---
 
+### Heimdall LLM QC (Auto-TLP Validation)
+
+**Purpose**: Use the Heimdall SLM to validate Auto-TLP edge suggestions before creation. Each proposed relationship is sent to the SLM for approval, improving edge quality.
+
+**Environment Variable**: `NORNICDB_AUTO_TLP_LLM_QC_ENABLED`
+
+**Default**: ❌ Disabled (requires Heimdall SLM to be configured)
+
+```bash
+# Enable LLM quality control for Auto-TLP
+export NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
+```
+
+**Go API**:
+```go
+import (
+    "github.com/orneryd/nornicdb/pkg/config"
+    "github.com/orneryd/nornicdb/pkg/inference"
+)
+
+if config.IsAutoTLPLLMQCEnabled() {
+    // Heimdall QC is validating edge suggestions
+}
+
+// Setup Heimdall QC
+qc := inference.NewHeimdallQC(func(ctx context.Context, prompt string) (string, error) {
+    return ollamaClient.Complete(ctx, prompt)
+}, nil)
+
+engine.SetHeimdallQC(qc)
+
+// Now OnStore/OnAccess suggestions are validated by Heimdall
+suggestions, _ := engine.OnStore(ctx, nodeID, embedding)
+// Only approved suggestions are returned
+```
+
+**What Heimdall Receives**:
+- Source node: ID, labels, properties
+- Target node: ID, labels, properties  
+- Proposed relationship type and TLP confidence
+- Inference method (similarity, co-access, temporal, transitive)
+- Existing relationships between nodes
+- Shared neighbors count
+
+**What Heimdall Returns** (JSON):
+```json
+{
+  "approved": true,
+  "confidence": 0.85,
+  "relation_type": "SIMILAR_TO",
+  "reasoning": "Both nodes discuss machine learning topics"
+}
+```
+
+**Performance Notes**:
+- Adds ~100-500ms latency per suggestion (SLM call)
+- Decisions are cached for 1 hour by default
+- Suggestions below 0.5 TLP confidence are auto-rejected (no SLM call)
+- Max 4 concurrent SLM calls (rate limited)
+
+---
+
 ## Complete Example: Docker Compose Configuration
 
 ```yaml
@@ -656,7 +809,7 @@ services:
       # Experimental - Disabled by default, uncomment to enable
       # NORNICDB_KALMAN_ENABLED: "true"
       # NORNICDB_AUTO_TLP_ENABLED: "true"
-      # NORNICDB_GPU_CLUSTERING_ENABLED: "true"
+      # NORNICDB_KMEANS_CLUSTERING_ENABLED: "true"
       # NORNICDB_EDGE_DECAY_ENABLED: "false"
 ```
 

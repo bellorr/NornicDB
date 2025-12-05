@@ -24,7 +24,7 @@
 //
 //	NORNICDB_KALMAN_ENABLED=true
 //	NORNICDB_AUTO_TLP_ENABLED=true
-//	NORNICDB_GPU_CLUSTERING_ENABLED=true
+//	NORNICDB_KMEANS_CLUSTERING_ENABLED=true
 //	NORNICDB_GPU_CLUSTERING_AUTO_INTEGRATION_ENABLED=true
 //
 // Environment variables (to DISABLE default-on features if problems occur):
@@ -87,7 +87,7 @@ const (
 	EnvWALEnabled = "NORNICDB_WAL_ENABLED"
 
 	// EnvGPUClusteringEnabled is the environment variable to enable GPU k-means clustering
-	EnvGPUClusteringEnabled = "NORNICDB_GPU_CLUSTERING_ENABLED"
+	EnvGPUClusteringEnabled = "NORNICDB_KMEANS_CLUSTERING_ENABLED"
 
 	// EnvGPUClusteringAutoIntegrationEnabled is the environment variable to enable automatic GPU clustering in inference
 	EnvGPUClusteringAutoIntegrationEnabled = "NORNICDB_GPU_CLUSTERING_AUTO_INTEGRATION_ENABLED"
@@ -95,6 +95,18 @@ const (
 	// EnvEdgeDecayEnabled is the environment variable to enable automatic edge decay
 	// Auto-generated edges decay over time if not reinforced (accessed)
 	EnvEdgeDecayEnabled = "NORNICDB_EDGE_DECAY_ENABLED"
+
+	// EnvAutoTLPLLMQCEnabled is the environment variable to enable LLM quality control for Auto-TLP
+	// When enabled, TLP suggestions are batch-reviewed by Heimdall SLM before creation
+	// This adds latency but improves relationship quality
+	// DISABLED by default - requires Heimdall SLM to be configured
+	EnvAutoTLPLLMQCEnabled = "NORNICDB_AUTO_TLP_LLM_QC_ENABLED"
+
+	// EnvAutoTLPLLMAugmentEnabled allows Heimdall to suggest ADDITIONAL edges beyond TLP's candidates
+	// When enabled, Heimdall can discover relationships that TLP algorithms missed
+	// Requires EnvAutoTLPLLMQCEnabled to also be enabled
+	// DISABLED by default - increases SLM workload
+	EnvAutoTLPLLMAugmentEnabled = "NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED"
 
 	// FeatureKalmanDecay enables Kalman filtering for memory decay prediction
 	FeatureKalmanDecay = "kalman_decay"
@@ -182,6 +194,8 @@ var (
 	gpuClusteringEnabled                 atomic.Bool
 	gpuClusteringAutoIntegrationEnabled  atomic.Bool
 	edgeDecayEnabled                     atomic.Bool
+	autoTLPLLMQCEnabled                  atomic.Bool
+	autoTLPLLMAugmentEnabled             atomic.Bool
 	featureFlags                         = make(map[string]bool)
 	featureFlagsMu                       sync.RWMutex
 	initOnce                             sync.Once
@@ -277,6 +291,18 @@ func init() {
 		edgeDecayEnabled.Store(true)
 		if env := os.Getenv(EnvEdgeDecayEnabled); env == "false" || env == "0" {
 			edgeDecayEnabled.Store(false)
+		}
+
+		// Auto-TLP LLM QC: DISABLED by default (requires Heimdall SLM)
+		// When enabled, TLP suggestions are batch-reviewed by the SLM
+		if env := os.Getenv(EnvAutoTLPLLMQCEnabled); env == "true" || env == "1" {
+			autoTLPLLMQCEnabled.Store(true)
+		}
+
+		// Auto-TLP LLM Augment: DISABLED by default
+		// When enabled, Heimdall can suggest additional edges beyond TLP's candidates
+		if env := os.Getenv(EnvAutoTLPLLMAugmentEnabled); env == "true" || env == "1" {
+			autoTLPLLMAugmentEnabled.Store(true)
 		}
 	})
 }
@@ -1088,5 +1114,76 @@ func WithEdgeDecayDisabled() func() {
 	edgeDecayEnabled.Store(false)
 	return func() {
 		edgeDecayEnabled.Store(prev)
+	}
+}
+
+// EnableAutoTLPLLMQC enables LLM quality control for Auto-TLP edge creation.
+// When enabled, the Heimdall SLM validates each edge suggestion before creation.
+func EnableAutoTLPLLMQC() {
+	autoTLPLLMQCEnabled.Store(true)
+}
+
+// DisableAutoTLPLLMQC disables LLM quality control for Auto-TLP.
+func DisableAutoTLPLLMQC() {
+	autoTLPLLMQCEnabled.Store(false)
+}
+
+// IsAutoTLPLLMQCEnabled returns true if LLM quality control is enabled for Auto-TLP.
+// When enabled, each edge suggestion is validated by the Heimdall SLM before creation.
+func IsAutoTLPLLMQCEnabled() bool {
+	return autoTLPLLMQCEnabled.Load()
+}
+
+// WithAutoTLPLLMQCEnabled temporarily enables LLM QC and returns cleanup function.
+func WithAutoTLPLLMQCEnabled() func() {
+	prev := autoTLPLLMQCEnabled.Load()
+	autoTLPLLMQCEnabled.Store(true)
+	return func() {
+		autoTLPLLMQCEnabled.Store(prev)
+	}
+}
+
+// WithAutoTLPLLMQCDisabled temporarily disables LLM QC and returns cleanup function.
+func WithAutoTLPLLMQCDisabled() func() {
+	prev := autoTLPLLMQCEnabled.Load()
+	autoTLPLLMQCEnabled.Store(false)
+	return func() {
+		autoTLPLLMQCEnabled.Store(prev)
+	}
+}
+
+// EnableAutoTLPLLMAugment enables LLM augmentation for Auto-TLP.
+// When enabled, Heimdall can suggest additional edges beyond TLP's candidates.
+func EnableAutoTLPLLMAugment() {
+	autoTLPLLMAugmentEnabled.Store(true)
+}
+
+// DisableAutoTLPLLMAugment disables LLM augmentation for Auto-TLP.
+func DisableAutoTLPLLMAugment() {
+	autoTLPLLMAugmentEnabled.Store(false)
+}
+
+// IsAutoTLPLLMAugmentEnabled returns true if LLM augmentation is enabled.
+// When enabled, Heimdall can suggest NEW edges that TLP algorithms missed.
+// Requires IsAutoTLPLLMQCEnabled() to also be true to have any effect.
+func IsAutoTLPLLMAugmentEnabled() bool {
+	return autoTLPLLMAugmentEnabled.Load()
+}
+
+// WithAutoTLPLLMAugmentEnabled temporarily enables LLM augmentation.
+func WithAutoTLPLLMAugmentEnabled() func() {
+	prev := autoTLPLLMAugmentEnabled.Load()
+	autoTLPLLMAugmentEnabled.Store(true)
+	return func() {
+		autoTLPLLMAugmentEnabled.Store(prev)
+	}
+}
+
+// WithAutoTLPLLMAugmentDisabled temporarily disables LLM augmentation.
+func WithAutoTLPLLMAugmentDisabled() func() {
+	prev := autoTLPLLMAugmentEnabled.Load()
+	autoTLPLLMAugmentEnabled.Store(false)
+	return func() {
+		autoTLPLLMAugmentEnabled.Store(prev)
 	}
 }

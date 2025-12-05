@@ -136,7 +136,7 @@ func main() {
 			log.Printf("")
 			log.Printf("📝 These nodes need embeddings generated.")
 			log.Printf("   Start NornicDB with an embedder to auto-generate embeddings:")
-			log.Printf("   NORNICDB_GPU_CLUSTERING_ENABLED=true go run cmd/nornicdb/main.go -data %s", *dbDir)
+			log.Printf("   NORNICDB_KMEANS_CLUSTERING_ENABLED=true go run cmd/nornicdb/main.go -data %s", *dbDir)
 		} else {
 			// Save to JSON
 			if err := os.MkdirAll(*outputDir, 0755); err != nil {
@@ -166,7 +166,7 @@ func main() {
 		log.Printf("✅ Successfully imported %d embeddings to NornicDB", len(embeddings))
 		log.Printf("")
 		log.Printf("🔬 To test k-means clustering:")
-		log.Printf("   export NORNICDB_GPU_CLUSTERING_ENABLED=true")
+		log.Printf("   export NORNICDB_KMEANS_CLUSTERING_ENABLED=true")
 		log.Printf("   go run cmd/nornicdb/main.go -data %s", *dbDir)
 	} else {
 		// Save to JSON file

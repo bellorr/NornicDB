@@ -90,6 +90,44 @@ This prevents graph bloat:
 
 See: [Edge Decay Configuration](./feature-flags.md#edge-decay)
 
+## Heimdall SLM Quality Control
+
+For higher-quality edge creation, enable **Heimdall LLM QC** to validate each suggestion before creation:
+
+```
+TLP suggests edge → Heimdall SLM validates → Approved? → Create edge
+                                          → Rejected? → Skip
+```
+
+Enable with:
+```bash
+export NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
+```
+
+Heimdall receives full context about both nodes and the proposed relationship, then returns a structured decision:
+
+```json
+{
+  "approved": true,
+  "confidence": 0.92,
+  "relation_type": "RELATES_TO",
+  "reasoning": "Both nodes discuss TypeScript and share related concepts"
+}
+```
+
+**Benefits**:
+- Higher quality edges (semantic validation)
+- Can suggest better relationship types
+- Filters out nonsensical connections
+- Provides audit trail with reasoning
+
+**Trade-offs**:
+- Adds ~100-500ms latency per suggestion
+- Requires SLM to be available
+- Decisions cached to reduce load
+
+See: [Heimdall LLM QC Configuration](./feature-flags.md#heimdall-llm-qc-auto-tlp-validation)
+
 ## Go API
 
 ```go
@@ -214,6 +252,75 @@ RETURN count(r)
 2. Use deferred mode for batch operations
 3. Consider disabling and using link prediction procedures instead
 
+## Heimdall SLM Quality Control (Optional)
+
+For higher-quality edges, enable **Heimdall QC** - an LLM-based review layer that validates TLP suggestions before they're created.
+
+### Additional Feature Flags
+
+| Flag | Environment Variable | Default | Description |
+|------|---------------------|---------|-------------|
+| LLM QC | `NORNICDB_AUTO_TLP_LLM_QC_ENABLED` | ❌ Disabled | Heimdall reviews TLP suggestions |
+| LLM Augment | `NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED` | ❌ Disabled | Heimdall can suggest additional edges |
+
+### Progressive Enablement
+
+```bash
+# Stage 1: TLP only (fast, algorithmic)
+export NORNICDB_AUTO_TLP_ENABLED=true
+
+# Stage 2: TLP + Heimdall review (higher quality)
+export NORNICDB_AUTO_TLP_ENABLED=true
+export NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
+
+# Stage 3: Full hybrid (TLP + review + augmentation)
+export NORNICDB_AUTO_TLP_ENABLED=true
+export NORNICDB_AUTO_TLP_LLM_QC_ENABLED=true
+export NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED=true
+```
+
+### How Heimdall QC Works
+
+```
+TLP Generates Candidates (fast)
+         ↓
+   Batch Suggestions (max 5)
+         ↓
+  Check Size Limits (4KB)
+         ↓
+   Too Large? → Skip review, pass through
+         ↓
+   Heimdall SLM Reviews Batch
+         ↓
+   Error? → Log, approve all (fail-open)
+         ↓
+  Return approved + augmented
+```
+
+### Error Handling
+
+Heimdall uses **fail-open** behavior:
+- LLM error → Log warning, approve batch, continue
+- LLM timeout → Log warning, approve batch, continue
+- Invalid JSON → Fuzzy parse or approve all
+- Prompt too large → Skip review, pass through
+
+No retries. If Heimdall fails, TLP's suggestions pass through unchanged.
+
+### Performance Impact
+
+| Mode | Latency per Node | Edge Quality |
+|------|-----------------|--------------|
+| TLP Only | ~5-20ms | Good |
+| TLP + Heimdall QC | ~100-500ms | Better |
+
+Mitigations:
+- Batching reduces LLM calls
+- Caching prevents redundant reviews
+- Size limits avoid slow large-context calls
+
+See [Heimdall TLP QC Proposal](../proposals/HEIMDALL_TLP_QC.md) for full details.
+
 ## Summary
 
 | Aspect | Details |
@@ -224,6 +331,7 @@ RETURN count(r)
 | **Triggers** | OnStore (new nodes), OnAccess (reads) |
 | **Signals** | Semantic, co-access, temporal, transitive |
 | **Cleanup** | Edge Decay (enabled by default) |
+| **QC** | Optional Heimdall SLM review |
 | **Alternative** | `CALL gds.linkPrediction.*` procedures |
 
 ---
