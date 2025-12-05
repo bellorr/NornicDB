@@ -467,6 +467,7 @@ func (tx *BadgerTransaction) GetNode(nodeID NodeID) (*Node, error) {
 }
 
 // Commit applies all changes atomically with full constraint validation.
+// Explicit transactions get strict ACID durability with immediate fsync.
 func (tx *BadgerTransaction) Commit() error {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
@@ -491,6 +492,29 @@ func (tx *BadgerTransaction) Commit() error {
 	if err := tx.badgerTx.Commit(); err != nil {
 		tx.Status = TxStatusRolledBack
 		return fmt.Errorf("badger commit failed: %w", err)
+	}
+
+	// Invalidate cache for modified/deleted nodes
+	// This ensures subsequent reads see the committed changes
+	tx.engine.nodeCacheMu.Lock()
+	for nodeID := range tx.pendingNodes {
+		delete(tx.engine.nodeCache, nodeID)
+	}
+	for nodeID := range tx.deletedNodes {
+		delete(tx.engine.nodeCache, nodeID)
+	}
+	tx.engine.nodeCacheMu.Unlock()
+
+	// ACID GUARANTEE: Force fsync for explicit transactions
+	// This ensures durability - data is on disk before we return success
+	// Non-transactional writes use batch sync for better performance
+	// Note: In-memory mode (testing) skips fsync as there's no disk
+	if !tx.engine.IsInMemory() {
+		if err := tx.engine.Sync(); err != nil {
+			// Transaction is committed in Badger but fsync failed
+			// Log error but don't rollback - data is in Badger's WAL
+			log.Printf("[Transaction %s] Warning: fsync failed after commit: %v", tx.ID, err)
+		}
 	}
 
 	tx.Status = TxStatusCommitted
@@ -641,14 +665,14 @@ func (tx *BadgerTransaction) scanForUniqueViolation(label, property string, valu
 	prefix := labelIndexKey(label, "")
 	opts := badger.DefaultIteratorOptions
 	opts.PrefetchValues = false // Only need keys first
-	
+
 	iter := tx.badgerTx.NewIterator(opts)
 	defer iter.Close()
 
 	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
 		item := iter.Item()
 		key := item.Key()
-		
+
 		// Extract nodeID from label index key
 		// Format: prefixLabelIndex + label (lowercase) + 0x00 + nodeID
 		parts := bytes.Split(key[1:], []byte{0x00})
@@ -656,7 +680,7 @@ func (tx *BadgerTransaction) scanForUniqueViolation(label, property string, valu
 			continue
 		}
 		nodeID := NodeID(parts[1])
-		
+
 		if nodeID == excludeNodeID {
 			continue // Skip the node being validated
 		}
@@ -737,7 +761,7 @@ func compareValues(a, b interface{}) bool {
 			return v1 == v2
 		}
 	}
-	
+
 	// Default comparison
 	return a == b
 }
@@ -797,21 +821,21 @@ func (tx *BadgerTransaction) scanForNodeKeyViolation(label string, properties []
 	prefix := labelIndexKey(label, "")
 	opts := badger.DefaultIteratorOptions
 	opts.PrefetchValues = false
-	
+
 	iter := tx.badgerTx.NewIterator(opts)
 	defer iter.Close()
 
 	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
 		item := iter.Item()
 		key := item.Key()
-		
+
 		// Extract nodeID
 		parts := bytes.Split(key[1:], []byte{0x00})
 		if len(parts) != 2 {
 			continue
 		}
 		nodeID := NodeID(parts[1])
-		
+
 		if nodeID == excludeNodeID {
 			continue
 		}

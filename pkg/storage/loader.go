@@ -103,7 +103,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 )
 
 // LoadFromNeo4jJSON loads nodes and edges from Neo4j APOC JSON export format.
@@ -312,29 +311,22 @@ func LoadFromNeo4jExport(engine Engine, path string) error {
 func SaveToNeo4jExport(engine Engine, path string) error {
 	// Collect all nodes
 	var allNodes []*Node
-	// We need to iterate - for MemoryEngine we can do this through labels
-	// For a generic approach, we'd need an AllNodes() method
-	// For now, we'll add that method via a type assertion or add to interface
-
-	// Try to get all nodes via memory engine direct access
-	if mem, ok := engine.(*MemoryEngine); ok {
-		mem.mu.RLock()
-		for _, node := range mem.nodes {
-			allNodes = append(allNodes, mem.copyNode(node))
-		}
-		mem.mu.RUnlock()
-	} else {
+	// Use ExportableEngine interface which both MemoryEngine and BadgerEngine implement
+	exportable, ok := engine.(ExportableEngine)
+	if !ok {
 		return fmt.Errorf("SaveToNeo4jExport: engine type %T does not support full export", engine)
 	}
 
+	var err error
+	allNodes, err = exportable.AllNodes()
+	if err != nil {
+		return fmt.Errorf("getting all nodes: %w", err)
+	}
+
 	// Collect all edges
-	var allEdges []*Edge
-	if mem, ok := engine.(*MemoryEngine); ok {
-		mem.mu.RLock()
-		for _, edge := range mem.edges {
-			allEdges = append(allEdges, mem.copyEdge(edge))
-		}
-		mem.mu.RUnlock()
+	allEdges, err := exportable.AllEdges()
+	if err != nil {
+		return fmt.Errorf("getting all edges: %w", err)
 	}
 
 	export := ToNeo4jExport(allNodes, allEdges)
@@ -542,64 +534,8 @@ func FindNodeNeedingEmbedding(engine Engine) *Node {
 	return nil
 }
 
-// AllNodes returns all nodes in the memory engine.
-func (m *MemoryEngine) AllNodes() ([]*Node, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.closed {
-		return nil, ErrStorageClosed
-	}
-
-	nodes := make([]*Node, 0, len(m.nodes))
-	for _, node := range m.nodes {
-		nodes = append(nodes, m.copyNode(node))
-	}
-
-	return nodes, nil
-}
-
-// AllEdges returns all edges in the memory engine.
-func (m *MemoryEngine) AllEdges() ([]*Edge, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.closed {
-		return nil, ErrStorageClosed
-	}
-
-	edges := make([]*Edge, 0, len(m.edges))
-	for _, edge := range m.edges {
-		edges = append(edges, m.copyEdge(edge))
-	}
-
-	return edges, nil
-}
-
-// GetEdgesByType returns all edges of a specific type.
-// For MemoryEngine this filters AllEdges() but is semantically equivalent.
-func (m *MemoryEngine) GetEdgesByType(edgeType string) ([]*Edge, error) {
-	if edgeType == "" {
-		return m.AllEdges()
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	if m.closed {
-		return nil, ErrStorageClosed
-	}
-
-	normalizedType := strings.ToLower(edgeType)
-	var edges []*Edge
-	for _, edge := range m.edges {
-		if strings.ToLower(edge.Type) == normalizedType {
-			edges = append(edges, m.copyEdge(edge))
-		}
-	}
-
-	return edges, nil
-}
+// NOTE: MemoryEngine now inherits AllNodes(), AllEdges(), GetEdgesByType()
+// from embedded BadgerEngine - no need to redefine them here.
 
 // GenericSaveToNeo4jExport works with any ExportableEngine.
 func GenericSaveToNeo4jExport(engine ExportableEngine, path string) error {

@@ -13,7 +13,7 @@ import (
 
 // TransactionContext holds the active transaction for a Cypher session.
 type TransactionContext struct {
-	tx     interface{} // *storage.Transaction or *storage.BadgerTransaction
+	tx     interface{} // *storage.BadgerTransaction (MemoryEngine now wraps BadgerEngine)
 	engine storage.Engine
 	active bool
 }
@@ -50,6 +50,7 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 	}
 
 	// Start transaction based on engine type
+	// Both BadgerEngine and MemoryEngine (which wraps BadgerEngine) use BadgerTransaction
 	switch eng := engine.(type) {
 	case *storage.BadgerEngine:
 		tx, err := eng.BeginTransaction()
@@ -62,7 +63,10 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 			active: true,
 		}
 	case *storage.MemoryEngine:
-		tx := eng.BeginTransaction()
+		tx, err := eng.BeginTransaction()
+		if err != nil {
+			return nil, fmt.Errorf("failed to start transaction: %w", err)
+		}
 		e.txContext = &TransactionContext{
 			tx:     tx,
 			engine: eng,
@@ -85,11 +89,10 @@ func (e *StorageExecutor) handleCommit() (*ExecuteResult, error) {
 	}
 
 	// Commit based on transaction type
+	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
 	var err error
 	switch tx := e.txContext.tx.(type) {
 	case *storage.BadgerTransaction:
-		err = tx.Commit()
-	case *storage.Transaction:
 		err = tx.Commit()
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
@@ -115,11 +118,10 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 	}
 
 	// Rollback based on transaction type
+	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
 	var err error
 	switch tx := e.txContext.tx.(type) {
 	case *storage.BadgerTransaction:
-		err = tx.Rollback()
-	case *storage.Transaction:
 		err = tx.Rollback()
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
@@ -143,16 +145,11 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 	// Temporarily swap storage with transaction for scoped operations
 	originalStorage := e.storage
 
-	switch e.txContext.tx.(type) {
-	case *storage.BadgerTransaction:
+	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
+	if _, ok := e.txContext.tx.(*storage.BadgerTransaction); ok {
 		// Use transaction-scoped operations
 		// For now, execute against original storage (limitation)
 		// Full implementation would use a transaction-aware storage adapter
-		result, err := e.executeQueryAgainstStorage(ctx, cypher, upperQuery)
-		e.storage = originalStorage
-		return result, err
-	case *storage.Transaction:
-		// MemoryEngine transactions work fully
 		result, err := e.executeQueryAgainstStorage(ctx, cypher, upperQuery)
 		e.storage = originalStorage
 		return result, err

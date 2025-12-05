@@ -7,7 +7,12 @@ import (
 
 func TestNewTransaction(t *testing.T) {
 	engine := NewMemoryEngine()
-	tx := NewTransaction(engine)
+	defer engine.Close()
+
+	tx, err := engine.BeginTransaction()
+	if err != nil {
+		t.Fatalf("BeginTransaction failed: %v", err)
+	}
 
 	if tx == nil {
 		t.Fatal("Expected non-nil transaction")
@@ -25,7 +30,7 @@ func TestNewTransaction(t *testing.T) {
 
 func TestTransaction_CreateNode_Basic(t *testing.T) {
 	engine := NewMemoryEngine()
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	node := &Node{
 		ID:         "tx-node-1",
@@ -72,7 +77,7 @@ func TestTransaction_CreateNode_Basic(t *testing.T) {
 
 func TestTransaction_Rollback(t *testing.T) {
 	engine := NewMemoryEngine()
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Create some nodes
 	for i := 0; i < 5; i++ {
@@ -119,7 +124,7 @@ func TestTransaction_Atomicity(t *testing.T) {
 		t.Fatalf("Pre-create failed: %v", err)
 	}
 
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Create some nodes
 	for i := 0; i < 3; i++ {
@@ -167,7 +172,7 @@ func TestTransaction_DeleteNode(t *testing.T) {
 		t.Fatalf("CreateNode failed: %v", err)
 	}
 
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Delete in transaction
 	err := tx.DeleteNode("delete-me")
@@ -213,7 +218,7 @@ func TestTransaction_UpdateNode(t *testing.T) {
 		t.Fatalf("CreateNode failed: %v", err)
 	}
 
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Update in transaction
 	updatedNode := &Node{
@@ -245,9 +250,21 @@ func TestTransaction_UpdateNode(t *testing.T) {
 	}
 
 	// Engine should have new version
-	updated, _ := engine.GetNode("update-me")
-	if updated.Properties["version"] != 2 {
-		t.Error("Engine should have new version after commit")
+	updated, err := engine.GetNode("update-me")
+	if err != nil {
+		t.Fatalf("GetNode after commit failed: %v", err)
+	}
+	// Note: JSON serialization may convert int to float64
+	version, ok := updated.Properties["version"].(float64)
+	if !ok {
+		vInt, ok := updated.Properties["version"].(int)
+		if ok {
+			version = float64(vInt)
+		}
+	}
+	if version != 2 {
+		t.Errorf("Engine should have new version after commit, got version=%v (type %T)",
+			updated.Properties["version"], updated.Properties["version"])
 	}
 }
 
@@ -260,7 +277,7 @@ func TestTransaction_CreateEdge(t *testing.T) {
 	engine.CreateNode(node1)
 	engine.CreateNode(node2)
 
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Create edge in transaction
 	edge := &Edge{
@@ -298,7 +315,7 @@ func TestTransaction_CreateEdge(t *testing.T) {
 
 func TestTransaction_CreateEdgeWithNewNodes(t *testing.T) {
 	engine := NewMemoryEngine()
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Create nodes IN transaction
 	node1 := &Node{ID: "new-edge-node-1", Labels: []string{"New"}}
@@ -355,7 +372,7 @@ func TestTransaction_DeleteEdge(t *testing.T) {
 	}
 	engine.CreateEdge(edge)
 
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Delete edge in transaction
 	err := tx.DeleteEdge("delete-edge-1")
@@ -384,7 +401,7 @@ func TestTransaction_DeleteEdge(t *testing.T) {
 
 func TestTransaction_ClosedTransaction(t *testing.T) {
 	engine := NewMemoryEngine()
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Commit first
 	tx.Commit()
@@ -419,7 +436,7 @@ func TestTransaction_ClosedTransaction(t *testing.T) {
 
 func TestTransaction_IsActive(t *testing.T) {
 	engine := NewMemoryEngine()
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	if !tx.IsActive() {
 		t.Error("New transaction should be active")
@@ -434,14 +451,15 @@ func TestTransaction_IsActive(t *testing.T) {
 
 func TestTransaction_Isolation(t *testing.T) {
 	engine := NewMemoryEngine()
+	defer engine.Close()
 
 	// Transaction 1 creates a node
-	tx1 := engine.BeginTransaction()
+	tx1, _ := engine.BeginTransaction()
 	node := &Node{ID: "isolated-node", Labels: []string{"Isolated"}}
 	tx1.CreateNode(node)
 
 	// Transaction 2 should NOT see this node
-	tx2 := engine.BeginTransaction()
+	tx2, _ := engine.BeginTransaction()
 	_, err := tx2.GetNode("isolated-node")
 	if err != ErrNotFound {
 		t.Error("TX2 should not see TX1's uncommitted node")
@@ -465,7 +483,7 @@ func TestTransaction_MultipleOperationTypes(t *testing.T) {
 	engine.CreateNode(&Node{ID: "existing-1", Labels: []string{"Existing"}})
 	engine.CreateNode(&Node{ID: "existing-2", Labels: []string{"Existing"}})
 
-	tx := engine.BeginTransaction()
+	tx, _ := engine.BeginTransaction()
 
 	// Mix of operations
 	tx.CreateNode(&Node{ID: "new-1", Labels: []string{"New"}})
@@ -506,7 +524,7 @@ func BenchmarkTransaction_CommitNodes(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tx := engine.BeginTransaction()
+		tx, _ := engine.BeginTransaction()
 		for j := 0; j < 10; j++ {
 			node := &Node{
 				ID:     NodeID("bench-" + time.Now().Format("150405.000000") + "-" + string(rune('0'+j))),
@@ -523,7 +541,7 @@ func BenchmarkTransaction_RollbackNodes(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		tx := engine.BeginTransaction()
+		tx, _ := engine.BeginTransaction()
 		for j := 0; j < 10; j++ {
 			node := &Node{
 				ID:     NodeID("bench-" + time.Now().Format("150405.000000") + "-" + string(rune('0'+j))),
