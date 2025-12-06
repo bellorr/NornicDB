@@ -360,7 +360,19 @@ build-ui:
 build: build-ui build-binary build-plugins-if-supported
 	@echo "✓ Build complete: bin/nornicdb + plugins (if supported)"
 
-build-binary:
+# Check and build llama.cpp library if not present or outdated
+check-llama-lib:
+	@if [ ! -f lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a ]; then \
+		echo "⚠️  llama.cpp library not found, building..."; \
+		./scripts/build-llama.sh; \
+	elif ! nm lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a 2>/dev/null | grep -q "llama_get_memory"; then \
+		echo "⚠️  llama.cpp library outdated (missing llama_get_memory), rebuilding..."; \
+		./scripts/build-llama.sh; \
+	else \
+		echo "✓ llama.cpp library up to date"; \
+	fi
+
+build-binary: check-llama-lib
 	CGO_ENABLED=1 go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 
 # Build plugins only if platform supports Go plugins (Linux/macOS, not Windows)
