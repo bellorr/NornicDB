@@ -161,7 +161,7 @@ build-arm64-metal:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 -t $(IMAGE_ARM64) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
 
-build-arm64-metal-bge:
+build-arm64-metal-bge: download-bge
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_ARM64_BGE) [with BGE model]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
@@ -185,7 +185,7 @@ build-amd64-cuda:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 -t $(IMAGE_AMD64) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
 
-build-amd64-cuda-bge:
+build-amd64-cuda-bge: download-bge
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64_BGE) [with BGE model]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"

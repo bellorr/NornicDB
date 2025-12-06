@@ -39,3 +39,4 @@ Thumbs.db
 *.tmp
 ./nornicdb/pkg/nornicdb/
 ./nornicdb/pkg/nornicdb/custom
+models/
