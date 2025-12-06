@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/orneryd/Mimir/refs/heads/main/nornicdb/docs/assets/logos/nornicdb-logo.svg" alt="NornicDB Logo" width="200"/>
+  <img src="https://raw.githubusercontent.com/orneryd/NornicDB/refs/heads/main/docs/assets/logos/nornicdb-logo.svg" alt="NornicDB Logo" width="200"/>
 </p>
 
 <h1 align="center">NornicDB</h1>
@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.0-success" alt="Version 1.0.0">
-  <a href="https://github.com/orneryd/Mimir/tree/main/nornicdb"><img src="https://img.shields.io/badge/github-orneryd%2FMimir-blue?logo=github" alt="GitHub"></a>
+  <a href="https://github.com/orneryd/NornicDB"><img src="https://img.shields.io/badge/github-orneryd%2FNornicDB-blue?logo=github" alt="GitHub"></a>
   <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.21-00ADD8?logo=go" alt="Go Version"></a>
@@ -103,8 +103,8 @@ docker run -d --name nornicdb \
 ### From Source
 
 ```bash
-git clone https://github.com/orneryd/mimir.git
-cd mimir/nornicdb
+git clone https://github.com/orneryd/NornicDB.git
+cd NornicDB
 go build -o nornicdb ./cmd/nornicdb
 ./nornicdb serve
 ```
@@ -435,7 +435,9 @@ make cross-all             # All platforms
 
 ## License
 
-MIT License — Part of the [Mimir](https://github.com/orneryd/mimir) project.
+MIT License — Originally part of the [Mimir](https://github.com/orneryd/mimir) project, now maintained as a standalone repository.
+
+See [NOTICES.md](NOTICES.md) for third-party license information, including bundled AI models (BGE-M3, Qwen2.5) and dependencies.
 
 ---
 

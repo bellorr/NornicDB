@@ -37,6 +37,10 @@ Thumbs.db
 # Temporary files
 /tmp/
 *.tmp
-./nornicdb/pkg/nornicdb/
-./nornicdb/pkg/nornicdb/custom
+
+# Models directory (downloaded at build time)
 models/
+
+# Build artifacts
+nornicdb
+/nornicdb
