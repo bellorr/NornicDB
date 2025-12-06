@@ -17,9 +17,10 @@
 - **[GPU Acceleration](gpu-acceleration.md)** - 10-100x speedup
 - **[Auto-TLP](auto-tlp.md)** - Automatic relationship inference
 
-### Configuration
+### Configuration & Extensibility
 - **[Feature Flags](feature-flags.md)** - Runtime configuration
-- **[APOC Functions](apoc-functions.md)** - 450+ Neo4j-compatible functions
+- **[Plugin System](plugin-system.md)** - Extensible architecture with function & Heimdall plugins
+- **[APOC Functions](apoc-functions.md)** - 983 Neo4j-compatible functions
 
 ## 📚 Feature Categories
 
@@ -88,7 +89,8 @@ ORDER BY n.decayScore DESC
 
 ## 📖 Feature Guides
 
-- **[APOC Functions](apoc-functions.md)** - 450+ collection, text, math, graph functions
+- **[Plugin System](plugin-system.md)** - Create custom function & Heimdall plugins
+- **[APOC Functions](apoc-functions.md)** - 983 collection, text, math, graph functions
 - **[Auto-TLP](auto-tlp.md)** - Automatic relationship inference
 - **[Feature Flags](feature-flags.md)** - Runtime configuration
 - **[Link Prediction](link-prediction.md)** - Predict missing relationships

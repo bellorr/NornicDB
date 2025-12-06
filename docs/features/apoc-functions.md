@@ -191,6 +191,7 @@ type MLPlugin struct{}
 
 func (p MLPlugin) Name() string    { return "ml" }
 func (p MLPlugin) Version() string { return "1.0.0" }
+func (p MLPlugin) Type() string    { return "function" }
 
 func (p MLPlugin) Functions() map[string]apoc.PluginFunction {
     return map[string]apoc.PluginFunction{
@@ -246,21 +247,26 @@ RETURN apoc.ml.sigmoid(0.5) AS activation
 
 ### Auto-Detection
 
-When NornicDB starts with `NORNICDB_PLUGINS_DIR` set, it:
+When NornicDB starts with `NORNICDB_PLUGINS_DIR` set, the unified plugin loader:
 
 1. Scans the directory for `*.so` files
 2. Validates each file has a `Plugin` export
-3. Checks the export implements `PluginInterface`
-4. Registers valid plugin functions as `apoc.<plugin-name>.<function>`
-5. Logs warnings for invalid plugins (doesn't prevent startup)
+3. Calls `Plugin.Type()` to determine plugin type:
+   - `"function"` or `"apoc"` or `""` → Function plugin (extends Cypher)
+   - `"heimdall"` → Heimdall plugin (extends SLM subsystem)
+4. Routes function plugins to Cypher executor
+5. Registers valid functions as `<plugin-name>.<function>` (e.g., `apoc.ml.sigmoid`)
+6. Logs warnings for invalid plugins (doesn't prevent startup)
 
 ```
 plugins/
-├── apoc-ml.so       ✅ Loaded → apoc.ml.sigmoid, apoc.ml.relu
-├── apoc-kafka.so    ✅ Loaded → apoc.kafka.produce, apoc.kafka.consume
+├── apoc-ml.so       ✅ Loaded → apoc.ml.sigmoid, apoc.ml.relu (function plugin)
+├── apoc-kafka.so    ✅ Loaded → apoc.kafka.produce, apoc.kafka.consume (function plugin)
 ├── random-lib.so    ⚠️ Skipped (no Plugin export)
 └── broken.so        ⚠️ Skipped (invalid interface)
 ```
+
+**Note:** For Heimdall subsystem plugins (SLM management), use `NORNICDB_HEIMDALL_PLUGINS_DIR` instead. See [Plugin System](plugin-system.md) for details.
 
 ## Function Reference
 
