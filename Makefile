@@ -96,37 +96,71 @@ QWEN_URL := https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/
 
 # Create models directory if it doesn't exist
 $(MODELS_DIR):
+ifeq ($(HOST_OS),windows)
+	@if not exist "$(MODELS_DIR)" mkdir "$(MODELS_DIR)"
+else
 	@mkdir -p $(MODELS_DIR)
+endif
 
 # Download BGE embedding model if missing
 download-bge: $(MODELS_DIR)
+ifeq ($(HOST_OS),windows)
+	@if not exist "$(BGE_MODEL)" ( \
+		echo =============================================================== && \
+		echo  Downloading BGE-M3 embedding model... && \
+		echo =============================================================== && \
+		echo Source: $(BGE_URL) && \
+		echo Target: $(BGE_MODEL) && \
+		echo Size: ~400MB (this may take a few minutes) && \
+		powershell -Command "Invoke-WebRequest -Uri '$(BGE_URL)' -OutFile '$(BGE_MODEL)'" && \
+		echo Downloaded $(BGE_MODEL) \
+	) else ( \
+		echo BGE model already exists: $(BGE_MODEL) \
+	)
+else
 	@if [ ! -f "$(BGE_MODEL)" ]; then \
-		echo "╔══════════════════════════════════════════════════════════════╗"; \
-		echo "║ Downloading BGE-M3 embedding model...                        ║"; \
-		echo "╚══════════════════════════════════════════════════════════════╝"; \
+		echo "==============================================================="; \
+		echo " Downloading BGE-M3 embedding model..."; \
+		echo "==============================================================="; \
 		echo "Source: $(BGE_URL)"; \
 		echo "Target: $(BGE_MODEL)"; \
 		echo "Size: ~400MB (this may take a few minutes)"; \
 		curl -L --progress-bar "$(BGE_URL)" -o "$(BGE_MODEL)"; \
-		echo "✓ Downloaded $(BGE_MODEL)"; \
+		echo "Downloaded $(BGE_MODEL)"; \
 	else \
-		echo "✓ BGE model already exists: $(BGE_MODEL)"; \
+		echo "BGE model already exists: $(BGE_MODEL)"; \
 	fi
+endif
 
 # Download Qwen LLM model if missing
 download-qwen: $(MODELS_DIR)
+ifeq ($(HOST_OS),windows)
+	@if not exist "$(QWEN_MODEL)" ( \
+		echo =============================================================== && \
+		echo  Downloading Qwen2.5-0.5B-Instruct model... && \
+		echo =============================================================== && \
+		echo Source: $(QWEN_URL) && \
+		echo Target: $(QWEN_MODEL) && \
+		echo Size: ~350MB (this may take a few minutes) && \
+		powershell -Command "Invoke-WebRequest -Uri '$(QWEN_URL)' -OutFile '$(QWEN_MODEL)'" && \
+		echo Downloaded $(QWEN_MODEL) \
+	) else ( \
+		echo Qwen model already exists: $(QWEN_MODEL) \
+	)
+else
 	@if [ ! -f "$(QWEN_MODEL)" ]; then \
-		echo "╔══════════════════════════════════════════════════════════════╗"; \
-		echo "║ Downloading Qwen2.5-0.5B-Instruct model...                   ║"; \
-		echo "╚══════════════════════════════════════════════════════════════╝"; \
+		echo "==============================================================="; \
+		echo " Downloading Qwen2.5-0.5B-Instruct model..."; \
+		echo "==============================================================="; \
 		echo "Source: $(QWEN_URL)"; \
 		echo "Target: $(QWEN_MODEL)"; \
 		echo "Size: ~350MB (this may take a few minutes)"; \
 		curl -L --progress-bar "$(QWEN_URL)" -o "$(QWEN_MODEL)"; \
-		echo "✓ Downloaded $(QWEN_MODEL)"; \
+		echo "Downloaded $(QWEN_MODEL)"; \
 	else \
-		echo "✓ Qwen model already exists: $(QWEN_MODEL)"; \
+		echo "Qwen model already exists: $(QWEN_MODEL)"; \
 	fi
+endif
 
 # Download both models if missing
 download-models: download-bge download-qwen
@@ -138,6 +172,20 @@ download-models: download-bge download-qwen
 # Check if models exist (without downloading)
 check-models:
 	@echo "Checking Heimdall models..."
+ifeq ($(HOST_OS),windows)
+	@if exist "$(BGE_MODEL)" ( \
+		echo BGE model: $(BGE_MODEL) \
+	) else ( \
+		echo BGE model missing: $(BGE_MODEL) && \
+		echo   Run: make download-bge \
+	)
+	@if exist "$(QWEN_MODEL)" ( \
+		echo Qwen model: $(QWEN_MODEL) \
+	) else ( \
+		echo Qwen model missing: $(QWEN_MODEL) && \
+		echo   Run: make download-qwen \
+	)
+else
 	@if [ -f "$(BGE_MODEL)" ]; then \
 		echo "✓ BGE model: $(BGE_MODEL)"; \
 	else \
@@ -150,6 +198,7 @@ check-models:
 		echo "✗ Qwen model missing: $(QWEN_MODEL)"; \
 		echo "  Run: make download-qwen"; \
 	fi
+endif
 
 # ==============================================================================
 # Build (local only, no push)
@@ -362,6 +411,14 @@ build: build-ui download-models build-binary build-plugins-if-supported
 
 # Check and build llama.cpp library if not present or outdated
 check-llama-lib:
+ifeq ($(HOST_OS),windows)
+	@if not exist "lib\llama\libllama_$(HOST_OS)_$(HOST_ARCH).a" ( \
+		echo WARNING: llama.cpp library not found, building... && \
+		powershell -ExecutionPolicy Bypass -File scripts\build-llama-cuda.ps1 \
+	) else ( \
+		echo llama.cpp library up to date \
+	)
+else
 	@if [ ! -f lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a ]; then \
 		echo "⚠️  llama.cpp library not found, building..."; \
 		./scripts/build-llama.sh; \
@@ -371,6 +428,7 @@ check-llama-lib:
 	else \
 		echo "✓ llama.cpp library up to date"; \
 	fi
+endif
 
 build-binary: check-llama-lib
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
@@ -581,18 +639,34 @@ plugins-list:
 	@echo "  make plugins-clean              Remove built plugins"
 	@echo ""
 	@echo "Built APOC plugins:"
+ifeq ($(HOST_OS),windows)
+	@if exist "$(PLUGINS_DIR)" ( \
+		dir /b $(PLUGINS_DIR)\*.dll 2>nul || echo   (none) \
+	) else ( \
+		echo   (none) \
+	)
+else
 	@if [ -d "$(PLUGINS_DIR)" ]; then \
 		ls -lh $(PLUGINS_DIR)/*.so 2>/dev/null || echo "  (none)"; \
 	else \
 		echo "  (none)"; \
 	fi
+endif
 	@echo ""
 	@echo "Built Heimdall plugins:"
+ifeq ($(HOST_OS),windows)
+	@if exist "$(HEIMDALL_PLUGINS_DIR)" ( \
+		dir /b $(HEIMDALL_PLUGINS_DIR)\*.dll 2>nul || echo   (none) \
+	) else ( \
+		echo   (none) \
+	)
+else
 	@if [ -d "$(HEIMDALL_PLUGINS_DIR)" ]; then \
 		ls -lh $(HEIMDALL_PLUGINS_DIR)/*.so 2>/dev/null || echo "  (none)"; \
 	else \
 		echo "  (none)"; \
 	fi
+endif
 	@echo ""
 	@echo "To build all: make plugins"
 
