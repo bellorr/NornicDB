@@ -87,7 +87,7 @@ QWEN_URL := https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/
 .PHONY: deploy-amd64-cpu deploy-amd64-cpu-headless
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
-.PHONY: build build-localllm build-headless build-localllm-headless test clean images help
+.PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test clean images help
 .PHONY: download-models download-bge download-qwen check-models
 
 # ==============================================================================
@@ -350,12 +350,18 @@ deploy-llama-cuda: build-llama-cuda push-llama-cuda
 # Local Development (native binary, not Docker)
 # ==============================================================================
 
+# Build UI assets first
+build-ui:
+	@echo "Building UI assets..."
+	@cd ui && npm install && npm run build
+	@echo "✓ UI built successfully"
+
 # Build NornicDB binary + APOC plugins (on supported platforms)
-build: build-binary build-plugins-if-supported
+build: build-ui build-binary build-plugins-if-supported
 	@echo "✓ Build complete: bin/nornicdb + plugins (if supported)"
 
 build-binary:
-	go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 
 # Build plugins only if platform supports Go plugins (Linux/macOS, not Windows)
 build-plugins-if-supported:
@@ -559,7 +565,9 @@ help:
 	@echo "  make check-models            Check which models are present"
 	@echo ""
 	@echo "Local Development:"
-	@echo "  make build                   Build native binary with UI"
+	@echo "  make build                   Build UI + native binary (with UI embedded)"
+	@echo "  make build-ui                Build UI assets only (ui/dist/)"
+	@echo "  make build-binary            Build Go binary only (requires UI built)"
 	@echo "  make build-headless          Build native binary without UI"
 	@echo "  make build-localllm          Build with local LLM support"
 	@echo "  make build-localllm-headless Build headless with local LLM"

@@ -44,3 +44,7 @@ models/
 # Build artifacts
 nornicdb
 /nornicdb
+
+neural/data
+neural/venv
+neural/training/__pycache__
