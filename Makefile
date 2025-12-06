@@ -373,7 +373,7 @@ check-llama-lib:
 	fi
 
 build-binary: check-llama-lib
-	CGO_ENABLED=1 go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 
 # Build plugins only if platform supports Go plugins (Linux/macOS, not Windows)
 build-plugins-if-supported:
@@ -527,7 +527,7 @@ plugins: plugin-check plugin-apoc
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	@ls -lh $(PLUGINS_DIR)/*.so 2>/dev/null || echo "No plugins found"
 	@echo ""
-	@echo "To use: NORNICDB_PLUGINS_DIR=$(PLUGINS_DIR) ./bin/nornicdb serve --no-auth"
+	@echo "To use: NORNICDB_PLUGINS_DIR=$(PLUGINS_DIR) NORNICDB_MODELS_DIR=./models NORNICDB_EMBEDDING_PROVIDER=local ./bin/nornicdb serve --no-auth"
 
 # Plugin source directory
 PLUGINS_SRC_DIR := apoc/plugin-src
