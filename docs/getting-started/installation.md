@@ -28,7 +28,7 @@ go build -o nornicdb ./cmd/nornicdb
 
 ```bash
 # Pull the image (ARM64/Apple Silicon)
-docker pull timothyswt/nornicdb-arm64-metal:0.1.3
+docker pull timothyswt/nornicdb-arm64-metal:v1.0.0
 
 # Or use latest
 docker pull timothyswt/nornicdb-arm64-metal:latest
@@ -39,14 +39,14 @@ docker run -d \
   -p 7474:7474 \
   -p 7687:7687 \
   -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal:0.1.3
+  timothyswt/nornicdb-arm64-metal:v1.0.0
 
 # Verify it's running
 curl http://localhost:7474/health
 ```
 
 **Available Tags:**
-- `timothyswt/nornicdb-arm64-metal:0.1.3` - Current stable release
+- `timothyswt/nornicdb-arm64-metal:v1.0.0` - Current stable release
 - `timothyswt/nornicdb-arm64-metal:latest` - Latest build
 
 ### Option 3: Go Package

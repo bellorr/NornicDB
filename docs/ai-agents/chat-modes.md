@@ -32,7 +32,7 @@ docker run -d \
   -p 7687:7687 \
   -v nornicdb-data:/data \
   --name nornicdb \
-  timothyswt/nornicdb-arm64-metal:0.1.3
+  timothyswt/nornicdb-arm64-metal:v1.0.0
 ```
 
 **Option B: Docker Compose**
@@ -41,7 +41,7 @@ docker run -d \
 # docker-compose.yml
 services:
   nornicdb:
-    image: timothyswt/nornicdb-arm64-metal:0.1.3
+    image: timothyswt/nornicdb-arm64-metal:v1.0.0
     ports:
       - "7474:7474"
       - "7687:7687"
