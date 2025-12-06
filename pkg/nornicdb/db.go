@@ -792,10 +792,11 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Initialize Cypher executor
 	db.cypherExecutor = cypher.NewStorageExecutor(db.storage)
 
-	// Load plugins from configured directory (NORNICDB_PLUGINS_DIR)
+	// Load function plugins from configured directory (NORNICDB_PLUGINS_DIR)
+	// Heimdall plugins will be loaded later by the server after Heimdall is initialized
 	pluginsDir := os.Getenv("NORNICDB_PLUGINS_DIR")
 	if pluginsDir != "" {
-		if err := LoadPluginsFromDir(pluginsDir); err != nil {
+		if err := LoadPluginsFromDir(pluginsDir, nil); err != nil {
 			fmt.Printf("⚠️  Plugin loading warning: %v\n", err)
 		}
 	}
@@ -2978,16 +2979,33 @@ func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
 	anonymousID := "anon-" + generateID("")
 
 	// Collect nodes to update (can't update while streaming in some engines)
+	// We must make copies since other goroutines might be iterating over these nodes
 	var toUpdate []*storage.Node
 	err := storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(n *storage.Node) error {
 		if owner, ok := n.Properties["owner_id"].(string); ok && owner == userID {
-			// Replace identifying info
-			n.Properties["owner_id"] = anonymousID
-			delete(n.Properties, "email")
-			delete(n.Properties, "name")
-			delete(n.Properties, "username")
-			delete(n.Properties, "ip_address")
-			toUpdate = append(toUpdate, n)
+			// Make a deep copy of the node to avoid concurrent modification
+			nodeCopy := &storage.Node{
+				ID:           n.ID,
+				Labels:       append([]string(nil), n.Labels...),
+				Properties:   make(map[string]any, len(n.Properties)),
+				CreatedAt:    n.CreatedAt,
+				UpdatedAt:    n.UpdatedAt,
+				DecayScore:   n.DecayScore,
+				LastAccessed: n.LastAccessed,
+				AccessCount:  n.AccessCount,
+				Embedding:    append([]float32(nil), n.Embedding...),
+			}
+			for k, v := range n.Properties {
+				nodeCopy.Properties[k] = v
+			}
+
+			// Replace identifying info in the copy
+			nodeCopy.Properties["owner_id"] = anonymousID
+			delete(nodeCopy.Properties, "email")
+			delete(nodeCopy.Properties, "name")
+			delete(nodeCopy.Properties, "username")
+			delete(nodeCopy.Properties, "ip_address")
+			toUpdate = append(toUpdate, nodeCopy)
 		}
 		return nil
 	})

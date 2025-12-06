@@ -22,6 +22,7 @@ type APOCPlugin struct{}
 
 func (p APOCPlugin) Name() string    { return "apoc" }
 func (p APOCPlugin) Version() string { return "1.0.0" }
+func (p APOCPlugin) Type() string    { return "function" }
 
 func (p APOCPlugin) Functions() map[string]PluginFunction {
 	// Initialize APOC with nil storage (functions don't need storage)

@@ -499,13 +499,14 @@ images:
 	@echo "  $(LLAMA_CUDA)"
 
 # ==============================================================================
-# APOC Plugin System
+# Plugin System (APOC + Heimdall)
 # ==============================================================================
 # Go plugins (.so files) that can be dynamically loaded at runtime.
 # Note: Go plugins only work on Linux and macOS (not Windows).
 # Plugins must be built with the same Go version as the main binary.
 
 PLUGINS_DIR := apoc/built-plugins
+HEIMDALL_PLUGINS_DIR := plugins/heimdall/built-plugins
 
 # Check if plugins are supported on this platform
 .PHONY: plugin-check
@@ -518,17 +519,27 @@ else
 	@echo "Platform $(shell uname -s) supports Go plugins"
 endif
 
-# Build all loadable plugins (APOC only - Heimdall is built-in)
+# Build all loadable plugins (APOC + Heimdall example)
 .PHONY: plugins
-plugins: plugin-check plugin-apoc
+plugins: plugin-check plugin-apoc plugin-heimdall-watcher
 	@echo ""
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Plugins built successfully!                                  ║"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	@ls -lh $(PLUGINS_DIR)/*.so 2>/dev/null || echo "No plugins found"
+	@echo ""
+	@echo "APOC plugins:"
+	@ls -lh $(PLUGINS_DIR)/*.so 2>/dev/null || echo "  (none)"
+	@echo ""
+	@echo "Heimdall plugins:"
+	@ls -lh $(HEIMDALL_PLUGINS_DIR)/*.so 2>/dev/null || echo "  (none)"
 	@echo ""
 	@echo "To use copy-paste the following:"
-	@echo "   NORNICDB_HEIMDALL_ENABLED=true NORNICDB_PLUGINS_DIR=$(PLUGINS_DIR) NORNICDB_MODELS_DIR=$(MODELS_DIR) NORNICDB_EMBEDDING_PROVIDER=local ./bin/nornicdb serve --no-auth "
+	@echo "   NORNICDB_HEIMDALL_ENABLED=true \\"
+	@echo "   NORNICDB_HEIMDALL_PLUGINS_DIR=$(HEIMDALL_PLUGINS_DIR) \\"
+	@echo "   NORNICDB_PLUGINS_DIR=$(PLUGINS_DIR) \\"
+	@echo "   NORNICDB_MODELS_DIR=$(MODELS_DIR) \\"
+	@echo "   NORNICDB_EMBEDDING_PROVIDER=local \\"
+	@echo "   ./bin/nornicdb serve --no-auth"
 
 # Plugin source directory
 PLUGINS_SRC_DIR := apoc/plugin-src
@@ -541,13 +552,22 @@ plugin-apoc: plugin-check
 	cd $(PLUGINS_SRC_DIR)/apoc && go build -buildmode=plugin -o ../../../$(PLUGINS_DIR)/apoc.so apoc_plugin.go
 	@echo "Built: $(PLUGINS_DIR)/apoc.so"
 
-# Note: Heimdall is built-in to the binary (compiled directly, not a loadable .so)
-# Enable it with: NORNICDB_HEIMDALL_ENABLED=true
+# Build Heimdall Watcher plugin (example plugin)
+.PHONY: plugin-heimdall-watcher
+plugin-heimdall-watcher: plugin-check
+	@mkdir -p $(HEIMDALL_PLUGINS_DIR)
+	@echo "Building Heimdall Watcher plugin..."
+	cd plugins/heimdall/plugin-src/watcher && go build -buildmode=plugin -o ../../built-plugins/watcher.so watcher_plugin.go
+	@echo "Built: $(HEIMDALL_PLUGINS_DIR)/watcher.so"
+
+# Note: Heimdall core is built into the binary. Plugins extend functionality.
+# Enable Heimdall with: NORNICDB_HEIMDALL_ENABLED=true
+# Load plugins with: NORNICDB_HEIMDALL_PLUGINS_DIR=$(HEIMDALL_PLUGINS_DIR)
 
 # Clean plugins
 .PHONY: plugins-clean
 plugins-clean:
-	rm -rf $(PLUGINS_DIR)
+	rm -rf $(PLUGINS_DIR) $(HEIMDALL_PLUGINS_DIR)
 	@echo "Cleaned plugin build artifacts"
 
 # List available plugins
@@ -555,16 +575,26 @@ plugins-clean:
 plugins-list:
 	@echo "Available Plugin Targets:"
 	@echo ""
-	@echo "  make plugins          Build APOC plugin"
-	@echo "  make plugin-apoc      Build APOC plugin"
-	@echo "  make plugins-clean    Remove built plugins"
+	@echo "  make plugins                    Build all plugins (APOC + Heimdall)"
+	@echo "  make plugin-apoc                Build APOC plugin"
+	@echo "  make plugin-heimdall-watcher    Build Heimdall Watcher plugin"
+	@echo "  make plugins-clean              Remove built plugins"
 	@echo ""
+	@echo "Built APOC plugins:"
 	@if [ -d "$(PLUGINS_DIR)" ]; then \
-		echo "Built plugins:"; \
 		ls -lh $(PLUGINS_DIR)/*.so 2>/dev/null || echo "  (none)"; \
 	else \
-		echo "No plugins built yet. Run 'make plugins' to build."; \
+		echo "  (none)"; \
 	fi
+	@echo ""
+	@echo "Built Heimdall plugins:"
+	@if [ -d "$(HEIMDALL_PLUGINS_DIR)" ]; then \
+		ls -lh $(HEIMDALL_PLUGINS_DIR)/*.so 2>/dev/null || echo "  (none)"; \
+	else \
+		echo "  (none)"; \
+	fi
+	@echo ""
+	@echo "To build all: make plugins"
 
 clean:
 	rm -rf bin/nornicdb bin/nornicdb-headless bin/nornicdb.exe \

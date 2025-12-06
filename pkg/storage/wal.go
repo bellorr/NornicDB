@@ -1768,6 +1768,7 @@ type WALEngine struct {
 
 	// Automatic snapshot and compaction
 	snapshotDir      string
+	snapshotMu       sync.RWMutex // Protects snapshotTicker and stopSnapshot
 	snapshotTicker   *time.Ticker
 	stopSnapshot     chan struct{}
 	lastSnapshotTime atomic.Int64
@@ -1796,6 +1797,9 @@ func NewWALEngine(engine Engine, wal *WAL) *WALEngine {
 //	walEngine.EnableAutoCompaction("data/snapshots")
 //	// WAL will now be automatically truncated every SnapshotInterval
 func (w *WALEngine) EnableAutoCompaction(snapshotDir string) error {
+	w.snapshotMu.Lock()
+	defer w.snapshotMu.Unlock()
+
 	if w.stopSnapshot != nil {
 		return fmt.Errorf("wal: auto-compaction already enabled")
 	}
@@ -1812,11 +1816,11 @@ func (w *WALEngine) EnableAutoCompaction(snapshotDir string) error {
 		interval = 1 * time.Hour // Default if not configured
 	}
 
-	// Create ticker BEFORE starting goroutine to avoid race
+	// Create ticker and channel BEFORE starting goroutine to avoid race
 	w.snapshotTicker = time.NewTicker(interval)
 	w.stopSnapshot = make(chan struct{})
 
-	// Now start goroutine - ticker is already initialized
+	// Now start goroutine - ticker is already initialized and protected by lock
 	go w.autoSnapshotLoop()
 
 	return nil
@@ -1824,6 +1828,9 @@ func (w *WALEngine) EnableAutoCompaction(snapshotDir string) error {
 
 // DisableAutoCompaction stops automatic snapshot creation and WAL truncation.
 func (w *WALEngine) DisableAutoCompaction() {
+	w.snapshotMu.Lock()
+	defer w.snapshotMu.Unlock()
+
 	if w.stopSnapshot != nil {
 		close(w.stopSnapshot)
 		w.stopSnapshot = nil
@@ -1837,18 +1844,25 @@ func (w *WALEngine) DisableAutoCompaction() {
 // autoSnapshotLoop runs in background, creating periodic snapshots and truncating WAL.
 func (w *WALEngine) autoSnapshotLoop() {
 	for {
-		// Check if ticker is still valid (could be nil after DisableAutoCompaction)
-		if w.snapshotTicker == nil {
+		// Get local copies of channels under lock to avoid races
+		w.snapshotMu.RLock()
+		ticker := w.snapshotTicker
+		stopCh := w.stopSnapshot
+		w.snapshotMu.RUnlock()
+
+		// Check if shutdown was requested
+		if ticker == nil || stopCh == nil {
 			return
 		}
 
+		// Select on local channel copies (safe to do without lock)
 		select {
-		case <-w.snapshotTicker.C:
+		case <-ticker.C:
 			if err := w.createSnapshotAndCompact(); err != nil {
 				// Log error but continue - don't crash on snapshot failure
 				fmt.Printf("WAL auto-compaction failed: %v\n", err)
 			}
-		case <-w.stopSnapshot:
+		case <-stopCh:
 			return
 		}
 	}

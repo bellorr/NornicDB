@@ -1098,6 +1098,11 @@ func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *Se
 //   - String representations of other property types
 //   - Priority properties (content, title, etc.) are included first for better ranking
 func (s *Service) extractSearchableText(node *storage.Node) string {
+	// Note: We now receive a stable copy of the node from IterateNodes,
+	// so we can safely access its properties without additional locking.
+	// The storage engine (AsyncEngine) makes copies during iteration to
+	// prevent concurrent modification issues.
+
 	var parts []string
 
 	// 1. Add labels first (important for type-based search)

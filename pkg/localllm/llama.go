@@ -42,8 +42,9 @@ package localllm
 #cgo linux,arm64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_linux_arm64 -lm -lstdc++ -lpthread
 
 // macOS with Metal (GPU primary on Apple Silicon)
-#cgo darwin,arm64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_darwin_arm64 -lm -lc++ -framework Accelerate -framework Metal -framework MetalPerformanceShaders -framework Foundation
-#cgo darwin,amd64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_darwin_amd64 -lm -lc++ -framework Accelerate
+// Set deployment target to macOS 26.0 to match llama library build (eliminates linker warnings)
+#cgo darwin,arm64 LDFLAGS: -mmacosx-version-min=26.0 -L${SRCDIR}/../../lib/llama -lllama_darwin_arm64 -lm -lc++ -framework Accelerate -framework Metal -framework MetalPerformanceShaders -framework Foundation
+#cgo darwin,amd64 LDFLAGS: -mmacosx-version-min=26.0 -L${SRCDIR}/../../lib/llama -lllama_darwin_amd64 -lm -lc++ -framework Accelerate
 
 // Windows with CUDA - handled in llama_windows.go
 #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_windows_amd64 -lcudart -lcublas -lm -lstdc++

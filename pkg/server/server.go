@@ -150,7 +150,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/mcp"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/security"
-	heimdallplugin "github.com/orneryd/nornicdb/plugins/heimdall"
 )
 
 // Errors for HTTP operations.
@@ -634,24 +633,16 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			}
 			subsystemMgr.SetContext(subsystemCtx)
 
-			// Register built-in actions
+			// Register built-in actions (core system actions)
 			heimdall.InitBuiltinActions()
 
-			// Register built-in watcher plugin
-			watcherPlugin := heimdallplugin.Plugin
-			if err := subsystemMgr.RegisterPlugin(watcherPlugin, "", true); err != nil {
-				log.Printf("   ⚠️  Failed to register watcher plugin: %v", err)
-			} else {
-				if err := watcherPlugin.Start(); err != nil {
-					log.Printf("   ⚠️  Failed to start watcher plugin: %v", err)
-				}
-			}
-
-			// Load external plugins if directory specified
+			// Load plugins from Heimdall plugins directory
+			// Auto-detects plugin types: function plugins (APOC) and Heimdall plugins
+			// Example: watcher.so (Heimdall), custom subsystem plugins
 			pluginsDir := os.Getenv("NORNICDB_HEIMDALL_PLUGINS_DIR")
 			if pluginsDir != "" {
-				if err := heimdall.LoadHeimdallPluginsFromDir(pluginsDir, subsystemCtx); err != nil {
-					log.Printf("   ⚠️  Failed to load Heimdall plugins from %s: %v", pluginsDir, err)
+				if err := nornicdb.LoadPluginsFromDir(pluginsDir, &subsystemCtx); err != nil {
+					log.Printf("   ⚠️  Failed to load plugins from %s: %v", pluginsDir, err)
 				}
 			}
 

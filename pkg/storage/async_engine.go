@@ -1013,19 +1013,41 @@ func (ae *AsyncEngine) FindNodeNeedingEmbedding() *Node {
 // IterateNodes iterates through all nodes, checking cache first.
 func (ae *AsyncEngine) IterateNodes(fn func(*Node) bool) error {
 	// First iterate cache
+	// We need to make copies since the callback may be called without locks held
+	// and the node could be modified by other goroutines
 	ae.mu.RLock()
 	cachedIDs := make(map[NodeID]bool)
+	cachedCopies := make([]*Node, 0, len(ae.nodeCache))
 	for id, node := range ae.nodeCache {
 		if ae.deleteNodes[id] {
 			continue
 		}
 		cachedIDs[id] = true
-		if !fn(node) {
-			ae.mu.RUnlock()
+		// Make a deep copy of the node to avoid concurrent access issues
+		nodeCopy := &Node{
+			ID:           node.ID,
+			Labels:       append([]string(nil), node.Labels...),
+			Properties:   make(map[string]any, len(node.Properties)),
+			CreatedAt:    node.CreatedAt,
+			UpdatedAt:    node.UpdatedAt,
+			DecayScore:   node.DecayScore,
+			LastAccessed: node.LastAccessed,
+			AccessCount:  node.AccessCount,
+			Embedding:    append([]float32(nil), node.Embedding...),
+		}
+		for k, v := range node.Properties {
+			nodeCopy.Properties[k] = v
+		}
+		cachedCopies = append(cachedCopies, nodeCopy)
+	}
+	ae.mu.RUnlock()
+
+	// Call callback with copies (safe to do without lock)
+	for _, nodeCopy := range cachedCopies {
+		if !fn(nodeCopy) {
 			return nil
 		}
 	}
-	ae.mu.RUnlock()
 
 	// Then iterate underlying engine, skipping cached nodes
 	if iterator, ok := ae.engine.(interface{ IterateNodes(func(*Node) bool) error }); ok {
@@ -1034,11 +1056,13 @@ func (ae *AsyncEngine) IterateNodes(fn func(*Node) bool) error {
 				return true // Skip, already visited from cache
 			}
 			ae.mu.RLock()
-			if ae.deleteNodes[node.ID] {
-				ae.mu.RUnlock()
+			deleted := ae.deleteNodes[node.ID]
+			ae.mu.RUnlock()
+
+			if deleted {
 				return true // Skip deleted
 			}
-			ae.mu.RUnlock()
+
 			return fn(node)
 		})
 	}
