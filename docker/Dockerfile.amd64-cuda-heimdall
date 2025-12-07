@@ -14,7 +14,7 @@
 # This is a "batteries included" deployment - no additional model downloads required.
 # Heimdall provides: anomaly detection, runtime diagnosis, and memory curation via Bifrost chat.
 
-ARG LLAMA_CUDA_IMAGE=timothyswt/llama-cuda-libs:7285
+ARG LLAMA_CUDA_IMAGE=timothyswt/llama-cuda-libs:b7285
 
 # =============================================================================
 # Stage 1: UI
@@ -93,11 +93,11 @@ RUN --mount=type=bind,source=models,target=/models,ro \
       echo "ERROR: models/bge-m3.gguf not found" && exit 1; \
     fi && \
     echo "Embedding Heimdall SLM model..." && \
-    if [ -f /models/qwen2.5-0.5b-instruct-q4_k_m.gguf ]; then \
-      cp /models/qwen2.5-0.5b-instruct-q4_k_m.gguf /app/models/ && \
-      echo "✓ Embedded qwen2.5-0.5b-instruct-q4_k_m.gguf ($(du -h /app/models/qwen2.5-0.5b-instruct-q4_k_m.gguf | cut -f1))"; \
+    if [ -f /models/qwen2.5-0.5b-instruct.gguf ]; then \
+      cp /models/qwen2.5-0.5b-instruct.gguf /app/models/ && \
+      echo "✓ Embedded qwen2.5-0.5b-instruct.gguf ($(du -h /app/models/qwen2.5-0.5b-instruct.gguf | cut -f1))"; \
     else \
-      echo "ERROR: models/qwen2.5-0.5b-instruct-q4_k_m.gguf not found" && exit 1; \
+      echo "ERROR: models/qwen2.5-0.5b-instruct.gguf not found" && exit 1; \
     fi && \
     echo "✓ Heimdall cognitive features enabled"
 

@@ -2,10 +2,12 @@
 
 // Package localllm provides CGO bindings to llama.cpp for local GGUF model inference.
 //
-// This is the Windows CPU-only implementation for embedding generation.
+// This is the Windows implementation with automatic GPU detection.
 //
-// Note: Windows builds use CPU-only due to MSVC/MinGW incompatibility.
-// For GPU acceleration, use Docker on Linux with CUDA support.
+// GPU Support (Dynamic Backend Loading):
+//   - If ggml-cuda.dll is present in lib/llama, CUDA acceleration is used
+//   - Falls back to CPU-only if CUDA DLL is not found
+//   - No recompilation needed to switch between CPU/GPU
 //
 // CPU Optimizations:
 //   - AVX/AVX2/FMA SIMD instructions
@@ -14,7 +16,8 @@
 //
 // Build Requirements:
 //   - MinGW-w64 (GCC for Windows)
-//   - Pre-built libllama_windows_amd64.a (CPU-only)
+//   - Pre-built llama.cpp libraries
+//   - Optional: ggml-cuda.dll for GPU acceleration
 //
 // Example:
 //
@@ -32,7 +35,7 @@ package localllm
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../lib/llama
 
-// Windows CPU-only - link against MinGW-built llama.cpp libraries
+// Windows - link against MinGW-built llama.cpp libraries with dynamic backend support
 // Libraries: All ggml/llama static libraries in correct order
 #cgo LDFLAGS: -L${SRCDIR}/../../lib/llama/windows_amd64_cuda/build/src
 #cgo LDFLAGS: -L${SRCDIR}/../../lib/llama/windows_amd64_cuda/build/ggml/src
@@ -47,15 +50,53 @@ package localllm
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 #include "llama.h"
+#include "ggml.h"
+#include "ggml-backend.h"
 
-// Initialize backend once (handles GPU detection)
+// Initialize backend once (handles GPU detection and dynamic backend loading)
 static int initialized = 0;
+static int cuda_loaded = 0;
+
 void init_backend() {
     if (!initialized) {
         llama_backend_init();
+
+        // Try to load GPU backends from lib/llama directory
+        // This loads ggml-cuda.dll if present, enabling GPU acceleration
+        // The function ggml_backend_load_all_from_path is available when GGML_BACKEND_DL=ON
+        ggml_backend_load_all_from_path("lib/llama");
+
+        // Check if CUDA backend is now available
+        size_t backend_count = ggml_backend_dev_count();
+        fprintf(stderr, "[localllm] Found %zu compute backend(s)\n", backend_count);
+
+        for (size_t i = 0; i < backend_count; i++) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            const char* name = ggml_backend_dev_name(dev);
+            const char* desc = ggml_backend_dev_description(dev);
+            fprintf(stderr, "[localllm] Backend %zu: %s - %s\n", i, name, desc);
+
+            // Check if this is a CUDA backend
+            if (name && (strstr(name, "CUDA") != NULL || strstr(name, "cuda") != NULL)) {
+                cuda_loaded = 1;
+            }
+        }
+
+        if (cuda_loaded) {
+            fprintf(stderr, "[localllm] CUDA GPU acceleration enabled!\n");
+        } else {
+            fprintf(stderr, "[localllm] Using CPU backend\n");
+        }
+
         initialized = 1;
     }
+}
+
+// Check if CUDA backend was loaded
+int is_cuda_available() {
+    return cuda_loaded;
 }
 
 // Get number of layers in model (for GPU offload calculation)

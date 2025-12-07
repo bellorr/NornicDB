@@ -63,7 +63,7 @@ IMAGE_AMD64_BGE_HEIMDALL := $(REGISTRY)/nornicdb-amd64-cuda-bge-heimdall:$(VERSI
 IMAGE_AMD64_HEADLESS := $(REGISTRY)/nornicdb-amd64-cuda-headless:$(VERSION)
 IMAGE_AMD64_CPU := $(REGISTRY)/nornicdb-amd64-cpu:$(VERSION)
 IMAGE_AMD64_CPU_HEADLESS := $(REGISTRY)/nornicdb-amd64-cpu-headless:$(VERSION)
-LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:b4785
+LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:b7285
 
 # Dockerfiles
 DOCKER_DIR := docker
@@ -405,35 +405,26 @@ build-ui:
 	@cd ui && npm install && npm run build
 	@echo "✓ UI built successfully"
 
-# Build NornicDB binary + APOC plugins + download models (on supported platforms)
-build: build-ui download-models build-binary build-plugins-if-supported
+# Build NornicDB binary + APOC plugins (Windows: CPU-only, others: with localllm)
+build: build-ui build-binary build-plugins-if-supported
 	@echo "==============================================================="
 	@echo " Build complete!"
 	@echo "==============================================================="
 ifeq ($(HOST_OS),windows)
 	@echo ""
-	@echo "Binary: bin\nornicdb.exe"
-	@echo "Models: models\bge-m3.gguf"
+	@echo "Binary: bin\nornicdb.exe (CPU-only build)"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  1. Quick start (recommended):"
-	@echo "       $$env:NORNICDB_EMBEDDING_PROVIDER='local'"
+	@echo "  1. Quick start (no embeddings):"
 	@echo "       .\bin\nornicdb.exe serve --no-auth"
 	@echo ""
-	@echo "  2. With Heimdall cognitive features:"
-	@echo "       $$env:NORNICDB_EMBEDDING_PROVIDER='local'"
-	@echo "       $$env:NORNICDB_HEIMDALL_ENABLED='true'"
-	@echo "       .\bin\nornicdb.exe serve --no-auth"
-	@echo ""
-	@echo "  3. Connect with Neo4j drivers:"
+	@echo "  2. Connect with Neo4j drivers:"
 	@echo "       bolt://localhost:7687"
 	@echo "       (authentication disabled with --no-auth)"
 	@echo ""
-	@echo "  Note: If WAL sync errors occur, try a different data location:"
-	@echo "        .\bin\nornicdb.exe serve --no-auth --data-dir C:\nornicdb-data"
-	@echo ""
-	@echo "  Example command to run with PowerShell:"
-	@echo "$$env:NORNICDB_EMBEDDING_PROVIDER='local';$$env:NORNICDB_MODELS_DIR='.\models'; .\bin\nornicdb.exe serve --no-auth "
+	@echo "  Note: This is a CPU-only build without embedding support."
+	@echo "  For embeddings, use Docker: make build-amd64-cuda-bge-heimdall"
+	@echo "  Or use external embedding provider (Ollama, OpenAI, etc.)"
 	@echo ""
 else
 	@echo ""
@@ -457,13 +448,7 @@ endif
 # Check and build llama.cpp library if not present or outdated
 check-llama-lib:
 ifeq ($(HOST_OS),windows)
-	@if not exist "lib\llama\libllama_$(HOST_OS)_$(HOST_ARCH).a" ( \
-		echo WARNING: llama.cpp library not found, building... && \
-		if exist "%TEMP%\llama-cpp-build" rmdir /s /q "%TEMP%\llama-cpp-build" && \
-		powershell -ExecutionPolicy Bypass -File scripts\build-llama-cuda.ps1 \
-	) else ( \
-		echo llama.cpp library up to date \
-	)
+	@echo "Windows: Skipping llama.cpp library check (CPU-only build)"
 else
 	@if [ ! -f lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a ]; then \
 		echo "⚠️  llama.cpp library not found, building..."; \
@@ -478,7 +463,7 @@ endif
 
 build-binary: check-llama-lib
 ifeq ($(HOST_OS),windows)
-	@set CGO_ENABLED=1 && go build -tags "localllm" -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	@go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 else
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 endif
@@ -491,8 +476,10 @@ else
 	@$(MAKE) plugins
 endif
 
-build-localllm: build-plugins-if-supported
+build-localllm: check-llama-lib build-plugins-if-supported
 ifeq ($(HOST_OS),windows)
+	@echo "Note: On Windows, build-localllm requires manual llama.cpp setup"
+	@echo "Run: powershell -ExecutionPolicy Bypass -File scripts\\build-llama-cuda.ps1"
 	@set CGO_ENABLED=1 && go build -tags "localllm" -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 else
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
@@ -502,8 +489,10 @@ endif
 build-headless: build-plugins-if-supported
 	go build -tags noui -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 
-build-localllm-headless: build-plugins-if-supported
+build-localllm-headless: check-llama-lib build-plugins-if-supported
 ifeq ($(HOST_OS),windows)
+	@echo "Note: On Windows, build-localllm-headless requires manual llama.cpp setup"
+	@echo "Run: powershell -ExecutionPolicy Bypass -File scripts\\build-llama-cuda.ps1"
 	@set CGO_ENABLED=1 && go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
 else
 	CGO_ENABLED=1 go build -tags "localllm noui" -o bin/nornicdb-headless$(BIN_EXT) ./cmd/nornicdb
@@ -758,7 +747,7 @@ clean:
 		bin/nornicdb-rpi64 bin/nornicdb-rpi32 bin/nornicdb-rpi-zero
 
 help:
-	@echo "NornicDB Build System (detected arch: $(HOST_ARCH))"
+	@echo "NornicDB Build System (detected arch: $(HOST_ARCH), OS: $(HOST_OS))"
 	@echo ""
 	@echo "Model Downloads (Heimdall prerequisites):"
 	@echo "  make download-models         Download both BGE + Qwen models"
@@ -767,11 +756,19 @@ help:
 	@echo "  make check-models            Check which models are present"
 	@echo ""
 	@echo "Local Development:"
-	@echo "  make build                   Build UI + native binary (with UI embedded)"
+ifeq ($(HOST_OS),windows)
+	@echo "  make build                   Build UI + native binary (CPU-only, no embeddings)"
+else
+	@echo "  make build                   Build UI + native binary (with local embeddings)"
+endif
 	@echo "  make build-ui                Build UI assets only (ui/dist/)"
 	@echo "  make build-binary            Build Go binary only (requires UI built)"
 	@echo "  make build-headless          Build native binary without UI"
+ifeq ($(HOST_OS),windows)
+	@echo "  make build-localllm          Build with local LLM support (requires manual setup)"
+else
 	@echo "  make build-localllm          Build with local LLM support"
+endif
 	@echo "  make build-localllm-headless Build headless with local LLM"
 	@echo ""
 	@echo "Cross-Compilation (from macOS to other platforms):"
