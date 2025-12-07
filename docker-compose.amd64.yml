@@ -1,0 +1,54 @@
+services:
+  nornicdb:
+    image: timothyswt/nornicdb-amd64-cuda-embed-bge-m3:latest
+    container_name: nornicdb
+    ports:
+      - "7474:7474"  # HTTP API & Browser UI
+      - "7687:7687"  # Bolt protocol (Neo4j compatible)
+    volumes:
+      - ./data/nornicdb:/data
+      - ./data/nornicdb/export:/data/export # For loading Mimir exports
+    environment:
+      - NORNICDB_DATA_DIR=/data
+      - NORNICDB_HTTP_PORT=7474
+      - NORNICDB_BOLT_PORT=7687
+      # Embedding configuration - llama.cpp OpenAI-compatible API
+      - NORNICDB_EMBEDDING_PROVIDER=local
+      # - NORNICDB_EMBEDDING_API_URL=http://llama-server:8080
+      # - NORNICDB_EMBEDDING_API_KEY=not-needed
+      - NORNICDB_EMBEDDING_MODEL=bge-m3
+      - NORNICDB_MODELS_DIR=/data/models
+      # # Authentication (disabled by default for dev)
+      - NORNICDB_NO_AUTH=${NORNICDB_NO_AUTH:-true}
+      - NORNICDB_ADMIN_PASSWORD=${NEO4J_PASSWORD:-password}
+      - NORNICDB_TOPOLOGY_AUTO_INTEGRATION_ENABLED=true
+      # Load export data on startup (disabled - starting fresh)
+      - NORNICDB_LOAD_EXPORT=
+      # Badger memory tuning (reduce memory footprint)
+      - GOGC=50
+      - NORNICDB_GPU_ENABLED=${NORNICDB_GPU_ENABLED:-true}
+      - NORNICDB_GPU_DEVICE_ID=${NORNICDB_GPU_DEVICE_ID:-0}
+      - NORNICDB_EMBEDDING_CACHE_SIZE=0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:7474/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - mcp_network
+    deploy:
+      resources:
+        limits:
+          memory: 2GB
+        reservations:
+          memory: 1GB
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu, compute, utility]
+
+networks:
+  mcp_network:
+    driver: bridge
