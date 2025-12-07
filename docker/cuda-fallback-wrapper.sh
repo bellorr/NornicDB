@@ -4,7 +4,7 @@
 
 # Create a stub libcuda.so.1 if GPU is not available
 if ! nvidia-smi >/dev/null 2>&1; then
-    echo "⚠️  No GPU detected - creating CUDA stub library for graceful fallback"
+    echo "âš ï¸  No GPU detected - creating CUDA stub library for graceful fallback"
     
     # Create minimal stub library directory
     mkdir -p /tmp/cuda-stub
@@ -21,7 +21,7 @@ void cuLaunchKernel() {}
 EOF
     
     gcc -shared -fPIC -o /tmp/cuda-stub/libcuda.so.1 /tmp/cuda-stub/stub.c 2>/dev/null || {
-        echo "⚠️  Could not create CUDA stub - local embeddings will be disabled"
+        echo "âš ï¸  Could not create CUDA stub - local embeddings will be disabled"
         export NORNICDB_EMBEDDING_PROVIDER=openai
     }
     
