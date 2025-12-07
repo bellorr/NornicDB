@@ -2,7 +2,7 @@ services:
   nornicdb:
     build:
       context: .
-      dockerfile: docker/Dockerfile.arm64-metal
+      dockerfile: docker/Dockerfile.arm64-metal-heimdall
       args:
         EMBED_MODEL: "true"  # Include bge-m3.gguf in image
       tags:
