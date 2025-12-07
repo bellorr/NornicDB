@@ -46,8 +46,8 @@ package localllm
 #cgo darwin,arm64 LDFLAGS: -mmacosx-version-min=26.0 -L${SRCDIR}/../../lib/llama -lllama_darwin_arm64 -lm -lc++ -framework Accelerate -framework Metal -framework MetalPerformanceShaders -framework Foundation
 #cgo darwin,amd64 LDFLAGS: -mmacosx-version-min=26.0 -L${SRCDIR}/../../lib/llama -lllama_darwin_amd64 -lm -lc++ -framework Accelerate
 
-// Windows with CUDA - handled in llama_windows.go
-#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_windows_amd64 -lcudart -lcublas -lm -lstdc++
+// Windows with dynamic backend loading (CUDA DLL loaded at runtime)
+#cgo windows,amd64 LDFLAGS: -L${SRCDIR}/../../lib/llama -lllama_windows_amd64 -lm -lstdc++
 
 #include <stdlib.h>
 #include <string.h>
@@ -59,6 +59,13 @@ static int initialized = 0;
 void init_backend() {
     if (!initialized) {
         llama_backend_init();
+
+        #ifdef _WIN32
+            // On Windows, load GPU backends (CUDA DLL) from lib directory
+            // This enables GPU acceleration without linking CUDA at compile time
+            ggml_backend_load_all_from_path("lib/llama");
+        #endif
+
         initialized = 1;
     }
 }
