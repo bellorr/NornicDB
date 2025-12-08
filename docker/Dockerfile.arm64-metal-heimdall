@@ -87,6 +87,12 @@ RUN echo "Building APOC plugin..." && \
     cd apoc/plugin-src/apoc && go build -buildmode=plugin -o ../../../apoc/built-plugins/apoc.so apoc_plugin.go && \
     echo "✓ Built plugin:" && ls -lh /build/apoc/built-plugins/*.so
 
+# Build Heimdall plugin
+RUN echo "Building Heimdall plugin..." && \
+    mkdir -p plugins/heimdall/built-plugins && \
+    cd plugins/heimdall/plugin-src/watcher && go build -buildmode=plugin -o ../../built-plugins/watcher.so watcher_plugin.go && \
+    echo "✓ Built Heimdall plugin:" && ls -lh /build/plugins/heimdall/built-plugins/*.so
+
 # =============================================================================
 # Stage 4: Runtime with embedded models
 # =============================================================================
@@ -99,6 +105,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /build/nornicdb /app/
 COPY --from=builder /build/apoc/built-plugins /app/plugins/
+COPY --from=builder /build/plugins/heimdall/built-plugins /app/plugins/heimdall/
 COPY docker/entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
@@ -147,6 +154,7 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_HEIMDALL_ANOMALY_DETECTION=true \
     NORNICDB_HEIMDALL_RUNTIME_DIAGNOSIS=true \
     NORNICDB_HEIMDALL_MEMORY_CURATION=false \
+    NORNICDB_HEIMDALL_PLUGINS_DIR=/app/plugins/heimdall \
     # General settings
     NORNICDB_NO_AUTH=true \
     NORNICDB_PLUGINS_DIR=/app/plugins
