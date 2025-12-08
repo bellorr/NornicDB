@@ -54,8 +54,12 @@ storage:
 # DATABASE
 # -----------------------------------------------------------------------------
 database:
-  # Encryption password for data at rest (leave empty to disable)
-  # If set, all data will be encrypted using this password
+  # Enable full database encryption at rest (all-or-nothing)
+  # When enabled, ALL data is encrypted using AES-256
+  encryption_enabled: false
+  
+  # Encryption password for data at rest
+  # Required when encryption_enabled is true
   # WARNING: Keep this password safe - data cannot be recovered without it!
   encryption_password: ""
 

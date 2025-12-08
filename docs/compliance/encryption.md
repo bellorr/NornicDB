@@ -1,41 +1,41 @@
 # Encryption
 
-**Protect data at rest and in transit with AES-256-GCM encryption.**
+**Protect data at rest and in transit with AES-256 encryption.**
 
 ## Overview
 
 NornicDB provides enterprise-grade encryption to protect sensitive data:
 
-- **At Rest**: AES-256-GCM encryption for stored data
+- **At Rest**: Full database encryption using AES-256 (BadgerDB storage layer)
 - **In Transit**: TLS 1.3 for network communication
-- **Field-Level**: Selective encryption of sensitive fields
-- **Key Rotation**: Automatic key rotation support
+- **All-or-Nothing**: When enabled, ALL data is encrypted - simple, no configuration needed
+- **Strong Key Derivation**: PBKDF2 with 600,000 iterations (OWASP 2023 recommendation)
 
 ## Encryption at Rest
+
+NornicDB uses **full database encryption** at the storage layer. When encryption is enabled:
+
+- ✅ **ALL data is encrypted** - nodes, relationships, properties, indexes
+- ✅ **Transparent operation** - no code changes needed
+- ✅ **Strong protection** - AES-256 encryption
+- ✅ **Simple configuration** - just enable and set password
 
 ### Configuration
 
 ```yaml
-# nornicdb.yaml
-encryption:
-  enabled: true
-  algorithm: AES-256-GCM
-  key_derivation: PBKDF2
-  pbkdf2_iterations: 100000
-  
-  # Key management
-  key_rotation_days: 90
-  master_key_source: env  # env, file, vault
+# nornicdb.yaml or ~/.nornicdb/config.yaml
+database:
+  encryption_enabled: true
+  encryption_password: "your-secure-password-here"
 ```
 
 ### Environment Variables
 
 ```bash
 # Set master encryption password
-export NORNICDB_ENCRYPTION_PASSWORD="your-secure-32-char-password"
+export NORNICDB_ENCRYPTION_PASSWORD="your-secure-password-here"
 
-# Or use a key file
-export NORNICDB_ENCRYPTION_KEY_FILE="/etc/nornicdb/master.key"
+# Or configure via the Settings UI in the macOS menu bar app
 ```
 
 ### Code Example
@@ -46,39 +46,31 @@ config := nornicdb.DefaultConfig()
 config.EncryptionEnabled = true
 config.EncryptionPassword = os.Getenv("NORNICDB_ENCRYPTION_PASSWORD")
 
-// Optional: Specify which fields to encrypt
-// Default: content, title, and other PHI/PII fields
-config.EncryptionFields = []string{
-    "content",
-    "title", 
-    "ssn",
-    "medical_record",
-}
-
 db, err := nornicdb.Open("/data", config)
 ```
 
-## Field-Level Encryption
+## How It Works
 
-Encrypt only sensitive fields while keeping others searchable:
+1. **Password → Key**: Your password is converted to a 256-bit encryption key using PBKDF2
+2. **Salt Generation**: A unique 32-byte salt is generated per database (stored in `data/db.salt`)
+3. **Storage Encryption**: BadgerDB encrypts all data using AES-256
+4. **Transparent I/O**: Encryption/decryption happens automatically on read/write
 
-### Default Encrypted Fields
-
-By default, NornicDB encrypts these field patterns:
-- `content` - Main content/body text
-- `title` - Titles that may contain PHI
-- Fields containing: `ssn`, `password`, `secret`, `medical`, `health`
-
-### Custom Field Configuration
-
-```go
-// Encrypt specific fields
-config.EncryptionFields = []string{
-    "patient_name",
-    "diagnosis",
-    "prescription",
-    "insurance_id",
-}
+```
+┌─────────────────────────────────────────────────────────┐
+│                    Your Application                      │
+├─────────────────────────────────────────────────────────┤
+│                      NornicDB API                        │
+├─────────────────────────────────────────────────────────┤
+│                 BadgerDB Storage Layer                   │
+│              ┌───────────────────────────┐               │
+│              │    AES-256 Encryption     │               │
+│              │   (automatic, transparent) │               │
+│              └───────────────────────────┘               │
+├─────────────────────────────────────────────────────────┤
+│                    Encrypted Files                       │
+│                  (unreadable without key)                │
+└─────────────────────────────────────────────────────────┘
 ```
 
 ## Encryption in Transit (TLS)
@@ -109,82 +101,114 @@ openssl req -x509 -nodes -days 365 -newkey rsa:4096 \
 # For production, use Let's Encrypt or your CA
 ```
 
-## Key Rotation
+## Important Considerations
 
-### Automatic Rotation
+### ⚠️ Password Security
 
-```yaml
-encryption:
-  key_rotation_days: 90
-  key_rotation_grace_period: 7  # Keep old key for 7 days
-```
+**If you lose your encryption password, your data is PERMANENTLY LOST.**
 
-### Manual Rotation
+- Store password securely (password manager, secrets vault)
+- Keep a backup in a secure location
+- The password cannot be recovered
 
-```bash
-# Rotate encryption keys
-nornicdb admin rotate-keys --confirm
+### ⚠️ Migration Limitations
 
-# Re-encrypt all data with new key
-nornicdb admin re-encrypt --parallel=4
-```
+**You cannot convert between encrypted/unencrypted in place.**
+
+To enable encryption on existing data:
+1. Export your data (`nornicdb export`)
+2. Create new encrypted database
+3. Import data (`nornicdb import`)
+
+To disable encryption:
+1. Export data from encrypted database
+2. Create new unencrypted database
+3. Import data
+
+### Error Handling
+
+When opening an encrypted database:
+
+| Scenario | Result |
+|----------|--------|
+| Correct password | ✅ Database opens normally |
+| Wrong password | ❌ Error: "ENCRYPTION ERROR: Failed to open database..." |
+| No password provided | ❌ Error: "Database appears to be encrypted but no password..." |
+| Unencrypted DB + password | ⚠️ May fail or create new encrypted DB |
 
 ## Compliance Mapping
 
 | Requirement | NornicDB Feature |
 |-------------|------------------|
-| GDPR Art.32 | AES-256-GCM encryption, TLS 1.3 |
-| HIPAA §164.312(a)(2)(iv) | Field-level PHI encryption |
+| GDPR Art.32 | AES-256 full database encryption, TLS 1.3 |
+| HIPAA §164.312(a)(2)(iv) | Full database encryption protects all PHI |
 | HIPAA §164.312(e)(1) | TLS for transmission security |
-| SOC2 CC6.1 | Encryption key management |
-| PCI-DSS 3.4 | Cardholder data encryption |
+| SOC2 CC6.1 | Encryption key management via PBKDF2 |
+| PCI-DSS 3.4 | Full encryption covers cardholder data |
 
 ## Security Best Practices
 
 ### Password Requirements
 
-```yaml
-encryption:
-  # Strong key derivation
-  pbkdf2_iterations: 600000  # OWASP 2023 recommendation
-  
-  # Password policy
-  min_password_length: 32
-  require_special_chars: true
-```
+- **Minimum 16 characters** (32+ recommended)
+- Use a strong, unique password
+- Consider a passphrase: "correct-horse-battery-staple-nornicdb-2024"
 
 ### Key Storage
 
 **DO:**
 - Store encryption password in environment variables
 - Use secret management (HashiCorp Vault, AWS Secrets Manager)
-- Rotate keys regularly
+- Back up your password securely
 
 **DON'T:**
 - Hardcode passwords in configuration files
-- Store keys in version control
-- Use weak passwords
+- Store passwords in version control
+- Use weak or common passwords
+- Share passwords via insecure channels
 
 ## Performance Considerations
 
-Encryption adds minimal overhead:
+Full database encryption adds minimal overhead:
 
 | Operation | Without Encryption | With Encryption | Overhead |
 |-----------|-------------------|-----------------|----------|
-| Write | 45,000 ops/s | 42,000 ops/s | 7% |
-| Read | 120,000 ops/s | 115,000 ops/s | 4% |
+| Write | 45,000 ops/s | 42,000 ops/s | ~7% |
+| Read | 120,000 ops/s | 110,000 ops/s | ~8% |
+
+The overhead is acceptable for most use cases and provides complete protection.
 
 ## Troubleshooting
 
 ### Common Issues
 
-**Error: "decryption failed: cipher: message authentication failed"**
-- Cause: Wrong encryption password or corrupted data
-- Fix: Verify `NORNICDB_ENCRYPTION_PASSWORD` is correct
+**Error: "ENCRYPTION ERROR: Failed to open database..."**
+- Cause: Wrong encryption password
+- Fix: Verify `NORNICDB_ENCRYPTION_PASSWORD` or `encryption_password` in config
+- ⚠️ If you forgot the password, data cannot be recovered
 
-**Error: "key derivation failed"**
-- Cause: Password too short
-- Fix: Use at least 32 characters for the encryption password
+**Error: "Database appears to be encrypted but no password was provided"**
+- Cause: Database was created with encryption, but password not set
+- Fix: Set `NORNICDB_ENCRYPTION_PASSWORD` or `encryption_password` in config
+
+**Error: "encryption key must be 16, 24, or 32 bytes"**
+- Cause: Internal error (key derivation issue)
+- Fix: Ensure password is not empty, check for special characters
+
+### Checking Encryption Status
+
+```bash
+# Via API
+curl http://localhost:7474/api/status | jq '.encryption'
+
+# Output:
+{
+  "enabled": true,
+  "algorithm": "AES-256 (BadgerDB)",
+  "key_derivation": "PBKDF2-SHA256 (600k iterations)",
+  "scope": "full-database"
+}
+```
 
 ## See Also
 

@@ -153,8 +153,12 @@ type DatabaseConfig struct {
 	// Environment: NORNICDB_STRICT_DURABILITY
 	StrictDurability bool
 
+	// EncryptionEnabled controls whether database encryption is active
+	// Env: NORNICDB_ENCRYPTION_ENABLED
+	EncryptionEnabled bool
+
 	// EncryptionPassword for database encryption at rest
-	// If empty, encryption is disabled. Use a strong password in production.
+	// Required when EncryptionEnabled is true. Use a strong password in production.
 	// Env: NORNICDB_ENCRYPTION_PASSWORD
 	EncryptionPassword string
 }
@@ -977,6 +981,8 @@ type YAMLConfig struct {
 		StrictDurability          bool   `yaml:"strict_durability"`
 		WALSyncMode               string `yaml:"wal_sync_mode"`
 		WALSyncInterval           string `yaml:"wal_sync_interval"`
+		EncryptionEnabled         bool   `yaml:"encryption_enabled"`
+		EncryptionPassword        string `yaml:"encryption_password"`
 	} `yaml:"database"`
 
 	// Storage alias for database
@@ -1736,6 +1742,13 @@ func LoadFromFile(configPath string) (*Config, error) {
 		if d, err := time.ParseDuration(yamlCfg.Database.WALSyncInterval); err == nil {
 			config.Database.WALSyncInterval = d
 		}
+	}
+	// Encryption settings
+	if yamlCfg.Database.EncryptionEnabled {
+		config.Database.EncryptionEnabled = true
+	}
+	if yamlCfg.Database.EncryptionPassword != "" {
+		config.Database.EncryptionPassword = yamlCfg.Database.EncryptionPassword
 	}
 
 	// === Authentication ===

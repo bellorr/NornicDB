@@ -329,11 +329,11 @@ type Config struct {
 	AsyncWritesEnabled bool          `yaml:"async_writes_enabled"` // Enable async writes for faster performance
 	AsyncFlushInterval time.Duration `yaml:"async_flush_interval"` // How often to flush pending writes (default: 50ms)
 
-	// Encryption (data-at-rest) - AES-256-GCM with key rotation
+	// Encryption (data-at-rest) - AES-256 full database encryption
 	// Disabled by default for performance. Enable for HIPAA/GDPR/SOC2 compliance.
-	EncryptionEnabled  bool     `yaml:"encryption_enabled"`  // Enable AES-256-GCM encryption for sensitive fields
-	EncryptionPassword string   `yaml:"encryption_password"` // Master password for key derivation (env: NORNICDB_ENCRYPTION_PASSWORD)
-	EncryptionFields   []string `yaml:"encryption_fields"`   // Fields to encrypt (nil = default PHI/PII fields)
+	// When enabled, ALL data is encrypted at the storage level - all or nothing.
+	EncryptionEnabled  bool   `yaml:"encryption_enabled"`  // Enable AES-256 encryption for entire database
+	EncryptionPassword string `yaml:"encryption_password"` // Master password for key derivation (env: NORNICDB_ENCRYPTION_PASSWORD)
 
 	// Server
 	BoltPort int `yaml:"bolt_port"`
@@ -384,7 +384,6 @@ func DefaultConfig() *Config {
 		AsyncFlushInterval:           50 * time.Millisecond, // Flush pending writes every 50ms
 		EncryptionEnabled:            false,                 // Encryption disabled by default (opt-in)
 		EncryptionPassword:           "",                    // Must be set if encryption enabled
-		EncryptionFields:             nil,                   // nil = use default PHI fields
 		BoltPort:                     7687,
 		HTTPPort:                     7474,
 	}
@@ -441,9 +440,8 @@ type DB struct {
 	embedQueue        *EmbedQueue
 	embedWorkerConfig *EmbedWorkerConfig // Configurable via ENV vars
 
-	// Encryption for data-at-rest (PHI/PII fields)
-	encryptor     *encryption.Encryptor
-	encryptFields *encryption.FieldEncryptionConfig
+	// Encryption flag - when true, all data is encrypted at BadgerDB level
+	encryptionEnabled bool
 
 	// Background goroutine tracking
 	bgWg sync.WaitGroup
@@ -748,8 +746,66 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		if config.LowMemoryMode {
 			fmt.Println("⚡ Using low-memory storage mode (reduced RAM usage)")
 		}
+
+		// Enable BadgerDB-level encryption at rest if configured
+		if config.EncryptionEnabled && config.EncryptionPassword != "" {
+			// Load or generate salt for this database
+			saltFile := dataDir + "/db.salt"
+			var salt []byte
+			if existingSalt, err := os.ReadFile(saltFile); err == nil && len(existingSalt) == 32 {
+				salt = existingSalt
+				fmt.Println("🔐 Loading existing encryption salt")
+			} else {
+				// Generate new salt for new encrypted database
+				salt = make([]byte, 32)
+				if _, err := rand.Read(salt); err != nil {
+					return nil, fmt.Errorf("failed to generate encryption salt: %w", err)
+				}
+				// Persist salt (required for decryption after restart)
+				if err := os.MkdirAll(dataDir, 0700); err != nil {
+					return nil, fmt.Errorf("failed to create data directory: %w", err)
+				}
+				if err := os.WriteFile(saltFile, salt, 0600); err != nil {
+					return nil, fmt.Errorf("failed to save encryption salt: %w", err)
+				}
+				fmt.Println("🔐 Generated new encryption salt")
+			}
+
+			// Derive 32-byte AES-256 key from password using PBKDF2
+			encryptionKey := encryption.DeriveKey([]byte(config.EncryptionPassword), salt, 600000)
+			badgerOpts.EncryptionKey = encryptionKey
+			db.encryptionEnabled = true
+			fmt.Println("🔒 Database encryption enabled (AES-256)")
+		}
+
 		badgerEngine, err := storage.NewBadgerEngineWithOptions(badgerOpts)
 		if err != nil {
+			// Check for encryption-related errors and provide helpful messages
+			// IMPORTANT: BadgerDB fails safely - data files are NOT touched or corrupted
+			errStr := err.Error()
+			if strings.Contains(errStr, "encryption") || strings.Contains(errStr, "decrypt") || strings.Contains(errStr, "cipher") ||
+				strings.Contains(errStr, "Invalid checksum") || strings.Contains(errStr, "MANIFEST") {
+				if config.EncryptionEnabled {
+					// Log clear warning and fail safely
+					log.Printf("🔒 ENCRYPTION ERROR: Database decryption failed")
+					log.Printf("   ⚠️  Data files are safe and unchanged")
+					log.Printf("   ⚠️  Server will NOT start to protect your data")
+					return nil, fmt.Errorf("ENCRYPTION ERROR: Failed to open database. "+
+						"The encryption password appears to be incorrect. "+
+						"Your data files have NOT been modified - they remain safely encrypted. "+
+						"If you forgot your password, your data cannot be recovered. "+
+						"Original error: %w", err)
+				} else {
+					// Database is encrypted but no password was provided
+					log.Printf("🔒 ENCRYPTION ERROR: Database is encrypted but no password was provided")
+					log.Printf("   ⚠️  Data files are safe and unchanged")
+					log.Printf("   ⚠️  Server will NOT start to protect your data")
+					return nil, fmt.Errorf("ENCRYPTION ERROR: Database appears to be encrypted but no password was provided. "+
+						"Your data files have NOT been modified. "+
+						"Set encryption_password in config.yaml or NORNICDB_ENCRYPTION_PASSWORD environment variable. "+
+						"Original error: %w", err)
+				}
+			}
 			return nil, fmt.Errorf("failed to open persistent storage: %w", err)
 		}
 
@@ -890,71 +946,8 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		fmt.Println("🔬 K-means clustering enabled for accelerated semantic search")
 	}
 
-	// Initialize encryption if enabled (AES-256-GCM with PBKDF2 key derivation)
-	if config.EncryptionEnabled {
-		// Get password from config (should be set via config file or env var)
-		password := config.EncryptionPassword
-
-		if password == "" {
-			// Clean up resources before returning error
-			db.closeInternal()
-			return nil, fmt.Errorf("encryption enabled but no password provided (set NORNICDB_ENCRYPTION_PASSWORD or config.EncryptionPassword)")
-		}
-
-		// Generate installation-specific salt (or load existing)
-		saltFile := dataDir + "/encryption.salt"
-		var salt []byte
-		if saltData, err := os.ReadFile(saltFile); err == nil && len(saltData) == 32 {
-			salt = saltData
-		} else {
-			// Generate new salt for this installation
-			salt, err = encryption.GenerateSalt()
-			if err != nil {
-				db.closeInternal()
-				return nil, fmt.Errorf("failed to generate encryption salt: %w", err)
-			}
-			// Persist salt (required for decryption after restart)
-			if dataDir != "" {
-				if err := os.WriteFile(saltFile, salt, 0600); err != nil {
-					db.closeInternal()
-					return nil, fmt.Errorf("failed to save encryption salt: %w", err)
-				}
-			}
-		}
-
-		// Configure encryption with OWASP 2023 recommended settings
-		encConfig := encryption.Config{
-			Enabled: true,
-			KeyDerivation: encryption.KeyDerivationConfig{
-				Salt:       salt,
-				Iterations: 600000, // OWASP 2023 PBKDF2-SHA256 recommendation
-				UseArgon2:  false,  // PBKDF2 for broader compatibility
-			},
-			Rotation: encryption.KeyRotationConfig{
-				Enabled:     true,
-				Interval:    90 * 24 * time.Hour, // 90-day key rotation (compliance best practice)
-				RetainCount: 8,                   // Keep 2 years of keys for decryption
-			},
-		}
-
-		encryptor, err := encryption.NewEncryptorWithPassword(password, encConfig)
-		if err != nil {
-			db.closeInternal()
-			return nil, fmt.Errorf("failed to initialize encryption: %w", err)
-		}
-		db.encryptor = encryptor
-
-		// Configure which fields to encrypt
-		db.encryptFields = &encryption.FieldEncryptionConfig{
-			PHIFields: encryption.DefaultPHIFields(), // SSN, MRN, DOB, etc.
-		}
-		if len(config.EncryptionFields) > 0 {
-			db.encryptFields.EncryptFields = config.EncryptionFields
-		}
-
-		fmt.Println("🔐 Encryption enabled (AES-256-GCM, PBKDF2-SHA256, 90-day key rotation)")
-		fmt.Printf("   Encrypted fields: %v\n", append(db.encryptFields.PHIFields, db.encryptFields.EncryptFields...))
-	}
+	// Note: Database encryption is now handled at the BadgerDB storage level (see above)
+	// When encryption is enabled, ALL data is encrypted at rest using AES-256.
 
 	// Build search indexes from existing data (including embeddings)
 	// This runs in background to not block startup
@@ -3223,86 +3216,32 @@ func (db *DB) GetUserConsents(ctx context.Context, userID string) ([]Consent, er
 	return consents, nil
 }
 
-// encryptProperties encrypts sensitive fields in a properties map.
-// Only encrypts string values for fields matching the encryption config.
-// Thread-safe: uses read lock on db.encryptor.
+// encryptProperties is a no-op - encryption is handled at the BadgerDB storage level.
+// All data is encrypted transparently when encryption is enabled.
+// This method is kept for API compatibility but simply returns the input unchanged.
 func (db *DB) encryptProperties(props map[string]interface{}) map[string]interface{} {
-	if db.encryptor == nil || !db.encryptor.IsEnabled() || db.encryptFields == nil {
-		return props
-	}
-
-	result := make(map[string]interface{}, len(props))
-	for k, v := range props {
-		if strVal, ok := v.(string); ok && db.encryptFields.ShouldEncryptField(k) {
-			// Skip empty strings - no point encrypting them
-			if strVal == "" {
-				result[k] = v
-				continue
-			}
-			encrypted, err := db.encryptor.EncryptField(strVal)
-			if err != nil {
-				// Log but don't fail - return original value
-				log.Printf("⚠️  Failed to encrypt field %s: %v", k, err)
-				result[k] = v
-			} else {
-				result[k] = encrypted
-			}
-		} else {
-			result[k] = v
-		}
-	}
-	return result
+	return props
 }
 
-// decryptProperties decrypts sensitive fields in a properties map.
-// Only decrypts values that were previously encrypted (have enc: prefix).
-// Thread-safe: uses read lock on db.encryptor.
+// decryptProperties is a no-op - decryption is handled at the BadgerDB storage level.
+// All data is decrypted transparently when read from an encrypted database.
+// This method is kept for API compatibility but simply returns the input unchanged.
 func (db *DB) decryptProperties(props map[string]interface{}) map[string]interface{} {
-	if db.encryptor == nil || !db.encryptor.IsEnabled() {
-		return props
-	}
-
-	result := make(map[string]interface{}, len(props))
-	for k, v := range props {
-		if strVal, ok := v.(string); ok {
-			// DecryptField handles both encrypted and non-encrypted values
-			decrypted, err := db.encryptor.DecryptField(strVal)
-			if err != nil {
-				// Log but don't fail - return original value
-				log.Printf("⚠️  Failed to decrypt field %s: %v", k, err)
-				result[k] = v
-			} else {
-				result[k] = decrypted
-			}
-		} else {
-			result[k] = v
-		}
-	}
-	return result
+	return props
 }
 
 // IsEncryptionEnabled returns whether data-at-rest encryption is enabled.
+// When enabled, ALL data is encrypted at the BadgerDB storage level using AES-256.
 func (db *DB) IsEncryptionEnabled() bool {
-	return db.encryptor != nil && db.encryptor.IsEnabled()
+	return db.encryptionEnabled
 }
 
 // EncryptionStats returns encryption statistics for monitoring.
 func (db *DB) EncryptionStats() map[string]interface{} {
-	if db.encryptor == nil {
-		return map[string]interface{}{
-			"enabled": false,
-		}
-	}
-	km := db.encryptor.KeyManager()
-	if km == nil {
-		return map[string]interface{}{
-			"enabled": db.encryptor.IsEnabled(),
-		}
-	}
 	return map[string]interface{}{
-		"enabled":        db.encryptor.IsEnabled(),
-		"key_count":      km.KeyCount(),
-		"algorithm":      "AES-256-GCM",
+		"enabled":        db.encryptionEnabled,
+		"algorithm":      "AES-256 (BadgerDB)",
 		"key_derivation": "PBKDF2-SHA256 (600k iterations)",
+		"scope":          "full-database",
 	}
 }

@@ -39,34 +39,24 @@ NornicDB provides features to help covered entities and business associates comp
 
 ## PHI Protection
 
-### Automatic PHI Detection
+### Full Database Encryption
 
-NornicDB can automatically detect and protect PHI fields:
-
-```yaml
-# Auto-detect PHI patterns
-phi_detection:
-  enabled: true
-  patterns:
-    - ssn
-    - medical_record
-    - diagnosis
-    - prescription
-    - insurance_id
-```
-
-### Field-Level Encryption
+NornicDB uses **all-or-nothing encryption** at the storage level. When enabled, ALL data is encrypted - including all PHI fields, indexes, and metadata. This simplifies compliance because you don't need to identify and configure individual PHI fields.
 
 ```yaml
-encryption:
-  enabled: true
-  fields:
-    - patient_name
-    - diagnosis
-    - treatment
-    - medical_record_number
-    - insurance_info
+# Enable full database encryption
+database:
+  encryption_enabled: true
+  encryption_password: "your-secure-password-here"
 ```
+
+**Benefits of full database encryption:**
+- ✅ **Complete PHI protection** - No need to identify PHI fields
+- ✅ **No configuration errors** - Can't accidentally miss a field
+- ✅ **Simple compliance** - One setting protects everything
+- ✅ **Strong encryption** - AES-256 with PBKDF2 key derivation
+
+**Important:** If you lose your encryption password, your data cannot be recovered. Store it securely!
 
 ### Access Logging
 

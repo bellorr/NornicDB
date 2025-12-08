@@ -12,6 +12,7 @@ if [ "$ACTUAL_USER" = "root" ]; then
 fi
 
 USER_HOME=$(eval echo ~$ACTUAL_USER)
+USER_UID=$(id -u $ACTUAL_USER)
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  NornicDB Installer - Pre-Install"
@@ -27,19 +28,26 @@ if [ -f "/usr/local/bin/nornicdb" ] || [ -d "/Applications/NornicDB.app" ]; then
     echo ""
 fi
 
-# Stop existing service if running
+# Stop existing service if running - use bootout to forcefully remove even if plist is gone
+echo "🛑 Stopping NornicDB service..."
+
+# Try to stop gracefully first
+sudo -u $ACTUAL_USER launchctl stop com.nornicdb.server 2>/dev/null || true
+sleep 1
+
+# Forcefully remove from launchd (works even if plist was deleted)
+sudo -u $ACTUAL_USER launchctl bootout gui/$USER_UID/com.nornicdb.server 2>/dev/null || true
+
+# Also try unload if plist exists
 if [ -f "$USER_HOME/Library/LaunchAgents/com.nornicdb.server.plist" ]; then
-    echo "🛑 Stopping NornicDB service..."
-    
-    # Try to stop gracefully
-    sudo -u $ACTUAL_USER launchctl stop com.nornicdb.server 2>/dev/null || true
-    sleep 1
-    
-    # Unload the service
     sudo -u $ACTUAL_USER launchctl unload "$USER_HOME/Library/LaunchAgents/com.nornicdb.server.plist" 2>/dev/null || true
-    
-    echo "   ✓ Service stopped"
 fi
+
+# Kill any remaining nornicdb processes
+pkill -9 -f "nornicdb serve" 2>/dev/null || true
+sleep 0.5
+
+echo "   ✓ Service stopped"
 
 # Quit menu bar app if running
 if pgrep -x "NornicDB" > /dev/null; then

@@ -558,12 +558,16 @@ class ConfigManager: ObservableObject {
         }
         
         // Load encryption settings
-        if let encryptionSection = context.range(of: "database:.*?encryption_password:", options: .regularExpression) {
-            let start = encryptionSection.upperBound
+        if let enabledMatch = context.range(of: "database:.*?encryption_enabled:\\s*(true|false)", options: .regularExpression) {
+            let enabledValue = context[enabledMatch].contains("true")
+            encryptionEnabled = enabledValue
+            print("Loaded encryption enabled: \(encryptionEnabled)")
+        }
+        if let passwordSection = context.range(of: "database:.*?encryption_password:", options: .regularExpression) {
+            let start = passwordSection.upperBound
             if let value = extractStringValue(from: context, after: start) {
                 encryptionPassword = value
-                encryptionEnabled = !value.isEmpty
-                print("Loaded encryption: \(encryptionEnabled ? "enabled" : "disabled")")
+                print("Loaded encryption password: [hidden]")
             }
         }
     }
@@ -603,6 +607,22 @@ class ConfigManager: ObservableObject {
             return false
         }
         
+        // Ensure required sections exist
+        content = ensureSectionExists(in: content, section: "auth", defaultContent: """
+        
+        auth:
+          username: "admin"
+          password: "password"
+          jwt_secret: ""
+        """)
+        
+        content = ensureSectionExists(in: content, section: "database", defaultContent: """
+        
+        database:
+          encryption_enabled: false
+          encryption_password: ""
+        """)
+        
         // Update each feature setting
         content = updateYAMLValue(in: content, section: "embedding", key: "enabled", value: embeddingsEnabled)
         content = updateYAMLValue(in: content, section: "kmeans", key: "enabled", value: kmeansEnabled)
@@ -621,12 +641,22 @@ class ConfigManager: ObservableObject {
         // Update auth settings
         content = updateYAMLStringValue(in: content, section: "auth", key: "username", value: adminUsername)
         content = updateYAMLStringValue(in: content, section: "auth", key: "password", value: adminPassword)
-        if !jwtSecret.isEmpty {
-            content = updateYAMLStringValue(in: content, section: "auth", key: "jwt_secret", value: jwtSecret)
+        
+        // Auto-generate JWT secret if empty
+        if jwtSecret.isEmpty {
+            jwtSecret = generateRandomSecret()
+            print("Auto-generated JWT secret")
         }
+        content = updateYAMLStringValue(in: content, section: "auth", key: "jwt_secret", value: jwtSecret)
         
         // Update encryption settings
-        if encryptionEnabled && !encryptionPassword.isEmpty {
+        content = updateYAMLValue(in: content, section: "database", key: "encryption_enabled", value: encryptionEnabled)
+        if encryptionEnabled {
+            // Auto-generate encryption password if empty
+            if encryptionPassword.isEmpty {
+                encryptionPassword = generateRandomSecret()
+                print("Auto-generated encryption password")
+            }
             content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: encryptionPassword)
         } else {
             content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: "")
@@ -663,6 +693,19 @@ class ConfigManager: ObservableObject {
             task.arguments = ["launchctl", "unload", launchAgentPath]
             task.launch()
         }
+    }
+    
+    private func ensureSectionExists(in content: String, section: String, defaultContent: String) -> String {
+        // Check if section exists
+        let pattern = "^\(section):"
+        if let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) {
+            let range = NSRange(content.startIndex..., in: content)
+            if regex.firstMatch(in: content, options: [], range: range) != nil {
+                return content // Section exists
+            }
+        }
+        // Section doesn't exist, append it
+        return content + defaultContent
     }
     
     private func updateYAMLStringValue(in content: String, section: String, key: String, value: String) -> String {
@@ -724,6 +767,9 @@ struct SettingsView: View {
     // Progress tracking
     @State private var isSaving: Bool = false
     @State private var saveProgress: String = ""
+    
+    // Show/hide sensitive fields
+    @State private var showEncryptionKey: Bool = false
     
     // Check if there are unsaved changes
     var hasChanges: Bool {
@@ -1157,50 +1203,75 @@ struct SettingsView: View {
                 .background(Color.secondary.opacity(0.1))
                 .cornerRadius(8)
                 
-                // // Encryption
-                // VStack(alignment: .leading, spacing: 15) {
-                //     Text("Database Encryption")
-                //         .font(.headline)
+                // Encryption
+                VStack(alignment: .leading, spacing: 15) {
+                    Text("Database Encryption")
+                        .font(.headline)
                     
-                //     Toggle("Enable Encryption at Rest", isOn: $config.encryptionEnabled)
+                    Toggle("Enable Encryption at Rest", isOn: $config.encryptionEnabled)
                     
-                //     if config.encryptionEnabled {
-                //         HStack {
-                //             Text("Encryption Key:")
-                //                 .frame(width: 120, alignment: .trailing)
-                //             SecureField("Enter encryption password", text: $config.encryptionPassword)
-                //                 .textFieldStyle(RoundedBorderTextFieldStyle())
-                //                 .frame(maxWidth: 250)
-                //         }
+                    if config.encryptionEnabled {
+                        HStack {
+                            Text("Encryption Key:")
+                                .frame(width: 120, alignment: .trailing)
+                            
+                            if showEncryptionKey {
+                                TextField("Enter encryption password", text: $config.encryptionPassword)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .frame(maxWidth: 200)
+                                    .font(.system(.body, design: .monospaced))
+                            } else {
+                                SecureField("Enter encryption password", text: $config.encryptionPassword)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .frame(maxWidth: 200)
+                            }
+                            
+                            Button(action: { showEncryptionKey.toggle() }) {
+                                Image(systemName: showEncryptionKey ? "eye.slash" : "eye")
+                            }
+                            .buttonStyle(.borderless)
+                            .help(showEncryptionKey ? "Hide key" : "Show key")
+                            
+                            Button(action: {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(config.encryptionPassword, forType: .string)
+                            }) {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Copy to clipboard")
+                            .disabled(config.encryptionPassword.isEmpty)
+                        }
                         
-                //         HStack {
-                //             Spacer().frame(width: 120)
-                //             Button("Generate Strong Key") {
-                //                 config.encryptionPassword = config.generateRandomSecret()
-                //             }
-                //             .buttonStyle(.bordered)
-                //         }
+                        HStack {
+                            Spacer().frame(width: 120)
+                            Button("Generate Strong Key") {
+                                config.encryptionPassword = config.generateRandomSecret()
+                                showEncryptionKey = true  // Show the newly generated key
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         
-                //         if config.encryptionPassword.count < 16 && !config.encryptionPassword.isEmpty {
-                //             HStack {
-                //                 Spacer().frame(width: 120)
-                //                 Text("⚠️ Encryption key should be at least 16 characters")
-                //                     .font(.caption)
-                //                     .foregroundColor(.orange)
-                //             }
-                //         }
-                //     }
+                        if config.encryptionPassword.count < 16 && !config.encryptionPassword.isEmpty {
+                            HStack {
+                                Spacer().frame(width: 120)
+                                Text("⚠️ Encryption key should be at least 16 characters")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                    }
                     
-                //     Text("⚠️ Enabling encryption will protect your data at rest. Keep your encryption password safe — data cannot be recovered without it!")
-                //         .font(.caption2)
-                //         .foregroundColor(.secondary)
-                //         .padding(.leading, 0)
-                // }
-                // .padding()
-                // .background(Color.secondary.opacity(0.1))
-                // .cornerRadius(8)
+                    Text("⚠️ Enabling encryption will protect your data at rest. Keep your encryption password safe — data cannot be recovered without it!")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 0)
+                }
+                .padding()
+                .background(Color.secondary.opacity(0.1))
+                .cornerRadius(8)
                 
-                // Spacer()
+                Spacer()
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding()
@@ -1317,6 +1388,7 @@ struct FirstRunWizard: View {
     @State private var serverIsRunning: Bool = false
     @State private var isSaving: Bool = false
     @State private var saveProgress: String = ""
+    @State private var showEncryptionKey: Bool = false
     
     var body: some View {
         VStack(spacing: 0) {
@@ -1479,25 +1551,123 @@ struct FirstRunWizard: View {
                     saveProgress = serverIsRunning ? "Restarting server..." : "Starting server..."
                     
                     // Start or restart server
-                    let task = Process()
-                    task.launchPath = "/usr/bin/env"
-                    
                     if serverIsRunning {
                         // Restart the server
+                        let task = Process()
+                        task.launchPath = "/usr/bin/env"
                         task.arguments = ["launchctl", "kickstart", "-k", "gui/\(getuid())/com.nornicdb.server"]
+                        task.launch()
+                        
+                        saveProgress = "Waiting for server to restart..."
                     } else {
-                        // Start the server
-                        task.arguments = ["launchctl", "start", "com.nornicdb.server"]
+                        // First time: CREATE the LaunchAgent plist, then load and start
+                        saveProgress = "Creating service configuration..."
+                        
+                        let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
+                        let homeDir = NSString(string: "~").expandingTildeInPath
+                        
+                        // Create the plist content
+                        let plistContent = """
+                        <?xml version="1.0" encoding="UTF-8"?>
+                        <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+                        <plist version="1.0">
+                        <dict>
+                            <key>Label</key>
+                            <string>com.nornicdb.server</string>
+                            <key>ProgramArguments</key>
+                            <array>
+                                <string>/usr/local/bin/nornicdb</string>
+                                <string>serve</string>
+                                <string>--data-dir</string>
+                                <string>/usr/local/var/nornicdb/data</string>
+                                <string>--bolt-port</string>
+                                <string>7687</string>
+                                <string>--http-port</string>
+                                <string>7474</string>
+                            </array>
+                            <key>WorkingDirectory</key>
+                            <string>/usr/local/var/nornicdb</string>
+                            <key>RunAtLoad</key>
+                            <true/>
+                            <key>KeepAlive</key>
+                            <dict>
+                                <key>SuccessfulExit</key>
+                                <false/>
+                                <key>Crashed</key>
+                                <true/>
+                            </dict>
+                            <key>ThrottleInterval</key>
+                            <integer>30</integer>
+                            <key>StandardOutPath</key>
+                            <string>/usr/local/var/log/nornicdb/stdout.log</string>
+                            <key>StandardErrorPath</key>
+                            <string>/usr/local/var/log/nornicdb/stderr.log</string>
+                            <key>EnvironmentVariables</key>
+                            <dict>
+                                <key>PATH</key>
+                                <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+                                <key>HOME</key>
+                                <string>\(homeDir)</string>
+                            </dict>
+                            <key>ProcessType</key>
+                            <string>Interactive</string>
+                            <key>Nice</key>
+                            <integer>0</integer>
+                        </dict>
+                        </plist>
+                        """
+                        
+                        // Write the plist file
+                        do {
+                            try plistContent.write(toFile: launchAgentPath, atomically: true, encoding: .utf8)
+                            print("Created server plist at: \(launchAgentPath)")
+                        } catch {
+                            print("Failed to create server plist: \(error)")
+                        }
+                        
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                            saveProgress = "Loading service..."
+                            
+                            // Load the LaunchAgent
+                            let loadTask = Process()
+                            loadTask.launchPath = "/usr/bin/env"
+                            loadTask.arguments = ["launchctl", "load", launchAgentPath]
+                            loadTask.launch()
+                            loadTask.waitUntilExit()
+                            
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                                saveProgress = "Starting server..."
+                                
+                                // Then start the server
+                                let startTask = Process()
+                                startTask.launchPath = "/usr/bin/env"
+                                startTask.arguments = ["launchctl", "start", "com.nornicdb.server"]
+                                startTask.launch()
+                            }
+                        }
                     }
                     
-                    task.launch()
-                    
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                        saveProgress = "Server started! Opening browser..."
+                    // Wait and verify server is running
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                        saveProgress = "Waiting for server to be ready..."
                         
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                            isSaving = false
-                            onComplete()
+                        // Poll health endpoint
+                        waitForServerHealth(attempts: 10) { success in
+                            if success {
+                                saveProgress = "✅ Server is running!"
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                                    isSaving = false
+                                    onComplete()
+                                }
+                            } else {
+                                saveProgress = "⚠️ Server may still be starting. Check menu bar status."
+                                
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                                    isSaving = false
+                                    onComplete()
+                                }
+                            }
                         }
                     }
                 }
@@ -1508,6 +1678,31 @@ struct FirstRunWizard: View {
                 }
             }
         }
+    }
+    
+    private func waitForServerHealth(attempts: Int, completion: @escaping (Bool) -> Void) {
+        guard attempts > 0 else {
+            completion(false)
+            return
+        }
+        
+        // Health endpoint is always on HTTP port 7474
+        let url = URL(string: "http://localhost:7474/health")!
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 2.0
+        
+        URLSession.shared.dataTask(with: request) { _, response, error in
+            DispatchQueue.main.async {
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 {
+                    completion(true)
+                } else {
+                    // Retry after 1 second
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                        waitForServerHealth(attempts: attempts - 1, completion: completion)
+                    }
+                }
+            }
+        }.resume()
     }
     
     var welcomeStep: some View {
@@ -1653,48 +1848,76 @@ struct FirstRunWizard: View {
                 .cornerRadius(8)
                 
                 // Encryption
-                // VStack(alignment: .leading, spacing: 15) {
-                //     Text("Database Encryption (Optional)")
-                //         .font(.headline)
+                VStack(alignment: .leading, spacing: 15) {
+                    Text("Database Encryption (Optional)")
+                        .font(.headline)
                     
-                //     Toggle("Enable Encryption at Rest", isOn: $config.encryptionEnabled)
+                    Toggle("Enable Encryption at Rest", isOn: $config.encryptionEnabled)
                     
-                //     if config.encryptionEnabled {
-                //         HStack {
-                //             Text("Encryption Key:")
-                //                 .frame(width: 120, alignment: .trailing)
-                //             SecureField("Enter encryption password", text: $config.encryptionPassword)
-                //                 .textFieldStyle(RoundedBorderTextFieldStyle())
-                //                 .frame(maxWidth: 250)
-                //         }
+                    if config.encryptionEnabled {
+                        HStack {
+                            Text("Encryption Key:")
+                                .frame(width: 120, alignment: .trailing)
+                            
+                            if showEncryptionKey {
+                                TextField("Enter encryption password", text: $config.encryptionPassword)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .frame(maxWidth: 200)
+                                    .font(.system(.body, design: .monospaced))
+                            } else {
+                                SecureField("Enter encryption password", text: $config.encryptionPassword)
+                                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                                    .frame(maxWidth: 200)
+                            }
+                            
+                            Button(action: { showEncryptionKey.toggle() }) {
+                                Image(systemName: showEncryptionKey ? "eye.slash" : "eye")
+                            }
+                            .buttonStyle(.borderless)
+                            .help(showEncryptionKey ? "Hide key" : "Show key")
+                            
+                            Button(action: {
+                                NSPasteboard.general.clearContents()
+                                NSPasteboard.general.setString(config.encryptionPassword, forType: .string)
+                            }) {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.borderless)
+                            .help("Copy to clipboard")
+                            .disabled(config.encryptionPassword.isEmpty)
+                        }
                         
-                //         HStack {
-                //             Spacer().frame(width: 120)
-                //             Button("Generate Strong Key") {
-                //                 config.encryptionPassword = config.generateRandomSecret()
-                //             }
-                //             .buttonStyle(.bordered)
-                //         }
+                        HStack {
+                            Spacer().frame(width: 120)
+                            Button("Generate Strong Key") {
+                                config.encryptionPassword = config.generateRandomSecret()
+                                showEncryptionKey = true  // Show the newly generated key
+                            }
+                            .buttonStyle(.bordered)
+                        }
                         
-                //         if config.encryptionPassword.count < 16 && !config.encryptionPassword.isEmpty {
-                //             HStack {
-                //                 Spacer().frame(width: 120)
-                //                 Text("⚠️ Encryption key should be at least 16 characters")
-                //                     .font(.caption)
-                //                     .foregroundColor(.orange)
-                //             }
-                //         }
-                //     }
+                        if config.encryptionPassword.count < 16 && !config.encryptionPassword.isEmpty {
+                            HStack {
+                                Spacer().frame(width: 120)
+                                Text("⚠️ Encryption key should be at least 16 characters")
+                                    .font(.caption)
+                                    .foregroundColor(.orange)
+                            }
+                        }
+                    }
                     
-                //     Text("⚠️ Enabling encryption will protect your data at rest. Keep your encryption password safe — data cannot be recovered without it!")
-                //         .font(.caption2)
-                //         .foregroundColor(.secondary)
-                //         .padding(.leading, 0)
-                // }
-                // .padding()
-                // .background(Color.secondary.opacity(0.1))
-                // .cornerRadius(8)
+                    Text("⚠️ Enabling encryption will protect your data at rest. Keep your encryption password safe — data cannot be recovered without it!")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                        .padding(.leading, 0)
+                }
+                .padding()
+                .background(Color.secondary.opacity(0.1))
+                .cornerRadius(8)
+                
+                Spacer()
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding()
         }
     }

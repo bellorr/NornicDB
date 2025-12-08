@@ -111,6 +111,12 @@ type BadgerOptions struct {
 	// HighPerformance enables aggressive caching and larger buffers.
 	// Uses more RAM but significantly faster writes/reads.
 	HighPerformance bool
+
+	// EncryptionKey is the 16, 24, or 32 byte key for AES encryption.
+	// If provided, all data will be encrypted at rest using AES-CTR.
+	// WARNING: If you lose this key, your data is irrecoverable!
+	// Leave empty to disable encryption.
+	EncryptionKey []byte
 }
 
 // NewBadgerEngine creates a new persistent storage engine with default settings.
@@ -268,6 +274,16 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	} else {
 		// Use a quiet logger by default
 		badgerOpts = badgerOpts.WithLogger(nil)
+	}
+
+	// Enable encryption at rest if key is provided
+	if len(opts.EncryptionKey) > 0 {
+		// Validate key length (must be 16, 24, or 32 bytes for AES-128/192/256)
+		keyLen := len(opts.EncryptionKey)
+		if keyLen != 16 && keyLen != 24 && keyLen != 32 {
+			return nil, fmt.Errorf("encryption key must be 16, 24, or 32 bytes (got %d bytes)", keyLen)
+		}
+		badgerOpts = badgerOpts.WithEncryptionKey(opts.EncryptionKey)
 	}
 
 	if opts.HighPerformance {

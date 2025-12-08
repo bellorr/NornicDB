@@ -174,6 +174,11 @@ server:
 storage:
   path: "/usr/local/var/nornicdb/data"
 
+database:
+  # Enable full database encryption at rest
+  encryption_enabled: false
+  encryption_password: ""
+
 embedding:
   enabled: true
   provider: "local"
@@ -183,6 +188,11 @@ kmeans:
 
 heimdall:
   enabled: true
+
+auth:
+  username: "admin"
+  password: "password"
+  jwt_secret: ""
 CONFIGEOF
     log "Created default configuration"
 fi
@@ -204,72 +214,18 @@ EOF
 
 log "Created environment file with plugin paths"
 
-# Create/update launchd service with plugin environment
-PLIST_PATH="$USER_HOME/Library/LaunchAgents/com.nornicdb.server.plist"
+# NOTE: We do NOT create or load the server LaunchAgent here!
+# The first-run wizard will create and load it AFTER the user configures
+# encryption settings. This ensures no data is written before encryption is set up.
+# 
+# The server.plist will be created by the menu bar app's saveAndStartServer() function.
 
-sudo -u $ACTUAL_USER cat > "$PLIST_PATH" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.nornicdb.server</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/nornicdb</string>
-        <string>serve</string>
-        <string>--data-dir</string>
-        <string>/usr/local/var/nornicdb/data</string>
-        <string>--bolt-port</string>
-        <string>7687</string>
-        <string>--http-port</string>
-        <string>7474</string>
-    </array>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>HOME</key>
-        <string>$USER_HOME</string>
-        <key>NORNICDB_PLUGINS_DIR</key>
-        <string>/usr/local/share/nornicdb/plugins/apoc</string>
-        <key>NORNICDB_HEIMDALL_PLUGINS_DIR</key>
-        <string>/usr/local/share/nornicdb/plugins/heimdall</string>
-        <key>NORNICDB_HEIMDALL_ENABLED</key>
-        <string>true</string>
-        <key>NORNICDB_EMBEDDING_PROVIDER</key>
-        <string>local</string>
-        <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
-        <string>true</string>
-    </dict>
-    <key>WorkingDirectory</key>
-    <string>/usr/local/var/nornicdb</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-        <key>Crashed</key>
-        <true/>
-    </dict>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <key>StandardOutPath</key>
-    <string>/usr/local/var/log/nornicdb/stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/usr/local/var/log/nornicdb/stderr.log</string>
-    <key>ProcessType</key>
-    <string>Interactive</string>
-</dict>
-</plist>
-EOF
+# Make sure any old server plist is removed to prevent launchd from auto-starting
+rm -f "$USER_HOME/Library/LaunchAgents/com.nornicdb.server.plist" 2>/dev/null || true
+sudo -u $ACTUAL_USER launchctl bootout "gui/$USER_UID/com.nornicdb.server" 2>/dev/null || true
+pkill -9 -f "nornicdb serve" 2>/dev/null || true
 
-log "Created launchd service (Full Edition with plugins)"
-
-# Load the service
-sudo -u $ACTUAL_USER launchctl load "$PLIST_PATH" 2>/dev/null || true
-log "Service loaded"
+log "Server will start after first-run wizard completes"
 
 # Install menu bar app LaunchAgent for auto-start
 sudo -u $ACTUAL_USER cat > "$USER_HOME/Library/LaunchAgents/com.nornicdb.menubar.plist" << EOF

@@ -18,8 +18,10 @@ echo "Setting up NornicDB for user: $ACTUAL_USER"
 
 # Create user directories
 # Create config directories - use ~/.nornicdb to match server's FindConfigFile priority
-sudo -u $ACTUAL_USER mkdir -p "$USER_HOME/.nornicdb"
-sudo -u $ACTUAL_USER mkdir -p "$USER_HOME/Library/LaunchAgents"
+mkdir -p "$USER_HOME/.nornicdb"
+mkdir -p "$USER_HOME/Library/LaunchAgents"
+chown $ACTUAL_USER:staff "$USER_HOME/.nornicdb"
+chown $ACTUAL_USER:staff "$USER_HOME/Library/LaunchAgents"
 
 # Create data, models, and log directories (as root, will set ownership later)
 mkdir -p /usr/local/var/nornicdb/data
@@ -48,8 +50,8 @@ if [ ! -f "$USER_HOME/.nornicdb/config.yaml" ]; then
             "$USER_HOME/.nornicdb/config.yaml"
         echo "✓ Installed default configuration (fallback)"
     else
-        # Create minimal config
-        sudo -u $ACTUAL_USER cat > "$USER_HOME/.nornicdb/config.yaml" << 'EOF'
+        # Create minimal config (write as root, fix ownership after)
+        cat > "$USER_HOME/.nornicdb/config.yaml" << 'EOF'
 # NornicDB Configuration
 # Edit via Settings app (⌘,) or manually
 
@@ -74,69 +76,30 @@ auto_tlp:
 heimdall:
   enabled: false
 EOF
+        chown $ACTUAL_USER:staff "$USER_HOME/.nornicdb/config.yaml"
         echo "✓ Created minimal configuration"
     fi
 fi
 
-# Install LaunchAgent (expand home directory)
-sudo -u $ACTUAL_USER cat > "$USER_HOME/Library/LaunchAgents/com.nornicdb.server.plist" << EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.nornicdb.server</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/local/bin/nornicdb</string>
-        <string>serve</string>
-        <string>--data-dir</string>
-        <string>/usr/local/var/nornicdb/data</string>
-        <string>--bolt-port</string>
-        <string>7687</string>
-        <string>--http-port</string>
-        <string>7474</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/usr/local/var/nornicdb</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <dict>
-        <key>SuccessfulExit</key>
-        <false/>
-        <key>Crashed</key>
-        <true/>
-    </dict>
-    <key>ThrottleInterval</key>
-    <integer>30</integer>
-    <key>StandardOutPath</key>
-    <string>/usr/local/var/log/nornicdb/stdout.log</string>
-    <key>StandardErrorPath</key>
-    <string>/usr/local/var/log/nornicdb/stderr.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-        <key>HOME</key>
-        <string>$USER_HOME</string>
-    </dict>
-    <key>ProcessType</key>
-    <string>Interactive</string>
-    <key>Nice</key>
-    <integer>0</integer>
-</dict>
-</plist>
-EOF
+# NOTE: We do NOT create the server LaunchAgent plist here!
+# The plist will be created by the menu bar app when the user completes
+# the first-run wizard. This ensures:
+# 1. User can configure encryption BEFORE any data is written
+# 2. launchd's KeepAlive doesn't auto-start the server prematurely
 
-echo "✓ Installed LaunchAgent"
+# Make absolutely sure no old service is running
+sudo -u $ACTUAL_USER launchctl bootout gui/$USER_UID/com.nornicdb.server 2>/dev/null || true
+sudo -u $ACTUAL_USER launchctl remove com.nornicdb.server 2>/dev/null || true
+pkill -9 -f "nornicdb serve" 2>/dev/null || true
 
-# Load LaunchAgent as the user (not root)
-sudo -u $ACTUAL_USER launchctl load "$USER_HOME/Library/LaunchAgents/com.nornicdb.server.plist" 2>/dev/null || true
-echo "✓ Loaded service"
+# Remove any existing server plist to prevent auto-start
+rm -f "$USER_HOME/Library/LaunchAgents/com.nornicdb.server.plist" 2>/dev/null || true
+
+echo "✓ Server will start after first-run wizard completes"
 
 # Install menu bar app LaunchAgent for auto-start
-sudo -u $ACTUAL_USER cat > "$USER_HOME/Library/LaunchAgents/com.nornicdb.menubar.plist" << EOF
+# Write as root first, then fix ownership
+cat > "$USER_HOME/Library/LaunchAgents/com.nornicdb.menubar.plist" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -159,7 +122,10 @@ sudo -u $ACTUAL_USER cat > "$USER_HOME/Library/LaunchAgents/com.nornicdb.menubar
 </plist>
 EOF
 
-# Load the menu bar app LaunchAgent
+# Fix ownership so user can load it
+chown $ACTUAL_USER:staff "$USER_HOME/Library/LaunchAgents/com.nornicdb.menubar.plist"
+
+# Load the menu bar app LaunchAgent as the user
 sudo -u $ACTUAL_USER launchctl load "$USER_HOME/Library/LaunchAgents/com.nornicdb.menubar.plist" 2>/dev/null || true
 
 # Launch menu bar app immediately
@@ -167,7 +133,8 @@ sudo -u $ACTUAL_USER open -a "/Applications/NornicDB.app" 2>/dev/null || true
 echo "✓ Launched menu bar app (will auto-start on login)"
 
 # Create welcome file to trigger first-run wizard
-sudo -u $ACTUAL_USER touch "$USER_HOME/.nornicdb/.first_run"
+touch "$USER_HOME/.nornicdb/.first_run"
+chown $ACTUAL_USER:staff "$USER_HOME/.nornicdb/.first_run"
 
 echo ""
 echo "✅ NornicDB installation complete!"
@@ -175,7 +142,11 @@ echo ""
 echo "The menu bar app should now be running."
 echo "Look for the database icon in your menu bar (top right)."
 echo ""
-echo "First-time setup wizard will guide you through configuration."
+echo "IMPORTANT: The database server will NOT start until you complete the"
+echo "first-time setup wizard. This allows you to configure encryption"
+echo "BEFORE any data is written to disk."
+echo ""
+echo "Click the menu bar icon to begin setup."
 echo ""
 
 exit 0

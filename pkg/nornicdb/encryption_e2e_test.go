@@ -215,10 +215,11 @@ func TestEncryptionDataAtRest(t *testing.T) {
 }
 
 func TestEncryptionWithCustomFields(t *testing.T) {
+	// Note: Field-level encryption was removed in favor of full-database encryption.
+	// This test now verifies that encryption works at the BadgerDB storage level.
 	config := &Config{
 		EncryptionEnabled:  true,
 		EncryptionPassword: "test-secure-password-12345!",
-		EncryptionFields:   []string{"custom_secret", "internal_id"},
 		DecayEnabled:       false,
 		AutoLinksEnabled:   false,
 	}

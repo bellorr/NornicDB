@@ -338,6 +338,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 	lowMemory, _ := cmd.Flags().GetBool("low-memory")
 	dbConfig.LowMemoryMode = lowMemory
 
+	// Encryption settings from config
+	dbConfig.EncryptionEnabled = cfg.Database.EncryptionEnabled
+	dbConfig.EncryptionPassword = cfg.Database.EncryptionPassword
+
 	// Open database
 	fmt.Println("📂 Opening database...")
 	db, err := nornicdb.Open(dataDir, dbConfig)
@@ -402,7 +406,15 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if !noAuth {
 		fmt.Println("🔐 Setting up authentication...")
 		authConfig := auth.DefaultAuthConfig()
-		authConfig.JWTSecret = []byte("nornicdb-dev-secret") // TODO: Make configurable
+		// Use JWT secret from config (auto-generated if not set)
+		if cfg.Auth.JWTSecret != "" {
+			authConfig.JWTSecret = []byte(cfg.Auth.JWTSecret)
+			fmt.Printf("   Using configured JWT secret (%d bytes)\n", len(cfg.Auth.JWTSecret))
+		} else {
+			// Fallback to a generated secret (will change on restart!)
+			authConfig.JWTSecret = []byte("nornicdb-dev-key" + fmt.Sprintf("%d", time.Now().UnixNano()))
+			fmt.Println("   ⚠️  No JWT secret configured - tokens will invalidate on restart!")
+		}
 
 		var authErr error
 		authenticator, authErr = auth.NewAuthenticator(authConfig)
