@@ -2176,10 +2176,10 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		Name:     "nornicdb_token",
 		Value:    tokenResp.AccessToken,
 		Path:     "/",
-		HttpOnly: true,                    // Prevent XSS attacks
-		Secure:   r.TLS != nil,            // Secure only over HTTPS
-		SameSite: http.SameSiteStrictMode, // Prevent CSRF
-		MaxAge:   86400,                   // 24 hours
+		HttpOnly: true,                 // Prevent XSS attacks
+		Secure:   r.TLS != nil,         // Secure only over HTTPS
+		SameSite: http.SameSiteLaxMode, // Lax allows normal navigation, prevents CSRF on POST
+		MaxAge:   86400 * 7,            // 7 days
 	})
 
 	s.writeJSON(w, http.StatusOK, tokenResp)
