@@ -336,10 +336,11 @@ func DefaultConfig() *Config {
 		EnableCompression: true,
 
 		// Rate limiting enabled by default to prevent DoS attacks
-		RateLimitEnabled:   true,
-		RateLimitPerMinute: 100,  // 100 requests/minute per IP
-		RateLimitPerHour:   3000, // 3000 requests/hour per IP
-		RateLimitBurst:     20,   // Allow short bursts
+		// High limits for high-performance local/development use
+		RateLimitEnabled:   false,
+		RateLimitPerMinute: 10000, // 10,000 requests/minute per IP (166/sec)
+		RateLimitPerHour:   100000, // 100,000 requests/hour per IP
+		RateLimitBurst:     1000,   // Allow large bursts for batch operations
 
 		// MCP server enabled by default
 		// Override: NORNICDB_MCP_ENABLED=false

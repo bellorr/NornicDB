@@ -72,6 +72,7 @@ build_package() {
     
     # Clean and create build directory
     echo "📁 Preparing build directory..."
+    chmod -R u+w "$BUILD_DIR" 2>/dev/null || true
     rm -rf "$BUILD_DIR"
     mkdir -p "$BUILD_DIR"/{payload,scripts,resources,root/usr/local/bin,root/Applications}
     
