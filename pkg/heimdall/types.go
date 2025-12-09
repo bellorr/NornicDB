@@ -634,7 +634,7 @@ Subqueries:
   CALL { MATCH (n) RETURN count(n) as c } RETURN c   - Subquery
   UNWIND [1,2,3] AS x RETURN x                        - List expansion
 
-To perform a vector search, you can use the following syntax:
+Vector Search:
   CALL db.index.vector.queryNodes('chunk_embedding_index', 50, 'YOUR QUERY HERE')
   YIELD node AS chunk, score
   MATCH (file:File)-[:HAS_CHUNK]->(chunk) 
