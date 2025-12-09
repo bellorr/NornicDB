@@ -1861,7 +1861,15 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 
 		// Start background clearing and regeneration
 		go func() {
-			log.Printf("[EMBED] Starting background regeneration - clearing all embeddings...")
+			log.Printf("[EMBED] Starting background regeneration - stopping worker and clearing embeddings...")
+
+			// First, reset the embed worker to stop any in-progress work and clear its state
+			if err := s.db.ResetEmbedWorker(); err != nil {
+				log.Printf("[EMBED] ⚠️ Failed to reset embed worker: %v", err)
+				// Continue anyway - the worker will restart on its own
+			}
+
+			// Now clear all embeddings
 			cleared, err := s.db.ClearAllEmbeddings()
 			if err != nil {
 				log.Printf("[EMBED] ❌ Failed to clear embeddings: %v", err)
@@ -1869,7 +1877,7 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 			}
 			log.Printf("[EMBED] ✅ Cleared %d embeddings - triggering regeneration", cleared)
 
-			// Trigger embedding worker to regenerate
+			// Trigger embedding worker to regenerate (worker was already restarted by Reset)
 			ctx := context.Background()
 			if _, err := s.db.EmbedExisting(ctx); err != nil {
 				log.Printf("[EMBED] ❌ Failed to trigger embedding worker: %v", err)

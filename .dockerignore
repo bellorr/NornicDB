@@ -3,10 +3,17 @@ nornicdb
 *.exe
 *.test
 *.out
+bin/
 
 # Data
 data/
 *.db
+
+# Neural training environment (Python venv is huge)
+neural/venv/
+neural/data/
+neural/export/
+neural/training/
 
 # UI development files (dist is included via cmd/nornicdb/ui/dist)
 ui/node_modules/
@@ -26,6 +33,9 @@ ui/.DS_Store
 # Tests
 *_test.go
 testing/
+
+# macOS app (separate build)
+macos/
 
 # Docs (not needed in image)
 docs/

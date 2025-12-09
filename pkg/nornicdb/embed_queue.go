@@ -156,6 +156,49 @@ func (ew *EmbedWorker) Stats() WorkerStats {
 	}
 }
 
+// Reset stops the current worker and restarts it fresh.
+// This clears processed counts and the recently-processed cache,
+// which is necessary when regenerating all embeddings.
+func (ew *EmbedWorker) Reset() {
+	ew.mu.Lock()
+	if ew.closed {
+		ew.mu.Unlock()
+		return
+	}
+	ew.mu.Unlock()
+
+	fmt.Println("🔄 Resetting embed worker for regeneration...")
+
+	// Stop current worker
+	ew.cancel()
+	// Drain trigger channel to prevent panic on close
+	select {
+	case <-ew.trigger:
+	default:
+	}
+	close(ew.trigger)
+	ew.wg.Wait()
+
+	// Reset state
+	ew.mu.Lock()
+	ew.processed = 0
+	ew.failed = 0
+	ew.running = false
+	ew.recentlyProcessed = make(map[string]time.Time)
+	ew.loggedSkip = make(map[string]bool)
+	ew.mu.Unlock()
+
+	// Create new context and trigger channel
+	ew.ctx, ew.cancel = context.WithCancel(context.Background())
+	ew.trigger = make(chan struct{}, 1)
+
+	// Restart worker
+	ew.wg.Add(1)
+	go ew.worker()
+
+	fmt.Println("✅ Embed worker reset complete, starting fresh scan")
+}
+
 // Close gracefully shuts down the worker.
 func (ew *EmbedWorker) Close() {
 	ew.mu.Lock()

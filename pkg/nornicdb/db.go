@@ -1212,6 +1212,17 @@ func (db *DB) EmbedExisting(ctx context.Context) (int, error) {
 	return 0, nil // Worker will process in background
 }
 
+// ResetEmbedWorker stops the current embedding worker and restarts it fresh.
+// This clears all worker state (processed counts, recently-processed cache),
+// which is necessary when regenerating all embeddings after ClearAllEmbeddings.
+func (db *DB) ResetEmbedWorker() error {
+	if db.embedQueue == nil {
+		return fmt.Errorf("auto-embed not enabled")
+	}
+	db.embedQueue.Reset()
+	return nil
+}
+
 // ClearAllEmbeddings removes embeddings from all nodes, allowing them to be regenerated.
 // This is useful for re-embedding with a new model or fixing corrupted embeddings.
 func (db *DB) ClearAllEmbeddings() (int, error) {

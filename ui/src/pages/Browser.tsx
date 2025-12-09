@@ -161,7 +161,6 @@ export function Browser() {
              <button
               type="button"
               onClick={() => setShowRegenerateConfirm(true)}
-              disabled={embedTriggering || embedData.stats?.running}
               className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
                 embedData.stats?.running 
                   ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 cursor-not-allowed' 
