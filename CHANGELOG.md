@@ -14,6 +14,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Issue and PR templates
 - Migration guide for repository split
 
+## [1.0.3] - 2025-12-09
+
+### Fixed
+- **Critical: Double .gguf Extension Bug** - Model names with `.gguf` extension (e.g., `bge-m3.gguf`) were having `.gguf` appended again, resulting in `bge-m3.gguf.gguf` and "model not found" errors
+  - Fixed in `pkg/heimdall/scheduler.go` - Now checks `strings.HasSuffix()` before adding extension
+  - Fixed in `pkg/embed/local_gguf.go` - Same fix for embedding model resolution
+  - This prevented both Heimdall AI assistant and auto-embeddings from working on macOS
+- **Missing LaunchAgent Environment Variables** - macOS menu bar app's LaunchAgent plist was missing critical env vars
+  - Added `NORNICDB_MODELS_DIR=/usr/local/var/nornicdb/models`
+  - Added `NORNICDB_HEIMDALL_MODEL` to pass model name to Heimdall
+  - Added `NORNICDB_EMBEDDING_MODEL` to pass model name to embeddings
+  - Updated both plist generators in `macos/MenuBarApp/NornicDBMenuBar.swift`
+- **macOS Models Path Resolution** - Added `/usr/local/var/nornicdb/models` as first candidate in Heimdall's model path resolution (was only checking Docker paths)
+- **Swift YAML Config Indentation** - Fixed multi-line string indentation errors in plist generation
+
+### Changed
+- **Non-blocking Regenerate Embeddings** - `POST /nornicdb/embed/trigger?regenerate=true` now returns `202 Accepted` immediately
+  - Clearing and regeneration happens asynchronously in background goroutine
+  - Prevents UI from blocking for minutes during large regenerations
+  - Added detailed logging for background operations
+- **UI Confirmation Dialog** - Added confirmation modal before regenerating all embeddings
+  - Shows warning about destructive operation
+  - Displays current embedding count
+  - Red warning styling to indicate danger
+
+### Added
+- **Swift YAML Parser Unit Test** - Created `macos/MenuBarApp/ConfigParserTest.swift` to verify config loading works correctly
+  - Tests section extraction, boolean parsing, string parsing
+  - Validates against actual `~/.nornicdb/config.yaml` file
+
 ## [1.0.2] - 2025-01-27
 
 ### Added
