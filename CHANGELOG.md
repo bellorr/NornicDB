@@ -14,6 +14,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Issue and PR templates
 - Migration guide for repository split
 
+## [1.0.2] - 2025-01-27
+
+### Added
+- **macOS Code Intelligence / File Indexer**: New file indexing system in the macOS menu bar app that provides semantic code search capabilities.
+  - Automatically indexes source files with intelligent chunking (functions, classes, methods extracted separately)
+  - **Apple Vision Integration**: PNG/image files are processed with Apple's Vision framework for:
+    - OCR text extraction (reads text from screenshots, diagrams, etc.)
+    - Image classification (identifies objects, scenes, activities in images)
+  - Creates searchable `File` and `FileChunk` nodes linked via `HAS_CHUNK` relationships
+  - Real-time file watching with automatic re-indexing on changes
+  - Supports code files, markdown, images, and more
+- **NornicDB Icons**: Added proper application icons for macOS app
+
+### Changed
+- **Keychain-based API Token Storage**: API tokens (Ollama, OpenAI, etc.) are now stored securely in macOS Keychain instead of plain YAML config files
+- Improved default provider value handling
+
+### Fixed
+- **In-flight Node Deletion Race Condition**: Fixed a critical bug in `AsyncEngine` where nodes being flushed to disk could survive `DETACH DELETE` operations.
+  - When a node was in the middle of being written (in `inFlightNodes`), delete operations would only remove it from cache
+  - The flush would then complete, writing the "deleted" node back to BadgerDB
+  - Now properly marks in-flight nodes for deletion so they're removed after flush completes
+- **Node/Edge Count Consistency**: `NodeCount()` and `EdgeCount()` now validate that nodes can be decoded before counting, ensuring counts match what `AllNodes()` and `AllEdges()` actually return
+- CUDA Dockerfile fixes for improved GPU support
+- Documentation link fixes
+
 ## [1.0.1] - 2025-12-08
 
 ### Added

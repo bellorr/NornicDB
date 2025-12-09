@@ -118,6 +118,13 @@ class FileWatchManager: ObservableObject {
     @Published var authRequired: Bool = false
     @Published var isAuthenticated: Bool = false
     
+    /// Delay between indexing each file (in milliseconds) to reduce system load
+    @Published var indexingThrottleMs: Int = 50 {
+        didSet {
+            UserDefaults.standard.set(indexingThrottleMs, forKey: "indexingThrottleMs")
+        }
+    }
+    
     private var fileSystemWatchers: [String: DispatchSourceFileSystemObject] = [:]
     private let indexer = FileIndexer()
     private let indexerService = FileIndexerService.shared
@@ -136,6 +143,11 @@ class FileWatchManager: ObservableObject {
     
     init(config: ConfigManager) {
         self.config = config
+        
+        // Load saved throttle setting
+        let savedThrottle = UserDefaults.standard.integer(forKey: "indexingThrottleMs")
+        self.indexingThrottleMs = savedThrottle > 0 ? savedThrottle : 50
+        
         loadSavedFolders()
         setupFileWatching()
         
@@ -582,6 +594,11 @@ class FileWatchManager: ObservableObject {
                         print("Failed to store file \(file.relativePath): \(error)")
                         errorCount += 1
                     }
+                    
+                    // Throttle indexing to reduce system load
+                    if indexingThrottleMs > 0 {
+                        try? await Task.sleep(nanoseconds: UInt64(indexingThrottleMs) * 1_000_000)
+                    }
                 }
             }
             
@@ -765,41 +782,55 @@ class FileWatchManager: ObservableObject {
     }
     
     /// Perform vector search
-    func vectorSearch(query: String, limit: Int = 20, minSimilarity: Double = 0.75) async throws -> [VectorSearchResult] {
-        let params = [
+    func vectorSearch(query: String, limit: Int = 20, minSimilarity: Double = 0.0) async throws -> [VectorSearchResult] {
+        // Use the correct NornicDB search endpoint (POST /nornicdb/search)
+        let requestBody: [String: Any] = [
             "query": query,
-            "limit": String(limit),
-            "min_similarity": String(minSimilarity),
-            "types": "file"
+            "labels": ["File"],
+            "limit": limit
         ]
         
-        let queryString = params.map { "\($0.key)=\($0.value.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? $0.value)" }.joined(separator: "&")
-        
-        let (data, response) = try await makeAuthenticatedRequest(to: "/api/nodes/vector-search?\(queryString)")
+        let bodyData = try JSONSerialization.data(withJSONObject: requestBody)
+        let (data, response) = try await makeAuthenticatedRequest(to: "/nornicdb/search", method: "POST", body: bodyData)
         
         guard response.statusCode == 200 else {
+            let errorMsg = String(data: data, encoding: .utf8) ?? "Unknown error"
             throw NSError(domain: "FileWatchManager", code: response.statusCode,
-                         userInfo: [NSLocalizedDescriptionKey: "Search failed"])
+                         userInfo: [NSLocalizedDescriptionKey: "Search failed: \(errorMsg)"])
         }
         
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let results = json["results"] as? [[String: Any]] else {
+        // Parse search results - the API returns an array of SearchResult objects
+        // Each result has: node (with properties), score, rrf_score, bm25_rank
+        // RRF scores are typically in 0-0.1 range, not 0-1 like cosine similarity
+        guard let results = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
             return []
         }
         
         return results.compactMap { result in
-            guard let id = result["id"] as? String,
-                  let path = result["path"] as? String,
-                  let similarity = result["similarity"] as? Double else {
+            // Get RRF score (already ranked by relevance)
+            let score = result["rrf_score"] as? Double ?? result["score"] as? Double ?? 0.0
+            
+            // Filter by min similarity (if set above 0)
+            guard score >= minSimilarity else {
                 return nil
             }
             
+            // Get node properties
+            guard let node = result["node"] as? [String: Any],
+                  let properties = node["properties"] as? [String: Any],
+                  let id = node["id"] as? String else {
+                return nil
+            }
+            
+            let path = properties["path"] as? String ?? ""
+            let name = properties["name"] as? String ?? (path as NSString).lastPathComponent
+            
             return VectorSearchResult(
                 id: id,
-                title: result["title"] as? String ?? (path as NSString).lastPathComponent,
+                title: name,
                 path: path,
-                similarity: similarity,
-                language: result["language"] as? String
+                similarity: score,
+                language: properties["language"] as? String
             )
         }
     }
@@ -824,7 +855,7 @@ struct FileIndexerView: View {
     @State private var searchResults: [VectorSearchResult] = []
     @State private var isSearching: Bool = false
     @State private var showSearchSettings: Bool = false
-    @State private var minSimilarity: Double = 0.75
+    @State private var minSimilarity: Double = 0.0  // RRF scores are typically 0-0.1, not 0-1
     @State private var searchLimit: Int = 20
     @State private var authUsername: String = ""
     @State private var authPassword: String = ""
@@ -1100,23 +1131,43 @@ struct FileIndexerView: View {
             
             // Search settings
             if showSearchSettings {
-                HStack(spacing: 20) {
-                    HStack {
-                        Text("Min Similarity:")
-                            .font(.caption)
-                        Slider(value: $minSimilarity, in: 0.5...1.0, step: 0.05)
-                            .frame(width: 100)
-                        Text("\(minSimilarity, specifier: "%.2f")")
-                            .font(.caption)
-                            .monospacedDigit()
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 20) {
+                        HStack {
+                            Text("Min Similarity:")
+                                .font(.caption)
+                            Slider(value: $minSimilarity, in: 0.5...1.0, step: 0.05)
+                                .frame(width: 100)
+                            Text("\(minSimilarity, specifier: "%.2f")")
+                                .font(.caption)
+                                .monospacedDigit()
+                        }
+                        
+                        HStack {
+                            Text("Max Results:")
+                                .font(.caption)
+                            TextField("", value: $searchLimit, format: .number)
+                                .textFieldStyle(.roundedBorder)
+                                .frame(width: 60)
+                        }
                     }
                     
                     HStack {
-                        Text("Max Results:")
+                        Text("Indexing Throttle:")
                             .font(.caption)
-                        TextField("", value: $searchLimit, format: .number)
-                            .textFieldStyle(.roundedBorder)
-                            .frame(width: 60)
+                        Slider(value: Binding(
+                            get: { Double(watchManager.indexingThrottleMs) },
+                            set: { watchManager.indexingThrottleMs = Int($0) }
+                        ), in: 0...500, step: 10)
+                            .frame(width: 150)
+                        Text("\(watchManager.indexingThrottleMs)ms")
+                            .font(.caption)
+                            .monospacedDigit()
+                            .frame(width: 50, alignment: .trailing)
+                        
+                        Text(watchManager.indexingThrottleMs == 0 ? "(fastest)" : watchManager.indexingThrottleMs >= 200 ? "(gentle)" : "")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
                     }
                 }
                 .padding(.horizontal)
