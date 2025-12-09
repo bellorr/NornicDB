@@ -1917,17 +1917,23 @@ func (s *Server) handleEmbedStats(w http.ResponseWriter, r *http.Request) {
 
 	if stats == nil {
 		response := map[string]interface{}{
-			"enabled":          false,
-			"message":          "Auto-embed not enabled",
-			"total_embeddings": totalEmbeddings,
+			"enabled":               false,
+			"message":               "Auto-embed not enabled",
+			"total_embeddings":      totalEmbeddings,
+			"configured_model":      s.config.EmbeddingModel,
+			"configured_dimensions": s.config.EmbeddingDimensions,
+			"configured_provider":   s.config.EmbeddingProvider,
 		}
 		s.writeJSON(w, http.StatusOK, response)
 		return
 	}
 	response := map[string]interface{}{
-		"enabled":          true,
-		"stats":            stats,
-		"total_embeddings": totalEmbeddings,
+		"enabled":               true,
+		"stats":                 stats,
+		"total_embeddings":      totalEmbeddings,
+		"configured_model":      s.config.EmbeddingModel,
+		"configured_dimensions": s.config.EmbeddingDimensions,
+		"configured_provider":   s.config.EmbeddingProvider,
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }

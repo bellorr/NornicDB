@@ -940,8 +940,14 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		}
 	}
 
-	// Initialize search service (uses pre-computed embeddings from Mimir)
-	db.searchService = search.NewService(db.storage)
+	// Initialize search service with configured embedding dimensions
+	// This must match the embedding model's output dimensions (e.g., 512 for Apple Intelligence, 1024 for bge-m3)
+	embeddingDims := config.EmbeddingDimensions
+	if embeddingDims <= 0 {
+		embeddingDims = 1024 // Default for bge-m3 / mxbai-embed-large
+	}
+	db.searchService = search.NewServiceWithDimensions(db.storage, embeddingDims)
+	log.Printf("🔍 Search service initialized with %d-dimension vector index", embeddingDims)
 
 	// Wire up storage event callbacks to keep search indexes synchronized
 	// Storage is the single source of truth - it notifies when changes happen
@@ -1048,7 +1054,9 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	// Set callback to update search index after embedding
 	db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
 		if db.searchService != nil {
-			_ = db.searchService.IndexNode(node)
+			if err := db.searchService.IndexNode(node); err != nil {
+				log.Printf("⚠️ Failed to index embedded node %s: %v", node.ID, err)
+			}
 		}
 	})
 

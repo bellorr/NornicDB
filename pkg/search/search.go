@@ -328,9 +328,26 @@ type Service struct {
 //
 //	Safe for concurrent searches from multiple goroutines.
 func NewService(engine storage.Engine) *Service {
+	return NewServiceWithDimensions(engine, 1024) // Default to 1024 dimensions (mxbai-embed-large)
+}
+
+// NewServiceWithDimensions creates a search Service with the specified embedding dimensions.
+// Use this when your embedding model produces vectors of a different size than the default 1024.
+//
+// Example:
+//
+//	// For Apple Intelligence embeddings (512 dimensions)
+//	svc := search.NewServiceWithDimensions(engine, 512)
+//
+//	// For OpenAI text-embedding-3-small (1536 dimensions)
+//	svc := search.NewServiceWithDimensions(engine, 1536)
+func NewServiceWithDimensions(engine storage.Engine, dimensions int) *Service {
+	if dimensions <= 0 {
+		dimensions = 1024 // Fallback to default
+	}
 	return &Service{
 		engine:                     engine,
-		vectorIndex:                NewVectorIndex(1024), // Default to 1024 dimensions (mxbai-embed-large)
+		vectorIndex:                NewVectorIndex(dimensions),
 		fulltextIndex:              NewFulltextIndex(),
 		minEmbeddingsForClustering: DefaultMinEmbeddingsForClustering,
 	}
@@ -530,9 +547,12 @@ func (s *Service) IndexNode(node *storage.Node) error {
 
 	// Add to vector index if node has embedding
 	if len(node.Embedding) > 0 {
-		// DEBUG: Print embedding info
-		// fmt.Printf("DEBUG: IndexNode %s has %d-dim embedding\n", node.ID, len(node.Embedding))
 		if err := s.vectorIndex.Add(string(node.ID), node.Embedding); err != nil {
+			// Log dimension mismatch errors explicitly - common configuration issue
+			if err == ErrDimensionMismatch {
+				log.Printf("⚠️ IndexNode %s: embedding dimension mismatch (got %d, expected %d)",
+					node.ID, len(node.Embedding), s.vectorIndex.dimensions)
+			}
 			return err
 		}
 
