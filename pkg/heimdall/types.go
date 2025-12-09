@@ -633,6 +633,16 @@ Modifications (use carefully):
 Subqueries:
   CALL { MATCH (n) RETURN count(n) as c } RETURN c   - Subquery
   UNWIND [1,2,3] AS x RETURN x                        - List expansion
+
+To perform a vector search, you can use the following syntax:
+  CALL db.index.vector.queryNodes('chunk_embedding_index', 50, 'YOUR QUERY HERE')
+  YIELD node AS chunk, score
+  MATCH (file:File)-[:HAS_CHUNK]->(chunk) 
+  RETURN file.path AS file,
+	max(score) AS bestScore,
+	count(*) AS matchedChunks
+  ORDER BY bestScore DESC
+  LIMIT 10;
 `
 
 // EstimatedSystemTokens returns estimated token count for the system prompt.
