@@ -366,6 +366,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     var configManager: ConfigManager = ConfigManager()
     private var settingsWindowController: NSWindowController?
     private var firstRunWindowController: NSWindowController?
+    private var fileIndexerWindowController: NSWindowController?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide dock icon - we only want menu bar presence
@@ -429,6 +430,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         
         // Configuration
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(openSettings), keyEquivalent: ","))
+        menu.addItem(NSMenuItem(title: "File Indexer...", action: #selector(openFileIndexer), keyEquivalent: "i"))
         menu.addItem(NSMenuItem(title: "Open Config File", action: #selector(openConfig), keyEquivalent: ""))
         menu.addItem(NSMenuItem(title: "Show Logs", action: #selector(showLogs), keyEquivalent: "l"))
         menu.addItem(NSMenuItem.separator())
@@ -613,6 +615,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         NSApp.activate(ignoringOtherApps: true)
     }
     
+    @objc func openFileIndexer() {
+        if fileIndexerWindowController == nil {
+            let fileIndexerView = FileIndexerView(config: configManager)
+            let hostingController = NSHostingController(rootView: fileIndexerView)
+            
+            let window = NSWindow(contentViewController: hostingController)
+            window.title = "NornicDB File Indexer"
+            window.setContentSize(NSSize(width: 900, height: 700))
+            window.styleMask = [.titled, .closable, .resizable, .miniaturizable]
+            window.center()
+            
+            fileIndexerWindowController = NSWindowController(window: window)
+        }
+        
+        fileIndexerWindowController?.showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+    
     func showFirstRunWizard() {
         let wizardView = FirstRunWizard(config: configManager) {
             self.firstRunWindowController?.window?.close()
@@ -778,6 +798,69 @@ class ConfigManager: ObservableObject {
     
     // Config path matches server's FindConfigFile priority: ~/.nornicdb/config.yaml
     private let configPath = NSString(string: "~/.nornicdb/config.yaml").expandingTildeInPath
+    
+    // MARK: - YAML Parsing Helpers
+    
+    /// Extract a YAML section's content (everything until the next top-level key)
+    /// This properly handles indented content within a section
+    private func extractYAMLSection(named sectionName: String, from content: String) -> String? {
+        let lines = content.components(separatedBy: .newlines)
+        var inSection = false
+        var sectionLines: [String] = []
+        
+        for line in lines {
+            // Check if this is the start of our target section (no leading whitespace)
+            if line.hasPrefix("\(sectionName):") && !line.hasPrefix(" ") && !line.hasPrefix("\t") {
+                inSection = true
+                continue
+            }
+            
+            // If we're in the section, check if we've hit another top-level key
+            if inSection {
+                // A line that starts with a non-whitespace character and contains ":" is a new section
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.hasPrefix("#") && trimmed.contains(":") {
+                    // We've hit a new top-level section, stop
+                    break
+                }
+                sectionLines.append(line)
+            }
+        }
+        
+        return sectionLines.isEmpty ? nil : sectionLines.joined(separator: "\n")
+    }
+    
+    /// Get a boolean value from a YAML section
+    private func getYAMLBool(key: String, from section: String, default defaultValue: Bool = false) -> Bool {
+        // Look for "key: true" or "key: false" within section lines
+        for line in section.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("\(key):") {
+                if trimmed.contains("true") { return true }
+                if trimmed.contains("false") { return false }
+            }
+        }
+        return defaultValue
+    }
+    
+    /// Get a string value from a YAML section
+    private func getYAMLString(key: String, from section: String) -> String? {
+        for line in section.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("\(key):") {
+                let value = trimmed.dropFirst("\(key):".count).trimmingCharacters(in: .whitespaces)
+                // Remove quotes if present
+                if value.hasPrefix("\"") && value.hasSuffix("\"") {
+                    return String(value.dropFirst().dropLast())
+                }
+                if value.hasPrefix("'") && value.hasSuffix("'") {
+                    return String(value.dropFirst().dropLast())
+                }
+                return value.isEmpty ? nil : value
+            }
+        }
+        return nil
+    }
     private let firstRunPath = NSString(string: "~/.nornicdb/.first_run").expandingTildeInPath
     private let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
     private let modelsPath = "/usr/local/var/nornicdb/models"
@@ -817,165 +900,88 @@ class ConfigManager: ObservableObject {
         
         print("Loading config from: \(configPath)")
         
-        // Parse YAML (simple string matching since we don't have a YAML parser)
-        let lines = content.components(separatedBy: .newlines)
-        let context = lines.joined(separator: "\n")
+        // Parse YAML sections properly (each section ends when a new top-level key starts)
         
-        // Load feature enabled flags - handle multi-line YAML
-        let embeddingSection = context.range(of: "embedding:")
-        if embeddingSection != nil {
-            let afterEmbedding = String(context[embeddingSection!.upperBound...])
-            if afterEmbedding.contains("enabled: true") || afterEmbedding.contains("enabled:true") {
-                embeddingsEnabled = true
-                print("✅ Loaded embeddings enabled: true")
-            } else if afterEmbedding.contains("enabled: false") || afterEmbedding.contains("enabled:false") {
-                embeddingsEnabled = false
-                print("✅ Loaded embeddings enabled: false")
-            }
-        }
-        
-        let kmeansSection = context.range(of: "kmeans:")
-        if kmeansSection != nil {
-            let afterKmeans = String(context[kmeansSection!.upperBound...])
-            if afterKmeans.contains("enabled: true") || afterKmeans.contains("enabled:true") {
-                kmeansEnabled = true
-                print("✅ Loaded kmeans enabled: true")
-            } else if afterKmeans.contains("enabled: false") || afterKmeans.contains("enabled:false") {
-                kmeansEnabled = false
-                print("✅ Loaded kmeans enabled: false")
-            }
-        }
-        
-        let autoTLPSection = context.range(of: "auto_tlp:")
-        if autoTLPSection != nil {
-            let afterAutoTLP = String(context[autoTLPSection!.upperBound...])
-            if afterAutoTLP.contains("enabled: true") || afterAutoTLP.contains("enabled:true") {
-                autoTLPEnabled = true
-                print("✅ Loaded auto_tlp enabled: true")
-            } else if afterAutoTLP.contains("enabled: false") || afterAutoTLP.contains("enabled:false") {
-                autoTLPEnabled = false
-                print("✅ Loaded auto_tlp enabled: false")
-            }
-        }
-        
-        let heimdallSectionVar = context.range(of: "heimdall:")
-        if heimdallSectionVar != nil {
-            let afterHeimdall = String(context[heimdallSectionVar!.upperBound...])
-            if afterHeimdall.contains("enabled: true") || afterHeimdall.contains("enabled:true") {
-                heimdallEnabled = true
-                print("✅ Loaded heimdall enabled: true")
-            } else if afterHeimdall.contains("enabled: false") || afterHeimdall.contains("enabled:false") {
-                heimdallEnabled = false
-                print("✅ Loaded heimdall enabled: false")
-            }
-        }
-        
-        // Load model selections - handle multi-line YAML
-        if embeddingSection != nil {
-            let afterEmbedding = String(context[embeddingSection!.upperBound...])
-            if let modelRange = afterEmbedding.range(of: "model:") {
-                let start = modelRange.upperBound
-                if let value = extractStringValue(from: afterEmbedding, after: start) {
-                    embeddingModel = value
-                    print("✅ Loaded embedding model: \(value)")
-                }
-            }
-        }
-        
-        if heimdallSectionVar != nil {
-            let afterHeimdall = String(context[heimdallSectionVar!.upperBound...])
-            if let modelRange = afterHeimdall.range(of: "model:") {
-                let start = modelRange.upperBound
-                if let value = extractStringValue(from: afterHeimdall, after: start) {
-                    heimdallModel = value
-                    print("✅ Loaded heimdall model: \(value)")
-                }
-            }
-        }
-        
-        // Load server settings - handle multi-line YAML
-        let serverSection = context.range(of: "server:")
-        if serverSection != nil {
-            let afterServer = String(context[serverSection!.upperBound...])
+        // Load embedding section
+        if let embeddingSection = extractYAMLSection(named: "embedding", from: content) {
+            embeddingsEnabled = getYAMLBool(key: "enabled", from: embeddingSection)
+            print("✅ Loaded embeddings enabled: \(embeddingsEnabled)")
             
-            // Load bolt_port and http_port
-            if let boltPortRange = afterServer.range(of: "bolt_port:") {
-                let start = boltPortRange.upperBound
-                if let value = extractStringValue(from: afterServer, after: start) {
-                    boltPortNumber = value
-                    print("✅ Loaded bolt_port: \(value)")
-                }
-            }
-            
-            if let httpPortRange = afterServer.range(of: "http_port:") {
-                let start = httpPortRange.upperBound
-                if let value = extractStringValue(from: afterServer, after: start) {
-                    httpPortNumber = value
-                    print("✅ Loaded http_port: \(value)")
-                }
-            }
-            
-            if let hostRange = afterServer.range(of: "host:") {
-                let start = hostRange.upperBound
-                if let value = extractStringValue(from: afterServer, after: start) {
-                    hostAddress = value
-                    print("✅ Loaded host: \(value)")
-                }
+            if let model = getYAMLString(key: "model", from: embeddingSection) {
+                embeddingModel = model
+                print("✅ Loaded embedding model: \(model)")
             }
         }
         
-        // Load auth settings - handle multi-line YAML
-        let authSection = context.range(of: "auth:")
-        if authSection != nil {
-            let afterAuth = String(context[authSection!.upperBound...])
+        // Load kmeans section
+        if let kmeansSection = extractYAMLSection(named: "kmeans", from: content) {
+            kmeansEnabled = getYAMLBool(key: "enabled", from: kmeansSection)
+            print("✅ Loaded kmeans enabled: \(kmeansEnabled)")
+        }
+        
+        // Load auto_tlp section
+        if let autoTLPSection = extractYAMLSection(named: "auto_tlp", from: content) {
+            autoTLPEnabled = getYAMLBool(key: "enabled", from: autoTLPSection)
+            print("✅ Loaded auto_tlp enabled: \(autoTLPEnabled)")
+        }
+        
+        // Load heimdall section
+        if let heimdallSection = extractYAMLSection(named: "heimdall", from: content) {
+            heimdallEnabled = getYAMLBool(key: "enabled", from: heimdallSection)
+            print("✅ Loaded heimdall enabled: \(heimdallEnabled)")
             
-            if let usernameRange = afterAuth.range(of: "username:") {
-                let start = usernameRange.upperBound
-                if let value = extractStringValue(from: afterAuth, after: start) {
-                    adminUsername = value
-                    print("✅ Loaded username: \(value)")
-                }
+            if let model = getYAMLString(key: "model", from: heimdallSection) {
+                heimdallModel = model
+                print("✅ Loaded heimdall model: \(model)")
             }
-            
-            if let passwordRange = afterAuth.range(of: "password:") {
-                let start = passwordRange.upperBound
-                if let value = extractStringValue(from: afterAuth, after: start) {
-                    adminPassword = value
-                    print("✅ Loaded password: [hidden]")
-                }
+        }
+        
+        // Load server section
+        if let serverSection = extractYAMLSection(named: "server", from: content) {
+            if let port = getYAMLString(key: "bolt_port", from: serverSection) {
+                boltPortNumber = port
+                print("✅ Loaded bolt_port: \(port)")
+            }
+            if let port = getYAMLString(key: "http_port", from: serverSection) {
+                httpPortNumber = port
+                print("✅ Loaded http_port: \(port)")
+            }
+            if let host = getYAMLString(key: "host", from: serverSection) {
+                hostAddress = host
+                print("✅ Loaded host: \(host)")
+            }
+        }
+        
+        // Load auth section
+        if let authSection = extractYAMLSection(named: "auth", from: content) {
+            if let username = getYAMLString(key: "username", from: authSection) {
+                adminUsername = username
+                print("✅ Loaded username: \(username)")
+            }
+            if let password = getYAMLString(key: "password", from: authSection) {
+                adminPassword = password
+                print("✅ Loaded password: [hidden]")
             }
             
             // Load JWT secret from config file ONLY if not already loaded from Keychain
-            // This handles migration from old installs that stored secrets in config
             if jwtSecret.isEmpty {
-                if let jwtRange = afterAuth.range(of: "jwt_secret:") {
-                    let start = jwtRange.upperBound
-                    if let value = extractStringValue(from: afterAuth, after: start),
-                       !value.hasPrefix("[stored-in-keychain]"),
-                       !value.isEmpty {
-                        jwtSecret = value
-                        print("📄 Loaded JWT secret from config (migrating to Keychain)")
-                        // Migrate to Keychain - saveJWTSecret won't overwrite if one exists
-                        _ = KeychainHelper.shared.saveJWTSecret(value)
-                    }
+                if let jwt = getYAMLString(key: "jwt_secret", from: authSection),
+                   !jwt.hasPrefix("[stored-in-keychain]"),
+                   !jwt.isEmpty {
+                    jwtSecret = jwt
+                    print("📄 Loaded JWT secret from config (migrating to Keychain)")
+                    _ = KeychainHelper.shared.saveJWTSecret(jwt)
                 }
             }
         }
         
-        // Load encryption settings - check multiple patterns
-        // Pattern 1: Look for encryption_enabled anywhere after database:
+        // Load database/encryption settings
         var configSaysEncryptionEnabled = false
-        let databaseSection = context.range(of: "database:")
-        if databaseSection != nil {
-            // Search for encryption_enabled: true/false after database: section
-            let afterDatabase = String(context[databaseSection!.upperBound...])
-            if afterDatabase.contains("encryption_enabled: true") || afterDatabase.contains("encryption_enabled:true") {
-                configSaysEncryptionEnabled = true
-                print("✅ Config says encryption enabled: true")
-            } else if afterDatabase.contains("encryption_enabled: false") || afterDatabase.contains("encryption_enabled:false") {
-                configSaysEncryptionEnabled = false
-                print("✅ Config says encryption enabled: false")
-            }
+        var databaseSectionContent: String? = nil
+        if let dbSection = extractYAMLSection(named: "database", from: content) {
+            databaseSectionContent = dbSection
+            configSaysEncryptionEnabled = getYAMLBool(key: "encryption_enabled", from: dbSection)
+            print("✅ Config says encryption enabled: \(configSaysEncryptionEnabled)")
         }
         
         // NOW try to load encryption password from Keychain (only if encryption was/is enabled)
@@ -998,26 +1004,21 @@ class ConfigManager: ObservableObject {
         }
         
         // Load encryption password from config ONLY if not already loaded from Keychain
-        if encryptionPassword.isEmpty && !encryptionKeychainAccessDenied && databaseSection != nil {
-            let afterDatabase = String(context[databaseSection!.upperBound...])
-            if let passwordRange = afterDatabase.range(of: "encryption_password:") {
-                let start = passwordRange.upperBound
-                if let value = extractStringValue(from: afterDatabase, after: start),
-                   !value.hasPrefix("[stored-in-keychain]"),
-                   !value.isEmpty {
-                    encryptionPassword = value
-                    encryptionEnabled = true
-                    print("📄 Loaded encryption password from config (migrating to Keychain)")
-                    // Migrate to Keychain - saveEncryptionPassword won't overwrite if one exists
-                    if KeychainHelper.shared.saveEncryptionPassword(value) {
-                        print("✅ Migrated encryption password to Keychain")
-                    } else if KeychainHelper.shared.isEncryptionAccessDenied {
-                        // User denied Keychain access during migration - disable encryption
-                        print("🚫 Keychain access denied during migration - disabling encryption")
-                        encryptionEnabled = false
-                        encryptionKeychainAccessDenied = true
-                        encryptionPassword = ""
-                    }
+        if encryptionPassword.isEmpty && !encryptionKeychainAccessDenied, let dbSection = databaseSectionContent {
+            if let password = getYAMLString(key: "encryption_password", from: dbSection),
+               !password.hasPrefix("[stored-in-keychain]"),
+               !password.isEmpty {
+                encryptionPassword = password
+                encryptionEnabled = true
+                print("📄 Loaded encryption password from config (migrating to Keychain)")
+                // Migrate to Keychain
+                if KeychainHelper.shared.saveEncryptionPassword(password) {
+                    print("✅ Migrated encryption password to Keychain")
+                } else if KeychainHelper.shared.isEncryptionAccessDenied {
+                    print("🚫 Keychain access denied during migration - disabling encryption")
+                    encryptionEnabled = false
+                    encryptionKeychainAccessDenied = true
+                    encryptionPassword = ""
                 }
             }
         }
@@ -1111,7 +1112,7 @@ class ConfigManager: ObservableObject {
         if KeychainHelper.shared.saveJWTSecret(jwtSecret) {
             print("🔐 JWT secret saved to Keychain")
             // Write placeholder to config file indicating it's in Keychain
-            content = updateYAMLStringValue(in: content, section: "auth", key: "jwt_secret", value: "[stored-in-keychain]")
+            content = updateYAMLStringValue(in: content, section: "auth", key: "jwt_secret", value: "\"[stored-in-keychain]\"")
         } else {
             // Fallback: save to config file if Keychain fails
             print("⚠️ Keychain save failed, storing JWT in config file")
@@ -1132,7 +1133,7 @@ class ConfigManager: ObservableObject {
             if KeychainHelper.shared.saveEncryptionPassword(encryptionPassword) {
                 print("🔐 Encryption password saved to Keychain")
                 // Write placeholder to config file indicating it's in Keychain
-                content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: "[stored-in-keychain]")
+                content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: "\"[stored-in-keychain]\"")
             } else if KeychainHelper.shared.isEncryptionAccessDenied {
                 // User denied Keychain access - disable encryption for security
                 print("🚫 Keychain access denied - disabling encryption")

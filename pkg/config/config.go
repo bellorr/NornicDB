@@ -744,7 +744,11 @@ func legacyLoadFromEnv() *Config {
 	config.Memory.ArchiveThreshold = getEnvFloat("NORNICDB_MEMORY_ARCHIVE_THRESHOLD", 0.05)
 	// Only override EmbeddingEnabled if env var is explicitly set
 	if v := os.Getenv("NORNICDB_EMBEDDING_ENABLED"); v != "" {
+		wasEnabled := config.Memory.EmbeddingEnabled
 		config.Memory.EmbeddingEnabled = v == "true" || v == "1"
+		fmt.Printf("🔧 NORNICDB_EMBEDDING_ENABLED env var: '%s' -> setting EmbeddingEnabled from %v to %v\n", v, wasEnabled, config.Memory.EmbeddingEnabled)
+	} else {
+		fmt.Printf("⚠️  NORNICDB_EMBEDDING_ENABLED env var not set, using config file value: %v\n", config.Memory.EmbeddingEnabled)
 	}
 	if v := getEnv("NORNICDB_EMBEDDING_PROVIDER", ""); v != "" {
 		config.Memory.EmbeddingProvider = v

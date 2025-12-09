@@ -1913,7 +1913,9 @@ func (b *BadgerEngine) GetOutDegree(nodeID NodeID) int {
 // Stats and Lifecycle
 // ============================================================================
 
-// NodeCount returns the total number of nodes.
+// NodeCount returns the total number of valid, decodable nodes.
+// This is consistent with AllNodes() - only counts nodes that can be successfully decoded.
+// Corrupted or incompatible node entries are not counted.
 func (b *BadgerEngine) NodeCount() (int64, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -1926,12 +1928,21 @@ func (b *BadgerEngine) NodeCount() (int64, error) {
 	err := b.db.View(func(txn *badger.Txn) error {
 		prefix := []byte{prefixNode}
 		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
+		opts.PrefetchValues = true // Need values to validate decoding
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			count++
+			// Only count if the node can be successfully decoded
+			// This matches AllNodes() behavior which skips decode errors
+			err := it.Item().Value(func(val []byte) error {
+				_, decodeErr := decodeNode(val)
+				return decodeErr
+			})
+			if err == nil {
+				count++
+			}
+			// Skip corrupted/incompatible entries (don't count them)
 		}
 		return nil
 	})
@@ -1939,7 +1950,8 @@ func (b *BadgerEngine) NodeCount() (int64, error) {
 	return count, err
 }
 
-// EdgeCount returns the total number of edges.
+// EdgeCount returns the total number of valid, decodable edges.
+// This is consistent with AllEdges() - only counts edges that can be successfully decoded.
 func (b *BadgerEngine) EdgeCount() (int64, error) {
 	b.mu.RLock()
 	if b.closed {
@@ -1952,12 +1964,20 @@ func (b *BadgerEngine) EdgeCount() (int64, error) {
 	err := b.db.View(func(txn *badger.Txn) error {
 		prefix := []byte{prefixEdge}
 		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false
+		opts.PrefetchValues = true // Need values to validate decoding
 		it := txn.NewIterator(opts)
 		defer it.Close()
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
-			count++
+			// Only count if the edge can be successfully decoded
+			err := it.Item().Value(func(val []byte) error {
+				_, decodeErr := decodeEdge(val)
+				return decodeErr
+			})
+			if err == nil {
+				count++
+			}
+			// Skip corrupted/incompatible entries (don't count them)
 		}
 		return nil
 	})
