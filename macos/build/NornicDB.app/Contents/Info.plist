@@ -5,6 +5,7 @@
 <key>CFBundleIdentifier</key><string>com.nornicdb.menubar</string>
 <key>CFBundleName</key><string>NornicDB</string>
 <key>CFBundleVersion</key><string>1.0.0</string>
+<key>CFBundleIconFile</key><string>NornicDB</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

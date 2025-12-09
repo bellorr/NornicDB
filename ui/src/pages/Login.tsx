@@ -1,6 +1,6 @@
 import { useState, useEffect, FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Database, Lock, User } from 'lucide-react';
+import { Lock, User } from 'lucide-react';
 import { api, AuthConfig } from '../utils/api';
 
 export function Login() {
@@ -64,8 +64,8 @@ export function Login() {
         <div className="bg-norse-shadow border border-norse-rune rounded-xl p-8 shadow-2xl">
           {/* Logo */}
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-gradient-to-br from-nornic-primary to-nornic-secondary mb-4">
-              <Database className="w-8 h-8 text-white" />
+            <div className="inline-flex items-center justify-center mb-4">
+              <img src="/nornicdb.svg" alt="NornicDB" className="w-16 h-16" />
             </div>
             <h1 className="text-2xl font-bold text-white">NornicDB</h1>
             <p className="text-norse-silver text-sm mt-1">Graph Database Browser</p>
