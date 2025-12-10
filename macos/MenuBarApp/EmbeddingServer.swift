@@ -7,10 +7,14 @@ import Network
 /// API Endpoint: POST /v1/embeddings
 /// Compatible with OpenAI embeddings API format
 ///
+/// Security: Requires Bearer token authentication matching the configured API key.
+/// The API key should match NORNICDB_EMBEDDING_API_KEY environment variable.
+///
 /// Example usage:
 /// ```bash
 /// curl http://localhost:11435/v1/embeddings \
 ///   -H "Content-Type: application/json" \
+///   -H "Authorization: Bearer your-api-key" \
 ///   -d '{"input": "Hello, world!", "model": "apple-ml-embeddings"}'
 /// ```
 @MainActor
@@ -23,6 +27,7 @@ class EmbeddingServer: ObservableObject {
     @Published var requestCount: Int = 0
     @Published var totalLatency: TimeInterval = 0.0
     @Published var lastError: String?
+    @Published var requiresAuth: Bool = true  // Enable authentication by default
     
     // MARK: - Private Properties
     
@@ -30,6 +35,9 @@ class EmbeddingServer: ObservableObject {
     private var connections: [NWConnection] = []
     let embedder: AppleMLEmbedder
     private let queue = DispatchQueue(label: "com.nornicdb.embedding-server", qos: .userInitiated)
+    
+    /// API key for authentication. If set, requests must include Authorization: Bearer <key>
+    private var apiKey: String?
     
     // MARK: - Computed Properties
     
@@ -42,6 +50,60 @@ class EmbeddingServer: ObservableObject {
     
     init() {
         self.embedder = AppleMLEmbedder()
+        // API key must be set via setAPIKey() before starting the server
+        // The menu bar app calls setAPIKey() with the key from Keychain
+    }
+    
+    // MARK: - Configuration
+    
+    /// Set the API key for authentication.
+    /// Requests must include "Authorization: Bearer <key>" header.
+    /// MUST be called before start() for security.
+    func setAPIKey(_ key: String?) {
+        self.apiKey = key
+        if let k = key, !k.isEmpty {
+            print("🔐 Embedding server API key configured (\(k.prefix(8))...)")
+        } else {
+            print("⚠️  Embedding server API key NOT configured - server will reject all requests!")
+        }
+    }
+    
+    /// Check if authentication is properly configured
+    var isAuthConfigured: Bool {
+        return apiKey != nil && !apiKey!.isEmpty
+    }
+    
+    /// Validate request authentication.
+    /// Returns nil if valid, or an error message if invalid.
+    private func validateAuth(headers: [String: String]) -> String? {
+        // Auth is disabled - allow all (for development/testing only)
+        if !requiresAuth {
+            return nil
+        }
+        
+        // Auth is required but no key configured - DENY ALL (secure default)
+        guard let expectedKey = apiKey, !expectedKey.isEmpty else {
+            print("🔒 Auth DENIED: No API key configured on server")
+            return "Server authentication not configured"
+        }
+        
+        // Check for Authorization header
+        guard let authHeader = headers["Authorization"] ?? headers["authorization"] else {
+            return "Missing Authorization header"
+        }
+        
+        // Expect "Bearer <key>" format
+        let parts = authHeader.split(separator: " ", maxSplits: 1)
+        guard parts.count == 2, parts[0].lowercased() == "bearer" else {
+            return "Invalid Authorization header format (expected: Bearer <key>)"
+        }
+        
+        let providedKey = String(parts[1])
+        guard providedKey == expectedKey else {
+            return "Invalid API key"
+        }
+        
+        return nil // Valid
     }
     
     // MARK: - Server Control
@@ -245,10 +307,21 @@ class EmbeddingServer: ObservableObject {
         // Route request - normalize path by stripping query string
         let normalizedPath = request.path.components(separatedBy: "?").first ?? request.path
         
+        // Health check is always allowed without auth (for monitoring)
+        if request.method == "GET" && request.path == "/health" {
+            handleHealthCheck(connection: connection)
+            return
+        }
+        
+        // Validate authentication for all other endpoints
+        if let authError = validateAuth(headers: request.headers) {
+            print("🔒 Auth failed: \(authError)")
+            sendErrorResponse(connection: connection, statusCode: 401, message: authError)
+            return
+        }
+        
         if request.method == "POST" && (normalizedPath == "/v1/embeddings" || normalizedPath == "/embeddings") {
             handleEmbeddingsRequest(request: request, connection: connection, startTime: startTime)
-        } else if request.method == "GET" && request.path == "/health" {
-            handleHealthCheck(connection: connection)
         } else if request.method == "GET" && request.path == "/" {
             handleRootRequest(connection: connection)
         } else {
@@ -369,21 +442,33 @@ class EmbeddingServer: ObservableObject {
     }
     
     private func parseHeadersOnly(_ requestString: String) -> HTTPRequest? {
-        let lines = requestString.components(separatedBy: CharacterSet.newlines)
+        let lines = requestString.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else { return nil }
         
         let parts = requestLine.components(separatedBy: " ")
         guard parts.count >= 2 else { return nil }
         
-        return HTTPRequest(method: parts[0], path: parts[1], headers: [:], body: nil)
+        // Parse headers from remaining lines
+        var headers: [String: String] = [:]
+        for i in 1..<lines.count {
+            let line = lines[i]
+            if line.isEmpty { break }
+            if let colonIndex = line.firstIndex(of: ":") {
+                let key = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                headers[key] = value
+            }
+        }
+        
+        return HTTPRequest(method: parts[0], path: parts[1], headers: headers, body: nil)
     }
     
     private func parseWithSeparator(_ requestString: String, separatorRange: Range<String.Index>) -> HTTPRequest? {
         let headerPart = String(requestString[..<separatorRange.lowerBound])
         let bodyPart = String(requestString[separatorRange.upperBound...])
         
-        // Parse request line
-        let lines = headerPart.components(separatedBy: CharacterSet.newlines)
+        // Parse request line and headers
+        let lines = headerPart.components(separatedBy: "\r\n")
         guard let requestLine = lines.first else { return nil }
         
         let parts = requestLine.components(separatedBy: " ")
@@ -391,6 +476,18 @@ class EmbeddingServer: ObservableObject {
         
         let method = parts[0]
         let path = parts[1]
+        
+        // Parse headers from remaining lines
+        var headers: [String: String] = [:]
+        for i in 1..<lines.count {
+            let line = lines[i]
+            if line.isEmpty { break }
+            if let colonIndex = line.firstIndex(of: ":") {
+                let key = String(line[..<colonIndex]).trimmingCharacters(in: .whitespaces)
+                let value = String(line[line.index(after: colonIndex)...]).trimmingCharacters(in: .whitespaces)
+                headers[key] = value
+            }
+        }
         
         // Get body if present
         let body: Data?
@@ -400,7 +497,7 @@ class EmbeddingServer: ObservableObject {
             body = nil
         }
         
-        return HTTPRequest(method: method, path: path, headers: [:], body: body)
+        return HTTPRequest(method: method, path: path, headers: headers, body: body)
     }
     
     private func sendJSONResponse(connection: NWConnection, statusCode: Int, json: [String: Any]) {

@@ -24,6 +24,8 @@ class KeychainHelper {
     private let jwtSecretAccount = "jwt_secret"
     private let encryptionPasswordAccount = "encryption_password"
     private let apiTokenAccount = "api_token"
+    private let appleIntelligenceAPIKeyAccount = "apple_intelligence_api_key"  // Local embedding server auth
+    // Future: openai_api_key, anthropic_api_key, etc.
     
     // Track if user has denied access to specific secrets
     private var accessDeniedForJWT = false
@@ -33,6 +35,7 @@ class KeychainHelper {
     // Cache secrets after first successful load to avoid multiple prompts
     private var cachedJWT: String?
     private var cachedEncryption: String?
+    private var cachedAppleIntelligenceAPIKey: String?
     private var cachedAPIToken: String?
     private var hasAttemptedJWTLoad = false
     private var hasAttemptedEncryptionLoad = false
@@ -337,6 +340,43 @@ class KeychainHelper {
         }
     }
     
+    // MARK: - Apple Intelligence API Key (Local Embedding Server)
+    
+    /// Save Apple Intelligence API key - won't overwrite if one already exists
+    func saveAppleIntelligenceAPIKey(_ key: String) -> Bool {
+        let result = saveSecret(key, account: appleIntelligenceAPIKeyAccount, overwrite: false)
+        if result {
+            cachedAppleIntelligenceAPIKey = key
+        }
+        return result
+    }
+    
+    /// Save Apple Intelligence API key - forces overwrite even if one exists
+    func updateAppleIntelligenceAPIKey(_ key: String) -> Bool {
+        let result = saveSecret(key, account: appleIntelligenceAPIKeyAccount, overwrite: true)
+        if result {
+            cachedAppleIntelligenceAPIKey = key
+        }
+        return result
+    }
+    
+    /// Get Apple Intelligence API key with caching
+    func getAppleIntelligenceAPIKey() -> String? {
+        // Return cached value if we already loaded it successfully
+        if let cached = cachedAppleIntelligenceAPIKey {
+            return cached
+        }
+        
+        let result = getSecretWithStatus(account: appleIntelligenceAPIKeyAccount)
+        switch result {
+        case .success(let secret):
+            cachedAppleIntelligenceAPIKey = secret
+            return secret
+        default:
+            return nil
+        }
+    }
+    
     func deleteAPIToken() -> Bool {
         return deleteSecret(account: apiTokenAccount)
     }
@@ -374,6 +414,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
         let server = EmbeddingServer()
         server.port = ConfigManager.appleEmbeddingPort
         server.loadConfiguration()
+        // Set API key for secure communication (only NornicDB can call it)
+        server.setAPIKey(ConfigManager.getAppleIntelligenceAPIKey())
         return server
     }()
     
@@ -814,6 +856,20 @@ class ConfigManager: ObservableObject {
     @Published var useAppleIntelligence: Bool = false
     static let appleEmbeddingPort: UInt16 = 11435
     static let appleEmbeddingDimensions: Int = 512
+    /// Get or generate the Apple Intelligence embedding server API key (stored in Keychain)
+    /// This is specific to the local Apple ML embedding server, separate from cloud provider API keys.
+    static func getAppleIntelligenceAPIKey() -> String {
+        // Try to load from Keychain
+        if let existingKey = KeychainHelper.shared.getAppleIntelligenceAPIKey(), !existingKey.isEmpty {
+            return existingKey
+        }
+        
+        // Generate a new random key and save it
+        let newKey = UUID().uuidString
+        _ = KeychainHelper.shared.saveAppleIntelligenceAPIKey(newKey)
+        print("🔐 Generated new Apple Intelligence API key")
+        return newKey
+    }
     
     // Authentication settings
     @Published var adminUsername: String = "admin"
@@ -1572,6 +1628,13 @@ struct SettingsView: View {
         isSaving = true
         saveProgress = "Saving configuration..."
         
+        // Pre-generate embedding API key if Apple Intelligence is being enabled
+        // This ensures the key is in Keychain before the server reads it
+        if config.useAppleIntelligence && config.embeddingsEnabled {
+            let apiKey = ConfigManager.getAppleIntelligenceAPIKey()
+            print("🔐 Embedding API key ready: \(apiKey.prefix(8))...")
+        }
+        
         DispatchQueue.global(qos: .userInitiated).async {
             let success = config.saveConfig()
             
@@ -1682,7 +1745,7 @@ struct SettingsView: View {
                 <key>NORNICDB_EMBEDDING_DIMENSIONS</key>
                 <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "1024")</string>
                 <key>NORNICDB_EMBEDDING_API_KEY</key>
-                <string>\(config.useAppleIntelligence ? "apple-local-dummy-key" : "")</string>
+                <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
                 <string>\(config.kmeansEnabled ? "true" : "false")</string>
                 <key>NORNICDB_AUTO_TLP_ENABLED</key>
@@ -2496,6 +2559,13 @@ struct FirstRunWizard: View {
         // Apply the selected preset
         applyPreset()
         
+        // Pre-generate embedding API key if Apple Intelligence is enabled
+        // This ensures the key is in Keychain before the server reads it
+        if config.useAppleIntelligence && config.embeddingsEnabled {
+            let apiKey = ConfigManager.getAppleIntelligenceAPIKey()
+            print("🔐 Embedding API key ready: \(apiKey.prefix(8))...")
+        }
+        
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             saveProgress = "Saving configuration..."
             
@@ -2567,7 +2637,7 @@ struct FirstRunWizard: View {
                                 <key>NORNICDB_EMBEDDING_DIMENSIONS</key>
                                 <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "1024")</string>
                                 <key>NORNICDB_EMBEDDING_API_KEY</key>
-                                <string>\(config.useAppleIntelligence ? "apple-local-dummy-key" : "")</string>
+                                <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
                                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
                                 <string>\(config.kmeansEnabled ? "true" : "false")</string>
                                 <key>NORNICDB_AUTO_TLP_ENABLED</key>
