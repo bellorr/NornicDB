@@ -33,6 +33,7 @@ type QueryInfo struct {
 	HasOrderBy       bool
 	HasLimit         bool
 	HasSkip          bool
+	HasAggregation   bool // COUNT, SUM, AVG, etc. - should not cache these
 
 	// First clause type for routing
 	FirstClause ClauseType
@@ -250,6 +251,14 @@ func analyzeQuery(cypher string) *QueryInfo {
 	// Path functions
 	info.HasShortestPath = strings.Contains(upper, "SHORTESTPATH") ||
 		strings.Contains(upper, "ALLSHORTESTPATHS")
+
+	// Aggregation functions - these should NOT be cached (must always be fresh)
+	info.HasAggregation = strings.Contains(upper, "COUNT(") ||
+		strings.Contains(upper, "SUM(") ||
+		strings.Contains(upper, "AVG(") ||
+		strings.Contains(upper, "MIN(") ||
+		strings.Contains(upper, "MAX(") ||
+		strings.Contains(upper, "COLLECT(")
 
 	// Determine first clause (for routing)
 	info.FirstClause = detectFirstClause(upper)

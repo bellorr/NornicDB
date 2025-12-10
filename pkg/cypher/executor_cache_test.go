@@ -18,8 +18,10 @@ func TestExecutor_CacheIntegration(t *testing.T) {
 	exec.Execute(ctx, `CREATE (n:User {name: 'Bob', age: 25})`, nil)
 
 	// First query - cache miss
+	// Note: We use RETURN n.name instead of count(n) because aggregation queries
+	// are NOT cached (they must always be fresh to avoid stale counts)
 	_, missesBefore, _, _, _ := exec.cache.Stats()
-	result1, err := exec.Execute(ctx, `MATCH (n:User) RETURN count(n) AS count`, nil)
+	result1, err := exec.Execute(ctx, `MATCH (n:User) RETURN n.name ORDER BY n.name`, nil)
 	if err != nil {
 		t.Fatalf("Query failed: %v", err)
 	}
@@ -30,7 +32,7 @@ func TestExecutor_CacheIntegration(t *testing.T) {
 	}
 
 	// Second identical query - cache hit
-	result2, err := exec.Execute(ctx, `MATCH (n:User) RETURN count(n) AS count`, nil)
+	result2, err := exec.Execute(ctx, `MATCH (n:User) RETURN n.name ORDER BY n.name`, nil)
 	if err != nil {
 		t.Fatalf("Query failed: %v", err)
 	}
@@ -41,7 +43,7 @@ func TestExecutor_CacheIntegration(t *testing.T) {
 	}
 
 	// Results should be identical
-	if result1.Rows[0][0] != result2.Rows[0][0] {
+	if len(result1.Rows) != len(result2.Rows) || result1.Rows[0][0] != result2.Rows[0][0] {
 		t.Error("Cached result doesn't match original")
 	}
 
@@ -50,7 +52,7 @@ func TestExecutor_CacheIntegration(t *testing.T) {
 
 	// Query again - should be cache miss after invalidation
 	_, missesBefore3, _, _, _ := exec.cache.Stats()
-	exec.Execute(ctx, `MATCH (n:User) RETURN count(n) AS count`, nil)
+	exec.Execute(ctx, `MATCH (n:User) RETURN n.name ORDER BY n.name`, nil)
 
 	_, missesAfter3, _, _, _ := exec.cache.Stats()
 	if missesAfter3 != missesBefore3+1 {
@@ -58,10 +60,9 @@ func TestExecutor_CacheIntegration(t *testing.T) {
 	}
 
 	// Result should reflect new data
-	result3, _ := exec.Execute(ctx, `MATCH (n:User) RETURN count(n) AS count`, nil)
-	count := result3.Rows[0][0].(int64)
-	if count != 3 {
-		t.Errorf("Expected count=3 after adding Charlie, got %d", count)
+	result3, _ := exec.Execute(ctx, `MATCH (n:User) RETURN n.name ORDER BY n.name`, nil)
+	if len(result3.Rows) != 3 {
+		t.Errorf("Expected 3 users after adding Charlie, got %d", len(result3.Rows))
 	}
 }
 

@@ -358,25 +358,17 @@ func (ae *AsyncEngine) CreateNode(node *Node) error {
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
-	// Check if this was a pending delete (node exists in underlying engine)
-	// If so, this is an UPDATE not a CREATE - don't count as pending create
+	// Remove from delete set if present (recreating a deleted node)
 	wasDeleted := ae.deleteNodes[node.ID]
 	delete(ae.deleteNodes, node.ID)
 
-	// Determine if this is an update (node exists in engine or cache) vs a true create
-	isUpdate := wasDeleted // Was pending delete = exists in engine
+	// Check if this node already exists in cache (being updated, not created)
+	_, existsInCache := ae.nodeCache[node.ID]
 
-	// Also check if node already exists in underlying engine
-	// This handles the case where we create a node that was previously flushed
-	if !isUpdate {
-		if _, exists := ae.nodeCache[node.ID]; !exists {
-			// Not in cache - check if it exists in underlying engine
-			if _, err := ae.engine.GetNode(node.ID); err == nil {
-				isUpdate = true // Node exists in engine
-			}
-		}
-	}
-
+	// Mark as update only if it was pending delete OR already in cache
+	// DO NOT check underlying engine - that causes race conditions and is slow
+	// New nodes from CREATE always have fresh UUIDs that won't exist anywhere
+	isUpdate := wasDeleted || existsInCache
 	if isUpdate {
 		ae.updateNodes[node.ID] = true
 	} else {
@@ -471,24 +463,16 @@ func (ae *AsyncEngine) CreateEdge(edge *Edge) error {
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
-	// Check if this was a pending delete (edge exists in underlying engine)
-	// If so, this is an UPDATE not a CREATE - don't count as pending create
+	// Remove from delete set if present (recreating a deleted edge)
 	wasDeleted := ae.deleteEdges[edge.ID]
 	delete(ae.deleteEdges, edge.ID)
 
-	// Determine if this is an update (edge exists in engine or cache) vs a true create
-	isUpdate := wasDeleted
+	// Check if this edge already exists in cache (being updated, not created)
+	_, existsInCache := ae.edgeCache[edge.ID]
 
-	// Also check if edge already exists in underlying engine
-	if !isUpdate {
-		if _, exists := ae.edgeCache[edge.ID]; !exists {
-			if _, err := ae.engine.GetEdge(edge.ID); err == nil {
-				isUpdate = true
-			}
-		}
-	}
-
-	if isUpdate {
+	// Mark as update only if it was pending delete OR already in cache
+	// DO NOT check underlying engine - that causes race conditions and is slow
+	if wasDeleted || existsInCache {
 		ae.updateEdges[edge.ID] = true
 	} else {
 		delete(ae.updateEdges, edge.ID)
@@ -969,20 +953,26 @@ func (ae *AsyncEngine) NodeCount() (int64, error) {
 	ae.mu.RLock()
 
 	// Count pending creates, excluding:
-	// - in-flight nodes (already written to engine)
 	// - update nodes (exist in engine, just being modified)
+	// NOTE: We DO count in-flight nodes because they are being written to engine
+	// but engine.NodeCount() won't include them until the write commits.
+	// During flush, nodes transition: cache -> inFlight -> engine
+	// If we skip inFlight nodes AND engine hasn't committed, count = 0 (BUG!)
 	pendingCreates := int64(0)
 	pendingUpdates := int64(0)
+	inFlightCreates := int64(0)
 	for id := range ae.nodeCache {
-		if ae.inFlightNodes[id] {
-			continue // Don't count in-flight (already in engine)
-		}
 		if ae.updateNodes[id] {
 			pendingUpdates++ // Exists in engine, just updating
 			continue
 		}
+		if ae.inFlightNodes[id] {
+			inFlightCreates++ // Being written to engine right now
+			continue
+		}
 		pendingCreates++
 	}
+	// Also count nodes that are in-flight but NOT updates (they're being created)
 	pendingDeletes := int64(len(ae.deleteNodes))
 
 	engineCount, err := ae.engine.NodeCount()
@@ -994,7 +984,8 @@ func (ae *AsyncEngine) NodeCount() (int64, error) {
 
 	// Adjust for pending creates and deletes
 	// Note: pendingUpdates don't change count (already counted in engineCount)
-	count := engineCount + pendingCreates - pendingDeletes
+	// Include inFlightCreates because they're being written but not yet in engineCount
+	count := engineCount + pendingCreates + inFlightCreates - pendingDeletes
 
 	// Clamp to zero if negative (should never happen, log for debugging)
 	if count < 0 {
@@ -1011,15 +1002,18 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 	ae.mu.RLock()
 
 	// Count pending creates, excluding:
-	// - in-flight edges (already written to engine)
 	// - update edges (exist in engine, just being modified)
+	// NOTE: We DO count in-flight edges because they are being written to engine
+	// but engine.EdgeCount() won't include them until the write commits.
 	pendingCreates := int64(0)
+	inFlightCreates := int64(0)
 	for id := range ae.edgeCache {
-		if ae.inFlightEdges[id] {
-			continue // Don't count in-flight (already in engine)
-		}
 		if ae.updateEdges[id] {
 			continue // Exists in engine, just updating
+		}
+		if ae.inFlightEdges[id] {
+			inFlightCreates++ // Being written to engine right now
+			continue
 		}
 		pendingCreates++
 	}
@@ -1034,7 +1028,8 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 
 	// Adjust for pending creates and deletes
 	// Note: updates don't change count (already counted in engineCount)
-	count := engineCount + pendingCreates - pendingDeletes
+	// Include inFlightCreates because they're being written but not yet in engineCount
+	count := engineCount + pendingCreates + inFlightCreates - pendingDeletes
 
 	// Clamp to zero if negative (should never happen, log for debugging)
 	if count < 0 {

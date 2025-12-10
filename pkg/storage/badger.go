@@ -1404,7 +1404,6 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 	if len(ids) == 0 {
 		return nil
 	}
-
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
@@ -2284,15 +2283,30 @@ func (b *BadgerEngine) NodeCount() (int64, error) {
 	}
 	b.mu.RUnlock()
 
-	// Return cached count for O(1) performance
-	// The counter is updated atomically on create/delete operations
-	count := b.nodeCount.Load()
+	// BUGFIX: The atomic counter gets out of sync when nodes are created via
+	// transactional writes that bypass the normal create path. Instead of
+	// trusting the counter, actually count nodes by scanning the prefix.
+	// This is still O(N) but uses key-only iteration which is fast.
+	var count int64
+	err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false // Only need keys, not values
+		it := txn.NewIterator(opts)
+		defer it.Close()
 
-	// Clamp to zero if negative (should never happen, log for debugging)
-	if count < 0 {
-		log.Printf("⚠️ [COUNT BUG] BadgerEngine.NodeCount went negative: %d (clamping to 0)", count)
-		return 0, nil
+		prefix := []byte{prefixNode}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
+
+	// Sync the atomic counter with reality (fixes it for next time)
+	b.nodeCount.Store(count)
+
 	return count, nil
 }
 
@@ -2306,15 +2320,29 @@ func (b *BadgerEngine) EdgeCount() (int64, error) {
 	}
 	b.mu.RUnlock()
 
-	// Return cached count for O(1) performance
-	// The counter is updated atomically on create/delete operations
-	count := b.edgeCount.Load()
+	// BUGFIX: The atomic counter gets out of sync when edges are created via
+	// transactional writes that bypass the normal create path. Instead of
+	// trusting the counter, actually count edges by scanning the prefix.
+	var count int64
+	err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false // Only need keys, not values
+		it := txn.NewIterator(opts)
+		defer it.Close()
 
-	// Clamp to zero if negative (should never happen, log for debugging)
-	if count < 0 {
-		log.Printf("⚠️ [COUNT BUG] BadgerEngine.EdgeCount went negative: %d (clamping to 0)", count)
-		return 0, nil
+		prefix := []byte{prefixEdge}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
 	}
+
+	// Sync the atomic counter with reality
+	b.edgeCount.Store(count)
+
 	return count, nil
 }
 

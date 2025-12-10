@@ -459,7 +459,9 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	result, err := e.executeImplicitAsync(ctx, cypher, upperQuery)
 
 	// Cache successful read-only queries
-	if err == nil && info.IsReadOnly && e.cache != nil {
+	// EXCEPT: Don't cache aggregation queries (COUNT, SUM, etc.) - they must always be fresh
+	// Aggregation queries use fast O(1) paths anyway, so caching doesn't help but can cause stale results
+	if err == nil && info.IsReadOnly && e.cache != nil && !info.HasAggregation {
 		// Determine TTL based on query type (using cached analysis)
 		ttl := 60 * time.Second // Default: 60s for data queries
 		if info.HasCall || info.HasShow {
