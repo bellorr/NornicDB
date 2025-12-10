@@ -113,7 +113,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	if err != nil || (len(labels) == 0 && len(matchProps) == 0) {
 		// If we truly can't parse, create a basic node
 		node := &storage.Node{
-			ID:         storage.NodeID(fmt.Sprintf("node-%d", e.idCounter())),
+			ID:         storage.NodeID(e.generateID()),
 			Labels:     labels,
 			Properties: matchProps,
 		}
@@ -893,7 +893,7 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 	} else {
 		// Create new relationship
 		edge = &storage.Edge{
-			ID:         storage.EdgeID(fmt.Sprintf("edge-%d", e.idCounter())),
+			ID:         storage.EdgeID(e.generateID()),
 			Type:       relType,
 			StartNode:  startNode.ID,
 			EndNode:    endNode.ID,

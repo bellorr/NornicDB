@@ -46,6 +46,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -299,14 +300,14 @@ func (e *StorageExecutor) evaluateSetExpression(expr string) interface{} {
 	// Handle function calls and expressions
 	lowerExpr := strings.ToLower(expr)
 
-	// timestamp() - returns current timestamp
+	// timestamp() - returns current timestamp in milliseconds
 	if lowerExpr == "timestamp()" {
-		return e.idCounter()
+		return time.Now().UnixMilli()
 	}
 
 	// datetime() - returns ISO date string
 	if lowerExpr == "datetime()" {
-		return fmt.Sprintf("%d", e.idCounter())
+		return time.Now().Format(time.RFC3339)
 	}
 
 	// randomUUID() or randomuuid()

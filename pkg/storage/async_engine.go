@@ -38,6 +38,11 @@ type AsyncEngine struct {
 	inFlightNodes map[NodeID]bool
 	inFlightEdges map[EdgeID]bool
 
+	// Updates tracking: nodes/edges in cache that are UPDATES (not creates)
+	// These exist in underlying engine and shouldn't be counted as pending creates
+	updateNodes map[NodeID]bool
+	updateEdges map[EdgeID]bool
+
 	// Label index for fast lookups - maps normalized label to node IDs
 	labelIndex map[string]map[NodeID]bool
 
@@ -88,6 +93,8 @@ func NewAsyncEngine(engine Engine, config *AsyncEngineConfig) *AsyncEngine {
 		deleteEdges:   make(map[EdgeID]bool),
 		inFlightNodes: make(map[NodeID]bool),
 		inFlightEdges: make(map[EdgeID]bool),
+		updateNodes:   make(map[NodeID]bool),
+		updateEdges:   make(map[EdgeID]bool),
 		labelIndex:    make(map[string]map[NodeID]bool),
 		flushInterval: config.FlushInterval,
 		stopChan:      make(chan struct{}),
@@ -312,6 +319,7 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 		// Only clear if successfully written AND still the same object in cache
 		if successfulNodeWrites[id] && ae.nodeCache[id] == nodesToWrite[id] {
 			delete(ae.nodeCache, id)
+			delete(ae.updateNodes, id) // Clear update flag
 		}
 		// Always clear in-flight marker for this batch (success or fail)
 		delete(ae.inFlightNodes, id)
@@ -319,6 +327,7 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 	for id := range edgesToWrite {
 		if successfulEdgeWrites[id] && ae.edgeCache[id] == edgesToWrite[id] {
 			delete(ae.edgeCache, id)
+			delete(ae.updateEdges, id) // Clear update flag
 		}
 		// Always clear in-flight marker for this batch (success or fail)
 		delete(ae.inFlightEdges, id)
@@ -349,8 +358,31 @@ func (ae *AsyncEngine) CreateNode(node *Node) error {
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
-	// Remove from delete set if present
+	// Check if this was a pending delete (node exists in underlying engine)
+	// If so, this is an UPDATE not a CREATE - don't count as pending create
+	wasDeleted := ae.deleteNodes[node.ID]
 	delete(ae.deleteNodes, node.ID)
+
+	// Determine if this is an update (node exists in engine or cache) vs a true create
+	isUpdate := wasDeleted // Was pending delete = exists in engine
+
+	// Also check if node already exists in underlying engine
+	// This handles the case where we create a node that was previously flushed
+	if !isUpdate {
+		if _, exists := ae.nodeCache[node.ID]; !exists {
+			// Not in cache - check if it exists in underlying engine
+			if _, err := ae.engine.GetNode(node.ID); err == nil {
+				isUpdate = true // Node exists in engine
+			}
+		}
+	}
+
+	if isUpdate {
+		ae.updateNodes[node.ID] = true
+	} else {
+		delete(ae.updateNodes, node.ID)
+	}
+
 	ae.nodeCache[node.ID] = node
 
 	// Update label index
@@ -439,7 +471,29 @@ func (ae *AsyncEngine) CreateEdge(edge *Edge) error {
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
+	// Check if this was a pending delete (edge exists in underlying engine)
+	// If so, this is an UPDATE not a CREATE - don't count as pending create
+	wasDeleted := ae.deleteEdges[edge.ID]
 	delete(ae.deleteEdges, edge.ID)
+
+	// Determine if this is an update (edge exists in engine or cache) vs a true create
+	isUpdate := wasDeleted
+
+	// Also check if edge already exists in underlying engine
+	if !isUpdate {
+		if _, exists := ae.edgeCache[edge.ID]; !exists {
+			if _, err := ae.engine.GetEdge(edge.ID); err == nil {
+				isUpdate = true
+			}
+		}
+	}
+
+	if isUpdate {
+		ae.updateEdges[edge.ID] = true
+	} else {
+		delete(ae.updateEdges, edge.ID)
+	}
+
 	ae.edgeCache[edge.ID] = edge
 	ae.pendingWrites++
 	return nil
@@ -914,14 +968,20 @@ func (ae *AsyncEngine) NodeCount() (int64, error) {
 	// This prevents race with flush which clears cache before writing to engine
 	ae.mu.RLock()
 
-	// Count pending creates, excluding in-flight nodes (already written to engine)
-	// In-flight nodes exist in BOTH nodeCache AND underlying engine temporarily,
-	// so we must not double-count them
+	// Count pending creates, excluding:
+	// - in-flight nodes (already written to engine)
+	// - update nodes (exist in engine, just being modified)
 	pendingCreates := int64(0)
+	pendingUpdates := int64(0)
 	for id := range ae.nodeCache {
-		if !ae.inFlightNodes[id] {
-			pendingCreates++
+		if ae.inFlightNodes[id] {
+			continue // Don't count in-flight (already in engine)
 		}
+		if ae.updateNodes[id] {
+			pendingUpdates++ // Exists in engine, just updating
+			continue
+		}
+		pendingCreates++
 	}
 	pendingDeletes := int64(len(ae.deleteNodes))
 
@@ -933,6 +993,7 @@ func (ae *AsyncEngine) NodeCount() (int64, error) {
 	}
 
 	// Adjust for pending creates and deletes
+	// Note: pendingUpdates don't change count (already counted in engineCount)
 	count := engineCount + pendingCreates - pendingDeletes
 
 	// Clamp to zero if negative (should never happen, log for debugging)
@@ -949,14 +1010,18 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 	// This prevents race with flush which clears cache before writing to engine
 	ae.mu.RLock()
 
-	// Count pending creates, excluding in-flight edges (already written to engine)
-	// In-flight edges exist in BOTH edgeCache AND underlying engine temporarily,
-	// so we must not double-count them
+	// Count pending creates, excluding:
+	// - in-flight edges (already written to engine)
+	// - update edges (exist in engine, just being modified)
 	pendingCreates := int64(0)
 	for id := range ae.edgeCache {
-		if !ae.inFlightEdges[id] {
-			pendingCreates++
+		if ae.inFlightEdges[id] {
+			continue // Don't count in-flight (already in engine)
 		}
+		if ae.updateEdges[id] {
+			continue // Exists in engine, just updating
+		}
+		pendingCreates++
 	}
 	pendingDeletes := int64(len(ae.deleteEdges))
 
@@ -968,6 +1033,7 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 	}
 
 	// Adjust for pending creates and deletes
+	// Note: updates don't change count (already counted in engineCount)
 	count := engineCount + pendingCreates - pendingDeletes
 
 	// Clamp to zero if negative (should never happen, log for debugging)

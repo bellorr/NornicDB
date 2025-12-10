@@ -120,6 +120,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -2296,14 +2297,11 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 	return result
 }
 
-// idGen is a fast atomic counter for ID generation
-var idGen int64
-
 func (e *StorageExecutor) generateID() string {
-	// Use fast atomic counter + process start time for unique IDs
-	// Much faster than crypto/rand while still globally unique
-	id := atomic.AddInt64(&idGen, 1)
-	return fmt.Sprintf("n%d", id)
+	// Use UUID for globally unique IDs
+	// This prevents ID collisions across server restarts which caused
+	// the race condition where CREATE would cancel pending DELETEs
+	return uuid.New().String()
 }
 
 // Deprecated: Sequential counter replaced with UUID generation
