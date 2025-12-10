@@ -161,19 +161,11 @@ export function Browser() {
              <button
               type="button"
               onClick={() => setShowRegenerateConfirm(true)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                embedData.stats?.running 
-                  ? 'bg-amber-500/20 text-amber-400 border border-amber-500/30 cursor-not-allowed' 
-                  : 'bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/30'
-              }`}
-              title={embedData.stats?.running ? 'Embedding in progress...' : 'Warning: This will clear and regenerate ALL embeddings'}
+              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/30`}
+              title={'Warning: This will clear and regenerate ALL embeddings'}
             >
-              {embedData.stats?.running ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Zap className="w-4 h-4" />
-              )}
-              <span>{embedData.stats?.running ? 'Regenerating...' : 'Regenerate all Embeddings'}</span>
+              <Zap className="w-4 h-4" />
+              <span>Regenerate all Embeddings</span>
             </button>
             {/* Embed Button */}
             <button
