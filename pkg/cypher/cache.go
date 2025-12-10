@@ -587,6 +587,8 @@ func (sc *SmartQueryCache) Put(cypher string, params map[string]interface{}, res
 
 // InvalidateLabels removes only cache entries that depend on the given labels.
 // This is much more efficient than full invalidation for multi-label workloads.
+// Also invalidates queries with NO labels (like "MATCH (n) RETURN count(n)")
+// since they match all nodes and are affected by any label change.
 func (sc *SmartQueryCache) InvalidateLabels(labels []string) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
@@ -599,6 +601,14 @@ func (sc *SmartQueryCache) InvalidateLabels(labels []string) {
 			for key := range keys {
 				keysToRemove[key] = struct{}{}
 			}
+		}
+	}
+
+	// Also invalidate queries with NO labels (they match all nodes)
+	// These queries are affected by ANY node creation/deletion
+	for key, entry := range sc.cache {
+		if len(entry.labels) == 0 {
+			keysToRemove[key] = struct{}{}
 		}
 	}
 
