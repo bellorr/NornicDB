@@ -1002,6 +1002,12 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		edgeVars[k] = v
 	}
 
+	// Collect all patterns and their matching nodes for cartesian product
+	patternMatches := make([]struct {
+		variable string
+		nodes    []*storage.Node
+	}, 0)
+
 	// Split by MATCH keyword to handle comma-separated patterns in MATCH
 	// Uses pre-compiled matchKeywordPattern from regex_patterns.go
 	matchClauses := matchKeywordPattern.Split(matchPart, -1)
@@ -1020,7 +1026,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		// Split by comma but respect parentheses
 		patterns := e.splitNodePatterns(clause)
 
-		// Find all matched nodes from MATCH clause
+		// Collect ALL matched nodes from MATCH clause (for cartesian product)
 		for _, pattern := range patterns {
 			pattern = strings.TrimSpace(pattern)
 			if pattern == "" {
@@ -1032,81 +1038,131 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				continue
 			}
 
-			// Try cached lookup first for label+properties patterns
-			if len(nodeInfo.labels) > 0 && len(nodeInfo.properties) > 0 {
-				if cached := e.lookupCachedNode(nodeInfo.labels[0], nodeInfo.properties); cached != nil {
-					nodeVars[nodeInfo.variable] = cached
-					continue
-				}
+			// Check if this variable already exists from previous blocks
+			if existingNode, exists := nodeVars[nodeInfo.variable]; exists {
+				// Already have this variable, use the existing node (single match from prior context)
+				patternMatches = append(patternMatches, struct {
+					variable string
+					nodes    []*storage.Node
+				}{
+					variable: nodeInfo.variable,
+					nodes:    []*storage.Node{existingNode},
+				})
+				continue
 			}
 
-			// Find matching node (uncached path)
-			// Optimization: if no properties filter, use GetFirstNodeByLabel for O(1) lookup
-			if len(nodeInfo.properties) == 0 && len(nodeInfo.labels) > 0 {
-				// Try optimized single-node fetch
-				if getter, ok := e.storage.(interface {
-					GetFirstNodeByLabel(string) (*storage.Node, error)
-				}); ok {
-					if node, err := getter.GetFirstNodeByLabel(nodeInfo.labels[0]); err == nil && node != nil {
-						nodeVars[nodeInfo.variable] = node
-						continue
+			// Find ALL matching nodes for this pattern (for cartesian product)
+			var matchingNodes []*storage.Node
+			if len(nodeInfo.labels) > 0 {
+				matchingNodes, _ = e.storage.GetNodesByLabel(nodeInfo.labels[0])
+			} else {
+				matchingNodes, _ = e.storage.AllNodes()
+			}
+
+			// Filter by additional labels
+			if len(nodeInfo.labels) > 1 {
+				var filtered []*storage.Node
+				for _, node := range matchingNodes {
+					hasAll := true
+					for _, reqLabel := range nodeInfo.labels[1:] {
+						found := false
+						for _, nodeLabel := range node.Labels {
+							if nodeLabel == reqLabel {
+								found = true
+								break
+							}
+						}
+						if !found {
+							hasAll = false
+							break
+						}
+					}
+					if hasAll {
+						filtered = append(filtered, node)
 					}
 				}
-			}
-
-			// Full scan path (when properties need filtering or no optimized getter)
-			var candidates []*storage.Node
-			if len(nodeInfo.labels) > 0 {
-				candidates, _ = e.storage.GetNodesByLabel(nodeInfo.labels[0])
-			} else {
-				candidates, _ = e.storage.AllNodes()
+				matchingNodes = filtered
 			}
 
 			// Filter by properties
-			for _, node := range candidates {
-				if e.nodeMatchesProps(node, nodeInfo.properties) {
-					nodeVars[nodeInfo.variable] = node
-					// Cache for future lookups
-					if len(nodeInfo.labels) > 0 && len(nodeInfo.properties) > 0 {
-						e.cacheNodeLookup(nodeInfo.labels[0], nodeInfo.properties, node)
+			if len(nodeInfo.properties) > 0 {
+				var filtered []*storage.Node
+				for _, node := range matchingNodes {
+					if e.nodeMatchesProps(node, nodeInfo.properties) {
+						filtered = append(filtered, node)
 					}
-					break
 				}
+				matchingNodes = filtered
+			}
+
+			if len(matchingNodes) > 0 {
+				patternMatches = append(patternMatches, struct {
+					variable string
+					nodes    []*storage.Node
+				}{
+					variable: nodeInfo.variable,
+					nodes:    matchingNodes,
+				})
 			}
 		}
+	}
+
+	// Build cartesian product of all pattern matches
+	allCombinations := e.buildCartesianProduct(patternMatches)
+
+	// If no combinations, fall back to using existing nodeVars
+	if len(allCombinations) == 0 {
+		allCombinations = []map[string]*storage.Node{nodeVars}
 	}
 
 	// Split CREATE part into individual CREATE statements
 	// Uses pre-compiled createKeywordPattern from regex_patterns.go
 	createClauses := createKeywordPattern.Split(createPart, -1)
 
-	for _, clause := range createClauses {
-		clause = strings.TrimSpace(clause)
-		if clause == "" {
-			continue
+	// For each combination in the cartesian product, execute CREATE
+	for _, combination := range allCombinations {
+		// Merge combination with existing nodeVars (combination takes precedence for cartesian product vars)
+		combinedNodeVars := make(map[string]*storage.Node)
+		for k, v := range nodeVars {
+			combinedNodeVars[k] = v
+		}
+		for k, v := range combination {
+			combinedNodeVars[k] = v
 		}
 
-		// Check if this is a relationship pattern or node pattern
-		// Use string-literal-aware checks to avoid matching arrows inside content strings
-		if containsOutsideStrings(clause, "->") || containsOutsideStrings(clause, "<-") || containsOutsideStrings(clause, "]-") {
-			// Relationship pattern: (var)-[:TYPE]->(var)
-			err := e.processCreateRelationship(clause, nodeVars, edgeVars, result)
-			if err != nil {
-				return nil, err
+		for _, clause := range createClauses {
+			clause = strings.TrimSpace(clause)
+			if clause == "" {
+				continue
 			}
-		} else {
-			// Node pattern: (var:Label {props})
-			nodePatterns := e.splitNodePatterns(clause)
-			for _, np := range nodePatterns {
-				np = strings.TrimSpace(np)
-				if np == "" {
-					continue
-				}
-				err := e.processCreateNode(np, nodeVars, result)
+
+			// Check if this is a relationship pattern or node pattern
+			// Use string-literal-aware checks to avoid matching arrows inside content strings
+			if containsOutsideStrings(clause, "->") || containsOutsideStrings(clause, "<-") || containsOutsideStrings(clause, "]-") {
+				// Relationship pattern: (var)-[:TYPE]->(var)
+				err := e.processCreateRelationship(clause, combinedNodeVars, edgeVars, result)
 				if err != nil {
 					return nil, err
 				}
+			} else {
+				// Node pattern: (var:Label {props})
+				nodePatterns := e.splitNodePatterns(clause)
+				for _, np := range nodePatterns {
+					np = strings.TrimSpace(np)
+					if np == "" {
+						continue
+					}
+					err := e.processCreateNode(np, combinedNodeVars, result)
+					if err != nil {
+						return nil, err
+					}
+				}
 			}
+		}
+
+		// Copy created nodes back to nodeVars for cross-reference within same query
+		for k, v := range combinedNodeVars {
+			nodeVars[k] = v
 		}
 	}
 

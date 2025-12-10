@@ -392,3 +392,203 @@ func TestSimplifiedByTypeQuery(t *testing.T) {
 		assert.Equal(t, int64(2), result.Rows[0][1])
 	})
 }
+
+// ====================================================================================
+// UNWIND with CREATE - Bulk node creation
+// ====================================================================================
+
+func TestUnwindWithCreate(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	t.Run("UNWIND creates multiple nodes from list", func(t *testing.T) {
+		// Create multiple TestNode nodes using UNWIND
+		_, err := exec.Execute(ctx, `
+			UNWIND ['node1', 'node2', 'node3'] AS name
+			CREATE (n:TestNode {name: name})
+		`, nil)
+		require.NoError(t, err)
+
+		// Verify nodes were created
+		result, err := exec.Execute(ctx, `
+			MATCH (n:TestNode)
+			RETURN count(n) as count
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, int64(3), result.Rows[0][0], "Should have created 3 TestNode nodes")
+	})
+
+	t.Run("UNWIND creates nodes with multiple properties", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+
+		// Create nodes with structured data
+		_, err := exec.Execute(ctx, `
+			UNWIND [
+				{name: 'Alice', age: 30},
+				{name: 'Bob', age: 25},
+				{name: 'Charlie', age: 35}
+			] AS props
+			CREATE (n:TestNode {name: props.name, age: props.age})
+		`, nil)
+		require.NoError(t, err)
+
+		// Verify nodes and properties
+		result, err := exec.Execute(ctx, `
+			MATCH (n:TestNode)
+			RETURN n.name, n.age
+			ORDER BY n.age
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 3)
+		
+		// Check sorted by age
+		assert.Equal(t, "Bob", result.Rows[0][0])
+		assert.Equal(t, int64(25), result.Rows[0][1])
+		assert.Equal(t, "Alice", result.Rows[1][0])
+		assert.Equal(t, int64(30), result.Rows[1][1])
+		assert.Equal(t, "Charlie", result.Rows[2][0])
+		assert.Equal(t, int64(35), result.Rows[2][1])
+	})
+
+	t.Run("UNWIND with range creates sequential nodes", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+
+		// Create nodes using range
+		_, err := exec.Execute(ctx, `
+			UNWIND range(1, 5) AS num
+			CREATE (n:TestNode {id: num})
+		`, nil)
+		require.NoError(t, err)
+
+		// Verify count
+		result, err := exec.Execute(ctx, `
+			MATCH (n:TestNode)
+			RETURN count(n) as count
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, int64(5), result.Rows[0][0])
+	})
+
+	t.Run("UNWIND CREATE with RETURN", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+
+		// Create and return nodes
+		result, err := exec.Execute(ctx, `
+			UNWIND ['A', 'B', 'C'] AS name
+			CREATE (n:TestNode {name: name})
+			RETURN n.name as nodeName
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 3, "Should return 3 created nodes")
+		
+		// Debug: print what we got
+		t.Logf("Result columns: %v", result.Columns)
+		t.Logf("Result rows: %v", result.Rows)
+		
+		names := []string{}
+		for _, row := range result.Rows {
+			if val, ok := row[0].(string); ok {
+				names = append(names, val)
+			}
+		}
+		t.Logf("Extracted names: %v", names)
+		assert.Contains(t, names, "A")
+		assert.Contains(t, names, "B")
+		assert.Contains(t, names, "C")
+	})
+
+	t.Run("UNWIND empty list creates no nodes", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+
+		// Create with empty list
+		_, err := exec.Execute(ctx, `
+			UNWIND [] AS name
+			CREATE (n:TestNode {name: name})
+		`, nil)
+		require.NoError(t, err)
+
+		// Verify no nodes created
+		result, err := exec.Execute(ctx, `
+			MATCH (n:TestNode)
+			RETURN count(n) as count
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, int64(0), result.Rows[0][0])
+	})
+
+	t.Run("UNWIND with parameters", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+
+		// Create nodes using parameter
+		params := map[string]interface{}{
+			"names": []interface{}{"X", "Y", "Z"},
+		}
+		
+		_, err := exec.Execute(ctx, `
+			UNWIND $names AS name
+			CREATE (n:TestNode {name: name})
+		`, params)
+		require.NoError(t, err)
+
+		// Verify count
+		result, err := exec.Execute(ctx, `
+			MATCH (n:TestNode)
+			RETURN count(n) as count
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, int64(3), result.Rows[0][0])
+	})
+
+	t.Run("UNWIND CREATE preserves transaction atomicity", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+
+		// This should create all or none
+		_, err := exec.Execute(ctx, `
+			UNWIND [1, 2, 3, 4, 5] AS num
+			CREATE (n:TestNode {id: num})
+		`, nil)
+		require.NoError(t, err)
+
+		// All 5 should exist
+		result, err := exec.Execute(ctx, `
+			MATCH (n:TestNode)
+			RETURN count(n) as count
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, int64(5), result.Rows[0][0])
+	})
+
+	t.Run("UNWIND CREATE with additional properties", func(t *testing.T) {
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+
+		// Create nodes with all properties at creation time
+		_, err := exec.Execute(ctx, `
+			UNWIND ['alpha', 'beta', 'gamma'] AS name
+			CREATE (n:TestNode {name: name, created: true, timestamp: 123456})
+		`, nil)
+		require.NoError(t, err)
+
+		// Verify properties were set
+		result, err := exec.Execute(ctx, `
+			MATCH (n:TestNode)
+			WHERE n.created = true
+			RETURN count(n) as count
+		`, nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		assert.Equal(t, int64(3), result.Rows[0][0])
+	})
+}

@@ -300,7 +300,8 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 }
 
 // executeMatchForContext executes a MATCH clause and returns matched nodes by variable name.
-// Handles multiple node patterns like (a:Label {prop: val}), (b:Label2 {prop: val2})
+// Handles both simple node patterns like (a:Label), (b:Label2) and relationship patterns
+// like (a)<-[:REL]-(b)-[:REL]->(c).
 func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClause string) ([]map[string]*storage.Node, map[string]*storage.Edge, error) {
 	relMatches := make(map[string]*storage.Edge)
 
@@ -308,18 +309,28 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 
 	// Find WHERE clause if present
 	whereIdx := strings.Index(upper, " WHERE ")
-	var wherePart string
 	var patternPart string
 
 	if whereIdx > 0 {
 		patternPart = matchClause[5:whereIdx]
-		wherePart = matchClause[whereIdx+7:]
 	} else {
 		patternPart = matchClause[5:]
 	}
 
 	patternPart = strings.TrimSpace(patternPart)
 
+	// Check if this is a relationship pattern (contains ->, <-, or ]-)
+	// If so, we need to use proper path matching, not cartesian product
+	hasRelationship := strings.Contains(patternPart, "->") ||
+		strings.Contains(patternPart, "<-") ||
+		strings.Contains(patternPart, "]-")
+
+	if hasRelationship {
+		// Use executeMatch to properly find paths, then extract variable bindings
+		return e.executeMatchForContextWithRelationships(ctx, matchClause, patternPart)
+	}
+
+	// Simple node patterns only - use cartesian product approach
 	// Split multiple node patterns: (a:Label), (b:Label2)
 	nodePatterns := e.splitNodePatterns(patternPart)
 
@@ -365,7 +376,8 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 	allMatches := e.buildCartesianProduct(patternMatches)
 
 	// Apply WHERE clause to each combination
-	if wherePart != "" {
+	if whereIdx > 0 {
+		wherePart := matchClause[whereIdx+7:]
 		var filtered []map[string]*storage.Node
 		for _, nodeMap := range allMatches {
 			matches := true
@@ -391,6 +403,171 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 	}
 
 	return allMatches, relMatches, nil
+}
+
+// executeMatchForContextWithRelationships handles MATCH patterns that include relationships.
+// It executes the MATCH query and extracts variable bindings from the results.
+func (e *StorageExecutor) executeMatchForContextWithRelationships(ctx context.Context, matchClause, patternPart string) ([]map[string]*storage.Node, map[string]*storage.Edge, error) {
+	relMatches := make(map[string]*storage.Edge)
+
+	// Extract all variable names from the pattern
+	varNames := e.extractVariableNamesFromPattern(patternPart)
+	if len(varNames) == 0 {
+		return nil, relMatches, nil
+	}
+
+	// Build a synthetic RETURN clause to get all node variables
+	// Filter to only include node variables (not relationship variables)
+	nodeVarNames := make([]string, 0)
+	for _, v := range varNames {
+		// Skip relationship variables (they appear after [ and before ])
+		// Node variables appear after ( and before )
+		nodeVarNames = append(nodeVarNames, v)
+	}
+
+	if len(nodeVarNames) == 0 {
+		return nil, relMatches, nil
+	}
+
+	// Build RETURN clause with all variables
+	returnClause := "RETURN " + strings.Join(nodeVarNames, ", ")
+	fullQuery := matchClause + " " + returnClause
+
+	// Execute the match
+	result, err := e.executeMatch(ctx, fullQuery)
+	if err != nil {
+		return nil, relMatches, err
+	}
+
+	// Convert results to node context maps
+	var allMatches []map[string]*storage.Node
+
+	for _, row := range result.Rows {
+		nodeMap := make(map[string]*storage.Node)
+		for i, col := range result.Columns {
+			if i >= len(row) {
+				continue
+			}
+
+			// Get the node from storage based on the returned value
+			val := row[i]
+			if val == nil {
+				continue
+			}
+
+			// The returned value might be a map or a node representation
+			var node *storage.Node
+
+			switch v := val.(type) {
+			case map[string]interface{}:
+				// It's a map representation - find the actual node
+				// Look for an ID property or _id
+				if id, ok := v["_id"]; ok {
+					if nodeID, ok := id.(string); ok {
+						node, _ = e.storage.GetNode(storage.NodeID(nodeID))
+					}
+				} else if id, ok := v["id"]; ok {
+					if nodeID, ok := id.(string); ok {
+						node, _ = e.storage.GetNode(storage.NodeID(nodeID))
+					}
+				}
+				// If we still don't have a node, try to find by properties
+				if node == nil {
+					// Try to find by matching properties
+					node = e.findNodeByProperties(v)
+				}
+			case *storage.Node:
+				node = v
+			case storage.Node:
+				node = &v
+			}
+
+			if node != nil {
+				nodeMap[col] = node
+			}
+		}
+
+		if len(nodeMap) > 0 {
+			allMatches = append(allMatches, nodeMap)
+		}
+	}
+
+	return allMatches, relMatches, nil
+}
+
+// extractVariableNamesFromPattern extracts variable names from a Cypher pattern.
+// e.g., "(p:Person)<-[:REL]-(poc:POC)-[:BELONGS_TO]->(a:Area)" returns ["p", "poc", "a"]
+func (e *StorageExecutor) extractVariableNamesFromPattern(pattern string) []string {
+	var varNames []string
+	seen := make(map[string]bool)
+
+	// Find all node patterns (...)
+	inParen := false
+	inBracket := false
+	var current strings.Builder
+
+	for _, c := range pattern {
+		switch c {
+		case '(':
+			inParen = true
+			current.Reset()
+		case ')':
+			if inParen {
+				nodeContent := current.String()
+				// Extract variable name (before : or end)
+				varName := strings.Split(nodeContent, ":")[0]
+				varName = strings.TrimSpace(varName)
+				// Remove any property part
+				if idx := strings.Index(varName, "{"); idx > 0 {
+					varName = strings.TrimSpace(varName[:idx])
+				}
+				if varName != "" && !seen[varName] {
+					varNames = append(varNames, varName)
+					seen[varName] = true
+				}
+			}
+			inParen = false
+		case '[':
+			inBracket = true
+		case ']':
+			inBracket = false
+		default:
+			if inParen && !inBracket {
+				current.WriteRune(c)
+			}
+		}
+	}
+
+	return varNames
+}
+
+// findNodeByProperties finds a node by matching its properties.
+func (e *StorageExecutor) findNodeByProperties(props map[string]interface{}) *storage.Node {
+	// Get all nodes and try to match
+	allNodes := e.storage.GetAllNodes()
+	for _, node := range allNodes {
+		// Check if name property matches (common identifier)
+		if name, ok := props["name"]; ok {
+			if nodeName, ok := node.Properties["name"]; ok && nodeName == name {
+				return node
+			}
+		}
+		// Check if all provided properties match
+		matches := true
+		for k, v := range props {
+			if k == "_labels" || k == "_id" {
+				continue
+			}
+			if nodeVal, ok := node.Properties[k]; !ok || nodeVal != v {
+				matches = false
+				break
+			}
+		}
+		if matches && len(props) > 0 {
+			return node
+		}
+	}
+	return nil
 }
 
 // buildCartesianProduct creates all combinations of node matches

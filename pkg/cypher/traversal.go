@@ -311,11 +311,28 @@ type TraversalMatch struct {
 	StartNode    nodePatternInfo
 	EndNode      nodePatternInfo
 	Relationship RelationshipPattern
+	// For chained patterns like (a)-[:R1]->(b)-[:R2]->(c), we store intermediate segments
+	IntermediateNodes []nodePatternInfo
+	Segments          []TraversalSegment // All segments in the chain
+	IsChained         bool               // True if this is a multi-segment pattern
+}
+
+// TraversalSegment represents one segment in a chained pattern
+type TraversalSegment struct {
+	FromNode     nodePatternInfo
+	ToNode       nodePatternInfo
+	Relationship RelationshipPattern
 }
 
 // parseTraversalPattern parses (a:Label)-[r:TYPE]->(b:Label) style patterns
+// Also handles chained patterns like (a)<-[:R1]-(b)-[:R2]->(c)
 // Uses a state machine instead of regex to properly handle parentheses in property values
 func (e *StorageExecutor) parseTraversalPattern(pattern string) *TraversalMatch {
+	// First check if this is a chained pattern (has multiple relationship segments)
+	if e.isChainedPattern(pattern) {
+		return e.parseChainedTraversalPattern(pattern)
+	}
+
 	// Try regex first for simple patterns (faster)
 	matches := pathPatternRe.FindStringSubmatch(pattern)
 	if matches != nil {
@@ -341,6 +358,188 @@ func (e *StorageExecutor) parseTraversalPattern(pattern string) *TraversalMatch 
 
 	// Fall back to state-machine parsing for complex patterns with special chars
 	return e.parseTraversalPatternStateMachine(pattern)
+}
+
+// isChainedPattern checks if a pattern has multiple relationship segments
+// e.g., (a)<-[:R1]-(b)-[:R2]->(c) or (a)-[:R1]->(b)-[:R2]->(c)
+func (e *StorageExecutor) isChainedPattern(pattern string) bool {
+	// Count relationship patterns by counting ]-
+	// A chained pattern has at least 2 relationship segments
+	count := 0
+	for i := 0; i < len(pattern)-1; i++ {
+		if pattern[i] == ']' && (pattern[i+1] == '-' || pattern[i+1] == '>') {
+			count++
+		}
+	}
+	return count >= 2
+}
+
+// parseChainedTraversalPattern parses multi-segment patterns like (a)<-[:R1]-(b)-[:R2]->(c)
+func (e *StorageExecutor) parseChainedTraversalPattern(pattern string) *TraversalMatch {
+	result := &TraversalMatch{
+		IsChained:         true,
+		Segments:          []TraversalSegment{},
+		IntermediateNodes: []nodePatternInfo{},
+	}
+
+	// Parse segments by splitting on relationship boundaries
+	// We need to find each (node)-[rel]->(node) or (node)<-[rel]-(node) segment
+
+	// Use state machine to properly handle nested parens and quotes
+	type segmentPart struct {
+		nodeStr string
+		relStr  string
+	}
+
+	var parts []segmentPart
+	var currentNode strings.Builder
+	var currentRel strings.Builder
+	inNode := false
+	inRel := false
+	parenDepth := 0
+	bracketDepth := 0
+	inQuote := false
+	quoteChar := byte(0)
+
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+
+		// Handle quotes
+		if (c == '\'' || c == '"') && (i == 0 || pattern[i-1] != '\\') {
+			if !inQuote {
+				inQuote = true
+				quoteChar = c
+			} else if c == quoteChar {
+				inQuote = false
+			}
+		}
+
+		if inQuote {
+			if inNode {
+				currentNode.WriteByte(c)
+			} else if inRel {
+				currentRel.WriteByte(c)
+			}
+			continue
+		}
+
+		switch c {
+		case '(':
+			if parenDepth == 0 {
+				inNode = true
+			}
+			parenDepth++
+			if inNode {
+				currentNode.WriteByte(c)
+			}
+		case ')':
+			parenDepth--
+			if inNode {
+				currentNode.WriteByte(c)
+			}
+			if parenDepth == 0 {
+				inNode = false
+			}
+		case '[':
+			if bracketDepth == 0 {
+				inRel = true
+			}
+			bracketDepth++
+			if inRel {
+				currentRel.WriteByte(c)
+			}
+		case ']':
+			if inRel {
+				currentRel.WriteByte(c)
+			}
+			bracketDepth--
+			if bracketDepth == 0 {
+				inRel = false
+				// Capture the direction arrows after ]
+				for j := i + 1; j < len(pattern) && (pattern[j] == '-' || pattern[j] == '>'); j++ {
+					currentRel.WriteByte(pattern[j])
+					i = j
+				}
+				// Save this part
+				parts = append(parts, segmentPart{
+					nodeStr: currentNode.String(),
+					relStr:  currentRel.String(),
+				})
+				currentNode.Reset()
+				currentRel.Reset()
+			}
+		case '<', '-':
+			if !inNode && !inRel && parenDepth == 0 && bracketDepth == 0 {
+				// Direction marker before relationship - add to next rel
+				currentRel.WriteByte(c)
+			} else if inNode {
+				currentNode.WriteByte(c)
+			} else if inRel {
+				currentRel.WriteByte(c)
+			}
+		default:
+			if inNode {
+				currentNode.WriteByte(c)
+			} else if inRel {
+				currentRel.WriteByte(c)
+			}
+		}
+	}
+
+	// Capture final node if present
+	if currentNode.Len() > 0 {
+		parts = append(parts, segmentPart{
+			nodeStr: currentNode.String(),
+			relStr:  "",
+		})
+	}
+
+	// Now convert parts to segments
+	if len(parts) < 2 {
+		return nil // Not enough parts for a valid pattern
+	}
+
+	// Parse all nodes first
+	var allNodes []nodePatternInfo
+	for _, part := range parts {
+		nodeStr := strings.Trim(part.nodeStr, "()")
+		allNodes = append(allNodes, e.parseNodePatternFromString(nodeStr))
+	}
+
+	// Build segments
+	for i := 0; i < len(parts)-1; i++ {
+		relStr := parts[i].relStr
+		if relStr == "" {
+			continue
+		}
+
+		segment := TraversalSegment{
+			FromNode:     allNodes[i],
+			ToNode:       allNodes[i+1],
+			Relationship: *e.parseRelationshipPattern(relStr),
+		}
+		result.Segments = append(result.Segments, segment)
+	}
+
+	// Set start and end nodes
+	if len(allNodes) > 0 {
+		result.StartNode = allNodes[0]
+	}
+	if len(allNodes) > 1 {
+		result.EndNode = allNodes[len(allNodes)-1]
+	}
+
+	// Intermediate nodes are all nodes except first and last
+	if len(allNodes) > 2 {
+		result.IntermediateNodes = allNodes[1 : len(allNodes)-1]
+	}
+
+	// For backward compatibility, set single Relationship to first segment
+	if len(result.Segments) > 0 {
+		result.Relationship = result.Segments[0].Relationship
+	}
+
+	return result
 }
 
 // parseTraversalPatternStateMachine parses patterns with a state machine
@@ -474,6 +673,11 @@ func (e *StorageExecutor) parseNodePatternFromString(s string) nodePatternInfo {
 
 // traverseGraph executes the traversal and returns all matching paths
 func (e *StorageExecutor) traverseGraph(match *TraversalMatch) []PathResult {
+	// Handle chained patterns differently (multi-segment traversal)
+	if match.IsChained && len(match.Segments) > 1 {
+		return e.traverseChainedGraph(match)
+	}
+
 	// Get starting nodes
 	var startNodes []*storage.Node
 	if len(match.StartNode.labels) > 0 {
@@ -591,6 +795,118 @@ func (e *StorageExecutor) traverseGraphParallel(match *TraversalMatch, startNode
 	}
 
 	return allResults
+}
+
+// traverseChainedGraph handles multi-segment patterns like (a)<-[:R1]-(b)-[:R2]->(c)
+// It traverses each segment sequentially, joining results where intermediate nodes match
+func (e *StorageExecutor) traverseChainedGraph(match *TraversalMatch) []PathResult {
+	if len(match.Segments) == 0 {
+		return nil
+	}
+
+	// Start with first segment
+	firstSeg := match.Segments[0]
+	simpleMatch := &TraversalMatch{
+		StartNode:    firstSeg.FromNode,
+		EndNode:      firstSeg.ToNode,
+		Relationship: firstSeg.Relationship,
+	}
+
+	// Get initial paths from first segment
+	currentPaths := e.traverseGraph(simpleMatch)
+
+	// For each subsequent segment, extend paths
+	for segIdx := 1; segIdx < len(match.Segments); segIdx++ {
+		seg := match.Segments[segIdx]
+		var extendedPaths []PathResult
+
+		for _, path := range currentPaths {
+			if len(path.Nodes) == 0 {
+				continue
+			}
+
+			// The last node in current path should be the start of next segment
+			lastNode := path.Nodes[len(path.Nodes)-1]
+
+			// Create a match for this segment starting from the last node
+			segMatch := &TraversalMatch{
+				StartNode:    seg.FromNode,
+				EndNode:      seg.ToNode,
+				Relationship: seg.Relationship,
+			}
+
+			// Traverse from the last node
+			segPaths := e.traverseFromNode(lastNode, segMatch)
+
+			// Join paths: combine current path with each segment path
+			for _, segPath := range segPaths {
+				// Create extended path
+				extended := PathResult{
+					Nodes:         make([]*storage.Node, 0, len(path.Nodes)+len(segPath.Nodes)-1),
+					Relationships: make([]*storage.Edge, 0, len(path.Relationships)+len(segPath.Relationships)),
+					Length:        path.Length + segPath.Length,
+				}
+
+				// Add all nodes from current path
+				extended.Nodes = append(extended.Nodes, path.Nodes...)
+
+				// Add nodes from segment path (skip first node as it's the same as last node of current)
+				if len(segPath.Nodes) > 1 {
+					extended.Nodes = append(extended.Nodes, segPath.Nodes[1:]...)
+				}
+
+				// Add all relationships
+				extended.Relationships = append(extended.Relationships, path.Relationships...)
+				extended.Relationships = append(extended.Relationships, segPath.Relationships...)
+
+				extendedPaths = append(extendedPaths, extended)
+			}
+		}
+
+		currentPaths = extendedPaths
+	}
+
+	return currentPaths
+}
+
+// traverseFromNode traverses from a specific node rather than finding start nodes by label
+func (e *StorageExecutor) traverseFromNode(startNode *storage.Node, match *TraversalMatch) []PathResult {
+	// Verify the start node matches the expected pattern (labels and properties)
+	if len(match.StartNode.labels) > 0 {
+		found := false
+		for _, label := range startNode.Labels {
+			for _, requiredLabel := range match.StartNode.labels {
+				if label == requiredLabel {
+					found = true
+					break
+				}
+			}
+			if found {
+				break
+			}
+		}
+		if !found {
+			return nil
+		}
+	}
+
+	if len(match.StartNode.properties) > 0 {
+		if !e.nodeMatchesProps(startNode, match.StartNode.properties) {
+			return nil
+		}
+	}
+
+	ctx := &TraversalContext{
+		startNode: startNode,
+		relTypes:  match.Relationship.Types,
+		direction: match.Relationship.Direction,
+		minHops:   match.Relationship.MinHops,
+		maxHops:   match.Relationship.MaxHops,
+		visited:   make(map[string]bool),
+		nodeCache: make(map[storage.NodeID]*storage.Node),
+	}
+
+	return e.findPaths(ctx, startNode, []*storage.Node{startNode}, []*storage.Edge{}, 0, &match.EndNode)
 }
 
 // findPaths performs DFS to find all paths matching the pattern
@@ -755,9 +1071,31 @@ func (e *StorageExecutor) buildPathContext(path PathResult, match *TraversalMatc
 		ctx.nodes[match.EndNode.variable] = path.Nodes[len(path.Nodes)-1]
 	}
 
-	// Map relationship
-	if match.Relationship.Variable != "" && len(path.Relationships) > 0 {
-		ctx.rels[match.Relationship.Variable] = path.Relationships[0]
+	// For chained patterns, map intermediate nodes
+	// Path nodes layout: [startNode, intermediate1, intermediate2, ..., endNode]
+	// IntermediateNodes layout: [intermediate1, intermediate2, ...]
+	if match.IsChained && len(match.IntermediateNodes) > 0 {
+		for i, intermediateInfo := range match.IntermediateNodes {
+			if intermediateInfo.variable != "" {
+				// Path node index is i+1 (skip start node)
+				pathIdx := i + 1
+				if pathIdx < len(path.Nodes) {
+					ctx.nodes[intermediateInfo.variable] = path.Nodes[pathIdx]
+				}
+			}
+		}
+
+		// Also map relationships from each segment
+		for i, seg := range match.Segments {
+			if seg.Relationship.Variable != "" && i < len(path.Relationships) {
+				ctx.rels[seg.Relationship.Variable] = path.Relationships[i]
+			}
+		}
+	} else {
+		// Map relationship (single segment)
+		if match.Relationship.Variable != "" && len(path.Relationships) > 0 {
+			ctx.rels[match.Relationship.Variable] = path.Relationships[0]
+		}
 	}
 
 	return ctx

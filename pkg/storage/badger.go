@@ -946,6 +946,10 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 	}
 	b.mu.RUnlock()
 
+	// Track edge deletions for counter update after transaction
+	var totalEdgesDeleted int64
+	var deletedEdgeIDs []EdgeID
+
 	err := b.db.Update(func(txn *badger.Txn) error {
 		key := nodeKey(id)
 
@@ -974,17 +978,23 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 			}
 		}
 
-		// Delete outgoing edges
+		// Delete outgoing edges (and track count)
 		outPrefix := outgoingIndexPrefix(id)
-		if err := b.deleteEdgesWithPrefix(txn, outPrefix); err != nil {
+		outCount, outIDs, err := b.deleteEdgesWithPrefix(txn, outPrefix)
+		if err != nil {
 			return err
 		}
+		totalEdgesDeleted += outCount
+		deletedEdgeIDs = append(deletedEdgeIDs, outIDs...)
 
-		// Delete incoming edges
+		// Delete incoming edges (and track count)
 		inPrefix := incomingIndexPrefix(id)
-		if err := b.deleteEdgesWithPrefix(txn, inPrefix); err != nil {
+		inCount, inIDs, err := b.deleteEdgesWithPrefix(txn, inPrefix)
+		if err != nil {
 			return err
 		}
+		totalEdgesDeleted += inCount
+		deletedEdgeIDs = append(deletedEdgeIDs, inIDs...)
 
 		// Remove from pending embeddings index (if present)
 		txn.Delete(pendingEmbedKey(id))
@@ -1002,6 +1012,17 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 		// Decrement cached node count for O(1) stats lookups
 		b.nodeCount.Add(-1)
 
+		// Decrement cached edge count for edges deleted with this node
+		if totalEdgesDeleted > 0 {
+			b.edgeCount.Add(-totalEdgesDeleted)
+			// Invalidate edge type cache since we deleted edges
+			b.InvalidateEdgeTypeCache()
+			// Notify listeners about deleted edges
+			for _, edgeID := range deletedEdgeIDs {
+				b.notifyEdgeDeleted(edgeID)
+			}
+		}
+
 		// Notify listeners (e.g., search service) to remove from indexes
 		b.notifyNodeDeleted(id)
 	}
@@ -1010,7 +1031,10 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 }
 
 // deleteEdgesWithPrefix deletes all edges matching a prefix (helper for DeleteNode).
-func (b *BadgerEngine) deleteEdgesWithPrefix(txn *badger.Txn, prefix []byte) error {
+// deleteEdgesWithPrefix deletes all edges matching the given prefix.
+// Returns the count of edges actually deleted for accurate stats tracking.
+// IMPORTANT: The returned count MUST be used to decrement edgeCount after txn commits.
+func (b *BadgerEngine) deleteEdgesWithPrefix(txn *badger.Txn, prefix []byte) (int64, []EdgeID, error) {
 	opts := badger.DefaultIteratorOptions
 	opts.PrefetchValues = false
 	it := txn.NewIterator(opts)
@@ -1022,13 +1046,19 @@ func (b *BadgerEngine) deleteEdgesWithPrefix(txn *badger.Txn, prefix []byte) err
 		edgeIDs = append(edgeIDs, edgeID)
 	}
 
+	var deletedCount int64
+	var deletedIDs []EdgeID
 	for _, edgeID := range edgeIDs {
-		if err := b.deleteEdgeInTxn(txn, edgeID); err != nil && err != ErrNotFound {
-			return err
+		err := b.deleteEdgeInTxn(txn, edgeID)
+		if err == nil {
+			deletedCount++
+			deletedIDs = append(deletedIDs, edgeID)
+		} else if err != ErrNotFound {
+			return 0, nil, err
 		}
 	}
 
-	return nil
+	return deletedCount, deletedIDs, nil
 }
 
 // ============================================================================
@@ -1316,16 +1346,17 @@ func (b *BadgerEngine) deleteEdgeInTxn(txn *badger.Txn, id EdgeID) error {
 }
 
 // deleteNodeInTxn is the internal helper for deleting a node within a transaction.
-func (b *BadgerEngine) deleteNodeInTxn(txn *badger.Txn, id NodeID) error {
+// Returns the count of edges that were deleted along with the node (for stats tracking).
+func (b *BadgerEngine) deleteNodeInTxn(txn *badger.Txn, id NodeID) (edgesDeleted int64, deletedEdgeIDs []EdgeID, err error) {
 	key := nodeKey(id)
 
 	// Get node for label cleanup
 	item, err := txn.Get(key)
 	if err == badger.ErrKeyNotFound {
-		return ErrNotFound
+		return 0, nil, ErrNotFound
 	}
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 
 	var node *Node
@@ -1334,34 +1365,41 @@ func (b *BadgerEngine) deleteNodeInTxn(txn *badger.Txn, id NodeID) error {
 		node, decodeErr = decodeNode(val)
 		return decodeErr
 	}); err != nil {
-		return err
+		return 0, nil, err
 	}
 
 	// Delete label indexes
 	for _, label := range node.Labels {
 		if err := txn.Delete(labelIndexKey(label, id)); err != nil {
-			return err
+			return 0, nil, err
 		}
 	}
 
-	// Delete outgoing edges
+	// Delete outgoing edges (and track count)
 	outPrefix := outgoingIndexPrefix(id)
-	if err := b.deleteEdgesWithPrefix(txn, outPrefix); err != nil {
-		return err
+	outCount, outIDs, err := b.deleteEdgesWithPrefix(txn, outPrefix)
+	if err != nil {
+		return 0, nil, err
 	}
+	edgesDeleted += outCount
+	deletedEdgeIDs = append(deletedEdgeIDs, outIDs...)
 
-	// Delete incoming edges
+	// Delete incoming edges (and track count)
 	inPrefix := incomingIndexPrefix(id)
-	if err := b.deleteEdgesWithPrefix(txn, inPrefix); err != nil {
-		return err
+	inCount, inIDs, err := b.deleteEdgesWithPrefix(txn, inPrefix)
+	if err != nil {
+		return 0, nil, err
 	}
+	edgesDeleted += inCount
+	deletedEdgeIDs = append(deletedEdgeIDs, inIDs...)
 
 	// Delete the node
-	return txn.Delete(key)
+	return edgesDeleted, deletedEdgeIDs, txn.Delete(key)
 }
 
 // BulkDeleteNodes removes multiple nodes in a single transaction.
 // This is much faster than calling DeleteNode repeatedly.
+// IMPORTANT: This also deletes all edges connected to the deleted nodes and updates edge counts.
 func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 	if len(ids) == 0 {
 		return nil
@@ -1375,17 +1413,23 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 	b.mu.RUnlock()
 
 	// Track which nodes were actually deleted for accurate counting
-	deletedCount := int64(0)
-	deletedIDs := make([]NodeID, 0, len(ids))
+	deletedNodeCount := int64(0)
+	deletedNodeIDs := make([]NodeID, 0, len(ids))
+	// Track edges deleted along with nodes
+	totalEdgesDeleted := int64(0)
+	deletedEdgeIDs := make([]EdgeID, 0)
+
 	err := b.db.Update(func(txn *badger.Txn) error {
 		for _, id := range ids {
 			if id == "" {
 				continue // Skip invalid IDs
 			}
-			err := b.deleteNodeInTxn(txn, id)
+			edgesDeleted, edgeIDs, err := b.deleteNodeInTxn(txn, id)
 			if err == nil {
-				deletedCount++                      // Successfully deleted
-				deletedIDs = append(deletedIDs, id) // Track for callbacks
+				deletedNodeCount++                          // Successfully deleted
+				deletedNodeIDs = append(deletedNodeIDs, id) // Track for callbacks
+				totalEdgesDeleted += edgesDeleted
+				deletedEdgeIDs = append(deletedEdgeIDs, edgeIDs...)
 			} else if err != ErrNotFound {
 				return err // Actual error, abort transaction
 			}
@@ -1394,7 +1438,7 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 		return nil
 	})
 
-	// Invalidate cache for deleted nodes and update count
+	// Invalidate cache for deleted nodes and update counts
 	if err == nil {
 		b.nodeCacheMu.Lock()
 		for _, id := range ids {
@@ -1403,12 +1447,23 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 		b.nodeCacheMu.Unlock()
 
 		// Decrement cached node count by actual number deleted (accurate)
-		if deletedCount > 0 {
-			b.nodeCount.Add(-deletedCount)
+		if deletedNodeCount > 0 {
+			b.nodeCount.Add(-deletedNodeCount)
+		}
+
+		// Decrement cached edge count by edges deleted along with nodes
+		if totalEdgesDeleted > 0 {
+			b.edgeCount.Add(-totalEdgesDeleted)
+			// Invalidate edge type cache since we deleted edges
+			b.InvalidateEdgeTypeCache()
+			// Notify listeners about deleted edges
+			for _, edgeID := range deletedEdgeIDs {
+				b.notifyEdgeDeleted(edgeID)
+			}
 		}
 
 		// Notify listeners (e.g., search service) for each deleted node
-		for _, id := range deletedIDs {
+		for _, id := range deletedNodeIDs {
 			b.notifyNodeDeleted(id)
 		}
 	}

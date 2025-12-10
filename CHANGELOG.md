@@ -14,6 +14,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Issue and PR templates
 - Migration guide for repository split
 
+## [1.0.4] - 2025-12-10
+
+### Fixed
+- **Critical: Node/Edge Count Tracking During DETACH DELETE** - Edge counts became incorrect (negative, double-counted, or stale) during `DETACH DELETE` operations
+  - `deleteEdgesWithPrefix()` was deleting edges but not returning count of edges actually deleted
+  - `deleteNodeInTxn()` wasn't tracking edges deleted along with the node
+  - `BulkDeleteNodes()` only decremented node count, not edge count for cascade-deleted edges
+  - Unit tests showed counts going negative or remaining high after deletes, resetting to zero only on restart
+  - Fixed by updating `deleteEdgesWithPrefix()` signature to return `(int64, []EdgeID, error)`
+  - Fixed `deleteNodeInTxn()` to aggregate and return edges deleted with node
+  - Fixed `BulkDeleteNodes()` to correctly decrement `edgeCount` and notify `edgeDeleted` callbacks
+  - Added comprehensive tests in `pkg/storage/async_engine_delete_stats_test.go`
+  - **Impact**: `/admin/stats` and Cypher `count()` queries now remain accurate during bulk delete operations
+
+- **Critical: ORDER BY Ignored for Relationship Patterns** - `ORDER BY`, `SKIP`, and `LIMIT` clauses were completely ignored for queries with relationship patterns
+  - Queries like `MATCH (p:Person)-[:WORKS_IN]->(a:Area) RETURN p.name ORDER BY p.name` returned unordered results
+  - `executeMatchWithRelationships()` was returning immediately without applying post-processing clauses
+  - Fixed by capturing result, applying ORDER BY/SKIP/LIMIT, then returning
+  - Affects all queries with relationship traversal: `(a)-[:TYPE]->(b)`, `(a)<-[:TYPE]-(b)`, chained patterns
+  - **Impact**: Fixes data integrity issues where clients relied on sorted results
+
+- **Critical: Cartesian Product MATCH Returns Zero Rows** - Comma-separated node patterns returned empty results instead of cartesian product
+  - `MATCH (p:Person), (a:Area) RETURN p.name, a.code` returned 0 rows (should return N×M combinations)
+  - `executeMatch()` only parsed first pattern, ignoring subsequent comma-separated patterns
+  - Fixed by detecting multiple patterns via `splitNodePatterns()` and routing to new `executeCartesianProductMatch()`
+  - Now correctly generates all combinations of matched nodes
+  - Supports WHERE filtering, aggregation, ORDER BY, SKIP, LIMIT on cartesian results
+  - **Impact**: Critical for Northwind-style bulk insert patterns like `MATCH (s), (c) CREATE (p)-[:REL]->(c)`
+
+- **Critical: Cartesian Product CREATE Only Creates One Relationship** - `MATCH` with multiple patterns followed by `CREATE` only created relationships for first match
+  - `MATCH (p:Person), (a:Area) CREATE (p)-[:WORKS_IN]->(a)` created 1 relationship (should create 3 for 3 persons × 1 area)
+  - `executeMatchCreateBlock()` was collecting only first matching node per pattern variable
+  - Fixed by collecting ALL matching nodes and iterating through cartesian product combinations
+  - Each CREATE now executes once per combination in the cartesian product
+  - **Impact**: Fixes bulk relationship creation patterns used in data import workflows
+
+- **UNWIND CREATE with RETURN Returns Variable Name Instead of Values** - Return clause after `UNWIND...CREATE` returned literal variable names
+  - `UNWIND ['A','B','C'] AS name CREATE (n {name: name}) RETURN n.name` returned `["name","name","name"]` (should be `["A","B","C"]`)
+  - `replaceVariableInQuery()` failed to handle variables inside curly braces like `{name: name}`
+  - String splitting on spaces left `name}` which didn't match variable `name`
+  - Fixed by properly trimming braces `{}[]()` and preserving surrounding punctuation during replacement
+  - **Impact**: Fixes all UNWIND+CREATE+RETURN workflows, critical for bulk data ingestion with result tracking
+
+### Changed
+- **Cartesian Product Performance** - New `executeCartesianProductMatch()` efficiently handles multi-pattern queries
+  - Builds combinations incrementally to avoid memory explosion on large datasets
+  - Supports early filtering with WHERE clause before building full product
+  - Properly integrates with query optimizer (ORDER BY, SKIP, LIMIT applied after filtering)
+
+### Technical Details
+- Modified `pkg/storage/badger.go`:
+  - Fixed `deleteEdgesWithPrefix()` to return accurate count and edge IDs
+  - Fixed `deleteNodeInTxn()` to track and return edges deleted with node
+  - Fixed `BulkDeleteNodes()` to correctly decrement edge count for cascade deletes
+- Modified `pkg/cypher/match.go`:
+  - Added `executeCartesianProductMatch()` for comma-separated pattern handling
+  - Added `executeCartesianAggregation()` for aggregation over cartesian results
+  - Added `evaluateWhereForContext()` for WHERE clause evaluation on node contexts
+  - Fixed `executeMatch()` to detect and route multiple patterns correctly
+  - Fixed relationship pattern path to apply ORDER BY/SKIP/LIMIT before returning
+- Modified `pkg/cypher/create.go`:
+  - Updated `executeMatchCreateBlock()` to collect all pattern matches (not just first)
+  - Added cartesian product iteration for CREATE execution
+  - Now creates relationships for every combination in MATCH cartesian product
+- Modified `pkg/cypher/clauses.go`:
+  - Fixed `replaceVariableInQuery()` to handle variables in property maps `{key: value}`
+  - Improved punctuation preservation during variable substitution
+
+### Test Coverage
+- All existing tests pass (100% backwards compatibility)
+- Added `pkg/storage/async_engine_delete_stats_test.go` with comprehensive count tracking tests
+- Fixed `TestWorksInRelationshipTypeAlternation` - ORDER BY now works correctly
+- Fixed `TestUnwindWithCreate/UNWIND_CREATE_with_RETURN` - Returns actual values, not variable names
+- Cartesian product patterns now pass all Northwind benchmark compatibility tests
+
 ## [1.0.3] - 2025-12-09
 
 ### Fixed

@@ -430,6 +430,60 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		items = []interface{}{list}
 	}
 
+	// Handle UNWIND ... CREATE ... pattern
+	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "CREATE") {
+		result := &ExecuteResult{
+			Columns: []string{},
+			Rows:    [][]interface{}{},
+			Stats:   &QueryStats{},
+		}
+
+		// Split CREATE and RETURN parts
+		returnIdx := findKeywordIndex(restQuery, "RETURN")
+		var createPart, returnPart string
+		if returnIdx > 0 {
+			createPart = strings.TrimSpace(restQuery[:returnIdx])
+			returnPart = strings.TrimSpace(restQuery[returnIdx:])
+		} else {
+			createPart = restQuery
+			returnPart = ""
+		}
+
+		// Execute CREATE for each unwound item
+		for _, item := range items {
+			// Replace variable references ONLY in the CREATE clause
+			createQuerySubstituted := replaceVariableInQuery(createPart, variable, item)
+
+			// Reconstruct full query with RETURN
+			fullQuery := createQuerySubstituted
+			if returnPart != "" {
+				fullQuery += " " + returnPart
+			}
+
+			// Execute the CREATE (with RETURN if present)
+			createResult, err := e.executeCreate(ctx, fullQuery)
+			if err != nil {
+				return nil, fmt.Errorf("UNWIND CREATE failed: %w", err)
+			}
+
+			// Accumulate stats
+			result.Stats.NodesCreated += createResult.Stats.NodesCreated
+			result.Stats.RelationshipsCreated += createResult.Stats.RelationshipsCreated
+
+			// If there's a RETURN clause, collect the result rows
+			if returnPart != "" && len(createResult.Rows) > 0 {
+				// First iteration: set columns
+				if len(result.Columns) == 0 {
+					result.Columns = createResult.Columns
+				}
+				// Append all rows from this CREATE execution
+				result.Rows = append(result.Rows, createResult.Rows...)
+			}
+		}
+
+		return result, nil
+	}
+
 	if restQuery != "" && strings.HasPrefix(strings.ToUpper(restQuery), "RETURN") {
 		returnClause := strings.TrimSpace(restQuery[6:])
 		returnItems := e.parseReturnItems(returnClause)
@@ -1607,4 +1661,91 @@ func (e *StorageExecutor) executeForeach(ctx context.Context, cypher string) (*E
 // executeLoadCSV handles LOAD CSV clause
 func (e *StorageExecutor) executeLoadCSV(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	return nil, fmt.Errorf("LOAD CSV is not supported in NornicDB embedded mode")
+}
+
+// ========================================
+// Helper Functions
+// ========================================
+
+// replaceVariableInQuery replaces all occurrences of a variable with its value in a query
+func replaceVariableInQuery(query string, variable string, value interface{}) string {
+	result := query
+
+	// Handle property access patterns first (variable.property)
+	// For maps, replace variable.key with the actual value
+	if valueMap, ok := value.(map[string]interface{}); ok {
+		// Find all property access patterns
+		for key, propVal := range valueMap {
+			pattern := variable + "." + key
+			var propValStr string
+			switch pv := propVal.(type) {
+			case string:
+				escaped := strings.ReplaceAll(pv, "'", "\\'")
+				propValStr = fmt.Sprintf("'%s'", escaped)
+			case int, int64:
+				propValStr = fmt.Sprintf("%d", pv)
+			case float64:
+				propValStr = fmt.Sprintf("%f", pv)
+			case bool:
+				if pv {
+					propValStr = "true"
+				} else {
+					propValStr = "false"
+				}
+			default:
+				propValStr = fmt.Sprintf("%v", pv)
+			}
+			result = strings.ReplaceAll(result, pattern, propValStr)
+		}
+		// Don't replace standalone variable for maps - already handled property access
+		return result
+	}
+
+	// For simple values, convert to string representation
+	var valueStr string
+	switch v := value.(type) {
+	case string:
+		// Escape single quotes in string values
+		escaped := strings.ReplaceAll(v, "'", "\\'")
+		valueStr = fmt.Sprintf("'%s'", escaped)
+	case int, int64, int32:
+		valueStr = fmt.Sprintf("%d", v)
+	case float64, float32:
+		valueStr = fmt.Sprintf("%f", v)
+	case bool:
+		if v {
+			valueStr = "true"
+		} else {
+			valueStr = "false"
+		}
+	default:
+		valueStr = fmt.Sprintf("%v", v)
+	}
+
+	// Replace standalone variable references
+	// Need to be careful not to replace variable names that are part of other identifiers
+	// Use regex to match word boundaries for more accurate replacement
+	words := strings.Split(result, " ")
+	for i, word := range words {
+		// Remove common punctuation for comparison - include braces for property patterns like {name: name}
+		trimmed := strings.TrimRight(word, ",;)}]")
+		trimmed = strings.TrimLeft(trimmed, "({[")
+		if trimmed == variable {
+			// Replace the variable but preserve surrounding punctuation
+			prefix := ""
+			suffix := ""
+			// Find where the variable actually starts/ends in the word
+			varIdx := strings.Index(word, variable)
+			if varIdx > 0 {
+				prefix = word[:varIdx]
+			}
+			if varIdx >= 0 && varIdx+len(variable) < len(word) {
+				suffix = word[varIdx+len(variable):]
+			}
+			words[i] = prefix + valueStr + suffix
+		}
+	}
+	result = strings.Join(words, " ")
+
+	return result
 }

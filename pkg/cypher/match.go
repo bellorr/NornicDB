@@ -264,10 +264,81 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		if whereIdx > 0 {
 			whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
 		}
-		return e.executeMatchWithRelationships(matchPart, whereClause, returnItems)
+		result, err := e.executeMatchWithRelationships(matchPart, whereClause, returnItems)
+		if err != nil {
+			return nil, err
+		}
+
+		// Apply ORDER BY (whitespace-tolerant) - ORDER BY is NOT handled inside executeMatchWithRelationships
+		orderByIdx := findKeywordIndex(cypher, "ORDER")
+		if orderByIdx > 0 {
+			orderStart := orderByIdx + 5 // skip "ORDER"
+			// Skip whitespace
+			for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
+				orderStart++
+			}
+			// Skip "BY"
+			if orderStart+2 <= len(cypher) && strings.ToUpper(cypher[orderStart:orderStart+2]) == "BY" {
+				orderStart += 2
+				// Skip whitespace after BY
+				for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
+					orderStart++
+				}
+			}
+			// Find end of ORDER BY clause (before SKIP/LIMIT or end)
+			orderEnd := len(cypher)
+			for _, kw := range []string{"SKIP", "LIMIT"} {
+				if idx := findKeywordIndex(cypher[orderStart:], kw); idx >= 0 {
+					if orderStart+idx < orderEnd {
+						orderEnd = orderStart + idx
+					}
+				}
+			}
+			orderExpr := strings.TrimSpace(cypher[orderStart:orderEnd])
+			if orderExpr != "" {
+				result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
+			}
+		}
+
+		// Apply SKIP
+		skipIdx := findKeywordIndex(cypher, "SKIP")
+		if skipIdx > 0 {
+			skipPart := strings.TrimSpace(cypher[skipIdx+4:])
+			if fields := strings.Fields(skipPart); len(fields) > 0 {
+				if s, err := strconv.Atoi(fields[0]); err == nil && s > 0 {
+					if s < len(result.Rows) {
+						result.Rows = result.Rows[s:]
+					} else {
+						result.Rows = [][]interface{}{}
+					}
+				}
+			}
+		}
+
+		// Apply LIMIT
+		limitIdx := findKeywordIndex(cypher, "LIMIT")
+		if limitIdx > 0 {
+			limitPart := strings.TrimSpace(cypher[limitIdx+5:])
+			if fields := strings.Fields(limitPart); len(fields) > 0 {
+				if l, err := strconv.Atoi(fields[0]); err == nil && l >= 0 {
+					if l < len(result.Rows) {
+						result.Rows = result.Rows[:l]
+					}
+				}
+			}
+		}
+
+		return result, nil
 	}
 
-	// Parse node pattern
+	// Check for comma-separated node patterns (cartesian product): (a:Label), (b:Label2)
+	// This is different from relationship patterns which contain -[ or ]-
+	nodePatterns := e.splitNodePatterns(matchPart)
+	if len(nodePatterns) > 1 {
+		return e.executeCartesianProductMatch(ctx, cypher, matchPart, nodePatterns, whereIdx, returnIdx, returnItems, hasAggregation, distinct, result)
+	}
+
+	// Parse single node pattern
 	nodePattern := e.parseNodePattern(matchPart)
 
 	// FAST PATH: For simple node count queries like "MATCH (n) RETURN count(n)" or "MATCH (n:Label) RETURN count(n)"
@@ -3816,6 +3887,316 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	}
 
 	return nodes, nil
+}
+
+// executeCartesianProductMatch handles MATCH queries with multiple comma-separated node patterns.
+// For example: MATCH (p:Person), (a:Area) RETURN p.name, a.code
+// This creates a cartesian product of all matching nodes.
+func (e *StorageExecutor) executeCartesianProductMatch(
+	ctx context.Context,
+	cypher string,
+	matchPart string,
+	nodePatterns []string,
+	whereIdx int,
+	returnIdx int,
+	returnItems []returnItem,
+	hasAggregation bool,
+	distinct bool,
+	result *ExecuteResult,
+) (*ExecuteResult, error) {
+	// For each node pattern, find matching nodes
+	patternMatches := make([]struct {
+		variable string
+		nodes    []*storage.Node
+	}, 0, len(nodePatterns))
+
+	for _, pattern := range nodePatterns {
+		pattern = strings.TrimSpace(pattern)
+		if pattern == "" {
+			continue
+		}
+
+		nodeInfo := e.parseNodePattern(pattern)
+
+		var nodes []*storage.Node
+		var err error
+
+		if len(nodeInfo.labels) > 0 {
+			nodes, err = e.storage.GetNodesByLabel(nodeInfo.labels[0])
+			if err != nil {
+				return nil, fmt.Errorf("storage error: %w", err)
+			}
+			// Filter by additional labels if present
+			if len(nodeInfo.labels) > 1 {
+				var filtered []*storage.Node
+				for _, node := range nodes {
+					hasAll := true
+					for _, reqLabel := range nodeInfo.labels[1:] {
+						found := false
+						for _, nodeLabel := range node.Labels {
+							if nodeLabel == reqLabel {
+								found = true
+								break
+							}
+						}
+						if !found {
+							hasAll = false
+							break
+						}
+					}
+					if hasAll {
+						filtered = append(filtered, node)
+					}
+				}
+				nodes = filtered
+			}
+		} else {
+			nodes, err = e.storage.AllNodes()
+			if err != nil {
+				return nil, fmt.Errorf("storage error: %w", err)
+			}
+		}
+
+		// Filter by properties if specified in pattern
+		if len(nodeInfo.properties) > 0 {
+			nodes = e.filterNodesByProperties(nodes, nodeInfo.properties)
+		}
+
+		if nodeInfo.variable != "" {
+			patternMatches = append(patternMatches, struct {
+				variable string
+				nodes    []*storage.Node
+			}{
+				variable: nodeInfo.variable,
+				nodes:    nodes,
+			})
+		}
+	}
+
+	// Build cartesian product
+	allMatches := e.buildCartesianProduct(patternMatches)
+
+	// Apply WHERE clause to filter combinations
+	if whereIdx > 0 {
+		wherePart := strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
+		var filtered []map[string]*storage.Node
+		for _, match := range allMatches {
+			if e.evaluateWhereForContext(wherePart, match) {
+				filtered = append(filtered, match)
+			}
+		}
+		allMatches = filtered
+	}
+
+	// Handle aggregation queries
+	if hasAggregation {
+		return e.executeCartesianAggregation(allMatches, returnItems, result)
+	}
+
+	// Build result rows from cartesian product
+	for _, match := range allMatches {
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			row[i] = e.evaluateExpressionWithContext(item.expr, match, nil)
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	// Apply DISTINCT if needed
+	if distinct {
+		seen := make(map[string]bool)
+		var uniqueRows [][]interface{}
+		for _, row := range result.Rows {
+			key := fmt.Sprintf("%v", row)
+			if !seen[key] {
+				seen[key] = true
+				uniqueRows = append(uniqueRows, row)
+			}
+		}
+		result.Rows = uniqueRows
+	}
+
+	// Apply ORDER BY
+	orderByIdx := findKeywordIndex(cypher, "ORDER")
+	if orderByIdx > 0 {
+		orderStart := orderByIdx + 5
+		for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
+			orderStart++
+		}
+		if orderStart+2 <= len(cypher) && strings.ToUpper(cypher[orderStart:orderStart+2]) == "BY" {
+			orderStart += 2
+			for orderStart < len(cypher) && isWhitespace(cypher[orderStart]) {
+				orderStart++
+			}
+		}
+		orderEnd := len(cypher)
+		for _, kw := range []string{"SKIP", "LIMIT"} {
+			if idx := findKeywordIndex(cypher[orderStart:], kw); idx >= 0 {
+				if orderStart+idx < orderEnd {
+					orderEnd = orderStart + idx
+				}
+			}
+		}
+		orderExpr := strings.TrimSpace(cypher[orderStart:orderEnd])
+		if orderExpr != "" {
+			result.Rows = e.orderResultRows(result.Rows, result.Columns, orderExpr)
+		}
+	}
+
+	// Apply SKIP
+	skipIdx := findKeywordIndex(cypher, "SKIP")
+	if skipIdx > 0 {
+		skipPart := strings.TrimSpace(cypher[skipIdx+4:])
+		if fields := strings.Fields(skipPart); len(fields) > 0 {
+			if s, err := strconv.Atoi(fields[0]); err == nil && s > 0 {
+				if s < len(result.Rows) {
+					result.Rows = result.Rows[s:]
+				} else {
+					result.Rows = [][]interface{}{}
+				}
+			}
+		}
+	}
+
+	// Apply LIMIT
+	limitIdx := findKeywordIndex(cypher, "LIMIT")
+	if limitIdx > 0 {
+		limitPart := strings.TrimSpace(cypher[limitIdx+5:])
+		if fields := strings.Fields(limitPart); len(fields) > 0 {
+			if l, err := strconv.Atoi(fields[0]); err == nil && l >= 0 {
+				if l < len(result.Rows) {
+					result.Rows = result.Rows[:l]
+				}
+			}
+		}
+	}
+
+	return result, nil
+}
+
+// executeCartesianAggregation handles aggregation over cartesian product results
+func (e *StorageExecutor) executeCartesianAggregation(
+	allMatches []map[string]*storage.Node,
+	returnItems []returnItem,
+	result *ExecuteResult,
+) (*ExecuteResult, error) {
+	// Check if we have grouping columns (non-aggregated expressions)
+	hasGrouping := false
+	for _, item := range returnItems {
+		upper := strings.ToUpper(item.expr)
+		if !strings.HasPrefix(upper, "COUNT(") &&
+			!strings.HasPrefix(upper, "SUM(") &&
+			!strings.HasPrefix(upper, "AVG(") &&
+			!strings.HasPrefix(upper, "MIN(") &&
+			!strings.HasPrefix(upper, "MAX(") &&
+			!strings.HasPrefix(upper, "COLLECT(") {
+			hasGrouping = true
+			break
+		}
+	}
+
+	if !hasGrouping {
+		// Simple aggregation without grouping
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			upper := strings.ToUpper(item.expr)
+			switch {
+			case strings.HasPrefix(upper, "COUNT("):
+				row[i] = int64(len(allMatches))
+			case strings.HasPrefix(upper, "COLLECT("):
+				inner := item.expr[8 : len(item.expr)-1]
+				collected := make([]interface{}, 0, len(allMatches))
+				for _, match := range allMatches {
+					val := e.evaluateExpressionWithContext(inner, match, nil)
+					collected = append(collected, val)
+				}
+				row[i] = collected
+			default:
+				if len(allMatches) > 0 {
+					row[i] = e.evaluateExpressionWithContext(item.expr, allMatches[0], nil)
+				}
+			}
+		}
+		result.Rows = append(result.Rows, row)
+		return result, nil
+	}
+
+	// GROUP BY: group by non-aggregation columns
+	groups := make(map[string][]map[string]*storage.Node)
+	groupKeys := make(map[string][]interface{})
+
+	for _, match := range allMatches {
+		keyParts := make([]interface{}, 0)
+		for _, item := range returnItems {
+			upper := strings.ToUpper(item.expr)
+			if !strings.HasPrefix(upper, "COUNT(") &&
+				!strings.HasPrefix(upper, "SUM(") &&
+				!strings.HasPrefix(upper, "AVG(") &&
+				!strings.HasPrefix(upper, "MIN(") &&
+				!strings.HasPrefix(upper, "MAX(") &&
+				!strings.HasPrefix(upper, "COLLECT(") {
+				val := e.evaluateExpressionWithContext(item.expr, match, nil)
+				keyParts = append(keyParts, val)
+			}
+		}
+		key := fmt.Sprintf("%v", keyParts)
+		groups[key] = append(groups[key], match)
+		if _, exists := groupKeys[key]; !exists {
+			groupKeys[key] = keyParts
+		}
+	}
+
+	// Build result rows for each group
+	for key, groupMatches := range groups {
+		row := make([]interface{}, len(returnItems))
+		keyIdx := 0
+
+		for i, item := range returnItems {
+			upper := strings.ToUpper(item.expr)
+			if !strings.HasPrefix(upper, "COUNT(") &&
+				!strings.HasPrefix(upper, "SUM(") &&
+				!strings.HasPrefix(upper, "AVG(") &&
+				!strings.HasPrefix(upper, "MIN(") &&
+				!strings.HasPrefix(upper, "MAX(") &&
+				!strings.HasPrefix(upper, "COLLECT(") {
+				// Non-aggregated column
+				row[i] = groupKeys[key][keyIdx]
+				keyIdx++
+				continue
+			}
+
+			// Aggregation
+			switch {
+			case strings.HasPrefix(upper, "COUNT("):
+				row[i] = int64(len(groupMatches))
+			case strings.HasPrefix(upper, "COLLECT("):
+				inner := item.expr[8 : len(item.expr)-1]
+				collected := make([]interface{}, 0, len(groupMatches))
+				for _, match := range groupMatches {
+					val := e.evaluateExpressionWithContext(inner, match, nil)
+					collected = append(collected, val)
+				}
+				row[i] = collected
+			default:
+				if len(groupMatches) > 0 {
+					row[i] = e.evaluateExpressionWithContext(item.expr, groupMatches[0], nil)
+				}
+			}
+		}
+		result.Rows = append(result.Rows, row)
+	}
+
+	return result, nil
+}
+
+// evaluateWhereForContext evaluates a WHERE clause against a node context
+func (e *StorageExecutor) evaluateWhereForContext(whereClause string, nodes map[string]*storage.Node) bool {
+	// Parse the WHERE clause and evaluate against the node context
+	result := e.evaluateExpressionWithContext(whereClause, nodes, nil)
+	if b, ok := result.(bool); ok {
+		return b
+	}
+	return false
 }
 
 // executeCreate handles CREATE queries.
