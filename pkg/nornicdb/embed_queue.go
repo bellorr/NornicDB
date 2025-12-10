@@ -165,21 +165,19 @@ func (ew *EmbedWorker) Reset() {
 		ew.mu.Unlock()
 		return
 	}
+	// Mark as resetting to prevent Trigger() from sending during reset
+	wasRunning := ew.running
 	ew.mu.Unlock()
 
 	fmt.Println("🔄 Resetting embed worker for regeneration...")
 
-	// Stop current worker
+	// Cancel context to stop current processing
 	ew.cancel()
-	// Drain trigger channel to prevent panic on close
-	select {
-	case <-ew.trigger:
-	default:
-	}
-	close(ew.trigger)
+
+	// Wait for worker to exit (it will exit when context is cancelled)
 	ew.wg.Wait()
 
-	// Reset state
+	// Reset state under lock
 	ew.mu.Lock()
 	ew.processed = 0
 	ew.failed = 0
@@ -188,14 +186,20 @@ func (ew *EmbedWorker) Reset() {
 	ew.loggedSkip = make(map[string]bool)
 	ew.mu.Unlock()
 
-	// Create new context and trigger channel
+	// Create new context (don't recreate trigger channel - just drain it)
 	ew.ctx, ew.cancel = context.WithCancel(context.Background())
-	ew.trigger = make(chan struct{}, 1)
+
+	// Drain any pending triggers
+	select {
+	case <-ew.trigger:
+	default:
+	}
 
 	// Restart worker
 	ew.wg.Add(1)
 	go ew.worker()
 
+	_ = wasRunning // suppress unused warning
 	fmt.Println("✅ Embed worker reset complete, starting fresh scan")
 }
 
@@ -305,6 +309,13 @@ func (ew *EmbedWorker) processUntilEmpty() {
 // Returns true if it did useful work (processed or permanently skipped a node).
 // Returns false if there was nothing to process or if a node was temporarily skipped.
 func (ew *EmbedWorker) processNextBatch() bool {
+	// Check for cancellation at the start
+	select {
+	case <-ew.ctx.Done():
+		return false
+	default:
+	}
+
 	ew.mu.Lock()
 	ew.running = true
 	ew.mu.Unlock()
@@ -319,6 +330,13 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	node := ew.findNodeWithoutEmbedding()
 	if node == nil {
 		return false // Nothing to process
+	}
+
+	// Check for cancellation before processing
+	select {
+	case <-ew.ctx.Done():
+		return false
+	default:
 	}
 
 	// Check if this node was recently processed (prevents re-processing before DB commit is visible)

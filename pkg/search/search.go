@@ -540,6 +540,20 @@ func (s *Service) EmbeddingCount() int {
 	return s.vectorIndex.Count()
 }
 
+// ClearVectorIndex removes all embeddings from the vector index.
+// This is used when regenerating all embeddings to reset the index count.
+func (s *Service) ClearVectorIndex() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.vectorIndex != nil {
+		s.vectorIndex.Clear()
+	}
+	// Also clear cluster index if enabled
+	if s.clusterIndex != nil {
+		s.clusterIndex.Clear()
+	}
+}
+
 // IndexNode adds a node to all search indexes.
 func (s *Service) IndexNode(node *storage.Node) error {
 	s.mu.Lock()

@@ -1225,7 +1225,14 @@ func (db *DB) ResetEmbedWorker() error {
 
 // ClearAllEmbeddings removes embeddings from all nodes, allowing them to be regenerated.
 // This is useful for re-embedding with a new model or fixing corrupted embeddings.
+// It clears both the node embeddings in storage AND the search index.
 func (db *DB) ClearAllEmbeddings() (int, error) {
+	// First, clear the search service's vector index
+	// This ensures EmbeddingCount() returns 0 immediately
+	if db.searchService != nil {
+		db.searchService.ClearVectorIndex()
+	}
+
 	// Unwrap storage layers to find the BadgerEngine
 	// The storage chain can be: AsyncEngine -> WALEngine -> BadgerEngine
 	engine := db.storage

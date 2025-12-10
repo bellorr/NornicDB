@@ -558,6 +558,27 @@ func (ci *ClusterIndex) buildClusterMap() {
 	}
 }
 
+// Clear removes all embeddings and cluster state from the index.
+// This overrides EmbeddingIndex.Clear() to also reset clustering state.
+func (ci *ClusterIndex) Clear() {
+	ci.clusterMu.Lock()
+	defer ci.clusterMu.Unlock()
+
+	// Clear the embedded EmbeddingIndex
+	ci.EmbeddingIndex.Clear()
+
+	// Reset cluster state
+	ci.centroids = nil
+	ci.assignments = nil
+	ci.clusterMap = make(map[int][]int)
+	ci.pendingUpdates = ci.pendingUpdates[:0]
+	ci.updatesSinceCluster = 0
+	ci.clustered = false
+	ci.iterations = 0
+	ci.clusterIterations = 0
+	ci.centroidDrift = 0
+}
+
 // IsClustered returns true if clustering has been performed.
 func (ci *ClusterIndex) IsClustered() bool {
 	ci.clusterMu.RLock()

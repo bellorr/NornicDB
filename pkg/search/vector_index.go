@@ -367,6 +367,14 @@ func (v *VectorIndex) Count() int {
 	return len(v.vectors)
 }
 
+// Clear removes all vectors from the index.
+// This is useful when regenerating all embeddings to reset the index state.
+func (v *VectorIndex) Clear() {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.vectors = make(map[string][]float32)
+}
+
 // HasVector checks if a vector exists for the given ID.
 func (v *VectorIndex) HasVector(id string) bool {
 	v.mu.RLock()

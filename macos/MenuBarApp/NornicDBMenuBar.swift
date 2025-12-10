@@ -1291,12 +1291,20 @@ class ConfigManager: ObservableObject {
     
     private func updateYAMLStringValue(in content: String, section: String, key: String, value: String) -> String {
         var result = content
-        let pattern = "(\(section):(?:[^\n]*\n)*?\\s+\(key):\\s*)(?:[^\n]*)"
+        // Pattern explanation:
+        // - Match section header (e.g., "embedding:")
+        // - Then any lines (non-greedy) until we find the key
+        // - Match the key with optional whitespace and colon
+        // - Capture everything up to and including "key: " as group 1
+        // - Match the rest of the line (the value to replace) - but NOT greedy across newlines
+        let pattern = "(\(section):(?:[^\n]*\n)*?\\s+\(key):[ \\t]*)([^\n]*)"
         
         if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
             let range = NSRange(content.startIndex..., in: content)
             if regex.firstMatch(in: content, options: [], range: range) != nil {
-                let replacement = "$1\(value)"
+                // Escape any special regex characters in the replacement value
+                let escapedValue = NSRegularExpression.escapedTemplate(for: value)
+                let replacement = "$1\(escapedValue)"
                 result = regex.stringByReplacingMatches(in: content, options: [], range: range, withTemplate: replacement)
             } else {
                 // Key doesn't exist, add it to the section
