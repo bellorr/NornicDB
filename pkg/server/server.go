@@ -636,15 +636,29 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			log.Println("   → Check NORNICDB_HEIMDALL_MODEL and NORNICDB_MODELS_DIR")
 		} else {
 			// Create database reader wrapper for Heimdall
-			dbReader := &heimdallDBReader{db: db}
+			dbReader := &heimdallDBReader{db: db, features: featuresConfig}
 			metricsReader := &heimdallMetricsReader{}
 			heimdallHandler = heimdall.NewHandler(manager, heimdallCfg, dbReader, metricsReader)
 
 			// Initialize Heimdall plugin subsystem
 			subsystemMgr := heimdall.GetSubsystemManager()
+
+			// Create the Heimdall invoker so plugins can call the LLM
+			// This enables plugins to use SendPrompt() for synthesis, autonomous actions, etc.
+			heimdallInvoker := heimdall.NewLiveHeimdallInvoker(
+				subsystemMgr,
+				manager, // Manager implements Generator interface
+				heimdallHandler.Bifrost(),
+				dbReader,
+				metricsReader,
+			)
+
 			subsystemCtx := heimdall.SubsystemContext{
-				Config:  heimdallCfg,
-				Bifrost: heimdallHandler.Bifrost(),
+				Config:   heimdallCfg,
+				Bifrost:  heimdallHandler.Bifrost(),
+				Database: dbReader,
+				Metrics:  metricsReader,
+				Heimdall: heimdallInvoker, // Now plugins can call p.ctx.Heimdall.SendPrompt()
 			}
 			subsystemMgr.SetContext(subsystemCtx)
 
@@ -3152,7 +3166,8 @@ func (s *Server) logAudit(r *http.Request, userID, eventType string, success boo
 
 // heimdallDBReader wraps NornicDB for Heimdall's DatabaseReader interface.
 type heimdallDBReader struct {
-	db *nornicdb.DB
+	db       *nornicdb.DB
+	features *nornicConfig.FeatureFlagsConfig
 }
 
 func (r *heimdallDBReader) Query(ctx context.Context, cypher string, params map[string]interface{}) ([]map[string]interface{}, error) {
@@ -3176,11 +3191,44 @@ func (r *heimdallDBReader) Query(ctx context.Context, cypher string, params map[
 
 func (r *heimdallDBReader) Stats() heimdall.DatabaseStats {
 	stats := r.db.Stats()
-	return heimdall.DatabaseStats{
+	result := heimdall.DatabaseStats{
 		NodeCount:         stats.NodeCount,
 		RelationshipCount: stats.EdgeCount,
 		LabelCounts:       make(map[string]int64), // TODO: implement label counts
 	}
+
+	// Add search/cluster stats if available
+	if searchStats := r.db.GetSearchStats(); searchStats != nil {
+		result.ClusterStats = &heimdall.ClusterStats{
+			NumClusters:    searchStats.NumClusters,
+			EmbeddingCount: searchStats.EmbeddingCount,
+			IsClustered:    searchStats.IsClustered,
+			AvgClusterSize: searchStats.AvgClusterSize,
+			Iterations:     searchStats.ClusterIterations,
+		}
+	}
+
+	// Add feature flags
+	if r.features != nil {
+		// Derive clustering enabled from search stats
+		clusteringEnabled := false
+		if result.ClusterStats != nil {
+			clusteringEnabled = result.ClusterStats.NumClusters > 0 || result.ClusterStats.EmbeddingCount > 0
+		}
+
+		result.FeatureFlags = &heimdall.FeatureFlags{
+			HeimdallEnabled:          r.features.HeimdallEnabled,
+			HeimdallAnomalyDetection: r.features.HeimdallAnomalyDetection,
+			HeimdallRuntimeDiagnosis: r.features.HeimdallRuntimeDiagnosis,
+			HeimdallMemoryCuration:   r.features.HeimdallMemoryCuration,
+			ClusteringEnabled:        clusteringEnabled,
+			TopologyEnabled:          r.features.TopologyAutoIntegrationEnabled,
+			KalmanEnabled:            r.features.KalmanEnabled,
+			AsyncWritesEnabled:       r.db.IsAsyncWritesEnabled(),
+		}
+	}
+
+	return result
 }
 
 // Discover implements semantic search with graph traversal for Graph-RAG.

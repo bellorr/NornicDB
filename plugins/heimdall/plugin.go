@@ -37,6 +37,7 @@ package heimdall
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"runtime"
@@ -295,7 +296,7 @@ func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 			Handler:     p.actionQuery,
 		},
 		"db_stats": {
-			Description: "Get database statistics: node/edge counts, labels, indexes",
+			Description: "Get database statistics: node/edge counts, k-means clusters, embeddings, feature flags",
 			Category:    "database",
 			Handler:     p.actionDBStats,
 		},
@@ -854,6 +855,7 @@ func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.Act
 	p.mu.Unlock()
 
 	stats := map[string]interface{}{}
+	var msgBuilder strings.Builder
 
 	// Get database stats if available
 	if ctx.Database != nil {
@@ -862,6 +864,56 @@ func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.Act
 			"nodes":         dbStats.NodeCount,
 			"relationships": dbStats.RelationshipCount,
 			"labels":        dbStats.LabelCounts,
+		}
+
+		msgBuilder.WriteString(fmt.Sprintf("DATABASE: %d nodes, %d relationships\n\n",
+			dbStats.NodeCount, dbStats.RelationshipCount))
+
+		// Add cluster/search stats if available
+		if dbStats.ClusterStats != nil {
+			stats["clustering"] = map[string]interface{}{
+				"embedding_count":    dbStats.ClusterStats.EmbeddingCount,
+				"num_clusters":       dbStats.ClusterStats.NumClusters,
+				"is_clustered":       dbStats.ClusterStats.IsClustered,
+				"avg_cluster_size":   dbStats.ClusterStats.AvgClusterSize,
+				"cluster_iterations": dbStats.ClusterStats.Iterations,
+			}
+
+			msgBuilder.WriteString("CLUSTERING:\n")
+			msgBuilder.WriteString(fmt.Sprintf("  • Embeddings: %d\n", dbStats.ClusterStats.EmbeddingCount))
+			msgBuilder.WriteString(fmt.Sprintf("  • K-Means Clusters: %d\n", dbStats.ClusterStats.NumClusters))
+			if dbStats.ClusterStats.IsClustered {
+				msgBuilder.WriteString(fmt.Sprintf("  • Clustered: Yes (avg size: %.1f, iterations: %d)\n",
+					dbStats.ClusterStats.AvgClusterSize, dbStats.ClusterStats.Iterations))
+			} else {
+				msgBuilder.WriteString("  • Clustered: No\n")
+			}
+			msgBuilder.WriteString("\n")
+		}
+
+		// Add feature flags if available
+		if dbStats.FeatureFlags != nil {
+			stats["feature_flags"] = map[string]interface{}{
+				"heimdall_enabled":           dbStats.FeatureFlags.HeimdallEnabled,
+				"heimdall_anomaly_detection": dbStats.FeatureFlags.HeimdallAnomalyDetection,
+				"heimdall_runtime_diagnosis": dbStats.FeatureFlags.HeimdallRuntimeDiagnosis,
+				"heimdall_memory_curation":   dbStats.FeatureFlags.HeimdallMemoryCuration,
+				"clustering_enabled":         dbStats.FeatureFlags.ClusteringEnabled,
+				"topology_enabled":           dbStats.FeatureFlags.TopologyEnabled,
+				"kalman_enabled":             dbStats.FeatureFlags.KalmanEnabled,
+				"async_writes_enabled":       dbStats.FeatureFlags.AsyncWritesEnabled,
+			}
+
+			msgBuilder.WriteString("FEATURE FLAGS:\n")
+			msgBuilder.WriteString(fmt.Sprintf("  • Heimdall AI: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallEnabled)))
+			msgBuilder.WriteString(fmt.Sprintf("  • Anomaly Detection: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallAnomalyDetection)))
+			msgBuilder.WriteString(fmt.Sprintf("  • Runtime Diagnosis: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallRuntimeDiagnosis)))
+			msgBuilder.WriteString(fmt.Sprintf("  • Memory Curation: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallMemoryCuration)))
+			msgBuilder.WriteString(fmt.Sprintf("  • K-Means Clustering: %s\n", boolToStatus(dbStats.FeatureFlags.ClusteringEnabled)))
+			msgBuilder.WriteString(fmt.Sprintf("  • Topology Prediction: %s\n", boolToStatus(dbStats.FeatureFlags.TopologyEnabled)))
+			msgBuilder.WriteString(fmt.Sprintf("  • Kalman Filtering: %s\n", boolToStatus(dbStats.FeatureFlags.KalmanEnabled)))
+			msgBuilder.WriteString(fmt.Sprintf("  • Async Writes: %s\n", boolToStatus(dbStats.FeatureFlags.AsyncWritesEnabled)))
+			msgBuilder.WriteString("\n")
 		}
 	}
 
@@ -875,6 +927,11 @@ func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.Act
 		"gc_cycles":       m.NumGC,
 	}
 
+	msgBuilder.WriteString("RUNTIME:\n")
+	msgBuilder.WriteString(fmt.Sprintf("  • Goroutines: %d\n", runtime.NumGoroutine()))
+	msgBuilder.WriteString(fmt.Sprintf("  • Memory: %d MB\n", m.Alloc/1024/1024))
+	msgBuilder.WriteString(fmt.Sprintf("  • GC Cycles: %d\n", m.NumGC))
+
 	// Get metrics if available
 	if ctx.Metrics != nil {
 		runtimeMetrics := ctx.Metrics.Runtime()
@@ -883,9 +940,17 @@ func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.Act
 
 	return &heimdall.ActionResult{
 		Success: true,
-		Message: "Database statistics",
+		Message: msgBuilder.String(),
 		Data:    stats,
 	}, nil
+}
+
+// boolToStatus converts a boolean to a user-friendly status string.
+func boolToStatus(b bool) string {
+	if b {
+		return "✅ Enabled"
+	}
+	return "❌ Disabled"
 }
 
 // === Data Access Methods ===
@@ -976,6 +1041,27 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 		},
 		heimdall.PromptExample{
 			UserSays:   "show database info",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		// K-means clustering and feature flag queries -> db_stats
+		heimdall.PromptExample{
+			UserSays:   "how many k-means clusters",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "show clustering stats",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "how many embeddings",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "what features are enabled",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "show feature flags",
 			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
 		},
 		// Generic semantic search examples
@@ -1206,6 +1292,138 @@ func (p *WatcherPlugin) PostExecute(ctx *heimdall.PostExecuteContext) {
 	} else if ctx.Result != nil {
 		ctx.NotifyError("Watcher", fmt.Sprintf("Action failed: %s", ctx.Result.Message))
 	}
+}
+
+// Synthesize implements SynthesisHook to transform action results into conversational prose.
+// This is the reference implementation showing how plugins can provide rich, domain-specific
+// response formatting using LLM-based synthesis.
+//
+// The Watcher plugin demonstrates:
+//   - Using the Heimdall invoker to call the LLM for prose synthesis
+//   - Falling back gracefully if synthesis fails
+//   - Detecting pre-formatted messages to avoid double-processing
+//
+// Domain-specific plugins (like Welcome Season) can override this with their own synthesis logic.
+func (p *WatcherPlugin) Synthesize(ctx *heimdall.SynthesisContext, done func(response string)) {
+	// Skip synthesis for failed actions
+	if ctx.Result == nil || !ctx.Result.Success {
+		done("") // Let default handler format errors
+		return
+	}
+
+	// If there's no structured data, just return the message
+	if ctx.Result.Data == nil || len(ctx.Result.Data) == 0 {
+		done(ctx.Result.Message)
+		return
+	}
+
+	// Check if Heimdall invoker is available for LLM synthesis
+	if p.ctx.Heimdall == nil {
+		log.Printf("[Watcher] Heimdall invoker not available, using pre-formatted message")
+		// Fall back to the action's formatted message if it exists
+		if ctx.Result.Message != "" {
+			done(ctx.Result.Message)
+			return
+		}
+		done("") // Fall back to default JSON formatting
+		return
+	}
+
+	// Build synthesis prompt for the LLM
+	// This transforms structured data into conversational prose
+	synthesisPrompt := p.buildSynthesisPrompt(ctx.UserQuestion, ctx.Result.Message, ctx.Result.Data)
+
+	log.Printf("[Watcher] Generating LLM synthesis for user question: %s", ctx.UserQuestion)
+
+	// Call the LLM via Heimdall invoker using raw prompt (no action routing)
+	result, err := p.ctx.Heimdall.SendRawPrompt(synthesisPrompt)
+	if err != nil {
+		log.Printf("[Watcher] LLM synthesis failed: %v, falling back to formatted message", err)
+		if ctx.Result.Message != "" {
+			done(ctx.Result.Message)
+			return
+		}
+		done("")
+		return
+	}
+
+	if result == nil || !result.Success || result.Message == "" {
+		log.Printf("[Watcher] LLM returned empty/unsuccessful result, using formatted message")
+		if ctx.Result.Message != "" {
+			done(ctx.Result.Message)
+			return
+		}
+		done("")
+		return
+	}
+
+	// Clean up the response
+	response := strings.TrimSpace(result.Message)
+
+	// If the model output JSON (it tried to route an action), fall back
+	if strings.HasPrefix(response, "{") || strings.HasPrefix(response, "[") {
+		log.Printf("[Watcher] LLM returned JSON instead of prose, using formatted message")
+		if ctx.Result.Message != "" {
+			done(ctx.Result.Message)
+			return
+		}
+		done("")
+		return
+	}
+
+	// Quality check: if response is too short relative to the data,
+	// the LLM probably failed to synthesize properly - use formatted message
+	if len(response) < 50 && ctx.Result.Message != "" && len(ctx.Result.Message) > len(response)*2 {
+		log.Printf("[Watcher] LLM response too short (%d chars), using formatted message (%d chars)",
+			len(response), len(ctx.Result.Message))
+		done(ctx.Result.Message)
+		return
+	}
+
+	log.Printf("[Watcher] LLM synthesis successful (%d chars)", len(response))
+	done(response)
+}
+
+// buildSynthesisPrompt creates a prompt that instructs the LLM to generate
+// a conversational answer from structured data.
+func (p *WatcherPlugin) buildSynthesisPrompt(userQuestion, actionMessage string, data map[string]interface{}) string {
+	// Format data as readable JSON
+	dataJSON, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		dataJSON = []byte(fmt.Sprintf("%v", data))
+	}
+
+	// Build the prompt with clear structure
+	var prompt strings.Builder
+	prompt.WriteString("You are Heimdall, the AI assistant for NornicDB. Answer the user's question using the data provided.\n\n")
+	prompt.WriteString(fmt.Sprintf("USER QUESTION: %s\n\n", userQuestion))
+
+	// Include the formatted summary if available
+	if actionMessage != "" {
+		prompt.WriteString("FORMATTED DATA:\n")
+		prompt.WriteString(actionMessage)
+		prompt.WriteString("\n\n")
+	}
+
+	// Include raw JSON data for reference
+	prompt.WriteString("RAW DATA (JSON):\n")
+	prompt.WriteString(string(dataJSON))
+	prompt.WriteString("\n\n")
+
+	prompt.WriteString(`INSTRUCTIONS:
+1. Answer the user's question directly and completely
+2. Include ALL relevant data points from above - don't omit information
+3. Format your response with clear sections if there are multiple categories
+4. Use bullet points (•) for lists
+5. For feature flags, list each flag with its status (enabled/disabled)
+6. For statistics, include the actual numbers
+7. Be helpful and informative, not brief
+8. Do NOT output JSON - write natural language
+9. Do NOT suggest commands - just present the data
+
+YOUR RESPONSE:`)
+
+	return prompt.String()
 }
 
 // === Internal Helpers ===

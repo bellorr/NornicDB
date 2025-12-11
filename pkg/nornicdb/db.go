@@ -1872,6 +1872,40 @@ func (db *DB) TriggerSearchClustering() error {
 	return db.searchService.TriggerClustering()
 }
 
+// SearchStats contains search service statistics.
+type SearchStats struct {
+	EmbeddingCount    int     `json:"embedding_count"`
+	ClusteringEnabled bool    `json:"clustering_enabled"`
+	IsClustered       bool    `json:"is_clustered"`
+	NumClusters       int     `json:"num_clusters,omitempty"`
+	AvgClusterSize    float64 `json:"avg_cluster_size,omitempty"`
+	ClusterIterations int     `json:"cluster_iterations,omitempty"`
+}
+
+// GetSearchStats returns search service statistics including clustering info.
+func (db *DB) GetSearchStats() *SearchStats {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	if db.searchService == nil {
+		return nil
+	}
+
+	stats := &SearchStats{
+		EmbeddingCount:    db.searchService.EmbeddingCount(),
+		ClusteringEnabled: db.searchService.IsClusteringEnabled(),
+	}
+
+	if clusterStats := db.searchService.ClusterStats(); clusterStats != nil {
+		stats.IsClustered = clusterStats.Clustered
+		stats.NumClusters = clusterStats.NumClusters
+		stats.AvgClusterSize = clusterStats.AvgClusterSize
+		stats.ClusterIterations = clusterStats.Iterations
+	}
+
+	return stats
+}
+
 // IsAsyncWritesEnabled returns true if async writes (eventual consistency) is enabled.
 // When enabled, write operations return immediately and are flushed in the background.
 // HTTP handlers should return 202 Accepted instead of 201 Created for writes.

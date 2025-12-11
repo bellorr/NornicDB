@@ -70,6 +70,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"plugin"
@@ -230,6 +231,14 @@ type HeimdallInvoker interface {
 	// SendPromptAsync sends a prompt without waiting for result.
 	// Results will be broadcast via Bifrost to connected clients.
 	SendPromptAsync(prompt string)
+
+	// SendRawPrompt sends a prompt directly to the LLM without action routing context.
+	// Use this for synthesis or direct question-answering where you don't want
+	// the SLM to try parsing actions from the response.
+	//
+	// Example:
+	//   result, err := ctx.Heimdall.SendRawPrompt("Answer this question: How many nodes?")
+	SendRawPrompt(prompt string) (*ActionResult, error)
 }
 
 // NoOpHeimdallInvoker is a no-op implementation when Heimdall is not available.
@@ -239,6 +248,9 @@ func (n *NoOpHeimdallInvoker) InvokeAction(action string, params map[string]inte
 	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
 }
 func (n *NoOpHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
+	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
+}
+func (n *NoOpHeimdallInvoker) SendRawPrompt(prompt string) (*ActionResult, error) {
 	return &ActionResult{Success: false, Message: "Heimdall not available"}, nil
 }
 func (n *NoOpHeimdallInvoker) InvokeActionAsync(action string, params map[string]interface{}) {}
@@ -300,6 +312,26 @@ func (h *LiveHeimdallInvoker) SendPrompt(prompt string) (*ActionResult, error) {
 	}
 
 	// Return raw response if not an action
+	return &ActionResult{
+		Success: true,
+		Message: response,
+	}, nil
+}
+
+// SendRawPrompt sends a prompt directly to the SLM without action routing context.
+// This is used for synthesis where we just want the LLM to answer a question,
+// not try to parse and route actions.
+func (h *LiveHeimdallInvoker) SendRawPrompt(prompt string) (*ActionResult, error) {
+	if h.generator == nil {
+		return &ActionResult{Success: false, Message: "SLM not available"}, nil
+	}
+
+	// Generate response from SLM directly - no action routing prefix
+	response, err := h.generator.Generate(context.Background(), prompt, DefaultGenerateParams())
+	if err != nil {
+		return &ActionResult{Success: false, Message: fmt.Sprintf("SLM error: %v", err)}, nil
+	}
+
 	return &ActionResult{
 		Success: true,
 		Message: response,
@@ -541,6 +573,36 @@ type DatabaseStats struct {
 	NodeCount         int64            `json:"node_count"`
 	RelationshipCount int64            `json:"relationship_count"`
 	LabelCounts       map[string]int64 `json:"label_counts"`
+	ClusterStats      *ClusterStats    `json:"cluster_stats,omitempty"`
+	FeatureFlags      *FeatureFlags    `json:"feature_flags,omitempty"`
+}
+
+// ClusterStats contains k-means clustering statistics.
+type ClusterStats struct {
+	NumClusters    int     `json:"num_clusters"`
+	EmbeddingCount int     `json:"embedding_count"`
+	IsClustered    bool    `json:"is_clustered"`
+	AvgClusterSize float64 `json:"avg_cluster_size,omitempty"`
+	Iterations     int     `json:"iterations,omitempty"`
+}
+
+// FeatureFlags contains enabled/disabled feature status.
+type FeatureFlags struct {
+	// Core Heimdall flags
+	HeimdallEnabled          bool `json:"heimdall_enabled"`
+	HeimdallAnomalyDetection bool `json:"heimdall_anomaly_detection"`
+	HeimdallRuntimeDiagnosis bool `json:"heimdall_runtime_diagnosis"`
+	HeimdallMemoryCuration   bool `json:"heimdall_memory_curation"`
+
+	// Clustering (derived from search stats)
+	ClusteringEnabled bool `json:"clustering_enabled"`
+
+	// Topology/prediction flags
+	TopologyEnabled bool `json:"topology_enabled"`
+	KalmanEnabled   bool `json:"kalman_enabled"`
+
+	// Runtime flags (derived from DB state)
+	AsyncWritesEnabled bool `json:"async_writes_enabled"`
 }
 
 // MetricsReader provides runtime metrics access for actions.
@@ -1243,6 +1305,40 @@ func CallPostExecuteHooks(ctx *PostExecuteContext) {
 			go hook.PostExecute(ctx) // Fire and forget
 		}
 	}
+}
+
+// CallSynthesisHooks calls Synthesize on all plugins that implement SynthesisHook.
+// The first plugin to return a non-empty response wins.
+// If no plugin provides a response, returns empty string (caller should use default synthesis).
+// This is synchronous with a timeout to ensure responsive UX.
+func CallSynthesisHooks(ctx *SynthesisContext) string {
+	if !HeimdallPluginsInitialized() {
+		return ""
+	}
+
+	plugins := ListHeimdallPlugins()
+
+	for _, p := range plugins {
+		// Check if plugin implements SynthesisHook
+		if hook, ok := p.Plugin.(SynthesisHook); ok {
+			done := make(chan string, 1)
+			hook.Synthesize(ctx, func(response string) {
+				done <- response
+			})
+
+			select {
+			case response := <-done:
+				if response != "" {
+					log.Printf("[Heimdall] Plugin %s provided synthesis response", p.Plugin.Name())
+					return response // First non-empty response wins
+				}
+			case <-time.After(5 * time.Second):
+				log.Printf("[Heimdall] Plugin %s synthesis timed out", p.Plugin.Name())
+			}
+		}
+	}
+
+	return "" // No plugin provided synthesis, use default
 }
 
 // =============================================================================

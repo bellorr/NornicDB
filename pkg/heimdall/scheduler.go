@@ -305,6 +305,14 @@ func (m *Manager) Close() error {
 	return nil
 }
 
+// ModelPath returns the path to the loaded model.
+// This allows Manager to implement the Generator interface.
+func (m *Manager) ModelPath() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelPath
+}
+
 // idCounter provides unique IDs even within the same nanosecond.
 var idCounter uint64
 

@@ -330,6 +330,13 @@ func defaultExamples() []PromptExample {
 		{UserSays: "database stats", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
 		{UserSays: "health check", ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`},
 
+		// === CLUSTERING & EMBEDDINGS (db_stats) ===
+		{UserSays: "how many k-means clusters", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
+		{UserSays: "show clustering info", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
+		{UserSays: "how many embeddings", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
+		{UserSays: "what features are enabled", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
+		{UserSays: "show feature flags", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
+
 		// === COUNTING & STATISTICS ===
 		{UserSays: "how many nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) RETURN count(n) AS total_nodes"}}`},
 		{UserSays: "count all relationships", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH ()-[r]->() RETURN count(r) AS total_relationships"}}`},
@@ -423,29 +430,55 @@ func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.
 				finalResponse = fmt.Sprintf("Action failed: %v", err)
 			} else if result != nil {
 				log.Printf("[Bifrost] Action result: success=%v message=%s", result.Success, result.Message)
-				// Format action result as response
-				if result.Success {
-					finalResponse = result.Message
-					if result.Data != nil && len(result.Data) > 0 {
-						dataJSON, _ := json.MarshalIndent(result.Data, "", "  ")
-						finalResponse += "\n\n```json\n" + string(dataJSON) + "\n```"
-					}
+
+				// === Phase 6: PostExecute hooks ===
+				// Uses optional interface - plugins that don't implement PostExecuteHook are skipped
+				postExecCtx := &PostExecuteContext{
+					RequestID:  lifecycle.requestID,
+					Action:     parsedAction.Action,
+					Params:     parsedAction.Params,
+					Result:     result,
+					Duration:   execDuration,
+					PluginData: lifecycle.promptCtx.PluginData,
+				}
+				CallPostExecuteHooks(postExecCtx)
+
+				// === Phase 7: Synthesis hooks ===
+				// Allow plugins to provide custom response formatting
+				synthCtx := &SynthesisContext{
+					RequestID:    lifecycle.requestID,
+					UserQuestion: lifecycle.promptCtx.UserMessage,
+					Action:       parsedAction.Action,
+					Result:       result,
+					PluginData:   lifecycle.promptCtx.PluginData,
+					Database:     h.database,
+				}
+
+				// First, try plugin synthesis hooks
+				if pluginResponse := CallSynthesisHooks(synthCtx); pluginResponse != "" {
+					log.Printf("[Bifrost] Using plugin-provided synthesis")
+					finalResponse = pluginResponse
 				} else {
-					finalResponse = "Action failed: " + result.Message
+					// Fall back to simple formatting (no LLM synthesis)
+					// Plugins should implement SynthesisHook for rich responses
+					log.Printf("[Bifrost] Using default format (no plugin synthesis)")
+					finalResponse = h.defaultFormatResponse(result)
 				}
 			}
 
-			// === Phase 6: PostExecute hooks ===
-			// Uses optional interface - plugins that don't implement PostExecuteHook are skipped
-			postExecCtx := &PostExecuteContext{
-				RequestID:  lifecycle.requestID,
-				Action:     parsedAction.Action,
-				Params:     parsedAction.Params,
-				Result:     result,
-				Duration:   execDuration,
-				PluginData: lifecycle.promptCtx.PluginData,
+			// Note: PostExecute already called above when result != nil
+			if result == nil {
+				// Only call if we haven't already (err case doesn't have result)
+				postExecCtx := &PostExecuteContext{
+					RequestID:  lifecycle.requestID,
+					Action:     parsedAction.Action,
+					Params:     parsedAction.Params,
+					Result:     nil,
+					Duration:   execDuration,
+					PluginData: lifecycle.promptCtx.PluginData,
+				}
+				CallPostExecuteHooks(postExecCtx)
 			}
-			CallPostExecuteHooks(postExecCtx)
 		}
 	} else {
 		log.Printf("[Bifrost] No action detected in response")
@@ -572,10 +605,23 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 
 	// Collect full response to check for actions
 	var fullResponse strings.Builder
+	isActionResponse := false
 
-	// Stream tokens
+	// Stream tokens - but buffer action JSON responses instead of streaming
 	err := h.manager.GenerateStream(ctx, prompt, params, func(token string) error {
 		fullResponse.WriteString(token)
+
+		// Detect if this looks like an action JSON response
+		// If response starts with '{', buffer it instead of streaming
+		currentResponse := strings.TrimSpace(fullResponse.String())
+		if strings.HasPrefix(currentResponse, "{") {
+			isActionResponse = true
+		}
+
+		// Don't stream action JSON to user - we'll send the synthesized result instead
+		if isActionResponse {
+			return nil
+		}
 
 		chunk := ChatResponse{
 			ID:      id,
@@ -718,16 +764,6 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 					actionResponse = fmt.Sprintf("Action failed: %v", err)
 				} else if result != nil {
 					log.Printf("[Bifrost] Action result: success=%v", result.Success)
-
-					if result.Success {
-						actionResponse = "\n\n" + result.Message
-						if result.Data != nil && len(result.Data) > 0 {
-							dataJSON, _ := json.MarshalIndent(result.Data, "", "  ")
-							actionResponse += "\n\n```json\n" + string(dataJSON) + "\n```"
-						}
-					} else {
-						actionResponse = "\n\nAction failed: " + result.Message
-					}
 				}
 
 				// === Phase 6: PostExecute hooks (optional) ===
@@ -775,6 +811,29 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 					fmt.Fprintf(w, "data: %s\n\n", data)
 					flusher.Flush()
 				}
+
+				// === Phase 7: Synthesis hooks ===
+				// Allow plugins to provide custom response formatting
+				if result != nil {
+					synthCtx := &SynthesisContext{
+						RequestID:    lifecycle.requestID,
+						UserQuestion: prompt,
+						Action:       parsedAction.Action,
+						Result:       result,
+						PluginData:   lifecycle.promptCtx.PluginData,
+						Database:     h.database,
+					}
+
+					// First, try plugin synthesis hooks
+					if pluginResponse := CallSynthesisHooks(synthCtx); pluginResponse != "" {
+						log.Printf("[Bifrost] Using plugin-provided synthesis")
+						actionResponse = "\n\n" + pluginResponse
+					} else {
+						// Fall back to simple formatting (no LLM synthesis)
+						log.Printf("[Bifrost] Using default format (no plugin synthesis)")
+						actionResponse = "\n\n" + h.defaultFormatResponse(result)
+					}
+				}
 			}
 
 			// Send action result chunk
@@ -817,4 +876,32 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 	// OpenAI sends [DONE] to signal stream end
 	fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+// defaultFormatResponse provides a simple fallback format for action results.
+// This is a no-op that just formats the data - actual synthesis should be done by plugins.
+//
+// Plugins that implement SynthesisHook can provide rich, domain-specific formatting
+// (e.g., the watcher plugin provides LLM-based prose synthesis).
+func (h *Handler) defaultFormatResponse(result *ActionResult) string {
+	if result == nil {
+		return "No results available."
+	}
+
+	if !result.Success {
+		return "Action failed: " + result.Message
+	}
+
+	// If there's no structured data, just return the message
+	if result.Data == nil || len(result.Data) == 0 {
+		return result.Message
+	}
+
+	// Simple format: message + JSON data
+	dataJSON, err := json.MarshalIndent(result.Data, "", "  ")
+	if err != nil {
+		return result.Message
+	}
+
+	return result.Message + "\n\n```json\n" + string(dataJSON) + "\n```"
 }

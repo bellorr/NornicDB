@@ -1093,6 +1093,47 @@ type PostExecuteHook interface {
 	PostExecute(ctx *PostExecuteContext)
 }
 
+// SynthesisHook is an optional interface for plugins that want to customize
+// how action results are presented to users. This is called AFTER PostExecute
+// but BEFORE the response is sent to the user.
+//
+// Plugins can use this to:
+//   - Provide domain-specific formatting (e.g., format POC data nicely)
+//   - Add custom context or explanations
+//   - Transform data into more user-friendly formats
+//   - Skip synthesis entirely and return raw data
+type SynthesisHook interface {
+	// Synthesize transforms action results into a user-friendly response.
+	//
+	// Return values:
+	//   - Non-empty string: Use this as the final response (skips default synthesis)
+	//   - Empty string: Continue with default LLM-based synthesis
+	//
+	// The done callback MUST be called when complete.
+	Synthesize(ctx *SynthesisContext, done func(response string))
+}
+
+// SynthesisContext provides context for response synthesis.
+type SynthesisContext struct {
+	// RequestID for tracking
+	RequestID string
+
+	// UserQuestion is the original user message
+	UserQuestion string
+
+	// Action that was executed
+	Action string
+
+	// Result from the action execution
+	Result *ActionResult
+
+	// PluginData from earlier phases
+	PluginData map[string]interface{}
+
+	// Database provides read-only graph access if additional data is needed
+	Database DatabaseReader
+}
+
 // DatabaseEventHook is an optional interface for plugins that want to react to database events.
 // This enables plugins to monitor database activity without modifying the database layer.
 type DatabaseEventHook interface {
@@ -1114,9 +1155,20 @@ type DatabaseEventHook interface {
 
 // FullLifecycleHook is a convenience interface for plugins that implement all hooks.
 // Plugins are NOT required to implement this - they can pick and choose.
+//
+// Hook execution order:
+//  1. PrePromptHook   - Modify prompt context before SLM processes it
+//  2. PreExecuteHook  - Validate/modify params before action runs
+//  3. (Action executes)
+//  4. PostExecuteHook - Log, update state after action completes
+//  5. SynthesisHook   - Transform action results into user-friendly prose
+//  6. (Response sent to user)
+//
+// DatabaseEventHook runs asynchronously on database operations.
 type FullLifecycleHook interface {
 	PrePromptHook
 	PreExecuteHook
 	PostExecuteHook
+	SynthesisHook
 	DatabaseEventHook
 }
