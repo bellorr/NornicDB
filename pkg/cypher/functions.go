@@ -84,7 +84,19 @@ func isFunctionCall(expr, funcName string) bool {
 func (e *StorageExecutor) evaluateExpression(expr string, varName string, node *storage.Node) interface{} {
 	return e.evaluateExpressionWithContext(expr, map[string]*storage.Node{varName: node}, nil)
 }
+
+// evaluateExpressionWithPathContext evaluates an expression with full path context
+// This is needed for path functions like relationships(path) and nodes(path) that need
+// access to the full path data, not just individual nodes/relationships
+func (e *StorageExecutor) evaluateExpressionWithPathContext(expr string, pathCtx PathContext) interface{} {
+	return e.evaluateExpressionWithContextFull(expr, pathCtx.nodes, pathCtx.rels, pathCtx.paths, pathCtx.allPathEdges, pathCtx.allPathNodes, pathCtx.pathLength)
+}
+
 func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge) interface{} {
+	return e.evaluateExpressionWithContextFull(expr, nodes, rels, nil, nil, nil, 0)
+}
+
+func (e *StorageExecutor) evaluateExpressionWithContextFull(expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge, paths map[string]*PathResult, allPathEdges []*storage.Edge, allPathNodes []*storage.Node, pathLength int) interface{} {
 	expr = strings.TrimSpace(expr)
 	if expr == "" {
 		return nil
@@ -113,6 +125,135 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 			// Strip outer parentheses and re-evaluate
 			return e.evaluateExpressionWithContext(expr[1:len(expr)-1], nodes, rels)
 		}
+	}
+
+	// ========================================
+	// Array Indexing - handle expr[index] patterns
+	// ========================================
+	// This handles expressions like labels(n)[0], collect(...)[..10], etc.
+	if strings.HasSuffix(expr, "]") {
+		// Find the matching opening bracket
+		bracketEnd := len(expr) - 1
+		depth := 1
+		bracketStart := -1
+		for i := bracketEnd - 1; i >= 0; i-- {
+			if expr[i] == ']' {
+				depth++
+			} else if expr[i] == '[' {
+				depth--
+				if depth == 0 {
+					bracketStart = i
+					break
+				}
+			}
+		}
+		if bracketStart > 0 {
+			baseExpr := expr[:bracketStart]
+			indexExpr := expr[bracketStart+1 : bracketEnd]
+
+			// Skip if this is an IN expression (e.g., "1 IN [1, 2, 3]")
+			// The base would be "1 IN " which ends with " IN "
+			baseUpper := strings.ToUpper(strings.TrimSpace(baseExpr))
+			if strings.HasSuffix(baseUpper, " IN") || strings.HasSuffix(baseUpper, " NOT IN") {
+				// This is an IN expression, not array indexing - skip this section
+				goto skipArrayIndexing
+			}
+
+			// Check for slice notation [..N] or [N..M] or [N..]
+			if strings.Contains(indexExpr, "..") {
+				// This is a slice, not an index
+				baseVal := e.evaluateExpressionWithContext(baseExpr, nodes, rels)
+				if list, ok := baseVal.([]interface{}); ok {
+					parts := strings.SplitN(indexExpr, "..", 2)
+					startIdx := int64(0)
+					endIdx := int64(len(list))
+
+					if parts[0] != "" {
+						startIdx, _ = strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64)
+					}
+					if len(parts) > 1 && parts[1] != "" {
+						endIdx, _ = strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
+					}
+
+					// Handle negative indices
+					if startIdx < 0 {
+						startIdx = int64(len(list)) + startIdx
+					}
+					if endIdx < 0 {
+						endIdx = int64(len(list)) + endIdx
+					}
+					// Clamp
+					if startIdx < 0 {
+						startIdx = 0
+					}
+					if endIdx > int64(len(list)) {
+						endIdx = int64(len(list))
+					}
+					if startIdx >= endIdx {
+						return []interface{}{}
+					}
+					return list[startIdx:endIdx]
+				}
+				return nil
+			}
+
+			// Single index access [N]
+			baseVal := e.evaluateExpressionWithContext(baseExpr, nodes, rels)
+			if baseVal == nil {
+				return nil
+			}
+
+			// Evaluate the index
+			index := e.evaluateExpressionWithContext(indexExpr, nodes, rels)
+			var idx int64
+			switch v := index.(type) {
+			case int64:
+				idx = v
+			case int:
+				idx = int64(v)
+			case float64:
+				idx = int64(v)
+			case string:
+				// Try to parse as number
+				idx, _ = strconv.ParseInt(v, 10, 64)
+			}
+
+			// Apply the index to the base value
+			switch list := baseVal.(type) {
+			case []interface{}:
+				if idx < 0 {
+					idx = int64(len(list)) + idx
+				}
+				if idx >= 0 && idx < int64(len(list)) {
+					return list[idx]
+				}
+				return nil
+			case []string:
+				if idx < 0 {
+					idx = int64(len(list)) + idx
+				}
+				if idx >= 0 && idx < int64(len(list)) {
+					return list[idx]
+				}
+				return nil
+			case string:
+				if idx < 0 {
+					idx = int64(len(list)) + idx
+				}
+				if idx >= 0 && idx < int64(len(list)) {
+					return string(list[idx])
+				}
+				return nil
+			}
+		}
+	}
+skipArrayIndexing:
+
+	// ========================================
+	// Map Literals - handle { key: value, ... } patterns
+	// ========================================
+	if strings.HasPrefix(expr, "{") && strings.HasSuffix(expr, "}") {
+		return e.evaluateMapLiteralFull(expr, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
 	}
 
 	// ========================================
@@ -184,6 +325,13 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 		if rel, ok := rels[inner]; ok {
 			return rel.Type
 		}
+		// Also handle the case where inner is a map representation (from list comprehension)
+		innerVal := e.evaluateExpressionWithContextFull(inner, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
+		if mapVal, ok := innerVal.(map[string]interface{}); ok {
+			if relType, ok := mapVal["type"]; ok {
+				return relType
+			}
+		}
 		return nil
 	}
 
@@ -248,10 +396,27 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 		return int64(0)
 	}
 
-	// length(path) - same as size for compatibility
+	// length(path) - same as size for compatibility, with special handling for paths
 	if matchFuncStartAndSuffix(expr, "length") {
 		inner := extractFuncArgs(expr, "length")
-		innerVal := e.evaluateExpressionWithContext(inner, nodes, rels)
+
+		// Check if this is a path variable - use the path length from context
+		if paths != nil {
+			if pathResult, ok := paths[inner]; ok && pathResult != nil {
+				return int64(pathResult.Length)
+			}
+		}
+		// Also check if inner is a path variable and we have allPathEdges (variable-length patterns)
+		// For MATCH path = (a)-[*1..2]-(b), the path variable gives us the length
+		if pathLength > 0 {
+			// If pathLength is set and inner looks like a simple variable (no dots, no parens)
+			if !strings.Contains(inner, ".") && !strings.Contains(inner, "(") && !strings.Contains(inner, "[") {
+				// This might be a path variable reference, use stored pathLength
+				return int64(pathLength)
+			}
+		}
+
+		innerVal := e.evaluateExpressionWithContextFull(inner, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
 		switch v := innerVal.(type) {
 		case string:
 			return int64(len(v))
@@ -2365,7 +2530,25 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 	// nodes(path) - return list of nodes in a path
 	if matchFuncStartAndSuffix(expr, "nodes") {
 		inner := extractFuncArgs(expr, "nodes")
-		// For now, return nodes from node context
+		// First check if we have a full path by that variable name
+		if paths != nil {
+			if pathResult, ok := paths[inner]; ok && pathResult != nil {
+				var result []interface{}
+				for _, node := range pathResult.Nodes {
+					result = append(result, e.nodeToMap(node))
+				}
+				return result
+			}
+		}
+		// Then check allPathNodes (for variable-length patterns without explicit path variable)
+		if allPathNodes != nil && len(allPathNodes) > 0 {
+			var result []interface{}
+			for _, node := range allPathNodes {
+				result = append(result, e.nodeToMap(node))
+			}
+			return result
+		}
+		// Fallback: return single node from node context
 		if node, ok := nodes[inner]; ok {
 			return []interface{}{e.nodeToMap(node)}
 		}
@@ -2375,7 +2558,33 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 	// relationships(path) - return list of relationships in a path
 	if matchFuncStartAndSuffix(expr, "relationships") {
 		inner := extractFuncArgs(expr, "relationships")
-		// For now, return rels from rel context
+		// First check if we have a full path by that variable name
+		if paths != nil {
+			if pathResult, ok := paths[inner]; ok && pathResult != nil {
+				var result []interface{}
+				for _, edge := range pathResult.Relationships {
+					result = append(result, map[string]interface{}{
+						"_edgeId":    string(edge.ID),
+						"type":       edge.Type,
+						"properties": edge.Properties,
+					})
+				}
+				return result
+			}
+		}
+		// Then check allPathEdges (for variable-length patterns without explicit path variable)
+		if allPathEdges != nil && len(allPathEdges) > 0 {
+			var result []interface{}
+			for _, edge := range allPathEdges {
+				result = append(result, map[string]interface{}{
+					"_edgeId":    string(edge.ID),
+					"type":       edge.Type,
+					"properties": edge.Properties,
+				})
+			}
+			return result
+		}
+		// Fallback: return single relationship from rel context
 		if rel, ok := rels[inner]; ok {
 			return []interface{}{map[string]interface{}{
 				"_edgeId":    string(rel.ID),
@@ -3543,7 +3752,8 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 				listExpr := strings.TrimSpace(rest[:pipeIdx])
 				transform := strings.TrimSpace(rest[pipeIdx+3:])
 
-				list := e.evaluateExpressionWithContext(listExpr, nodes, rels)
+				// Use full context to properly evaluate path functions like relationships(path)
+				list := e.evaluateExpressionWithContextFull(listExpr, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
 				listVal, ok := list.([]interface{})
 				if !ok {
 					return []interface{}{}
@@ -3551,8 +3761,36 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 
 				result := make([]interface{}, len(listVal))
 				for i, item := range listVal {
+					// For simple function calls like type(r), handle the item directly
+					// instead of string replacement which breaks for map types
+					if matchFuncStartAndSuffix(transform, "type") {
+						// Extract type from relationship map
+						if mapItem, ok := item.(map[string]interface{}); ok {
+							if relType, ok := mapItem["type"]; ok {
+								result[i] = relType
+								continue
+							}
+						}
+						// Fallback: try to get type from storage.Edge
+						if edge, ok := item.(*storage.Edge); ok {
+							result[i] = edge.Type
+							continue
+						}
+					}
+
+					if matchFuncStartAndSuffix(transform, "id") {
+						// Extract id from relationship map
+						if mapItem, ok := item.(map[string]interface{}); ok {
+							if id, ok := mapItem["_edgeId"]; ok {
+								result[i] = id
+								continue
+							}
+						}
+					}
+
+					// Fallback to string replacement (may not work for complex types)
 					transformWithVal := strings.ReplaceAll(transform, varName, fmt.Sprintf("%v", item))
-					result[i] = e.evaluateExpressionWithContext(transformWithVal, nodes, rels)
+					result[i] = e.evaluateExpressionWithContextFull(transformWithVal, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
 				}
 				return result
 			}
@@ -3738,18 +3976,73 @@ func (e *StorageExecutor) evaluateExpressionWithContext(expr string, nodes map[s
 	// ========================================
 	// IN Operator (value IN list)
 	// ========================================
+	// NOT IN must be checked before IN (because "NOT IN" contains " IN ")
+	if e.hasStringPredicate(expr, " NOT IN ") {
+		parts := e.splitByOperator(expr, " NOT IN ")
+		if len(parts) == 2 {
+			value := e.evaluateExpressionWithContext(parts[0], nodes, rels)
+			listVal := e.evaluateExpressionWithContext(parts[1], nodes, rels)
+
+			// Convert to []interface{} if needed
+			var list []interface{}
+			switch v := listVal.(type) {
+			case []interface{}:
+				list = v
+			case []string:
+				list = make([]interface{}, len(v))
+				for i, s := range v {
+					list[i] = s
+				}
+			case []int64:
+				list = make([]interface{}, len(v))
+				for i, n := range v {
+					list[i] = n
+				}
+			default:
+				// Not a list, return true (value is not in non-list)
+				return true
+			}
+
+			// Check if value is NOT in the list
+			for _, item := range list {
+				if e.compareEqual(value, item) {
+					return false
+				}
+			}
+			return true
+		}
+	}
 	if e.hasStringPredicate(expr, " IN ") {
 		parts := e.splitByOperator(expr, " IN ")
 		if len(parts) == 2 {
 			value := e.evaluateExpressionWithContext(parts[0], nodes, rels)
 			listVal := e.evaluateExpressionWithContext(parts[1], nodes, rels)
-			if list, ok := listVal.([]interface{}); ok {
-				for _, item := range list {
-					if e.compareEqual(value, item) {
-						return true
-					}
+
+			// Convert to []interface{} if needed
+			var list []interface{}
+			switch v := listVal.(type) {
+			case []interface{}:
+				list = v
+			case []string:
+				list = make([]interface{}, len(v))
+				for i, s := range v {
+					list[i] = s
 				}
+			case []int64:
+				list = make([]interface{}, len(v))
+				for i, n := range v {
+					list[i] = n
+				}
+			default:
+				// Not a list, return false
 				return false
+			}
+
+			// Check if value is in the list
+			for _, item := range list {
+				if e.compareEqual(value, item) {
+					return true
+				}
 			}
 			return false
 		}
@@ -4079,3 +4372,96 @@ func callPluginHandler(handler interface{}, args []interface{}) (interface{}, er
 }
 
 // NOTE: Logical, Comparison, and Arithmetic operators moved to operators.go
+
+// evaluateMapLiteral parses and evaluates a map literal like { key: value, ... }
+// where values can be expressions that reference variables in context.
+func (e *StorageExecutor) evaluateMapLiteral(expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge) map[string]interface{} {
+	return e.evaluateMapLiteralFull(expr, nodes, rels, nil, nil, nil, 0)
+}
+
+// evaluateMapLiteralFull parses and evaluates a map literal with full path context
+func (e *StorageExecutor) evaluateMapLiteralFull(expr string, nodes map[string]*storage.Node, rels map[string]*storage.Edge, paths map[string]*PathResult, allPathEdges []*storage.Edge, allPathNodes []*storage.Node, pathLength int) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	expr = strings.TrimSpace(expr)
+	if !strings.HasPrefix(expr, "{") || !strings.HasSuffix(expr, "}") {
+		return result
+	}
+
+	inner := strings.TrimSpace(expr[1 : len(expr)-1])
+	if inner == "" {
+		return result
+	}
+
+	// Split by commas, respecting nesting
+	pairs := e.splitMapPairsRespectingNesting(inner)
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		// Find the first colon (key: value)
+		colonIdx := strings.Index(pair, ":")
+		if colonIdx == -1 {
+			continue
+		}
+
+		key := strings.TrimSpace(pair[:colonIdx])
+		valueExpr := strings.TrimSpace(pair[colonIdx+1:])
+
+		// Evaluate the value expression in context with full path info
+		value := e.evaluateExpressionWithContextFull(valueExpr, nodes, rels, paths, allPathEdges, allPathNodes, pathLength)
+		result[key] = value
+	}
+
+	return result
+}
+
+// splitMapPairsRespectingNesting splits map literal pairs by commas, respecting brackets and quotes.
+func (e *StorageExecutor) splitMapPairsRespectingNesting(s string) []string {
+	var result []string
+	var current strings.Builder
+	depth := 0
+	inQuote := false
+	quoteChar := rune(0)
+
+	for _, c := range s {
+		if inQuote {
+			current.WriteRune(c)
+			if c == quoteChar {
+				inQuote = false
+			}
+			continue
+		}
+
+		switch c {
+		case '"', '\'':
+			inQuote = true
+			quoteChar = c
+			current.WriteRune(c)
+		case '{', '[', '(':
+			depth++
+			current.WriteRune(c)
+		case '}', ']', ')':
+			depth--
+			current.WriteRune(c)
+		case ',':
+			if depth == 0 {
+				result = append(result, current.String())
+				current.Reset()
+			} else {
+				current.WriteRune(c)
+			}
+		default:
+			current.WriteRune(c)
+		}
+	}
+
+	if current.Len() > 0 {
+		result = append(result, current.String())
+	}
+
+	return result
+}

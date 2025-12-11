@@ -1130,33 +1130,51 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			combinedNodeVars[k] = v
 		}
 
+		// TWO-PASS APPROACH: Create nodes first, then relationships
+		// This ensures that nodes created in the same CREATE clause are available
+		// when processing relationships that reference them.
+
+		// Collect all patterns from all clauses
+		var allNodePatterns []string
+		var allRelPatterns []string
+
 		for _, clause := range createClauses {
 			clause = strings.TrimSpace(clause)
 			if clause == "" {
 				continue
 			}
 
-			// Check if this is a relationship pattern or node pattern
-			// Use string-literal-aware checks to avoid matching arrows inside content strings
-			if containsOutsideStrings(clause, "->") || containsOutsideStrings(clause, "<-") || containsOutsideStrings(clause, "]-") {
-				// Relationship pattern: (var)-[:TYPE]->(var)
-				err := e.processCreateRelationship(clause, combinedNodeVars, edgeVars, result)
-				if err != nil {
-					return nil, err
+			// Split the clause into individual patterns (respecting nesting)
+			patterns := e.splitCreatePatterns(clause)
+
+			for _, pat := range patterns {
+				pat = strings.TrimSpace(pat)
+				if pat == "" {
+					continue
 				}
-			} else {
-				// Node pattern: (var:Label {props})
-				nodePatterns := e.splitNodePatterns(clause)
-				for _, np := range nodePatterns {
-					np = strings.TrimSpace(np)
-					if np == "" {
-						continue
-					}
-					err := e.processCreateNode(np, combinedNodeVars, result)
-					if err != nil {
-						return nil, err
-					}
+
+				// Check if this individual pattern is a relationship or node
+				if containsOutsideStrings(pat, "->") || containsOutsideStrings(pat, "<-") || containsOutsideStrings(pat, "]-") {
+					allRelPatterns = append(allRelPatterns, pat)
+				} else {
+					allNodePatterns = append(allNodePatterns, pat)
 				}
+			}
+		}
+
+		// PASS 1: Create all nodes first
+		for _, np := range allNodePatterns {
+			err := e.processCreateNode(np, combinedNodeVars, result)
+			if err != nil {
+				return nil, err
+			}
+		}
+
+		// PASS 2: Create all relationships (now nodes are available)
+		for _, rp := range allRelPatterns {
+			err := e.processCreateRelationship(rp, combinedNodeVars, edgeVars, result)
+			if err != nil {
+				return nil, err
 			}
 		}
 

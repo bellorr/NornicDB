@@ -577,14 +577,19 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 						result.Rows[0][i] = *max
 					}
 				case strings.HasPrefix(upperExpr, "COLLECT("):
-					inner := item.expr[8 : len(item.expr)-1]
+					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
 					collected := make([]interface{}, 0, len(items))
 					for _, it := range items {
 						if inner == variable {
 							collected = append(collected, it)
 						}
 					}
-					result.Rows[0][i] = collected
+					// Apply suffix (e.g., [..10] for slicing) if present
+					if suffix != "" {
+						result.Rows[0][i] = e.applyArraySuffix(collected, suffix)
+					} else {
+						result.Rows[0][i] = collected
+					}
 				}
 			}
 			return result, nil
@@ -1407,12 +1412,17 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 			row[i] = sum
 
 		case strings.HasPrefix(upperExpr, "COLLECT(DISTINCT "):
-			inner := item.expr[17 : len(item.expr)-1]
-			inner = strings.TrimSpace(inner)
-			seen := make(map[interface{}]bool)
+			// COLLECT(DISTINCT expression) - may have suffix like [..10]
+			inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
+			// Skip "DISTINCT " prefix
+			if strings.HasPrefix(strings.ToUpper(inner), "DISTINCT ") {
+				inner = strings.TrimSpace(inner[9:])
+			}
+			seen := make(map[string]bool) // Use string key for map comparison
 			var collected []interface{}
 
-			if strings.Contains(inner, ".") {
+			// Check if inner is simple property access or general expression
+			if strings.Contains(inner, ".") && !strings.HasPrefix(inner, "{") {
 				parts := strings.SplitN(inner, ".", 2)
 				varName := strings.TrimSpace(parts[0])
 				propName := strings.TrimSpace(parts[1])
@@ -1426,22 +1436,52 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 					}
 					if node != nil {
 						if val, ok := node.Properties[propName]; ok {
-							if !seen[val] {
-								seen[val] = true
+							key := fmt.Sprintf("%v", val)
+							if !seen[key] {
+								seen[key] = true
 								collected = append(collected, val)
 							}
 						}
 					}
 				}
+			} else {
+				// General expression (e.g., map literal): COLLECT(DISTINCT { key: value })
+				for _, r := range rows {
+					nodeCtx := make(map[string]*storage.Node)
+					relCtx := make(map[string]*storage.Edge)
+					if r.initialNode != nil {
+						nodeCtx[sourceVar] = r.initialNode
+					}
+					if r.relatedNode != nil {
+						nodeCtx[targetVar] = r.relatedNode
+					}
+					if r.relationship != nil {
+						relCtx["r"] = r.relationship
+					}
+					val := e.evaluateExpressionWithContext(inner, nodeCtx, relCtx)
+					if val != nil {
+						key := fmt.Sprintf("%v", val)
+						if !seen[key] {
+							seen[key] = true
+							collected = append(collected, val)
+						}
+					}
+				}
 			}
-			row[i] = collected
+			// Apply suffix (e.g., [..10] for slicing) if present
+			if suffix != "" {
+				row[i] = e.applyArraySuffix(collected, suffix)
+			} else {
+				row[i] = collected
+			}
 
 		case strings.HasPrefix(upperExpr, "COLLECT("):
-			inner := item.expr[8 : len(item.expr)-1]
-			inner = strings.TrimSpace(inner)
+			// COLLECT(expression) - may have suffix like [..10]
+			inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
 			var collected []interface{}
 
-			if strings.Contains(inner, ".") {
+			// Check if inner is simple property access or general expression
+			if strings.Contains(inner, ".") && !strings.HasPrefix(inner, "{") {
 				parts := strings.SplitN(inner, ".", 2)
 				varName := strings.TrimSpace(parts[0])
 				propName := strings.TrimSpace(parts[1])
@@ -1459,8 +1499,32 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 						}
 					}
 				}
+			} else {
+				// General expression (e.g., map literal): COLLECT({ key: value })
+				for _, r := range rows {
+					nodeCtx := make(map[string]*storage.Node)
+					relCtx := make(map[string]*storage.Edge)
+					if r.initialNode != nil {
+						nodeCtx[sourceVar] = r.initialNode
+					}
+					if r.relatedNode != nil {
+						nodeCtx[targetVar] = r.relatedNode
+					}
+					if r.relationship != nil {
+						relCtx["r"] = r.relationship
+					}
+					val := e.evaluateExpressionWithContext(inner, nodeCtx, relCtx)
+					if val != nil {
+						collected = append(collected, val)
+					}
+				}
 			}
-			row[i] = collected
+			// Apply suffix (e.g., [..10] for slicing) if present
+			if suffix != "" {
+				row[i] = e.applyArraySuffix(collected, suffix)
+			} else {
+				row[i] = collected
+			}
 
 		default:
 			// Check for arithmetic expressions: SUM(...) + SUM(...)
@@ -1493,6 +1557,25 @@ func (e *StorageExecutor) processWithAggregation(rows []joinedRow, sourceVar, ta
 				}
 
 				row[i] = sum
+			} else if strings.Contains(item.expr, ".") {
+				// Handle simple property access: seed.name, connected.property, etc.
+				parts := strings.SplitN(item.expr, ".", 2)
+				varName := strings.TrimSpace(parts[0])
+				propName := strings.TrimSpace(parts[1])
+
+				// Get value from first row (for aggregated queries, all rows have the same source node)
+				for _, r := range rows {
+					var node *storage.Node
+					if strings.EqualFold(varName, sourceVar) {
+						node = r.initialNode
+					} else if strings.EqualFold(varName, targetVar) {
+						node = r.relatedNode
+					}
+					if node != nil {
+						row[i] = node.Properties[propName]
+						break // Use first non-nil value
+					}
+				}
 			} else {
 				row[i] = nil
 			}

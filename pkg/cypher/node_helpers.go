@@ -52,6 +52,7 @@
 package cypher
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -87,13 +88,20 @@ func (e *StorageExecutor) nodeToMap(node *storage.Node) map[string]interface{} {
 		"labels":  node.Labels,
 	}
 
-	// Add properties at top level for Neo4j compatibility
+	// Build properties map (excluding internal properties)
+	properties := make(map[string]interface{})
 	for k, v := range node.Properties {
 		if e.isInternalProperty(k) {
 			continue
 		}
+		properties[k] = v
+	}
+
+	// Add properties both at top level (for Neo4j compatibility) and nested (for standard graph format)
+	for k, v := range properties {
 		result[k] = v
 	}
+	result["properties"] = properties
 
 	// If no user "id" property, use storage ID for backward compatibility
 	if _, hasUserID := result["id"]; !hasUserID {
@@ -290,4 +298,73 @@ func (e *StorageExecutor) extractLabels(pattern string) []string {
 		}
 	}
 	return labels
+}
+
+// applyArraySuffix applies an array suffix operation (like [..10] or [5]) to a collected list.
+// This handles slicing and indexing operations on aggregation results.
+//
+// # Parameters
+//   - collected: the list to apply the suffix to
+//   - suffix: the suffix string (e.g., "[..10]", "[5]", "[2..5]")
+//
+// # Returns
+//   - The sliced or indexed result
+func (e *StorageExecutor) applyArraySuffix(collected []interface{}, suffix string) interface{} {
+	suffix = strings.TrimSpace(suffix)
+	if suffix == "" || !strings.HasPrefix(suffix, "[") || !strings.HasSuffix(suffix, "]") {
+		return collected
+	}
+
+	// Extract the index/slice expression inside [ ]
+	indexExpr := suffix[1 : len(suffix)-1]
+
+	// Check for slice notation [..N] or [N..M] or [N..]
+	if strings.Contains(indexExpr, "..") {
+		parts := strings.SplitN(indexExpr, "..", 2)
+		startIdx := int64(0)
+		endIdx := int64(len(collected))
+
+		if parts[0] != "" {
+			if n, err := strconv.ParseInt(strings.TrimSpace(parts[0]), 10, 64); err == nil {
+				startIdx = n
+			}
+		}
+		if len(parts) > 1 && parts[1] != "" {
+			if n, err := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64); err == nil {
+				endIdx = n
+			}
+		}
+
+		// Handle negative indices
+		if startIdx < 0 {
+			startIdx = int64(len(collected)) + startIdx
+		}
+		if endIdx < 0 {
+			endIdx = int64(len(collected)) + endIdx
+		}
+		// Clamp
+		if startIdx < 0 {
+			startIdx = 0
+		}
+		if endIdx > int64(len(collected)) {
+			endIdx = int64(len(collected))
+		}
+		if startIdx >= endIdx {
+			return []interface{}{}
+		}
+		return collected[startIdx:endIdx]
+	}
+
+	// Single index access [N]
+	if idx, err := strconv.ParseInt(strings.TrimSpace(indexExpr), 10, 64); err == nil {
+		if idx < 0 {
+			idx = int64(len(collected)) + idx
+		}
+		if idx >= 0 && idx < int64(len(collected)) {
+			return collected[idx]
+		}
+		return nil
+	}
+
+	return collected
 }

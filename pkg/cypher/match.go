@@ -47,19 +47,40 @@ func isAggregateFuncName(expr, funcName string) bool {
 }
 
 // extractFuncInner extracts the inner expression from a function call (whitespace-tolerant)
-// e.g., "COUNT(n)" -> "n", "SUM (x.val)" -> "x.val"
+// e.g., "COUNT(n)" -> "n", "SUM (x.val)" -> "x.val", "collect({a:1})[..10]" -> "{a:1}"
 func extractFuncInner(expr string) string {
 	// Find opening paren (may have whitespace before it)
 	openIdx := strings.Index(expr, "(")
 	if openIdx < 0 {
 		return ""
 	}
-	// Find matching closing paren
-	closeIdx := strings.LastIndex(expr, ")")
-	if closeIdx <= openIdx {
-		return ""
+
+	// Find the MATCHING closing paren, not just the last one
+	// This properly handles cases like collect({...})[..10]
+	depth := 0
+	inQuote := false
+	quoteChar := rune(0)
+
+	for i := openIdx; i < len(expr); i++ {
+		ch := rune(expr[i])
+		switch {
+		case (ch == '\'' || ch == '"') && !inQuote:
+			inQuote = true
+			quoteChar = ch
+		case ch == quoteChar && inQuote:
+			inQuote = false
+			quoteChar = 0
+		case ch == '(' && !inQuote:
+			depth++
+		case ch == ')' && !inQuote:
+			depth--
+			if depth == 0 {
+				// Found the matching closing parenthesis
+				return strings.TrimSpace(expr[openIdx+1 : i])
+			}
+		}
 	}
-	return strings.TrimSpace(expr[openIdx+1 : closeIdx])
+	return ""
 }
 
 // compareForSort compares two values for sorting, returns true if a < b
@@ -264,7 +285,22 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		if whereIdx > 0 {
 			whereClause = strings.TrimSpace(cypher[whereIdx+5 : returnIdx])
 		}
-		result, err := e.executeMatchWithRelationships(matchPart, whereClause, returnItems)
+
+		// Extract path variable if pattern has assignment: path = (a)-[r]-(b)
+		pathVariable := ""
+		patternForParsing := matchPart
+		if eqIdx := strings.Index(matchPart, "="); eqIdx > 0 {
+			// Check if this is a path assignment (not a property comparison)
+			beforeEq := strings.TrimSpace(matchPart[:eqIdx])
+			afterEq := strings.TrimSpace(matchPart[eqIdx+1:])
+			// Path variable should be a simple identifier, and after = should start with (
+			if !strings.Contains(beforeEq, " ") && !strings.Contains(beforeEq, "(") && strings.HasPrefix(afterEq, "(") {
+				pathVariable = beforeEq
+				patternForParsing = afterEq
+			}
+		}
+
+		result, err := e.executeMatchWithRelationshipsWithPath(patternForParsing, whereClause, returnItems, pathVariable)
 		if err != nil {
 			return nil, err
 		}
@@ -1023,16 +1059,38 @@ func (e *StorageExecutor) executeAggregationSingleGroup(nodes []*storage.Node, v
 				row[i] = nil
 			}
 
-		// Handle COLLECT(DISTINCT n.property)
+		// Handle COLLECT(DISTINCT expression)
 		case strings.HasPrefix(upperExpr, "COLLECT(") && strings.Contains(upperExpr, "DISTINCT"):
+			// Extract the inner expression after "COLLECT(DISTINCT "
+			inner := item.expr[17 : len(item.expr)-1]
+			inner = strings.TrimSpace(inner)
+
 			propMatch := collectDistinctPropPattern.FindStringSubmatch(item.expr)
-			seen := make(map[interface{}]bool)
+			seen := make(map[string]bool) // Use string key for map comparison
 			collected := make([]interface{}, 0)
+
 			if len(propMatch) == 3 {
+				// Simple property access: COLLECT(DISTINCT n.property)
 				for _, node := range nodes {
 					if val, exists := node.Properties[propMatch[2]]; exists && val != nil {
-						if !seen[val] {
-							seen[val] = true
+						key := fmt.Sprintf("%v", val)
+						if !seen[key] {
+							seen[key] = true
+							collected = append(collected, val)
+						}
+					}
+				}
+			} else {
+				// General expression (e.g., map literal): COLLECT(DISTINCT { key: value })
+				for _, node := range nodes {
+					nodeCtx := map[string]*storage.Node{variable: node}
+					// Add connected node if this is a relationship traversal result
+					// The variable from the matched row should be accessible
+					val := e.evaluateExpressionWithContext(inner, nodeCtx, nil)
+					if val != nil {
+						key := fmt.Sprintf("%v", val)
+						if !seen[key] {
+							seen[key] = true
 							collected = append(collected, val)
 						}
 					}
@@ -1041,9 +1099,20 @@ func (e *StorageExecutor) executeAggregationSingleGroup(nodes []*storage.Node, v
 			row[i] = collected
 
 		case strings.HasPrefix(upperExpr, "COLLECT("):
+			// Use extractFuncArgsWithSuffix to properly handle cases like collect({...})[..10]
+			inner, suffix, ok := extractFuncArgsWithSuffix(item.expr, "collect")
+			if !ok {
+				// Fallback to old method
+				inner = item.expr[8 : len(item.expr)-1]
+				inner = strings.TrimSpace(inner)
+				suffix = ""
+			}
+
 			propMatch := collectPropPattern.FindStringSubmatch(item.expr)
 			collected := make([]interface{}, 0)
-			if len(propMatch) >= 2 {
+
+			if len(propMatch) >= 2 && (len(propMatch) < 3 || propMatch[2] != "") {
+				// Simple property or variable access: COLLECT(n) or COLLECT(n.property)
 				for _, node := range nodes {
 					if len(propMatch) == 3 && propMatch[2] != "" {
 						if val, exists := node.Properties[propMatch[2]]; exists {
@@ -1057,8 +1126,25 @@ func (e *StorageExecutor) executeAggregationSingleGroup(nodes []*storage.Node, v
 						})
 					}
 				}
+			} else {
+				// General expression (e.g., map literal): COLLECT({ key: value })
+				for _, node := range nodes {
+					nodeCtx := map[string]*storage.Node{variable: node}
+					val := e.evaluateExpressionWithContext(inner, nodeCtx, nil)
+					if val != nil {
+						collected = append(collected, val)
+					}
+				}
 			}
-			row[i] = collected
+
+			// Apply suffix (e.g., [..10] for slicing) if present
+			var result interface{} = collected
+			if suffix != "" {
+				// Wrap collected in a temporary expression for slicing
+				// The suffix is something like "[..10]"
+				result = e.applyArraySuffix(collected, suffix)
+			}
+			row[i] = result
 
 		default:
 			// Non-aggregate in aggregation query - return first value
@@ -1311,7 +1397,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 			keyValues := make(map[string]interface{})
 
 			for i, ge := range groupByExprs {
-				val := e.evaluateExpressionWithContext(ge.expr, pathCtx.nodes, pathCtx.rels)
+				val := e.evaluateExpressionWithPathContext(ge.expr, pathCtx)
 				keyParts[i] = fmt.Sprintf("%v", val)
 				keyValues[ge.alias] = val
 			}
@@ -1342,7 +1428,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 					seen := make(map[string]bool)
 					for _, p := range groupPaths {
 						pCtx := e.buildPathContext(p, matches)
-						val := e.evaluateExpressionWithContext(distinctInner, pCtx.nodes, pCtx.rels)
+						val := e.evaluateExpressionWithPathContext(distinctInner, pCtx)
 						if val != nil {
 							seen[fmt.Sprintf("%v", val)] = true
 						}
@@ -1356,7 +1442,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 						count := int64(0)
 						for _, p := range groupPaths {
 							pCtx := e.buildPathContext(p, matches)
-							val := e.evaluateExpressionWithContext(inner, pCtx.nodes, pCtx.rels)
+							val := e.evaluateExpressionWithPathContext(inner, pCtx)
 							if val != nil {
 								count++
 							}
@@ -1370,7 +1456,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 					hasFloat := false
 					for _, p := range groupPaths {
 						pCtx := e.buildPathContext(p, matches)
-						val := e.evaluateExpressionWithContext(inner, pCtx.nodes, pCtx.rels)
+						val := e.evaluateExpressionWithPathContext(inner, pCtx)
 						switch v := val.(type) {
 						case int64:
 							sumInt += v
@@ -1399,7 +1485,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 					count := 0
 					for _, p := range groupPaths {
 						pCtx := e.buildPathContext(p, matches)
-						val := e.evaluateExpressionWithContext(inner, pCtx.nodes, pCtx.rels)
+						val := e.evaluateExpressionWithPathContext(inner, pCtx)
 						if num, ok := toFloat64(val); ok {
 							sum += num
 							count++
@@ -1415,7 +1501,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 					var minVal interface{}
 					for _, p := range groupPaths {
 						pCtx := e.buildPathContext(p, matches)
-						val := e.evaluateExpressionWithContext(inner, pCtx.nodes, pCtx.rels)
+						val := e.evaluateExpressionWithPathContext(inner, pCtx)
 						if val != nil && (minVal == nil || e.compareOrderValues(val, minVal) < 0) {
 							minVal = val
 						}
@@ -1426,7 +1512,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 					var maxVal interface{}
 					for _, p := range groupPaths {
 						pCtx := e.buildPathContext(p, matches)
-						val := e.evaluateExpressionWithContext(inner, pCtx.nodes, pCtx.rels)
+						val := e.evaluateExpressionWithPathContext(inner, pCtx)
 						if val != nil && (maxVal == nil || e.compareOrderValues(val, maxVal) > 0) {
 							maxVal = val
 						}
@@ -1440,7 +1526,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 					var collected []interface{}
 					for _, p := range groupPaths {
 						pCtx := e.buildPathContext(p, matches)
-						val := e.evaluateExpressionWithContext(distinctInner, pCtx.nodes, pCtx.rels)
+						val := e.evaluateExpressionWithPathContext(distinctInner, pCtx)
 						key := fmt.Sprintf("%v", val)
 						if !seen[key] {
 							seen[key] = true
@@ -1453,7 +1539,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 					var collected []interface{}
 					for _, p := range groupPaths {
 						pCtx := e.buildPathContext(p, matches)
-						val := e.evaluateExpressionWithContext(inner, pCtx.nodes, pCtx.rels)
+						val := e.evaluateExpressionWithPathContext(inner, pCtx)
 						collected = append(collected, val)
 					}
 					values[ae.alias] = collected
@@ -1469,7 +1555,7 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 			values := make(map[string]interface{})
 
 			for _, wi := range parsedWithItems {
-				values[wi.alias] = e.evaluateExpressionWithContext(wi.expr, pathCtx.nodes, pathCtx.rels)
+				values[wi.alias] = e.evaluateExpressionWithPathContext(wi.expr, pathCtx)
 			}
 
 			computedRows = append(computedRows, computedRow{values: values})
@@ -1498,21 +1584,134 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 		}
 	}
 
-	// Build result rows
-	for _, row := range computedRows {
+	// Check if RETURN clause has aggregation functions
+	hasReturnAggregation := false
+	for _, item := range returnItems {
+		if containsAggregateFunc(item.expr) {
+			hasReturnAggregation = true
+			break
+		}
+	}
+
+	if hasReturnAggregation {
+		// RETURN clause has aggregation - need to aggregate all rows into one
+		// Identify group-by columns (non-aggregated) and aggregation expressions
 		resultRow := make([]interface{}, len(returnItems))
+
 		for i, item := range returnItems {
-			// Try alias first, then expression
-			if val, ok := row.values[item.expr]; ok {
-				resultRow[i] = val
-			} else if val, ok := row.values[item.alias]; ok {
-				resultRow[i] = val
+			if containsAggregateFunc(item.expr) {
+				// Handle aggregation functions
+				inner := extractFuncInner(item.expr)
+
+				if isAggregateFuncName(item.expr, "collect") {
+					// Handle COLLECT (with or without DISTINCT)
+					upperInner := strings.ToUpper(inner)
+					isDistinct := strings.HasPrefix(upperInner, "DISTINCT ")
+					collectExpr := inner
+					if isDistinct {
+						collectExpr = strings.TrimSpace(inner[9:])
+					}
+
+					seen := make(map[string]bool)
+					var collected []interface{}
+					for _, row := range computedRows {
+						val := e.evaluateExpressionFromValues(collectExpr, row.values)
+						if isDistinct {
+							key := fmt.Sprintf("%v", val)
+							if !seen[key] {
+								seen[key] = true
+								collected = append(collected, val)
+							}
+						} else {
+							collected = append(collected, val)
+						}
+					}
+					resultRow[i] = collected
+				} else if isAggregateFuncName(item.expr, "count") {
+					if inner == "*" {
+						resultRow[i] = int64(len(computedRows))
+					} else {
+						count := int64(0)
+						for _, row := range computedRows {
+							val := e.evaluateExpressionFromValues(inner, row.values)
+							if val != nil {
+								count++
+							}
+						}
+						resultRow[i] = count
+					}
+				} else if isAggregateFuncName(item.expr, "sum") {
+					sum := float64(0)
+					for _, row := range computedRows {
+						val := e.evaluateExpressionFromValues(inner, row.values)
+						if num, ok := toFloat64(val); ok {
+							sum += num
+						}
+					}
+					resultRow[i] = sum
+				} else if isAggregateFuncName(item.expr, "avg") {
+					sum := float64(0)
+					count := 0
+					for _, row := range computedRows {
+						val := e.evaluateExpressionFromValues(inner, row.values)
+						if num, ok := toFloat64(val); ok {
+							sum += num
+							count++
+						}
+					}
+					if count > 0 {
+						resultRow[i] = sum / float64(count)
+					}
+				} else if isAggregateFuncName(item.expr, "min") {
+					var minVal interface{}
+					for _, row := range computedRows {
+						val := e.evaluateExpressionFromValues(inner, row.values)
+						if val != nil && (minVal == nil || e.compareOrderValues(val, minVal) < 0) {
+							minVal = val
+						}
+					}
+					resultRow[i] = minVal
+				} else if isAggregateFuncName(item.expr, "max") {
+					var maxVal interface{}
+					for _, row := range computedRows {
+						val := e.evaluateExpressionFromValues(inner, row.values)
+						if val != nil && (maxVal == nil || e.compareOrderValues(val, maxVal) > 0) {
+							maxVal = val
+						}
+					}
+					resultRow[i] = maxVal
+				}
 			} else {
-				// Evaluate expression using computed values as context
-				resultRow[i] = e.evaluateExpressionFromValues(item.expr, row.values)
+				// Non-aggregated column - use value from first row
+				if len(computedRows) > 0 {
+					if val, ok := computedRows[0].values[item.expr]; ok {
+						resultRow[i] = val
+					} else if val, ok := computedRows[0].values[item.alias]; ok {
+						resultRow[i] = val
+					} else {
+						resultRow[i] = e.evaluateExpressionFromValues(item.expr, computedRows[0].values)
+					}
+				}
 			}
 		}
 		result.Rows = append(result.Rows, resultRow)
+	} else {
+		// No aggregation - Build result rows individually
+		for _, row := range computedRows {
+			resultRow := make([]interface{}, len(returnItems))
+			for i, item := range returnItems {
+				// Try alias first, then expression
+				if val, ok := row.values[item.expr]; ok {
+					resultRow[i] = val
+				} else if val, ok := row.values[item.alias]; ok {
+					resultRow[i] = val
+				} else {
+					// Evaluate expression using computed values as context
+					resultRow[i] = e.evaluateExpressionFromValues(item.expr, row.values)
+				}
+			}
+			result.Rows = append(result.Rows, resultRow)
+		}
 	}
 
 	// Apply ORDER BY
@@ -1604,13 +1803,94 @@ func (e *StorageExecutor) evaluateExpressionFromValues(expr string, values map[s
 		varName := expr[:idx]
 		propName := expr[idx+1:]
 		if val, ok := values[varName]; ok {
+			// Handle *storage.Node (direct node reference)
 			if node, ok := val.(*storage.Node); ok {
 				return node.Properties[propName]
+			}
+			// Handle map[string]interface{} (node converted to map)
+			if nodeMap, ok := val.(map[string]interface{}); ok {
+				// Check properties sub-map first
+				if props, ok := nodeMap["properties"].(map[string]interface{}); ok {
+					if propVal, ok := props[propName]; ok {
+						return propVal
+					}
+				}
+				// Check top-level map for the property
+				if propVal, ok := nodeMap[propName]; ok {
+					return propVal
+				}
+			}
+		}
+	}
+
+	// Handle map literal expressions {...}
+	if strings.HasPrefix(expr, "{") && strings.HasSuffix(expr, "}") {
+		return e.evaluateMapLiteralFromValues(expr, values)
+	}
+
+	// Handle function calls
+	if strings.Contains(expr, "(") && strings.Contains(expr, ")") {
+		// For labels(connected), we need to extract the node and get labels
+		if matchFuncStartAndSuffix(expr, "labels") {
+			inner := extractFuncArgs(expr, "labels")
+			if val, ok := values[inner]; ok {
+				if nodeMap, ok := val.(map[string]interface{}); ok {
+					if labels, ok := nodeMap["labels"]; ok {
+						return labels
+					}
+				}
+				if node, ok := val.(*storage.Node); ok {
+					result := make([]interface{}, len(node.Labels))
+					for i, label := range node.Labels {
+						result[i] = label
+					}
+					return result
+				}
 			}
 		}
 	}
 
 	return expr // Return as literal if not found
+}
+
+// evaluateMapLiteralFromValues evaluates a map literal using computed values
+func (e *StorageExecutor) evaluateMapLiteralFromValues(expr string, values map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+
+	expr = strings.TrimSpace(expr)
+	if !strings.HasPrefix(expr, "{") || !strings.HasSuffix(expr, "}") {
+		return result
+	}
+
+	inner := strings.TrimSpace(expr[1 : len(expr)-1])
+	if inner == "" {
+		return result
+	}
+
+	// Split by commas, respecting nesting
+	pairs := e.splitMapPairsRespectingNesting(inner)
+
+	for _, pair := range pairs {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+
+		// Find the first colon (key: value)
+		colonIdx := strings.Index(pair, ":")
+		if colonIdx == -1 {
+			continue
+		}
+
+		key := strings.TrimSpace(pair[:colonIdx])
+		valueExpr := strings.TrimSpace(pair[colonIdx+1:])
+
+		// Evaluate the value expression using the values map
+		value := e.evaluateExpressionFromValues(valueExpr, values)
+		result[key] = value
+	}
+
+	return result
 }
 
 // executeMatchWithClause handles MATCH ... WHERE ... WITH ... RETURN queries

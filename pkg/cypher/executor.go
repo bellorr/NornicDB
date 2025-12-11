@@ -985,6 +985,11 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		return e.executeCompoundMatchOptionalMatch(ctx, cypher)
 	}
 
+	// Compound queries: MATCH ... CALL {} ... (correlated subquery)
+	if startsWithMatch && hasSubqueryPattern(cypher, callSubqueryRe) {
+		return e.executeMatchWithCallSubquery(ctx, cypher)
+	}
+
 	switch {
 	case strings.HasPrefix(upperQuery, "OPTIONAL MATCH"):
 		return e.executeOptionalMatch(ctx, cypher)
@@ -2894,6 +2899,221 @@ func isCallSubquery(cypher string) bool {
 	return hasSubqueryPattern(cypher, callSubqueryRe)
 }
 
+// executeMatchWithCallSubquery handles MATCH ... WHERE ... CALL { WITH var ... } ... RETURN queries
+// This is a correlated subquery where the CALL {} references variables from the outer MATCH
+func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	// Substitute parameters
+	if params := getParamsFromContext(ctx); params != nil {
+		cypher = e.substituteParams(cypher, params)
+	}
+
+	// Find CALL position
+	callIdx := findKeywordIndex(cypher, "CALL")
+	if callIdx == -1 {
+		return nil, fmt.Errorf("CALL not found in query")
+	}
+
+	// Extract the outer MATCH + WHERE part (before CALL)
+	outerPart := strings.TrimSpace(cypher[:callIdx])
+
+	// Parse the outer MATCH to get seed nodes
+	// First, execute the outer query to get the seed nodes
+	// We need to add a RETURN clause to get the variables
+	matchIdx := findKeywordIndex(outerPart, "MATCH")
+	if matchIdx == -1 {
+		return nil, fmt.Errorf("MATCH not found before CALL")
+	}
+
+	// Extract the pattern and WHERE clause
+	matchPart := strings.TrimSpace(outerPart[matchIdx+5:]) // Skip "MATCH"
+	whereIdx := findKeywordIndex(matchPart, "WHERE")
+
+	var nodePatternStr string
+	var whereClause string
+	if whereIdx > 0 {
+		nodePatternStr = strings.TrimSpace(matchPart[:whereIdx])
+		whereClause = strings.TrimSpace(matchPart[whereIdx+5:]) // Skip "WHERE"
+	} else {
+		nodePatternStr = matchPart
+	}
+
+	// Parse node pattern to get variable name
+	nodePattern := e.parseNodePattern(nodePatternStr)
+	if nodePattern.variable == "" {
+		return nil, fmt.Errorf("could not parse node pattern: %s", nodePatternStr)
+	}
+
+	// Get matching nodes
+	var seedNodes []*storage.Node
+	var err error
+	if len(nodePattern.labels) > 0 {
+		seedNodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+	} else {
+		seedNodes, err = e.storage.AllNodes()
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get seed nodes: %w", err)
+	}
+
+	// Filter by properties
+	if len(nodePattern.properties) > 0 {
+		seedNodes = e.filterNodesByProperties(seedNodes, nodePattern.properties)
+	}
+
+	// Filter by WHERE clause
+	if whereClause != "" {
+		seedNodes = e.filterNodesByWhereClause(seedNodes, whereClause, nodePattern.variable)
+	}
+
+	if len(seedNodes) == 0 {
+		// No seed nodes found - return empty result
+		return &ExecuteResult{
+			Columns: []string{nodePattern.variable, "neighbors"},
+			Rows:    [][]interface{}{},
+		}, nil
+	}
+
+	// Parse the CALL {} subquery and what comes after
+	callPart := strings.TrimSpace(cypher[callIdx:])
+	subqueryBody, afterCall, _, _ := e.parseCallSubquery(callPart)
+	if subqueryBody == "" {
+		return nil, fmt.Errorf("invalid CALL {} subquery: empty body")
+	}
+
+	// Check if subquery starts with "WITH <variable>" - this imports outer context
+	upperBody := strings.ToUpper(strings.TrimSpace(subqueryBody))
+	if !strings.HasPrefix(upperBody, "WITH ") {
+		// No WITH clause - execute as standalone subquery for each seed
+		return e.executeCallSubquery(ctx, callPart)
+	}
+
+	// Find where the WITH clause ends (at MATCH or RETURN)
+	withEndIdx := findKeywordIndex(subqueryBody, "MATCH")
+	if withEndIdx == -1 {
+		withEndIdx = findKeywordIndex(subqueryBody, "RETURN")
+	}
+	if withEndIdx == -1 {
+		withEndIdx = len(subqueryBody)
+	}
+
+	// Execute the subquery for each seed node
+	var combinedResult *ExecuteResult
+
+	// Use a unique parameter name to avoid collision with user-provided parameters
+	seedIDParamName := "__internal_seed_id"
+
+	for _, seedNode := range seedNodes {
+		seedID := string(seedNode.ID)
+
+		// Transform the inner query to bind the seed variable properly
+		// Original: "WITH seed MATCH path = (seed)-[r*1..2]-(connected) RETURN seed, collect(...)"
+		// We need to replace the WITH clause with an explicit seed binding
+		// SECURITY: Use parameterized query to prevent Cypher injection
+
+		// Extract the rest after WITH clause (starts with MATCH or RETURN)
+		restOfSubquery := strings.TrimSpace(subqueryBody[withEndIdx:])
+
+		// Create parameters map with the seed ID (safe from injection)
+		subqueryParams := map[string]interface{}{
+			seedIDParamName: seedID,
+		}
+
+		// If the rest starts with MATCH, we need to handle the path pattern
+		// Replace "MATCH path = (seed)" with "MATCH path = (seed) WHERE id(seed) = $param"
+		if strings.HasPrefix(strings.ToUpper(restOfSubquery), "MATCH") {
+			// Find the existing WHERE or RETURN to know where to inject our filter
+			matchPart := restOfSubquery[5:] // Skip "MATCH"
+			returnIdx := findKeywordIndex(matchPart, "RETURN")
+
+			if returnIdx > 0 {
+				patternPart := strings.TrimSpace(matchPart[:returnIdx])
+				returnPart := matchPart[returnIdx:]
+				// Add WHERE id(seed) = $param before RETURN (parameterized - safe from injection)
+				substitutedBody := "MATCH " + patternPart + " WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " " + returnPart
+
+				// Execute the substituted subquery with parameters
+				innerResult, err := e.Execute(ctx, substitutedBody, subqueryParams)
+				if err != nil {
+					// Log but continue with other seeds
+					continue
+				}
+
+				if combinedResult == nil {
+					combinedResult = &ExecuteResult{
+						Columns: innerResult.Columns,
+						Rows:    make([][]interface{}, 0),
+					}
+				}
+
+				// Add rows from this seed's result
+				combinedResult.Rows = append(combinedResult.Rows, innerResult.Rows...)
+				continue
+			}
+		}
+
+		// Fallback: try the WITH chaining approach (parameterized - safe from injection)
+		substitutedBody := "MATCH (" + nodePattern.variable + ") WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " WITH " + nodePattern.variable + " " + restOfSubquery
+
+		// Execute the substituted subquery with parameters
+		innerResult, err := e.Execute(ctx, substitutedBody, subqueryParams)
+		if err != nil {
+			// Log but continue with other seeds
+			continue
+		}
+
+		if combinedResult == nil {
+			combinedResult = &ExecuteResult{
+				Columns: innerResult.Columns,
+				Rows:    make([][]interface{}, 0),
+			}
+		}
+
+		// Add rows from this seed's result, injecting the seed node for variables that reference it
+		for _, row := range innerResult.Rows {
+			newRow := make([]interface{}, len(row))
+			copy(newRow, row)
+
+			// Find columns that match the seed variable and inject the seed node
+			// The variable name from outer MATCH should match a column in the inner RETURN
+			seedVarLower := strings.ToLower(nodePattern.variable)
+			for colIdx, colName := range innerResult.Columns {
+				colNameLower := strings.ToLower(strings.TrimSpace(colName))
+				if colNameLower == seedVarLower && newRow[colIdx] == nil {
+					// Inject the seed node as a map representation
+					newRow[colIdx] = e.nodeToMap(seedNode)
+				}
+			}
+			combinedResult.Rows = append(combinedResult.Rows, newRow)
+		}
+
+		// If inner query returned 0 rows but we have a seed, create a row with just the seed
+		if len(innerResult.Rows) == 0 {
+			// Create a row with the seed node and empty neighbors
+			emptyRow := make([]interface{}, len(innerResult.Columns))
+			for colIdx, colName := range innerResult.Columns {
+				if strings.EqualFold(colName, nodePattern.variable) {
+					emptyRow[colIdx] = e.nodeToMap(seedNode)
+				}
+			}
+			combinedResult.Rows = append(combinedResult.Rows, emptyRow)
+		}
+	}
+
+	if combinedResult == nil {
+		combinedResult = &ExecuteResult{
+			Columns: []string{},
+			Rows:    [][]interface{}{},
+		}
+	}
+
+	// If there's something after CALL { }, process it (e.g., RETURN)
+	if afterCall != "" {
+		return e.processAfterCallSubquery(ctx, combinedResult, afterCall)
+	}
+
+	return combinedResult, nil
+}
+
 // executeCallSubquery executes a CALL {} subquery
 // Syntax: CALL { <subquery> } [IN TRANSACTIONS [OF n ROWS]]
 // The subquery can contain MATCH, CREATE, RETURN, UNION, etc.
@@ -3079,7 +3299,152 @@ func (e *StorageExecutor) processCallSubqueryReturn(innerResult *ExecuteResult, 
 		colMap[col] = i
 	}
 
-	// Project columns
+	// Check if RETURN clause has aggregation functions
+	hasAggregation := false
+	for _, part := range parts {
+		if containsAggregateFunc(part) {
+			hasAggregation = true
+			break
+		}
+	}
+
+	if hasAggregation {
+		// Handle aggregation - aggregate all rows into one
+		newColumns := make([]string, len(parts))
+		resultRow := make([]interface{}, len(parts))
+
+		for i, part := range parts {
+			part = strings.TrimSpace(part)
+
+			// Check for alias
+			alias := part
+			expr := part
+			upperPart := strings.ToUpper(part)
+			if asIdx := strings.Index(upperPart, " AS "); asIdx != -1 {
+				alias = strings.TrimSpace(part[asIdx+4:])
+				expr = strings.TrimSpace(part[:asIdx])
+			}
+
+			newColumns[i] = alias
+
+			if containsAggregateFunc(expr) {
+				// Handle aggregation functions
+				inner := extractFuncInner(expr)
+
+				if isAggregateFuncName(expr, "collect") {
+					// Handle COLLECT (with or without DISTINCT)
+					upperInner := strings.ToUpper(inner)
+					isDistinct := strings.HasPrefix(upperInner, "DISTINCT ")
+					collectExpr := inner
+					if isDistinct {
+						collectExpr = strings.TrimSpace(inner[9:])
+					}
+
+					seen := make(map[string]bool)
+					var collected []interface{}
+					for _, row := range innerResult.Rows {
+						// Build a values map from the row
+						values := make(map[string]interface{})
+						for j, col := range innerResult.Columns {
+							if j < len(row) {
+								values[col] = row[j]
+							}
+						}
+						val := e.evaluateExpressionFromValues(collectExpr, values)
+						if isDistinct {
+							key := fmt.Sprintf("%v", val)
+							if !seen[key] {
+								seen[key] = true
+								collected = append(collected, val)
+							}
+						} else {
+							collected = append(collected, val)
+						}
+					}
+					resultRow[i] = collected
+				} else if isAggregateFuncName(expr, "count") {
+					if inner == "*" {
+						resultRow[i] = int64(len(innerResult.Rows))
+					} else {
+						count := int64(0)
+						for _, row := range innerResult.Rows {
+							if idx, ok := colMap[inner]; ok && idx < len(row) && row[idx] != nil {
+								count++
+							}
+						}
+						resultRow[i] = count
+					}
+				} else if isAggregateFuncName(expr, "sum") {
+					sum := float64(0)
+					for _, row := range innerResult.Rows {
+						if idx, ok := colMap[inner]; ok && idx < len(row) {
+							if num, ok := toFloat64(row[idx]); ok {
+								sum += num
+							}
+						}
+					}
+					resultRow[i] = sum
+				} else if isAggregateFuncName(expr, "avg") {
+					sum := float64(0)
+					count := 0
+					for _, row := range innerResult.Rows {
+						if idx, ok := colMap[inner]; ok && idx < len(row) {
+							if num, ok := toFloat64(row[idx]); ok {
+								sum += num
+								count++
+							}
+						}
+					}
+					if count > 0 {
+						resultRow[i] = sum / float64(count)
+					}
+				} else if isAggregateFuncName(expr, "min") {
+					var minVal interface{}
+					for _, row := range innerResult.Rows {
+						if idx, ok := colMap[inner]; ok && idx < len(row) {
+							val := row[idx]
+							if val != nil && (minVal == nil || e.compareOrderValues(val, minVal) < 0) {
+								minVal = val
+							}
+						}
+					}
+					resultRow[i] = minVal
+				} else if isAggregateFuncName(expr, "max") {
+					var maxVal interface{}
+					for _, row := range innerResult.Rows {
+						if idx, ok := colMap[inner]; ok && idx < len(row) {
+							val := row[idx]
+							if val != nil && (maxVal == nil || e.compareOrderValues(val, maxVal) > 0) {
+								maxVal = val
+							}
+						}
+					}
+					resultRow[i] = maxVal
+				}
+			} else {
+				// Non-aggregated column - use value from first row
+				if len(innerResult.Rows) > 0 {
+					if idx, ok := colMap[expr]; ok && idx < len(innerResult.Rows[0]) {
+						resultRow[i] = innerResult.Rows[0][idx]
+					}
+				}
+			}
+		}
+
+		result := &ExecuteResult{
+			Columns: newColumns,
+			Rows:    [][]interface{}{resultRow},
+			Stats:   innerResult.Stats,
+		}
+
+		// Apply modifiers (ORDER BY, LIMIT, SKIP)
+		if modifierClause != "" {
+			return e.applyResultModifiers(result, modifierClause)
+		}
+		return result, nil
+	}
+
+	// No aggregation - Project columns
 	newColumns := make([]string, 0, len(parts))
 	colIndices := make([]int, 0, len(parts))
 

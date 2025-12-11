@@ -129,6 +129,11 @@ func (e *StorageExecutor) parseRelationshipPattern(pattern string) *Relationship
 
 // executeMatchWithRelationships handles MATCH queries with relationship patterns
 func (e *StorageExecutor) executeMatchWithRelationships(pattern string, whereClause string, returnItems []returnItem) (*ExecuteResult, error) {
+	return e.executeMatchWithRelationshipsWithPath(pattern, whereClause, returnItems, "")
+}
+
+// executeMatchWithRelationshipsWithPath handles MATCH queries with relationship patterns and optional path variable
+func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, whereClause string, returnItems []returnItem, pathVariable string) (*ExecuteResult, error) {
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
@@ -148,6 +153,11 @@ func (e *StorageExecutor) executeMatchWithRelationships(pattern string, whereCla
 	matches := e.parseTraversalPattern(pattern)
 	if matches == nil {
 		return result, fmt.Errorf("invalid traversal pattern: %s", pattern)
+	}
+
+	// Store the path variable for path functions (relationships(path), nodes(path), length(path))
+	if pathVariable != "" {
+		matches.PathVariable = pathVariable
 	}
 
 	// Execute traversal
@@ -199,23 +209,56 @@ func (e *StorageExecutor) executeMatchWithRelationships(pattern string, whereCla
 				upperExpr := upperExprs[i] // Use pre-computed
 
 				switch {
-				case strings.HasPrefix(upperExpr, "COUNT("):
+				case isAggregateFuncName(item.expr, "count"):
 					row[i] = int64(len(paths))
 
-				case strings.HasPrefix(upperExpr, "COLLECT("):
+				case isAggregateFuncName(item.expr, "collect") && strings.Contains(upperExpr, "DISTINCT"):
+					// COLLECT(DISTINCT expression) - may have suffix like [..10]
+					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
+					// Skip "DISTINCT " prefix
+					if strings.HasPrefix(strings.ToUpper(inner), "DISTINCT ") {
+						inner = strings.TrimSpace(inner[9:])
+					}
+					seen := make(map[string]bool)
 					collected := make([]interface{}, 0, len(paths))
-					inner := item.expr[8 : len(item.expr)-1]
 					for _, path := range paths {
 						context := e.buildPathContext(path, matches)
-						val := e.evaluateExpressionWithContext(inner, context.nodes, context.rels)
+						val := e.evaluateExpressionWithPathContext(inner, context)
+						if val != nil {
+							key := fmt.Sprintf("%v", val)
+							if !seen[key] {
+								seen[key] = true
+								collected = append(collected, val)
+							}
+						}
+					}
+					// Apply suffix (e.g., [..10] for slicing) if present
+					if suffix != "" {
+						row[i] = e.applyArraySuffix(collected, suffix)
+					} else {
+						row[i] = collected
+					}
+
+				case isAggregateFuncName(item.expr, "collect"):
+					// COLLECT(expression) - may have suffix like [..10]
+					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
+					collected := make([]interface{}, 0, len(paths))
+					for _, path := range paths {
+						context := e.buildPathContext(path, matches)
+						val := e.evaluateExpressionWithPathContext(inner, context)
 						collected = append(collected, val)
 					}
-					row[i] = collected
+					// Apply suffix (e.g., [..10] for slicing) if present
+					if suffix != "" {
+						row[i] = e.applyArraySuffix(collected, suffix)
+					} else {
+						row[i] = collected
+					}
 
 				default:
 					if len(paths) > 0 {
 						context := e.buildPathContext(paths[0], matches)
-						row[i] = e.evaluateExpressionWithContext(item.expr, context.nodes, context.rels)
+						row[i] = e.evaluateExpressionWithPathContext(item.expr, context)
 					} else {
 						row[i] = nil
 					}
@@ -236,7 +279,7 @@ func (e *StorageExecutor) executeMatchWithRelationships(pattern string, whereCla
 			// Build group key from non-aggregation columns
 			for i, item := range returnItems {
 				if !isAggFlags[i] { // Use pre-computed flag
-					val := e.evaluateExpressionWithContext(item.expr, context.nodes, context.rels)
+					val := e.evaluateExpressionWithPathContext(item.expr, context)
 					keyParts = append(keyParts, val)
 				}
 			}
@@ -265,23 +308,55 @@ func (e *StorageExecutor) executeMatchWithRelationships(pattern string, whereCla
 
 				// Aggregation function - aggregate over this group
 				switch {
-				case strings.HasPrefix(upperExpr, "COUNT("):
+				case isAggregateFuncName(item.expr, "count"):
 					row[i] = int64(len(groupPaths))
 
-				case strings.HasPrefix(upperExpr, "COLLECT("):
+				case isAggregateFuncName(item.expr, "collect") && strings.Contains(upperExpr, "DISTINCT"):
+					// COLLECT(DISTINCT expression) - may have suffix like [..10]
+					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
+					if strings.HasPrefix(strings.ToUpper(inner), "DISTINCT ") {
+						inner = strings.TrimSpace(inner[9:])
+					}
+					seen := make(map[string]bool)
 					collected := make([]interface{}, 0, len(groupPaths))
-					inner := item.expr[8 : len(item.expr)-1]
 					for _, path := range groupPaths {
 						context := e.buildPathContext(path, matches)
-						val := e.evaluateExpressionWithContext(inner, context.nodes, context.rels)
+						val := e.evaluateExpressionWithPathContext(inner, context)
+						if val != nil {
+							key := fmt.Sprintf("%v", val)
+							if !seen[key] {
+								seen[key] = true
+								collected = append(collected, val)
+							}
+						}
+					}
+					// Apply suffix (e.g., [..10] for slicing) if present
+					if suffix != "" {
+						row[i] = e.applyArraySuffix(collected, suffix)
+					} else {
+						row[i] = collected
+					}
+
+				case isAggregateFuncName(item.expr, "collect"):
+					// COLLECT(expression) - may have suffix like [..10]
+					inner, suffix, _ := extractFuncArgsWithSuffix(item.expr, "collect")
+					collected := make([]interface{}, 0, len(groupPaths))
+					for _, path := range groupPaths {
+						context := e.buildPathContext(path, matches)
+						val := e.evaluateExpressionWithPathContext(inner, context)
 						collected = append(collected, val)
 					}
-					row[i] = collected
+					// Apply suffix (e.g., [..10] for slicing) if present
+					if suffix != "" {
+						row[i] = e.applyArraySuffix(collected, suffix)
+					} else {
+						row[i] = collected
+					}
 
 				default:
 					if len(groupPaths) > 0 {
 						context := e.buildPathContext(groupPaths[0], matches)
-						row[i] = e.evaluateExpressionWithContext(item.expr, context.nodes, context.rels)
+						row[i] = e.evaluateExpressionWithPathContext(item.expr, context)
 					} else {
 						row[i] = nil
 					}
@@ -298,12 +373,22 @@ func (e *StorageExecutor) executeMatchWithRelationships(pattern string, whereCla
 		context := e.buildPathContext(path, matches)
 
 		for i, item := range returnItems {
-			row[i] = e.evaluateExpressionWithContext(item.expr, context.nodes, context.rels)
+			// Special handling for length(path) expressions
+			if isLengthPathExpr(item.expr) {
+				row[i] = int64(context.pathLength)
+			} else {
+				row[i] = e.evaluateExpressionWithPathContext(item.expr, context)
+			}
 		}
 		result.Rows = append(result.Rows, row)
 	}
 
 	return result, nil
+}
+
+// isLengthPathExpr checks if an expression is length(path) for some path variable
+func isLengthPathExpr(expr string) bool {
+	return matchFuncStartAndSuffix(expr, "length") && strings.Contains(strings.ToLower(expr), "path")
 }
 
 // TraversalMatch represents a parsed traversal pattern
@@ -315,6 +400,7 @@ type TraversalMatch struct {
 	IntermediateNodes []nodePatternInfo
 	Segments          []TraversalSegment // All segments in the chain
 	IsChained         bool               // True if this is a multi-segment pattern
+	PathVariable      string             // Variable name for path assignment (e.g., "path" in "path = (a)-[r]-(b)")
 }
 
 // TraversalSegment represents one segment in a chained pattern
@@ -1050,15 +1136,29 @@ func (e *StorageExecutor) matchesEndPattern(node *storage.Node, pattern *nodePat
 
 // PathContext holds node/relationship mappings for expression evaluation
 type PathContext struct {
-	nodes map[string]*storage.Node
-	rels  map[string]*storage.Edge
+	nodes        map[string]*storage.Node
+	rels         map[string]*storage.Edge
+	pathLength   int                    // Length of the path for length(path) function
+	paths        map[string]*PathResult // Full paths by variable name for relationships(path), nodes(path)
+	allPathEdges []*storage.Edge        // All edges in the path (for variable-length patterns)
+	allPathNodes []*storage.Node        // All nodes in the path
 }
 
 // buildPathContext creates a context for evaluating expressions over a path
 func (e *StorageExecutor) buildPathContext(path PathResult, match *TraversalMatch) PathContext {
 	ctx := PathContext{
-		nodes: make(map[string]*storage.Node),
-		rels:  make(map[string]*storage.Edge),
+		nodes:        make(map[string]*storage.Node),
+		rels:         make(map[string]*storage.Edge),
+		paths:        make(map[string]*PathResult),
+		pathLength:   path.Length,        // Store path length for length(path) function
+		allPathEdges: path.Relationships, // Store all edges for relationships(path)
+		allPathNodes: path.Nodes,         // Store all nodes for nodes(path)
+	}
+
+	// Map the path variable if present (for path functions like relationships(path), nodes(path))
+	if match.PathVariable != "" {
+		pathCopy := path // Make a copy to store pointer
+		ctx.paths[match.PathVariable] = &pathCopy
 	}
 
 	// Map start node
@@ -1359,7 +1459,7 @@ func (e *StorageExecutor) evaluateWhereOnPath(whereClause string, context PathCo
 			leftExpr := strings.TrimSpace(whereClause[:idx])
 			rightExpr := strings.TrimSpace(whereClause[idx+len(op):])
 
-			leftVal := e.evaluateExpressionWithContext(leftExpr, context.nodes, context.rels)
+			leftVal := e.evaluateExpressionWithPathContext(leftExpr, context)
 			rightVal := e.evaluatePathValue(rightExpr)
 
 			return e.compareValues(leftVal, rightVal, op)
@@ -1371,7 +1471,7 @@ func (e *StorageExecutor) evaluateWhereOnPath(whereClause string, context PathCo
 		leftExpr := strings.TrimSpace(whereClause[:idx])
 		rightExpr := strings.TrimSpace(whereClause[idx+10:])
 
-		leftVal := e.evaluateExpressionWithContext(leftExpr, context.nodes, context.rels)
+		leftVal := e.evaluateExpressionWithPathContext(leftExpr, context)
 		rightVal := e.evaluatePathValue(rightExpr)
 
 		leftStr, lok := leftVal.(string)
@@ -1385,12 +1485,12 @@ func (e *StorageExecutor) evaluateWhereOnPath(whereClause string, context PathCo
 	// Handle IS NULL / IS NOT NULL
 	if strings.HasSuffix(upperClause, " IS NOT NULL") {
 		expr := strings.TrimSpace(whereClause[:len(whereClause)-12])
-		val := e.evaluateExpressionWithContext(expr, context.nodes, context.rels)
+		val := e.evaluateExpressionWithPathContext(expr, context)
 		return val != nil
 	}
 	if strings.HasSuffix(upperClause, " IS NULL") {
 		expr := strings.TrimSpace(whereClause[:len(whereClause)-8])
-		val := e.evaluateExpressionWithContext(expr, context.nodes, context.rels)
+		val := e.evaluateExpressionWithPathContext(expr, context)
 		return val == nil
 	}
 
