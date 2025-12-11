@@ -2,7 +2,7 @@
 
 **Complete guide to semantic search in NornicDB**
 
-Last Updated: December 1, 2025
+Last Updated: December 11, 2025
 
 ---
 
@@ -10,11 +10,67 @@ Last Updated: December 1, 2025
 
 NornicDB provides production-ready vector search with:
 
+- **Automatic indexing** - All node embeddings are indexed automatically
 - **Cypher integration** - `db.index.vector.queryNodes` procedure
 - **String auto-embedding** - Pass text, get results (no pre-computation)
 - **GPU acceleration** - 10-100x speedup with Metal/CUDA/OpenCL
 - **Hybrid search** - RRF fusion of vector + BM25
 - **Caching** - 450,000x speedup for repeated queries
+
+---
+
+## How Vector Search Works
+
+### Two Types of Indexes
+
+NornicDB maintains **two complementary vector index systems**:
+
+#### 1. Internal Automatic Index (Zero Configuration)
+
+NornicDB automatically maintains an internal vector index that:
+- **Indexes all nodes** with embeddings in `node.Embedding`
+- **Updates automatically** when nodes are created, updated, or deleted
+- **Requires no setup** - works out of the box
+- **Used by** REST API (`/nornicdb/search`) and hybrid search
+
+```go
+// This happens automatically at database startup:
+db.searchService = search.NewServiceWithDimensions(storage, 1024)
+
+// Nodes are indexed automatically via storage callbacks:
+// OnNodeCreated → searchService.IndexNode(node)
+// OnNodeUpdated → searchService.IndexNode(node)  
+// OnNodeDeleted → searchService.RemoveNode(nodeID)
+```
+
+#### 2. User-Defined Cypher Indexes (Optional)
+
+Create named indexes for specific labels/properties:
+
+```cypher
+CALL db.index.vector.createNodeIndex(
+  'embeddings',      -- Your index name
+  'Document',        -- Node label to filter
+  'embedding',       -- Property name to search
+  1024,              -- Vector dimensions
+  'cosine'           -- Similarity: 'cosine', 'euclidean', or 'dot'
+)
+```
+
+**Key insight:** User-defined indexes are **metadata only** - they specify which nodes to search and where to find embeddings. The actual embeddings come from either:
+1. The specified property (e.g., `node.Properties["embedding"]`)
+2. **OR** the internal `node.Embedding` field (fallback)
+
+### Embedding Lookup Order
+
+When `db.index.vector.queryNodes` runs, it finds embeddings in this order:
+
+```
+1. If user index specifies a property → check node.Properties[property]
+2. If not found → fall back to node.Embedding (internal field)
+```
+
+This means **user-defined indexes can use auto-generated embeddings!**
 
 ---
 
@@ -92,12 +148,68 @@ SET n.embedding = [0.7, 0.2, 0.05, 0.05],
 ```cypher
 CALL db.index.vector.createNodeIndex(
   'embeddings',      -- index name
-  'Document',        -- node label
-  'embedding',       -- property name
+  'Document',        -- node label  
+  'embedding',       -- property name (or use 'embedding' to use node.Embedding)
   1024,              -- dimensions
-  'cosine'           -- similarity function: 'cosine' or 'euclidean'
+  'cosine'           -- similarity function: 'cosine', 'euclidean', or 'dot'
 )
 ```
+
+> 💡 **Tip:** If you set the property to `'embedding'` and nodes don't have that property, the search will automatically fall back to `node.Embedding` (the internal auto-generated embeddings).
+
+---
+
+## REST API (Hybrid Search)
+
+The REST API uses NornicDB's **internal automatic index** for combined vector + BM25 search:
+
+```bash
+# Hybrid search (vector + BM25 with RRF fusion)
+curl -X POST http://localhost:7474/nornicdb/search \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{
+    "query": "machine learning algorithms",
+    "limit": 10,
+    "labels": ["Document", "Memory"]
+  }'
+```
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "results": [
+    {
+      "id": "node-123",
+      "title": "ML Basics",
+      "score": 0.92,
+      "rrf_score": 0.034,
+      "vector_rank": 1,
+      "bm25_rank": 3
+    }
+  ],
+  "search_method": "hybrid",
+  "metrics": {
+    "vector_search_time_ms": 12,
+    "bm25_search_time_ms": 8,
+    "fusion_time_ms": 1
+  }
+}
+```
+
+---
+
+## When to Use Each Approach
+
+| Use Case | Recommended Approach |
+|----------|---------------------|
+| General semantic search | REST API `/nornicdb/search` |
+| Neo4j driver compatibility | `db.index.vector.queryNodes` with user index |
+| Filter by specific label | User-defined index with label filter |
+| Custom embedding property | User-defined index with property name |
+| Use auto-generated embeddings | Either (both support `node.Embedding`) |
+| Hybrid vector + keyword search | REST API (built-in RRF fusion) |
 
 ---
 

@@ -193,16 +193,48 @@ NornicDB weaves connections automatically:
 
 ### 🎯 Vector Search
 
-Native semantic search with GPU acceleration.
+Native semantic search with GPU acceleration. NornicDB automatically indexes all node embeddings - no manual index creation required.
+
+> 📖 **Deep Dive:** See [Vector Search Guide](docs/user-guides/vector-search.md) for internal index architecture, user-defined indexes, and the embedding lookup order.
+
+**Option 1: Vector Array (Neo4j Compatible)**
+
+Provide your own embeddings - works identically to Neo4j:
 
 ```cypher
-// Find similar memories
+// Query with a pre-computed embedding vector
 CALL db.index.vector.queryNodes(
-  'memory_embeddings',
-  10,
-  $queryVector
+  'embeddings',            // Index name (created via createNodeIndex)
+  10,                      // Number of results
+  [0.1, 0.2, 0.3, ...]     // Your query vector
 ) YIELD node, score
 RETURN node.content, score
+```
+
+**Option 2: String Query (NornicDB Enhanced)**
+
+Let NornicDB handle embedding generation automatically:
+
+```cypher
+// Query with natural language - NornicDB generates the embedding
+CALL db.index.vector.queryNodes(
+  'embeddings',              // Index name
+  10,                        // Number of results
+  'machine learning guide'   // Natural language query (auto-embedded)
+) YIELD node, score
+RETURN node.content, score
+```
+
+> 💡 **Note:** String queries require an embedder to be configured. When enabled, NornicDB automatically generates embeddings server-side using the configured model (Ollama, OpenAI, or local GGUF).
+
+**Option 3: REST API (Hybrid Search)**
+
+Use the REST endpoint for combined vector + BM25 search:
+
+```bash
+curl -X POST http://localhost:7474/nornicdb/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "limit": 10}'
 ```
 
 ### 🤖 Heimdall AI Assistant
@@ -229,7 +261,7 @@ See [Heimdall AI Assistant Guide](docs/user-guides/heimdall-ai-assistant.md) and
 
 ### 🧩 APOC Functions
 
-60+ built-in functions for text, math, collections, and more. Plus a plugin system for custom extensions.
+950+ built-in functions for text, math, collections, and more. Plus a plugin system for custom extensions.
 
 ```cypher
 // Text processing
