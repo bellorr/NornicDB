@@ -380,7 +380,12 @@ func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.
 	// Try to parse action command from response
 	log.Printf("[Bifrost] SLM response: %s", response)
 	finalResponse := response
-	if parsedAction := h.tryParseAction(response); parsedAction != nil {
+	parsedAction, actionError := h.tryParseAction(response)
+
+	// Handle action not found error
+	if actionError != "" {
+		finalResponse = actionError
+	} else if parsedAction != nil {
 		log.Printf("[Bifrost] Action detected: %s with params: %v", parsedAction.Action, parsedAction.Params)
 
 		// === Phase 4: PreExecute hooks ===
@@ -507,19 +512,20 @@ func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.
 
 // tryParseAction parses action JSON from SLM response.
 // Format: {"action": "heimdall.watcher.status", "params": {}}
-func (h *Handler) tryParseAction(response string) *ParsedAction {
+// Returns (parsedAction, errorMessage). If errorMessage is set, action is invalid.
+func (h *Handler) tryParseAction(response string) (*ParsedAction, string) {
 	response = strings.TrimSpace(response)
 
 	// Find JSON in response
 	start := strings.Index(response, "{")
 	if start == -1 {
 		log.Printf("[Bifrost] tryParseAction: no JSON start found")
-		return nil
+		return nil, ""
 	}
 	end := strings.LastIndex(response, "}")
 	if end == -1 || end <= start {
 		log.Printf("[Bifrost] tryParseAction: no JSON end found")
-		return nil
+		return nil, ""
 	}
 
 	jsonStr := response[start : end+1]
@@ -528,12 +534,12 @@ func (h *Handler) tryParseAction(response string) *ParsedAction {
 	var parsed ParsedAction
 	if err := json.Unmarshal([]byte(jsonStr), &parsed); err != nil {
 		log.Printf("[Bifrost] tryParseAction: JSON parse error: %v", err)
-		return nil
+		return nil, ""
 	}
 
 	if parsed.Action == "" {
 		log.Printf("[Bifrost] tryParseAction: no action field")
-		return nil
+		return nil, ""
 	}
 
 	log.Printf("[Bifrost] tryParseAction: looking up action: %s", parsed.Action)
@@ -542,11 +548,11 @@ func (h *Handler) tryParseAction(response string) *ParsedAction {
 
 	if _, ok := GetHeimdallAction(parsed.Action); !ok {
 		log.Printf("[Bifrost] tryParseAction: action NOT FOUND: %s", parsed.Action)
-		return nil
+		return nil, fmt.Sprintf("Sorry, I don't know how to perform the action '%s'. Try asking 'what can you do?' to see available actions.", parsed.Action)
 	}
 
 	log.Printf("[Bifrost] tryParseAction: action FOUND: %s", parsed.Action)
-	return &parsed
+	return &parsed, ""
 }
 
 // handleStreamingResponse uses Server-Sent Events (SSE) for streaming with lifecycle hooks.
@@ -655,7 +661,18 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 	response := fullResponse.String()
 	log.Printf("[Bifrost] Streaming complete, checking for action: %s", response)
 
-	if parsedAction := h.tryParseAction(response); parsedAction != nil {
+	parsedAction, actionError := h.tryParseAction(response)
+
+	// Handle action not found error
+	if actionError != "" {
+		fmt.Fprintf(w, "data: %s\n\n", actionError)
+		flusher.Flush()
+		fmt.Fprintf(w, "data: [DONE]\n\n")
+		flusher.Flush()
+		return
+	}
+
+	if parsedAction != nil {
 		log.Printf("[Bifrost] Action detected in stream: %s", parsedAction.Action)
 
 		// === Phase 4: PreExecute hooks ===

@@ -1040,7 +1040,36 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 			ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`,
 		},
 		heimdall.PromptExample{
+			UserSays:   "get status",
+			ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`,
+		},
+		// Database stats queries -> db_stats (node/edge counts, labels, etc.)
+		heimdall.PromptExample{
+			UserSays:   "how many nodes are there",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "how many nodes",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "what is the database status",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
 			UserSays:   "show database info",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "database statistics",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "how many relationships",
+			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "show node labels",
 			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
 		},
 		// K-means clustering and feature flag queries -> db_stats
