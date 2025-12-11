@@ -36,9 +36,11 @@
 package heimdall
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -306,6 +308,11 @@ func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 			Description: "Send a notification via Bifrost (params: type, title, message)",
 			Category:    "system",
 			Handler:     p.actionNotify,
+		},
+		"discover": {
+			Description: "Semantic search in the knowledge graph (params: query, types, limit, depth). Use this to find information by meaning, not exact keywords.",
+			Category:    "search",
+			Handler:     p.actionDiscover,
 		},
 	}
 }
@@ -663,6 +670,183 @@ func (p *WatcherPlugin) actionQuery(ctx heimdall.ActionContext) (*heimdall.Actio
 	}, nil
 }
 
+// actionDiscover performs semantic search in the knowledge graph.
+// This is the primary way to search for information by meaning.
+func (p *WatcherPlugin) actionDiscover(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
+	p.mu.Lock()
+	p.requests++
+	p.mu.Unlock()
+
+	query, ok := ctx.Params["query"].(string)
+	if !ok || query == "" {
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: "Missing required parameter: query",
+		}, nil
+	}
+
+	// Check if database supports discover
+	if ctx.Database == nil {
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: "Database access not available",
+		}, nil
+	}
+
+	// Get optional parameters
+	limit := 10
+	if l, ok := ctx.Params["limit"].(float64); ok && l > 0 {
+		limit = int(l)
+	}
+	if l, ok := ctx.Params["limit"].(int); ok && l > 0 {
+		limit = l
+	}
+
+	depth := 2 // Default: get related nodes up to 2 hops
+	if d, ok := ctx.Params["depth"].(float64); ok && d >= 1 && d <= 3 {
+		depth = int(d)
+	}
+	if d, ok := ctx.Params["depth"].(int); ok && d >= 1 && d <= 3 {
+		depth = d
+	}
+
+	var nodeTypes []string
+	if types, ok := ctx.Params["types"].([]interface{}); ok {
+		for _, t := range types {
+			if s, ok := t.(string); ok {
+				nodeTypes = append(nodeTypes, s)
+			}
+		}
+	}
+	if typeStr, ok := ctx.Params["type"].(string); ok && typeStr != "" {
+		nodeTypes = append(nodeTypes, typeStr)
+	}
+
+	// Call Discover
+	result, err := ctx.Database.Discover(ctx.Context, query, nodeTypes, limit, depth)
+	if err != nil {
+		p.mu.Lock()
+		p.errors++
+		p.mu.Unlock()
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: fmt.Sprintf("Search failed: %v", err),
+		}, nil
+	}
+
+	p.addEvent("info", fmt.Sprintf("Discover query: %s", query), map[string]interface{}{
+		"result_count": result.Total,
+		"method":       result.Method,
+		"depth":        depth,
+	})
+
+	// Format results nicely for the user
+	return p.formatDiscoverResults(result, query)
+}
+
+// formatDiscoverResults creates a nicely formatted response for discover results.
+// Tuned for readability - concise output without overwhelming detail.
+func (p *WatcherPlugin) formatDiscoverResults(result *heimdall.DiscoverResult, query string) (*heimdall.ActionResult, error) {
+	if result.Total == 0 {
+		return &heimdall.ActionResult{
+			Success: true,
+			Message: fmt.Sprintf("No results found for '%s'", query),
+			Data:    map[string]interface{}{"results": []interface{}{}, "total": 0},
+		}, nil
+	}
+
+	// Build formatted message - concise and readable
+	var msg strings.Builder
+	msg.WriteString(fmt.Sprintf("Found %d results for '%s':\n\n", result.Total, query))
+
+	// Show top 5 results only in message
+	showCount := 5
+	if result.Total < showCount {
+		showCount = result.Total
+	}
+
+	for i := 0; i < showCount; i++ {
+		r := result.Results[i]
+		// Result header with title
+		title := r.Title
+		if title == "" {
+			// Try to get name from properties
+			if name, ok := r.Properties["name"].(string); ok && name != "" {
+				title = name
+			} else {
+				title = r.ID
+			}
+		}
+		msg.WriteString(fmt.Sprintf("**%d. [%s] %s**\n", i+1, r.Type, title))
+
+		// Content preview - truncated
+		if r.ContentPreview != "" {
+			preview := r.ContentPreview
+			if len(preview) > 150 {
+				preview = preview[:150] + "..."
+			}
+			msg.WriteString(fmt.Sprintf("   %s\n", preview))
+		}
+
+		// Related summary - just count and key relationships
+		if len(r.Related) > 0 {
+			// Count by relationship type
+			relTypes := make(map[string]int)
+			for _, rel := range r.Related {
+				relTypes[rel.Relationship]++
+			}
+			// Show top 3 relationship types
+			msg.WriteString("   🔗 ")
+			shown := 0
+			for relType, count := range relTypes {
+				if shown > 0 {
+					msg.WriteString(", ")
+				}
+				if shown >= 3 {
+					msg.WriteString("...")
+					break
+				}
+				msg.WriteString(fmt.Sprintf("%d %s", count, relType))
+				shown++
+			}
+			msg.WriteString("\n")
+		}
+		msg.WriteString("\n")
+	}
+
+	if result.Total > showCount {
+		msg.WriteString(fmt.Sprintf("... and %d more results\n", result.Total-showCount))
+	}
+
+	// Build compact data payload - essential fields only
+	resultData := make([]map[string]interface{}, len(result.Results))
+	for i, r := range result.Results {
+		resultData[i] = map[string]interface{}{
+			"id":    r.ID,
+			"type":  r.Type,
+			"title": r.Title,
+		}
+		if r.ContentPreview != "" {
+			resultData[i]["preview"] = r.ContentPreview
+		}
+		// Only include count of related, not full details
+		if len(r.Related) > 0 {
+			resultData[i]["related_count"] = len(r.Related)
+		}
+	}
+
+	return &heimdall.ActionResult{
+		Success: true,
+		Message: msg.String(),
+		Data: map[string]interface{}{
+			"results": resultData,
+			"total":   result.Total,
+			"method":  result.Method,
+			"query":   query,
+		},
+	}, nil
+}
+
 // actionDBStats returns comprehensive database statistics.
 func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
 	p.mu.Lock()
@@ -743,11 +927,16 @@ func (p *WatcherPlugin) RecentEvents(limit int) []heimdall.SubsystemEvent {
 // PrePrompt is called before the prompt is sent to Heimdall.
 // The ActionPrompt is immutable (already set). We can add context here.
 //
-// This demonstrates:
-// - Adding custom examples to help the SLM
-// - Storing state in PluginData for later hooks
-// - Sending fire-and-forget notifications to the UI
-// - Cancelling requests when needed
+// === GRAPH-RAG IMPLEMENTATION ===
+// This hook automatically enriches every user query with relevant knowledge
+// from the graph database using semantic search with neighbor traversal.
+//
+// Flow:
+// 1. User asks "when is welcome season?"
+// 2. PrePrompt runs semantic search on the query
+// 3. Related nodes (neighbors) are retrieved
+// 4. Context is injected into AdditionalInstructions
+// 5. Heimdall now has the knowledge to answer
 func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -758,9 +947,13 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	}
 	log.Printf("[Watcher] PrePrompt: request=%s user_msg=%q", ctx.RequestID, msgPreview)
 
-	// === EXAMPLE: Send non-blocking notification to UI ===
-	// This is fire-and-forget - it won't block the request
-	ctx.NotifyInfo("Watcher", "Processing your request...")
+	// === GRAPH-RAG: Semantic search to enrich context ===
+	ctx.NotifyProgress("Graph-RAG", "Searching knowledge graph...")
+	ragContext := p.performGraphRAG(ctx)
+	if ragContext != "" {
+		ctx.AdditionalInstructions += ragContext
+		ctx.NotifyInfo("Graph-RAG", "Found relevant knowledge from graph")
+	}
 
 	// Add watcher-specific context to help Heimdall understand the system
 	var m runtime.MemStats
@@ -775,6 +968,7 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	ctx.PluginData["watcher_memory_mb"] = m.Alloc / 1024 / 1024
 
 	// Add status examples to help with natural language → action mapping
+	// NOTE: Domain-specific examples (welcome season, war rooms) go in domain plugins
 	ctx.Examples = append(ctx.Examples,
 		heimdall.PromptExample{
 			UserSays:   "check the system",
@@ -784,26 +978,123 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 			UserSays:   "show database info",
 			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
 		},
+		// Generic semantic search examples
+		heimdall.PromptExample{
+			UserSays:   "search for X",
+			ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "X"}}`,
+		},
+		heimdall.PromptExample{
+			UserSays:   "find information about Y",
+			ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "Y"}}`,
+		},
 	)
 
-	// === EXAMPLE: Conditional cancellation ===
-	// Uncomment to see cancellation in action:
-	// if strings.Contains(ctx.UserMessage, "dangerous") {
-	//     ctx.Cancel("Message contains dangerous content", "PrePrompt:watcher")
-	//     return nil
-	// }
-
-	// === EXAMPLE: Send progress notification (async, non-blocking) ===
-	ctx.NotifyProgress("Watcher", fmt.Sprintf("System state: %d goroutines, %d MB memory",
-		runtime.NumGoroutine(), m.Alloc/1024/1024))
-
-	p.addEvent("info", "PrePrompt hook executed", map[string]interface{}{
-		"request_id":  ctx.RequestID,
-		"user_msg":    ctx.UserMessage[:min(50, len(ctx.UserMessage))],
-		"has_history": len(ctx.Messages) > 0,
+	p.addEvent("info", "PrePrompt hook executed with Graph-RAG", map[string]interface{}{
+		"request_id":   ctx.RequestID,
+		"user_msg":     ctx.UserMessage[:min(50, len(ctx.UserMessage))],
+		"has_history":  len(ctx.Messages) > 0,
+		"rag_enriched": ragContext != "",
 	})
 
 	return nil
+}
+
+// performGraphRAG performs semantic search on the user's message and returns
+// formatted context to inject into the prompt. This is the core of Graph-RAG.
+func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext) string {
+	// Skip if no database access or message is too short
+	if p.ctx.Database == nil || len(ctx.UserMessage) < 5 {
+		return ""
+	}
+
+	// Skip for system commands (status, metrics, etc.)
+	lowered := strings.ToLower(ctx.UserMessage)
+	skipPhrases := []string{"status", "metrics", "health", "config", "hello", "hi", "help"}
+	for _, phrase := range skipPhrases {
+		if strings.HasPrefix(lowered, phrase) {
+			return ""
+		}
+	}
+
+	// Perform semantic search with depth=2 for neighbor context
+	result, err := p.ctx.Database.Discover(
+		context.Background(),
+		ctx.UserMessage,
+		nil, // all node types
+		5,   // limit to top 5 results
+		2,   // depth 2 for neighbors
+	)
+	if err != nil {
+		log.Printf("[Watcher] Graph-RAG search failed: %v", err)
+		return ""
+	}
+
+	if result.Total == 0 {
+		return ""
+	}
+
+	// Format results as context for Heimdall
+	var sb strings.Builder
+	sb.WriteString("\n\n=== KNOWLEDGE FROM GRAPH DATABASE ===\n")
+	sb.WriteString("The following information was found in the knowledge graph and may help answer the user's question:\n\n")
+
+	for i, r := range result.Results {
+		// Main result
+		title := r.Title
+		if title == "" {
+			title = r.ID
+		}
+		sb.WriteString(fmt.Sprintf("### %d. [%s] %s\n", i+1, r.Type, title))
+
+		// Content/properties
+		if r.ContentPreview != "" {
+			sb.WriteString(fmt.Sprintf("Content: %s\n", r.ContentPreview))
+		}
+
+		// Key properties (skip embedding, internal IDs)
+		if len(r.Properties) > 0 {
+			sb.WriteString("Properties:\n")
+			for k, v := range r.Properties {
+				// Skip internal/large properties
+				if k == "embedding" || k == "id" || k == "created_at" || k == "updated_at" {
+					continue
+				}
+				if s, ok := v.(string); ok && len(s) > 200 {
+					v = s[:200] + "..."
+				}
+				sb.WriteString(fmt.Sprintf("  - %s: %v\n", k, v))
+			}
+		}
+
+		// Related nodes (neighbors)
+		if len(r.Related) > 0 {
+			sb.WriteString("Related:\n")
+			shown := 0
+			for _, rel := range r.Related {
+				if shown >= 3 {
+					sb.WriteString(fmt.Sprintf("  ... and %d more related items\n", len(r.Related)-3))
+					break
+				}
+				relTitle := rel.Title
+				if relTitle == "" {
+					relTitle = rel.ID
+				}
+				direction := "→"
+				if rel.Direction == "incoming" {
+					direction = "←"
+				}
+				sb.WriteString(fmt.Sprintf("  %s [%s] %s (via %s)\n", direction, rel.Type, relTitle, rel.Relationship))
+				shown++
+			}
+		}
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString("=== END KNOWLEDGE ===\n\n")
+	sb.WriteString("Use the above knowledge to help answer the user's question. If you can answer directly, do so. ")
+	sb.WriteString("If more detailed search is needed, use the heimdall.watcher.discover action.\n")
+
+	return sb.String()
 }
 
 // PreExecute is called after Heimdall responds, before action execution.

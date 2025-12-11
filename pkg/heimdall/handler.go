@@ -352,6 +352,13 @@ func defaultExamples() []PromptExample {
 		// === GRAPH ANALYSIS ===
 		{UserSays: "find highly connected nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n)-[r]-() RETURN n, count(r) AS connections ORDER BY connections DESC LIMIT 10"}}`},
 		{UserSays: "orphan nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) WHERE NOT (n)--() RETURN n LIMIT 20"}}`},
+
+		// === SEMANTIC SEARCH (discover) ===
+		// Generic examples - domain-specific examples come from domain plugins
+		{UserSays: "search for X", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "X"}}`},
+		{UserSays: "find information about Y", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "Y"}}`},
+		{UserSays: "what do we know about Z", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "Z"}}`},
+		{UserSays: "tell me about topic", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "topic"}}`},
 	}
 }
 

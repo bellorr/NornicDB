@@ -25,6 +25,21 @@ func (m *mockDBReader) Stats() DatabaseStats {
 	return DatabaseStats{NodeCount: 100, RelationshipCount: 50}
 }
 
+func (m *mockDBReader) Discover(ctx context.Context, query string, nodeTypes []string, limit int, depth int) (*DiscoverResult, error) {
+	return &DiscoverResult{
+		Results: []SearchResult{
+			{
+				ID:         "node-1",
+				Type:       "TestNode",
+				Title:      "Test Result",
+				Similarity: 0.95,
+			},
+		},
+		Method: "mock",
+		Total:  1,
+	}, nil
+}
+
 // mockMetricsReader is a mock implementation of MetricsReader for testing
 type mockMetricsReader struct{}
 

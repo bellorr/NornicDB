@@ -502,6 +502,38 @@ type DatabaseReader interface {
 	Query(ctx context.Context, cypher string, params map[string]interface{}) ([]map[string]interface{}, error)
 	// Stats returns database statistics
 	Stats() DatabaseStats
+	// Discover performs semantic search with graph traversal.
+	// Returns search results with related nodes up to the specified depth.
+	Discover(ctx context.Context, query string, nodeTypes []string, limit int, depth int) (*DiscoverResult, error)
+}
+
+// DiscoverResult contains semantic search results with related nodes.
+type DiscoverResult struct {
+	Results []SearchResult `json:"results"`
+	Method  string         `json:"method"` // "vector" or "keyword"
+	Total   int            `json:"total"`
+}
+
+// SearchResult represents a single search result with similarity and related nodes.
+type SearchResult struct {
+	ID             string                 `json:"id"`
+	Type           string                 `json:"type"`
+	Title          string                 `json:"title,omitempty"`
+	ContentPreview string                 `json:"content_preview,omitempty"`
+	Similarity     float64                `json:"similarity"`
+	Properties     map[string]interface{} `json:"properties,omitempty"`
+	Related        []RelatedNode          `json:"related,omitempty"`
+}
+
+// RelatedNode represents a node connected to a search result.
+type RelatedNode struct {
+	ID           string `json:"id"`
+	Type         string `json:"type,omitempty"`
+	Title        string `json:"title,omitempty"`
+	Distance     int    `json:"distance"`            // Hops from the source node
+	Relationship string `json:"relationship"`        // Relationship type
+	Direction    string `json:"direction,omitempty"` // "incoming", "outgoing", or ""
+	Path         string `json:"path,omitempty"`      // Path description
 }
 
 // DatabaseStats contains database statistics.
