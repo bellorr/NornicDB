@@ -35,15 +35,7 @@ If no GPU is available:
 
 ## Configuration
 
-### Environment Variables
 
-```bash
-# Force specific backend
-export NORNICDB_GPU_BACKEND=metal  # metal, cuda, opencl, vulkan, cpu
-
-# Disable GPU (force CPU)
-export NORNICDB_GPU_BACKEND=cpu
-```
 
 ### Docker with GPU
 
@@ -155,9 +147,6 @@ embedder := embed.NewLocalEmbedder(&embed.Config{
 ```bash
 # Check GPU status
 curl http://localhost:7474/status | jq .gpu
-
-# Force CPU fallback
-export NORNICDB_GPU_BACKEND=cpu
 ```
 
 ### Out of Memory

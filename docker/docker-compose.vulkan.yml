@@ -1,0 +1,44 @@
+# NornicDB Vulkan - docker-compose -f docker/docker-compose.vulkan.yml up
+#
+# GPU-accelerated NornicDB using Vulkan (no CUDA required)
+# Works with NVIDIA, AMD, and Intel GPUs
+#
+# Requirements:
+#   - Vulkan-capable GPU with drivers installed
+#   - For NVIDIA: nvidia-container-toolkit with Vulkan support
+#   - For AMD: AMDGPU drivers with RADV
+#   - For Intel: Intel Mesa drivers
+
+services:
+  nornicdb:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.amd64-vulkan-heimdall
+      args:
+        - EMBED_MODEL=false
+    image: timothyswt/nornicdb-amd64-vulkan-heimdall:latest
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    volumes:
+      - nornicdb-data:/data
+      - ../models:/app/models
+    environment:
+      - NORNICDB_NO_AUTH=true
+      - NORNICDB_EMBEDDING_PROVIDER=local
+      - NORNICDB_HEIMDALL_ENABLED=true
+    devices:
+      # Expose GPU for Vulkan access
+      - /dev/dri:/dev/dri
+    # For NVIDIA with nvidia-container-toolkit
+    # Uncomment the deploy section for NVIDIA GPUs
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu, vulkan]
+
+volumes:
+  nornicdb-data:

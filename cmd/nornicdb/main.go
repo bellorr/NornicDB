@@ -109,6 +109,7 @@ Features:
 	serveCmd.Flags().Int("embedding-dim", getEnvInt("NORNICDB_EMBEDDING_DIMENSIONS", 1024), "Embedding dimensions")
 	serveCmd.Flags().Int("embedding-cache", getEnvInt("NORNICDB_EMBEDDING_CACHE_SIZE", 10000), "Embedding cache size (0=disabled, default 10000)")
 	serveCmd.Flags().Int("embedding-gpu-layers", getEnvInt("NORNICDB_EMBEDDING_GPU_LAYERS", -1), "GPU layers for local provider: -1=auto, 0=CPU only")
+	serveCmd.Flags().String("gpu-backend", getEnvStr("NORNICDB_GPU_BACKEND", ""), "GPU backend: vulkan, cuda, metal, opencl (empty=auto-detect)")
 	serveCmd.Flags().Bool("no-auth", false, "Disable authentication")
 	serveCmd.Flags().String("admin-password", "password", "Admin password (default: password)")
 	serveCmd.Flags().Bool("mcp-enabled", getEnvBool("NORNICDB_MCP_ENABLED", true), "Enable MCP (Model Context Protocol) server for LLM tools")
@@ -198,6 +199,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	embeddingDim, _ := cmd.Flags().GetInt("embedding-dim")
 	embeddingCache, _ := cmd.Flags().GetInt("embedding-cache")
 	embeddingGPULayers, _ := cmd.Flags().GetInt("embedding-gpu-layers")
+	gpuBackend, _ := cmd.Flags().GetString("gpu-backend")
 	noAuth, _ := cmd.Flags().GetBool("no-auth")
 
 	// Set environment variable for local embedder GPU configuration
@@ -356,9 +358,21 @@ func runServe(cmd *cobra.Command, args []string) error {
 	gpuConfig.Enabled = true
 	gpuConfig.FallbackOnError = true
 
-	// Prefer Metal on macOS/Apple Silicon
-	if runtime.GOOS == "darwin" {
+	// Set preferred backend from flag/env or platform default
+	switch strings.ToLower(gpuBackend) {
+	case "vulkan":
+		gpuConfig.PreferredBackend = gpu.BackendVulkan
+	case "cuda":
+		gpuConfig.PreferredBackend = gpu.BackendCUDA
+	case "metal":
 		gpuConfig.PreferredBackend = gpu.BackendMetal
+	case "opencl":
+		gpuConfig.PreferredBackend = gpu.BackendOpenCL
+	default:
+		// Auto-detect: prefer Metal on macOS/Apple Silicon
+		if runtime.GOOS == "darwin" {
+			gpuConfig.PreferredBackend = gpu.BackendMetal
+		}
 	}
 
 	gpuManager, gpuErr := gpu.NewManager(gpuConfig)

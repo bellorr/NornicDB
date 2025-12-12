@@ -19,6 +19,8 @@
 | `nornicdb-amd64-cuda-bge` | ~4.5GB | CUDA + BGE-M3 | NVIDIA GPU, ready for embeddings |
 | `nornicdb-amd64-cuda-bge-heimdall` | ~5GB | CUDA + BGE + Heimdall | **Full cognitive features with GPU** |
 | `nornicdb-amd64-cuda-headless` | ~2.9GB | CUDA headless | API-only with GPU |
+| `nornicdb-amd64-vulkan` | ~600MB | Vulkan GPU | **Any GPU** (NVIDIA/AMD/Intel), no CUDA |
+| `nornicdb-amd64-vulkan-heimdall` | ~1GB | Vulkan + Heimdall | **Any GPU** with AI assistant |
 | `nornicdb-amd64-cpu` | ~500MB | CPU-only | No GPU required, minimal |
 | `nornicdb-amd64-cpu-headless` | ~500MB | CPU-only headless | API-only, smallest footprint |
 
@@ -201,6 +203,58 @@ make deploy-amd64-cpu-headless
 
 ---
 
+## AMD64 Vulkan (Any GPU - NVIDIA/AMD/Intel)
+
+### Overview
+The Vulkan builds provide GPU acceleration without requiring CUDA, making them compatible with any Vulkan-capable GPU:
+- **NVIDIA** GPUs (via Vulkan driver)
+- **AMD** GPUs (via RADV or AMDVLK)
+- **Intel** GPUs (via Mesa ANV driver)
+
+This is ideal for:
+- AMD GPU users who don't have CUDA
+- Intel integrated/discrete GPU users
+- Mixed GPU environments
+- Deployments where you don't want CUDA dependencies
+
+### Prerequisites
+- Docker
+- Vulkan-capable GPU with drivers installed
+- For AMD: AMDGPU driver with RADV
+- For Intel: Mesa with ANV
+- For NVIDIA: nvidia-container-toolkit (optional, or just use CUDA variant)
+
+### Build & Deploy Vulkan Images
+```bash
+cd nornicdb
+
+# Base Vulkan (no local embeddings - use external provider)
+docker build -f docker/Dockerfile.amd64-vulkan -t nornicdb-amd64-vulkan .
+
+# Vulkan + Heimdall (local llama.cpp CPU inference for AI assistant)
+docker build -f docker/Dockerfile.amd64-vulkan-heimdall -t nornicdb-amd64-vulkan-heimdall .
+
+# With embedded models
+docker build -f docker/Dockerfile.amd64-vulkan-heimdall --build-arg EMBED_MODEL=true -t nornicdb-amd64-vulkan-heimdall-bge .
+```
+
+### Running Vulkan Images
+```bash
+# Using docker-compose (recommended)
+docker-compose -f docker/docker-compose.vulkan.yml up
+
+# Or directly with GPU access
+docker run -d --name nornicdb \
+  -p 7474:7474 -p 7687:7687 \
+  -v nornicdb-data:/data \
+  --device /dev/dri:/dev/dri \
+  nornicdb-amd64-vulkan-heimdall:latest
+```
+
+**Note:** The `--device /dev/dri:/dev/dri` flag is required for Vulkan GPU access on Linux.
+
+---
+
 ## Deploy All Images
 
 ```bash
@@ -294,12 +348,19 @@ open http://localhost:7474
 
 ```
 docker/
-├── Dockerfile.arm64-metal      # ARM64 Metal build
-├── Dockerfile.amd64-cuda       # AMD64 CUDA build
-├── Dockerfile.llama-cuda       # CUDA libs (one-time prereq)
-├── entrypoint.sh               # Shared entrypoint
+├── Dockerfile.arm64-metal          # ARM64 Metal build
+├── Dockerfile.arm64-metal-heimdall # ARM64 Metal + Heimdall
+├── Dockerfile.amd64-cuda           # AMD64 CUDA build
+├── Dockerfile.amd64-cuda-heimdall  # AMD64 CUDA + Heimdall
+├── Dockerfile.amd64-vulkan         # AMD64 Vulkan (no CUDA)
+├── Dockerfile.amd64-vulkan-heimdall # AMD64 Vulkan + Heimdall
+├── Dockerfile.amd64-cpu            # AMD64 CPU-only
+├── Dockerfile.llama-cuda           # CUDA libs (one-time prereq)
+├── entrypoint.sh                   # Shared entrypoint
+├── cuda-fallback-wrapper.sh        # CUDA graceful fallback
 ├── docker-compose.arm64-metal.yml
 ├── docker-compose.cuda.yml
+├── docker-compose.vulkan.yml       # Vulkan compose (any GPU)
 └── README.md
 ```
 

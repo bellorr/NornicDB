@@ -1,6 +1,4 @@
-//go:build vulkan && (linux || windows || darwin)
-// +build vulkan
-// +build linux windows darwin
+//go:build cgovulkan && (linux || windows || darwin)
 
 // Package vulkan provides cross-platform GPU acceleration using Vulkan Compute.
 //

@@ -150,6 +150,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/gpu/cuda"
 	"github.com/orneryd/nornicdb/pkg/gpu/metal"
+	"github.com/orneryd/nornicdb/pkg/gpu/vulkan"
 )
 
 // Errors
@@ -423,8 +424,7 @@ func probeBackend(backend Backend, deviceID int) (*DeviceInfo, error) {
 		// TODO: Implement OpenCL detection
 		return nil, ErrGPUNotAvailable
 	case BackendVulkan:
-		// TODO: Implement Vulkan detection
-		return nil, ErrGPUNotAvailable
+		return probeVulkan(deviceID)
 	default:
 		return nil, ErrGPUNotAvailable
 	}
@@ -481,6 +481,40 @@ func probeCUDA(deviceID int) (*DeviceInfo, error) {
 		MemoryMB:     device.MemoryMB(),
 		ComputeUnits: ccMajor*10 + ccMinor, // Store compute capability
 		MaxWorkGroup: 1024,                 // Typical CUDA max threads per block
+		Available:    true,
+	}, nil
+}
+
+// probeVulkan checks for Vulkan GPU availability.
+func probeVulkan(deviceID int) (*DeviceInfo, error) {
+	if !vulkan.IsAvailable() {
+		return nil, ErrGPUNotAvailable
+	}
+
+	deviceCount := vulkan.DeviceCount()
+	if deviceCount == 0 {
+		return nil, ErrGPUNotAvailable
+	}
+
+	// Use specified device or first available
+	if deviceID < 0 || deviceID >= deviceCount {
+		deviceID = 0
+	}
+
+	device, err := vulkan.NewDevice(deviceID)
+	if err != nil {
+		return nil, err
+	}
+	defer device.Release()
+
+	return &DeviceInfo{
+		ID:           deviceID,
+		Name:         device.Name(),
+		Vendor:       "Vulkan", // Vendor detection would need VkPhysicalDeviceProperties
+		Backend:      BackendVulkan,
+		MemoryMB:     device.MemoryMB(),
+		ComputeUnits: 0, // Would need extension queries
+		MaxWorkGroup: 256,
 		Available:    true,
 	}, nil
 }
@@ -853,14 +887,17 @@ type EmbeddingIndex struct {
 	cpuVectors []float32 // Flat array: [vec0..., vec1..., vec2...]
 
 	// GPU storage (ONLY embeddings, no strings or metadata)
-	gpuBuffer    unsafe.Pointer // Native GPU buffer handle (legacy)
-	metalBuffer  *metal.Buffer  // Metal GPU buffer (macOS)
-	metalDevice  *metal.Device  // Metal device reference
-	cudaBuffer   *cuda.Buffer   // CUDA GPU buffer (NVIDIA)
-	cudaDevice   *cuda.Device   // CUDA device reference
-	gpuAllocated int            // Bytes allocated on GPU (dimensions × count × 4)
-	gpuCapacity  int            // Max embeddings before realloc needed
-	gpuSynced    bool           // Is GPU in sync with CPU?
+	gpuBuffer     unsafe.Pointer         // Native GPU buffer handle (legacy)
+	metalBuffer   *metal.Buffer          // Metal GPU buffer (macOS)
+	metalDevice   *metal.Device          // Metal device reference
+	cudaBuffer    *cuda.Buffer           // CUDA GPU buffer (NVIDIA)
+	cudaDevice    *cuda.Device           // CUDA device reference
+	vulkanBuffer  *vulkan.Buffer         // Vulkan GPU buffer (cross-platform)
+	vulkanDevice  *vulkan.Device         // Vulkan device reference
+	vulkanCompute *vulkan.ComputeContext // Vulkan compute pipeline context
+	gpuAllocated  int                    // Bytes allocated on GPU (dimensions × count × 4)
+	gpuCapacity   int                    // Max embeddings before realloc needed
+	gpuSynced     bool                   // Is GPU in sync with CPU?
 
 	// Stats
 	searchesGPU  int64
@@ -1129,6 +1166,8 @@ func (ei *EmbeddingIndex) searchGPU(query []float32, k int) ([]SearchResult, err
 			return ei.searchMetal(query, k)
 		case BackendCUDA:
 			return ei.searchCUDA(query, k)
+		case BackendVulkan:
+			return ei.searchVulkan(query, k)
 		}
 	}
 
@@ -1169,6 +1208,68 @@ func (ei *EmbeddingIndex) searchCUDA(query []float32, k int) ([]SearchResult, er
 	atomic.AddInt64(&ei.manager.stats.KernelExecutions, 2) // similarity + topk
 
 	// Convert CUDA results to SearchResult with nodeIDs
+	output := make([]SearchResult, len(results))
+	for i, r := range results {
+		if int(r.Index) < len(ei.nodeIDs) {
+			output[i] = SearchResult{
+				ID:       ei.nodeIDs[r.Index],
+				Score:    r.Score,
+				Distance: 1 - r.Score,
+			}
+		}
+	}
+
+	return output, nil
+}
+
+// searchVulkan performs similarity search using Vulkan GPU.
+func (ei *EmbeddingIndex) searchVulkan(query []float32, k int) ([]SearchResult, error) {
+	if ei.vulkanBuffer == nil || ei.vulkanDevice == nil {
+		// Fall back to CPU if Vulkan not initialized
+		return ei.searchCPU(query, k)
+	}
+
+	n := uint32(len(ei.nodeIDs))
+	if k > int(n) {
+		k = int(n)
+	}
+
+	var results []vulkan.SearchResult
+	var err error
+
+	// Use GPU compute shaders if available, otherwise fall back to CPU implementation
+	if ei.vulkanCompute != nil {
+		results, err = ei.vulkanCompute.SearchGPU(
+			ei.vulkanBuffer,
+			query,
+			n,
+			uint32(ei.dimensions),
+			k,
+			true, // vectors are normalized
+		)
+	} else {
+		// CPU fallback (still uses GPU memory buffers)
+		results, err = ei.vulkanDevice.Search(
+			ei.vulkanBuffer,
+			query,
+			n,
+			uint32(ei.dimensions),
+			k,
+			true, // vectors are normalized
+		)
+	}
+
+	if err != nil {
+		// Fall back to CPU on GPU error
+		atomic.AddInt64(&ei.manager.stats.FallbackCount, 1)
+		return ei.searchCPU(query, k)
+	}
+
+	// Update stats
+	atomic.AddInt64(&ei.manager.stats.OperationsGPU, 1)
+	atomic.AddInt64(&ei.manager.stats.KernelExecutions, 2) // similarity + topk
+
+	// Convert Vulkan results to SearchResult with nodeIDs
 	output := make([]SearchResult, len(results))
 	for i, r := range results {
 		if int(r.Index) < len(ei.nodeIDs) {
@@ -1291,6 +1392,8 @@ func (ei *EmbeddingIndex) SyncToGPU() error {
 			return ei.syncToMetal()
 		case BackendCUDA:
 			return ei.syncToCUDA()
+		case BackendVulkan:
+			return ei.syncToVulkan()
 		}
 	}
 
@@ -1332,6 +1435,71 @@ func (ei *EmbeddingIndex) syncToCUDA() error {
 	if err := ei.cudaDevice.NormalizeVectors(ei.cudaBuffer, n, dims); err != nil {
 		// Non-fatal: we can still search with unnormalized vectors
 		// (but slower since we need to normalize each query)
+	}
+
+	// Update stats
+	ei.gpuAllocated = len(ei.cpuVectors) * 4
+	ei.gpuSynced = true
+	atomic.AddInt64(&ei.uploadsCount, 1)
+	atomic.AddInt64(&ei.uploadBytes, int64(ei.gpuAllocated))
+	atomic.AddInt64(&ei.manager.stats.BytesTransferred, int64(ei.gpuAllocated))
+
+	return nil
+}
+
+// syncToVulkan uploads embeddings to Vulkan GPU buffer.
+func (ei *EmbeddingIndex) syncToVulkan() error {
+	// Initialize Vulkan device if needed
+	if ei.vulkanDevice == nil {
+		deviceID := 0
+		if ei.manager.config != nil {
+			deviceID = ei.manager.config.DeviceID
+		}
+		device, err := vulkan.NewDevice(deviceID)
+		if err != nil {
+			return err
+		}
+		ei.vulkanDevice = device
+
+		// Create compute context with shader pipelines
+		computeCtx, err := device.NewComputeContext()
+		if err != nil {
+			// Log but continue - will fall back to CPU implementations
+			// (the device.Search still works with CPU fallback)
+		} else {
+			ei.vulkanCompute = computeCtx
+		}
+	}
+
+	// Release old buffer
+	if ei.vulkanBuffer != nil {
+		ei.vulkanBuffer.Release()
+		ei.vulkanBuffer = nil
+	}
+
+	// Create new buffer with embeddings
+	buffer, err := ei.vulkanDevice.NewBuffer(ei.cpuVectors)
+	if err != nil {
+		return err
+	}
+	ei.vulkanBuffer = buffer
+
+	// Normalize vectors on GPU for faster cosine similarity
+	n := uint32(len(ei.nodeIDs))
+	dims := uint32(ei.dimensions)
+
+	// Use GPU compute shader if available, otherwise CPU fallback
+	if ei.vulkanCompute != nil {
+		if err := ei.vulkanCompute.NormalizeVectorsGPU(ei.vulkanBuffer, n, dims); err != nil {
+			// Fall back to CPU normalization
+			if err := ei.vulkanDevice.NormalizeVectors(ei.vulkanBuffer, n, dims); err != nil {
+				// Non-fatal: we can still search with unnormalized vectors
+			}
+		}
+	} else {
+		if err := ei.vulkanDevice.NormalizeVectors(ei.vulkanBuffer, n, dims); err != nil {
+			// Non-fatal: we can still search with unnormalized vectors
+		}
 	}
 
 	// Update stats
@@ -1472,6 +1640,14 @@ func (ei *EmbeddingIndex) Clear() {
 		ei.metalBuffer.Release()
 		ei.metalBuffer = nil
 	}
+	if ei.vulkanBuffer != nil {
+		ei.vulkanBuffer.Release()
+		ei.vulkanBuffer = nil
+	}
+	if ei.cudaBuffer != nil {
+		ei.cudaBuffer.Release()
+		ei.cudaBuffer = nil
+	}
 	ei.gpuAllocated = 0
 }
 
@@ -1499,6 +1675,20 @@ func (ei *EmbeddingIndex) Release() {
 	if ei.cudaDevice != nil {
 		ei.cudaDevice.Release()
 		ei.cudaDevice = nil
+	}
+
+	// Release Vulkan resources
+	if ei.vulkanCompute != nil {
+		ei.vulkanCompute.Release()
+		ei.vulkanCompute = nil
+	}
+	if ei.vulkanBuffer != nil {
+		ei.vulkanBuffer.Release()
+		ei.vulkanBuffer = nil
+	}
+	if ei.vulkanDevice != nil {
+		ei.vulkanDevice.Release()
+		ei.vulkanDevice = nil
 	}
 
 	ei.gpuAllocated = 0
