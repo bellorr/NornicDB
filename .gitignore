@@ -59,3 +59,4 @@ neural/training/__pycache__
 .cursor/rules/snyk_rules.mdc
 dist
 macos/build
+data.old/

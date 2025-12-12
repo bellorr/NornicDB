@@ -405,26 +405,32 @@ build-ui:
 	@cd ui && npm install && npm run build
 	@echo "✓ UI built successfully"
 
-# Build NornicDB binary + APOC plugins (Windows: CPU-only, others: with localllm)
+# Build NornicDB binary + APOC plugins (Windows: GPU-enabled via yzma, others: with localllm)
 build: build-ui build-binary build-plugins-if-supported
 	@echo "==============================================================="
 	@echo " Build complete!"
 	@echo "==============================================================="
 ifeq ($(HOST_OS),windows)
 	@echo ""
-	@echo "Binary: bin\nornicdb.exe (CPU-only build)"
+	@echo "Binary: bin\nornicdb.exe (GPU-enabled build via yzma)"
+	@echo "GPU Support: CUDA (NVIDIA), Vulkan (AMD/NVIDIA, coming soon)"
 	@echo ""
 	@echo "Next steps:"
-	@echo "  1. Quick start (no embeddings):"
+	@echo "  1. Install CUDA libraries (if not done):"
+	@echo "       .\scripts\setup-windows-cuda.bat"
+	@echo ""
+	@echo "  2. Set library path:"
+	@echo "       $$env:NORNICDB_LIB = '.\lib\llama'"
+	@echo ""
+	@echo "  3. Run with GPU detection:"
 	@echo "       .\bin\nornicdb.exe serve --no-auth"
+	@echo "       .\bin\nornicdb.exe --check-gpu"
 	@echo ""
-	@echo "  2. Connect with Neo4j drivers:"
+	@echo "  4. Connect with Neo4j drivers:"
 	@echo "       bolt://localhost:7687"
-	@echo "       (authentication disabled with --no-auth)"
 	@echo ""
-	@echo "  Note: This is a CPU-only build without embedding support."
-	@echo "  For embeddings, use Docker: make build-amd64-cuda-bge-heimdall"
-	@echo "  Or use external embedding provider (Ollama, OpenAI, etc.)"
+	@echo "  Note: For local embeddings, download model:"
+	@echo "       make download-bge"
 	@echo ""
 else
 	@echo ""
@@ -448,7 +454,9 @@ endif
 # Check and build llama.cpp library if not present or outdated
 check-llama-lib:
 ifeq ($(HOST_OS),windows)
-	@echo "Windows: Skipping llama.cpp library check (CPU-only build)"
+	@echo "Windows: Using yzma runtime GPU libraries (no compile-time linking)"
+	@echo "  Run setup-windows-cuda.bat to install CUDA libraries"
+	@echo "  Vulkan support coming soon for AMD GPUs"
 else
 	@if [ ! -f lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a ]; then \
 		echo "⚠️  llama.cpp library not found, building..."; \
@@ -463,6 +471,7 @@ endif
 
 build-binary: check-llama-lib
 ifeq ($(HOST_OS),windows)
+	@echo "Building with GPU support (CUDA via yzma, Vulkan coming soon)..."
 	@go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 else
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
@@ -581,15 +590,20 @@ else
 endif
 	@echo "bin/nornicdb-rpi-zero"
 
-# Windows x86_64 (CPU only, no embeddings)
+# Windows x86_64 (GPU-enabled via yzma: CUDA + Vulkan support)
 cross-windows:
-	@echo "Building for Windows x86_64 (CPU-only)..."
+	@echo "Building for Windows x86_64 (GPU-enabled via yzma)..."
+	@echo "  GPU Backends: CUDA (NVIDIA), Vulkan (AMD/NVIDIA, coming soon)"
 ifeq ($(HOST_OS),windows)
 	@set CGO_ENABLED=0 && set GOOS=windows && set GOARCH=amd64 && go build -o bin/nornicdb.exe ./cmd/nornicdb
 else
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -o bin/nornicdb.exe ./cmd/nornicdb
 endif
 	@echo "bin/nornicdb.exe"
+	@echo ""
+	@echo "Note: GPU libraries installed separately via:"
+	@echo "  scripts\setup-windows-cuda.bat    (NVIDIA CUDA)"
+	@echo "  scripts\setup-windows-vulkan.bat  (AMD/NVIDIA Vulkan, coming soon)"
 
 # Windows native builds (must run on Windows)
 # See: build.bat for all Windows variants
