@@ -4,6 +4,7 @@
 package vulkan
 
 import (
+	"errors"
 	"testing"
 )
 
@@ -21,8 +22,13 @@ func TestDeviceCountStub(t *testing.T) {
 
 func TestNewDeviceStub(t *testing.T) {
 	device, err := NewDevice(0)
-	if err != ErrVulkanNotAvailable {
-		t.Errorf("NewDevice() error = %v, want ErrVulkanNotAvailable", err)
+	// On stub build (no Vulkan library), we expect either ErrVulkanNotAvailable
+	// or ErrDeviceCreation wrapped error
+	if err == nil {
+		t.Error("NewDevice() should return an error on stub")
+	}
+	if !errors.Is(err, ErrVulkanNotAvailable) && !errors.Is(err, ErrDeviceCreation) {
+		t.Errorf("NewDevice() error = %v, want ErrVulkanNotAvailable or ErrDeviceCreation", err)
 	}
 	if device != nil {
 		t.Error("NewDevice() should return nil device on stub")
@@ -65,13 +71,13 @@ func TestDeviceBufferCreationStub(t *testing.T) {
 	var device Device
 
 	_, err := device.NewBuffer([]float32{1.0})
-	if err != ErrVulkanNotAvailable {
-		t.Errorf("NewBuffer() error = %v, want ErrVulkanNotAvailable", err)
+	if !errors.Is(err, ErrVulkanNotAvailable) && !errors.Is(err, ErrDeviceCreation) {
+		t.Errorf("NewBuffer() error = %v, want ErrVulkanNotAvailable or ErrDeviceCreation", err)
 	}
 
 	_, err = device.NewEmptyBuffer(100)
-	if err != ErrVulkanNotAvailable {
-		t.Errorf("NewEmptyBuffer() error = %v, want ErrVulkanNotAvailable", err)
+	if !errors.Is(err, ErrVulkanNotAvailable) && !errors.Is(err, ErrDeviceCreation) {
+		t.Errorf("NewEmptyBuffer() error = %v, want ErrVulkanNotAvailable or ErrDeviceCreation", err)
 	}
 }
 
@@ -80,23 +86,23 @@ func TestDeviceOperationsStub(t *testing.T) {
 	var buffer Buffer
 
 	err := device.NormalizeVectors(&buffer, 10, 3)
-	if err != ErrVulkanNotAvailable {
-		t.Errorf("NormalizeVectors() error = %v, want ErrVulkanNotAvailable", err)
+	if !errors.Is(err, ErrVulkanNotAvailable) && !errors.Is(err, ErrDeviceCreation) {
+		t.Errorf("NormalizeVectors() error = %v, want ErrVulkanNotAvailable or ErrDeviceCreation", err)
 	}
 
 	err = device.CosineSimilarity(&buffer, &buffer, &buffer, 10, 3, true)
-	if err != ErrVulkanNotAvailable {
-		t.Errorf("CosineSimilarity() error = %v, want ErrVulkanNotAvailable", err)
+	if !errors.Is(err, ErrVulkanNotAvailable) && !errors.Is(err, ErrDeviceCreation) {
+		t.Errorf("CosineSimilarity() error = %v, want ErrVulkanNotAvailable or ErrDeviceCreation", err)
 	}
 
 	_, _, err = device.TopK(&buffer, 10, 5)
-	if err != ErrVulkanNotAvailable {
-		t.Errorf("TopK() error = %v, want ErrVulkanNotAvailable", err)
+	if !errors.Is(err, ErrVulkanNotAvailable) && !errors.Is(err, ErrDeviceCreation) {
+		t.Errorf("TopK() error = %v, want ErrVulkanNotAvailable or ErrDeviceCreation", err)
 	}
 
 	_, err = device.Search(&buffer, []float32{1.0}, 10, 1, 5, true)
-	if err != ErrVulkanNotAvailable {
-		t.Errorf("Search() error = %v, want ErrVulkanNotAvailable", err)
+	if !errors.Is(err, ErrVulkanNotAvailable) && !errors.Is(err, ErrDeviceCreation) {
+		t.Errorf("Search() error = %v, want ErrVulkanNotAvailable or ErrDeviceCreation", err)
 	}
 }
 

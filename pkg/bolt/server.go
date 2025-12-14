@@ -1798,19 +1798,47 @@ func encodeNode(nodeId any, labels any, nodeMap map[string]any) []byte {
 	return buf
 }
 
+// encodePackStreamInt encodes an integer using the smallest PackStream representation.
+//
+// PackStream integer encoding (from Bolt spec):
+//   - Tiny: -16 to 127 (1 byte, inline)
+//   - INT8: -128 to -17 (2 bytes, marker 0xC8)
+//   - INT16: -32768 to 32767 (3 bytes, marker 0xC9)
+//   - INT32: -2147483648 to 2147483647 (5 bytes, marker 0xCA)
+//   - INT64: all other values (9 bytes, marker 0xCB)
+//
+// JavaScript Driver Behavior:
+//   - Tiny, INT8, INT16, INT32 → decoded as JavaScript Number
+//   - INT64 (0xCB) → decoded as JavaScript BigInt
+//
+// For Neo4j compatibility, we MUST use INT32 or smaller for values
+// within JavaScript's safe integer range to avoid BigInt conversion issues.
+//
+// JavaScript safe integer range: -2^53 to 2^53 (-9007199254740991 to 9007199254740991)
+// INT32 range: -2^31 to 2^31-1 (-2147483648 to 2147483647)
+//
+// Since INT32 range is within JS safe range, using INT32 encoding ensures
+// the Neo4j JS driver will return regular Numbers, not BigInts.
 func encodePackStreamInt(val int64) []byte {
+	// Tiny int: -16 to 127 (inline, 1 byte)
 	if val >= -16 && val <= 127 {
 		return []byte{byte(val)}
 	}
+	// INT8: -128 to -17 (marker + 1 byte)
 	if val >= -128 && val < -16 {
 		return []byte{0xC8, byte(val)}
 	}
+	// INT16: -32768 to 32767 (marker + 2 bytes)
 	if val >= -32768 && val <= 32767 {
 		return []byte{0xC9, byte(val >> 8), byte(val)}
 	}
+	// INT32: -2147483648 to 2147483647 (marker + 4 bytes)
+	// This is the largest encoding that Neo4j JS driver decodes as Number (not BigInt)
 	if val >= -2147483648 && val <= 2147483647 {
 		return []byte{0xCA, byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)}
 	}
+	// INT64: everything else (marker + 8 bytes)
+	// Neo4j JS driver will decode this as BigInt
 	return []byte{0xCB, byte(val >> 56), byte(val >> 48), byte(val >> 40), byte(val >> 32),
 		byte(val >> 24), byte(val >> 16), byte(val >> 8), byte(val)}
 }

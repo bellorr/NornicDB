@@ -1489,7 +1489,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 
 	// Check for property merge operator: n += $properties
 	if strings.Contains(setPart, "+=") {
-		return e.executeSetMerge(matchResult, setPart, result)
+		return e.executeSetMerge(matchResult, setPart, result, cypher, returnIdx)
 	}
 
 	// Split SET clause into individual assignments, respecting brackets
@@ -1629,7 +1629,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 }
 
 // executeSetMerge handles SET n += $properties for property merging
-func (e *StorageExecutor) executeSetMerge(matchResult *ExecuteResult, setPart string, result *ExecuteResult) (*ExecuteResult, error) {
+func (e *StorageExecutor) executeSetMerge(matchResult *ExecuteResult, setPart string, result *ExecuteResult, cypher string, returnIdx int) (*ExecuteResult, error) {
 	// Parse: n += $properties or n += {key: value}
 	plusEqIdx := strings.Index(setPart, "+=")
 	if plusEqIdx == -1 {
@@ -1677,11 +1677,44 @@ func (e *StorageExecutor) executeSetMerge(matchResult *ExecuteResult, setPart st
 			_ = e.storage.UpdateNode(storageNode)
 		}
 	}
-	_ = variable // silence unused warning
 
-	// Return matched rows info
-	result.Columns = []string{"matched"}
-	result.Rows = [][]interface{}{{len(matchResult.Rows)}}
+	// Handle RETURN clause
+	if returnIdx > 0 {
+		returnPart := strings.TrimSpace(cypher[returnIdx+6:])
+		returnItems := e.parseReturnItems(returnPart)
+		result.Columns = make([]string, len(returnItems))
+		for i, item := range returnItems {
+			if item.alias != "" {
+				result.Columns[i] = item.alias
+			} else {
+				result.Columns[i] = item.expr
+			}
+		}
+
+		// Re-fetch and return updated nodes
+		for _, row := range matchResult.Rows {
+			for _, val := range row {
+				if node, ok := val.(map[string]interface{}); ok {
+					id, ok := node["_nodeId"].(string)
+					if !ok {
+						continue
+					}
+					storageNode, _ := e.storage.GetNode(storage.NodeID(id))
+					if storageNode != nil {
+						newRow := make([]interface{}, len(returnItems))
+						for j, item := range returnItems {
+							newRow[j] = e.resolveReturnItem(item, variable, storageNode)
+						}
+						result.Rows = append(result.Rows, newRow)
+					}
+				}
+			}
+		}
+	} else {
+		// No RETURN clause - return matched count
+		result.Columns = []string{"matched"}
+		result.Rows = [][]interface{}{{len(matchResult.Rows)}}
+	}
 
 	return result, nil
 }
