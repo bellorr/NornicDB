@@ -3812,7 +3812,7 @@ func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string)
 					propName := item.expr[len(ur.nodeVar)+1:]
 					row[i] = ur.node.Properties[propName]
 				} else if item.expr == ur.nodeVar {
-					row[i] = e.nodeToMap(ur.node)
+					row[i] = ur.node
 				}
 			}
 			result.Rows = append(result.Rows, row)
@@ -4682,7 +4682,7 @@ func (e *StorageExecutor) resolveBindingItem(item returnItem, b binding) interfa
 
 	// Check for node variable
 	if node := b[expr]; node != nil {
-		return e.nodeToMap(node)
+		return node
 	}
 
 	return nil

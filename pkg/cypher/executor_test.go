@@ -2410,11 +2410,10 @@ func TestExecuteAggregationCollectNodes(t *testing.T) {
 	require.NoError(t, err)
 	collected := result.Rows[0][0].([]interface{})
 	assert.Len(t, collected, 3)
-	// Each item should be a map with id, labels, properties
-	item := collected[0].(map[string]interface{})
-	assert.Contains(t, item, "id")
-	assert.Contains(t, item, "labels")
-	assert.Contains(t, item, "properties")
+	// Each item should be a *storage.Node
+	node := collected[0].(*storage.Node)
+	assert.NotEmpty(t, node.ID)
+	assert.Contains(t, node.Labels, "CollectNode")
 }
 
 func TestExecuteAggregationNonAggregateInQuery(t *testing.T) {

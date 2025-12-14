@@ -833,33 +833,69 @@ func (e *StorageExecutor) executeCompoundMatchCreate(ctx context.Context, cypher
 		result.Stats.RelationshipsCreated += blockResult.Stats.RelationshipsCreated
 		result.Stats.NodesDeleted += blockResult.Stats.NodesDeleted
 		result.Stats.RelationshipsDeleted += blockResult.Stats.RelationshipsDeleted
+
+		// Copy Columns and Rows from last block with RETURN
+		if len(blockResult.Columns) > 0 {
+			result.Columns = blockResult.Columns
+			result.Rows = append(result.Rows, blockResult.Rows...)
+		}
 	}
 
 	return result, nil
 }
 
 // splitMatchCreateBlocks splits a query into independent MATCH...CREATE blocks
-// Each block starts with MATCH and contains all following CREATEs until the next MATCH
+// Consecutive MATCH clauses without intervening CREATE are merged into a single block
 func (e *StorageExecutor) splitMatchCreateBlocks(cypher string) []string {
 	var blocks []string
 
-	// Find all MATCH keyword positions
+	// Find all MATCH and CREATE keyword positions
 	matchPositions := findAllKeywordPositions(cypher, "MATCH")
+	createPositions := findAllKeywordPositions(cypher, "CREATE")
 
 	if len(matchPositions) == 0 {
 		return []string{cypher}
 	}
 
-	// Split into blocks: each MATCH starts a new block
-	for i, pos := range matchPositions {
+	// If there's only one MATCH or no CREATEs, return as single block
+	if len(matchPositions) == 1 || len(createPositions) == 0 {
+		return []string{cypher}
+	}
+
+	// Group consecutive MATCHes that share a CREATE
+	// A new block starts when there's a CREATE between two MATCH positions
+	var blockStarts []int
+	blockStarts = append(blockStarts, matchPositions[0])
+
+	for i := 1; i < len(matchPositions); i++ {
+		prevMatchPos := matchPositions[i-1]
+		currMatchPos := matchPositions[i]
+
+		// Check if there's a CREATE between the previous MATCH and current MATCH
+		hasCreateBetween := false
+		for _, createPos := range createPositions {
+			if createPos > prevMatchPos && createPos < currMatchPos {
+				hasCreateBetween = true
+				break
+			}
+		}
+
+		// Only start a new block if there was a CREATE between MATCHes
+		if hasCreateBetween {
+			blockStarts = append(blockStarts, currMatchPos)
+		}
+	}
+
+	// Create blocks from start positions
+	for i, startPos := range blockStarts {
 		var endPos int
-		if i+1 < len(matchPositions) {
-			endPos = matchPositions[i+1]
+		if i+1 < len(blockStarts) {
+			endPos = blockStarts[i+1]
 		} else {
 			endPos = len(cypher)
 		}
 
-		block := strings.TrimSpace(cypher[pos:endPos])
+		block := strings.TrimSpace(cypher[startPos:endPos])
 		if block != "" {
 			blocks = append(blocks, block)
 		}
@@ -958,9 +994,10 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 	hasDirectDelete := deleteIdx > 0 && withIdx <= 0 // DELETE without WITH in createPart
 
 	// Find RETURN clause if present (only in last block typically)
+	// Note: findKeywordIndex returns -1 if not found, 0 if at start
 	returnIdx := findKeywordIndex(createPart, "RETURN")
 	var returnPart string
-	if returnIdx > 0 {
+	if returnIdx >= 0 {
 		returnPart = strings.TrimSpace(createPart[returnIdx+6:])
 		if hasWithDelete {
 			// WITH...DELETE...RETURN - extract delete target and strip
@@ -1238,7 +1275,27 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				continue
 			}
 
-			// Find variable that matches
+			// Check edge variables first (for RETURN e after CREATE relationship)
+			found := false
+			for varName, edge := range edgeVars {
+				if item.expr == varName || strings.HasPrefix(item.expr, varName+".") {
+					if item.expr == varName {
+						// Return the edge directly
+						row[i] = edge
+					} else {
+						// Return edge property
+						propName := item.expr[len(varName)+1:]
+						row[i] = edge.Properties[propName]
+					}
+					found = true
+					break
+				}
+			}
+			if found {
+				continue
+			}
+
+			// Find node variable that matches
 			for varName, node := range nodeVars {
 				if strings.HasPrefix(item.expr, varName) {
 					row[i] = e.resolveReturnItem(item, varName, node)

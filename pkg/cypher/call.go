@@ -510,7 +510,22 @@ func (e *StorageExecutor) evaluateReturnExprInContext(expr string, ctx map[strin
 			propName := strings.TrimSpace(parts[1])
 
 			if val, ok := ctx[varName]; ok {
-				// If the value is a map (node representation), extract property
+				// Handle *storage.Node (Neo4j compatible)
+				if node, ok := val.(*storage.Node); ok && node != nil {
+					// Handle special "id" property
+					if propName == "id" {
+						if propVal, ok := node.Properties["id"]; ok {
+							return propVal
+						}
+						return string(node.ID)
+					}
+					// Regular property access
+					if propVal, ok := node.Properties[propName]; ok {
+						return propVal
+					}
+					return nil
+				}
+				// If the value is a map (legacy node representation), extract property
 				if mapVal, ok := val.(map[string]interface{}); ok {
 					// Try direct property access
 					if propVal, ok := mapVal[propName]; ok {
@@ -1318,7 +1333,7 @@ func (e *StorageExecutor) callDbIndexVectorQueryNodes(cypher string) (*ExecuteRe
 	// Convert to result rows
 	for _, sn := range scoredNodes {
 		result.Rows = append(result.Rows, []interface{}{
-			e.nodeToMap(sn.node),
+			sn.node,
 			sn.score,
 		})
 	}
@@ -1631,7 +1646,7 @@ func (e *StorageExecutor) callDbIndexFulltextQueryNodes(cypher string) (*Execute
 	// Convert to result rows
 	for _, sn := range scoredNodes {
 		result.Rows = append(result.Rows, []interface{}{
-			e.nodeToMap(sn.node),
+			sn.node,
 			sn.score,
 		})
 	}
@@ -1894,7 +1909,7 @@ func (e *StorageExecutor) callApocPathSubgraphNodes(cypher string) (*ExecuteResu
 
 	// Convert to result rows
 	for _, node := range resultNodes {
-		result.Rows = append(result.Rows, []interface{}{e.nodeToMap(node)})
+		result.Rows = append(result.Rows, []interface{}{node})
 	}
 
 	return result, nil
@@ -2276,8 +2291,8 @@ func (e *StorageExecutor) callApocPathSpanningTree(cypher string) (*ExecuteResul
 		if startNodeObj != nil && endNodeObj != nil {
 			path := map[string]interface{}{
 				"nodes": []interface{}{
-					e.nodeToMap(startNodeObj),
-					e.nodeToMap(endNodeObj),
+					startNodeObj,
+					endNodeObj,
 				},
 				"relationships": []interface{}{
 					map[string]interface{}{
@@ -3016,7 +3031,7 @@ func (e *StorageExecutor) callDbCreateSetNodeVectorProperty(ctx context.Context,
 
 	return &ExecuteResult{
 		Columns: []string{"node"},
-		Rows:    [][]interface{}{{e.nodeToMap(node)}},
+		Rows:    [][]interface{}{{node}},
 	}, nil
 }
 

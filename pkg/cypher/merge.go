@@ -125,7 +125,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			varName = "n"
 		}
 		result.Columns = []string{varName}
-		result.Rows = append(result.Rows, []interface{}{e.nodeToMap(node)})
+		result.Rows = append(result.Rows, []interface{}{node})
 		return result, nil
 	}
 
@@ -978,7 +978,7 @@ func (e *StorageExecutor) parseReturnClauseWithContext(returnClause string, node
 		var values []interface{}
 		for name, node := range nodes {
 			columns = append(columns, name)
-			values = append(values, e.nodeToMap(node))
+			values = append(values, node)
 		}
 		return columns, values
 	}
@@ -1017,7 +1017,7 @@ func (e *StorageExecutor) parseReturnClauseWithContext(returnClause string, node
 func (e *StorageExecutor) parseReturnClause(returnClause string, varName string, node *storage.Node) ([]string, []interface{}) {
 	// Handle RETURN *
 	if strings.TrimSpace(returnClause) == "*" {
-		return []string{varName}, []interface{}{e.nodeToMap(node)}
+		return []string{varName}, []interface{}{node}
 	}
 
 	var columns []string

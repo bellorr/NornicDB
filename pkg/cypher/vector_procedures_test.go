@@ -221,8 +221,8 @@ func TestVectorSearchQueryModes(t *testing.T) {
 		// Should find nodes with embeddings, doc1 should be most similar
 		assert.Greater(t, len(result.Rows), 0, "Should find at least one document")
 		if len(result.Rows) > 0 {
-			topNode := result.Rows[0][0].(map[string]interface{})
-			assert.Equal(t, "doc1", topNode["id"], "doc1 should be most similar to ML query")
+			topNode := result.Rows[0][0].(*storage.Node)
+			assert.Equal(t, "doc1", topNode.Properties["id"], "doc1 should be most similar to ML query")
 			score := result.Rows[0][1].(float64)
 			assert.Greater(t, score, 0.8, "Score should be high for similar vectors")
 		}
@@ -248,8 +248,8 @@ func TestVectorSearchQueryModes(t *testing.T) {
 		// Should find nodes, doc1 should be most similar
 		assert.Greater(t, len(result.Rows), 0, "Should find documents")
 		if len(result.Rows) > 0 {
-			topNode := result.Rows[0][0].(map[string]interface{})
-			assert.Equal(t, "doc1", topNode["id"], "doc1 should match ML query")
+			topNode := result.Rows[0][0].(*storage.Node)
+			assert.Equal(t, "doc1", topNode.Properties["id"], "doc1 should match ML query")
 		}
 	})
 
@@ -270,8 +270,8 @@ func TestVectorSearchQueryModes(t *testing.T) {
 
 		// doc2 should be most similar
 		if len(result.Rows) > 0 {
-			topNode := result.Rows[0][0].(map[string]interface{})
-			assert.Equal(t, "doc2", topNode["id"], "doc2 should match DB query")
+			topNode := result.Rows[0][0].(*storage.Node)
+			assert.Equal(t, "doc2", topNode.Properties["id"], "doc2 should match DB query")
 		}
 	})
 

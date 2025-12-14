@@ -1366,6 +1366,12 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	if strings.HasPrefix(upperDeleteClause, "DELETE ") {
 		deleteClause = deleteClause[7:] // len("DELETE ")
 	}
+	
+	// Strip RETURN clause from deleteVars if present
+	returnInDelete := findKeywordIndex(deleteClause, "RETURN")
+	if returnInDelete > 0 {
+		deleteClause = strings.TrimSpace(deleteClause[:returnInDelete])
+	}
 	deleteVars := strings.TrimSpace(deleteClause)
 
 	// Execute the match first - return the specific variables being deleted
@@ -1436,6 +1442,30 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				}
 			}
 		}
+	}
+
+	// Handle RETURN clause (e.g., RETURN count(*) as deleted)
+	returnIdx := findKeywordIndex(cypher, "RETURN")
+	if returnIdx > 0 {
+		returnPart := strings.TrimSpace(cypher[returnIdx+6:])
+		returnItems := e.parseReturnItems(returnPart)
+		result.Columns = make([]string, len(returnItems))
+		row := make([]interface{}, len(returnItems))
+
+		for i, item := range returnItems {
+			if item.alias != "" {
+				result.Columns[i] = item.alias
+			} else {
+				result.Columns[i] = item.expr
+			}
+
+			// Handle count(*) - return number of deleted items
+			upperExpr := strings.ToUpper(item.expr)
+			if strings.HasPrefix(upperExpr, "COUNT(") {
+				row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
+			}
+		}
+		result.Rows = [][]interface{}{row}
 	}
 
 	return result, nil
@@ -1523,28 +1553,22 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 					// Add label to matched nodes
 					for _, row := range matchResult.Rows {
 						for _, val := range row {
-							if node, ok := val.(map[string]interface{}); ok {
-								id, ok := node["_nodeId"].(string)
-								if !ok {
-									continue
+							node, ok := val.(*storage.Node)
+							if !ok || node == nil {
+								continue
+							}
+							// Add label if not already present
+							hasLabel := false
+							for _, l := range node.Labels {
+								if l == labelName {
+									hasLabel = true
+									break
 								}
-								storageNode, err := e.storage.GetNode(storage.NodeID(id))
-								if err != nil {
-									continue
-								}
-								// Add label if not already present
-								hasLabel := false
-								for _, l := range storageNode.Labels {
-									if l == labelName {
-										hasLabel = true
-										break
-									}
-								}
-								if !hasLabel {
-									storageNode.Labels = append(storageNode.Labels, labelName)
-									if err := e.storage.UpdateNode(storageNode); err == nil {
-										result.Stats.LabelsAdded++
-									}
+							}
+							if !hasLabel {
+								node.Labels = append(node.Labels, labelName)
+								if err := e.storage.UpdateNode(node); err == nil {
+									result.Stats.LabelsAdded++
 								}
 							}
 						}
@@ -1571,20 +1595,14 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		// Update matched nodes
 		for _, row := range matchResult.Rows {
 			for _, val := range row {
-				if node, ok := val.(map[string]interface{}); ok {
-					id, ok := node["_nodeId"].(string)
-					if !ok {
-						continue
-					}
-					storageNode, err := e.storage.GetNode(storage.NodeID(id))
-					if err != nil {
-						continue
-					}
-					// Use setNodeProperty to properly route "embedding" to node.Embedding
-					setNodeProperty(storageNode, propName, propValue)
-					if err := e.storage.UpdateNode(storageNode); err == nil {
-						result.Stats.PropertiesSet++
-					}
+				node, ok := val.(*storage.Node)
+				if !ok || node == nil {
+					continue
+				}
+				// Use setNodeProperty to properly route "embedding" to node.Embedding
+				setNodeProperty(node, propName, propValue)
+				if err := e.storage.UpdateNode(node); err == nil {
+					result.Stats.PropertiesSet++
 				}
 			}
 		}
@@ -1604,23 +1622,18 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 			}
 		}
 
-		// Re-fetch and return updated nodes
+		// Return updated nodes
 		for _, row := range matchResult.Rows {
 			for _, val := range row {
-				if node, ok := val.(map[string]interface{}); ok {
-					id, ok := node["_nodeId"].(string)
-					if !ok {
-						continue
-					}
-					storageNode, _ := e.storage.GetNode(storage.NodeID(id))
-					if storageNode != nil {
-						newRow := make([]interface{}, len(returnItems))
-						for j, item := range returnItems {
-							newRow[j] = e.resolveReturnItem(item, variable, storageNode)
-						}
-						result.Rows = append(result.Rows, newRow)
-					}
+				node, ok := val.(*storage.Node)
+				if !ok || node == nil {
+					continue
 				}
+				newRow := make([]interface{}, len(returnItems))
+				for j, item := range returnItems {
+					newRow[j] = e.resolveReturnItem(item, variable, node)
+				}
+				result.Rows = append(result.Rows, newRow)
 			}
 		}
 	}
@@ -1653,28 +1666,24 @@ func (e *StorageExecutor) executeSetMerge(matchResult *ExecuteResult, setPart st
 		return nil, fmt.Errorf("SET += requires a map or parameter")
 	}
 
+	// Collect updated nodes for RETURN
+	var updatedNodes []*storage.Node
+
 	// Update matched nodes
 	for _, row := range matchResult.Rows {
 		for _, val := range row {
-			nodeMap, ok := val.(map[string]interface{})
-			if !ok {
+			node, ok := val.(*storage.Node)
+			if !ok || node == nil {
 				continue
 			}
-			id, ok := nodeMap["_nodeId"].(string)
-			if !ok {
-				continue
-			}
-			storageNode, err := e.storage.GetNode(storage.NodeID(id))
-			if err != nil {
-				continue
-			}
+
 			// Merge properties (new values override existing)
-			// Use setNodeProperty to properly route "embedding" to node.Embedding
 			for k, v := range propsToMerge {
-				setNodeProperty(storageNode, k, v)
+				setNodeProperty(node, k, v)
 				result.Stats.PropertiesSet++
 			}
-			_ = e.storage.UpdateNode(storageNode)
+			_ = e.storage.UpdateNode(node)
+			updatedNodes = append(updatedNodes, node)
 		}
 	}
 
@@ -1691,24 +1700,13 @@ func (e *StorageExecutor) executeSetMerge(matchResult *ExecuteResult, setPart st
 			}
 		}
 
-		// Re-fetch and return updated nodes
-		for _, row := range matchResult.Rows {
-			for _, val := range row {
-				if node, ok := val.(map[string]interface{}); ok {
-					id, ok := node["_nodeId"].(string)
-					if !ok {
-						continue
-					}
-					storageNode, _ := e.storage.GetNode(storage.NodeID(id))
-					if storageNode != nil {
-						newRow := make([]interface{}, len(returnItems))
-						for j, item := range returnItems {
-							newRow[j] = e.resolveReturnItem(item, variable, storageNode)
-						}
-						result.Rows = append(result.Rows, newRow)
-					}
-				}
+		// Return updated nodes (Neo4j compatible: return *storage.Node)
+		for _, storageNode := range updatedNodes {
+			newRow := make([]interface{}, len(returnItems))
+			for j, item := range returnItems {
+				newRow[j] = e.resolveReturnItem(item, variable, storageNode)
 			}
+			result.Rows = append(result.Rows, newRow)
 		}
 	} else {
 		// No RETURN clause - return matched count
@@ -1767,26 +1765,18 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 	// Update matched nodes
 	for _, row := range matchResult.Rows {
 		for _, val := range row {
-			nodeMap, ok := val.(map[string]interface{})
-			if !ok {
-				continue
-			}
-			id, ok := nodeMap["_nodeId"].(string)
-			if !ok {
-				continue
-			}
-			storageNode, err := e.storage.GetNode(storage.NodeID(id))
-			if err != nil {
+			node, ok := val.(*storage.Node)
+			if !ok || node == nil {
 				continue
 			}
 			// Remove specified properties
 			for _, prop := range propsToRemove {
-				if _, exists := storageNode.Properties[prop]; exists {
-					delete(storageNode.Properties, prop)
+				if _, exists := node.Properties[prop]; exists {
+					delete(node.Properties, prop)
 					result.Stats.PropertiesSet++ // Neo4j counts removals as properties set
 				}
 			}
-			_ = e.storage.UpdateNode(storageNode)
+			_ = e.storage.UpdateNode(node)
 		}
 	}
 
@@ -1802,23 +1792,18 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 				result.Columns[i] = item.expr
 			}
 		}
-		// Re-fetch nodes for return
+		// Return updated nodes
 		for _, row := range matchResult.Rows {
 			for _, val := range row {
-				if nodeMap, ok := val.(map[string]interface{}); ok {
-					id, ok := nodeMap["_nodeId"].(string)
-					if !ok {
-						continue
-					}
-					storageNode, _ := e.storage.GetNode(storage.NodeID(id))
-					if storageNode != nil {
-						resultRow := make([]interface{}, len(returnItems))
-						for i, item := range returnItems {
-							resultRow[i] = e.resolveReturnItem(item, "n", storageNode)
-						}
-						result.Rows = append(result.Rows, resultRow)
-					}
+				node, ok := val.(*storage.Node)
+				if !ok || node == nil {
+					continue
 				}
+				resultRow := make([]interface{}, len(returnItems))
+				for i, item := range returnItems {
+					resultRow[i] = e.resolveReturnItem(item, "n", node)
+				}
+				result.Rows = append(result.Rows, resultRow)
 			}
 		}
 	}
@@ -2260,9 +2245,9 @@ func (e *StorageExecutor) parseValue(s string) interface{} {
 func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, node *storage.Node) interface{} {
 	expr := item.expr
 
-	// Handle wildcard - return the whole node
+	// Handle wildcard - return the whole node (Neo4j compatible: return *storage.Node)
 	if expr == "*" || expr == variable {
-		return e.nodeToMap(node)
+		return node
 	}
 
 	// Check for CASE expression FIRST (before property access check)
@@ -3140,7 +3125,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 				colNameLower := strings.ToLower(strings.TrimSpace(colName))
 				if colNameLower == seedVarLower && newRow[colIdx] == nil {
 					// Inject the seed node as a map representation
-					newRow[colIdx] = e.nodeToMap(seedNode)
+					newRow[colIdx] = seedNode
 				}
 			}
 			combinedResult.Rows = append(combinedResult.Rows, newRow)
@@ -3152,7 +3137,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 			emptyRow := make([]interface{}, len(innerResult.Columns))
 			for colIdx, colName := range innerResult.Columns {
 				if strings.EqualFold(colName, nodePattern.variable) {
-					emptyRow[colIdx] = e.nodeToMap(seedNode)
+					emptyRow[colIdx] = seedNode
 				}
 			}
 			combinedResult.Rows = append(combinedResult.Rows, emptyRow)

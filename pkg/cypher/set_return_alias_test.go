@@ -33,11 +33,11 @@ func TestSetWithReturnAlias(t *testing.T) {
 		require.Len(t, result.Rows, 1)
 
 		// Verify the returned node has updated properties
-		node := result.Rows[0][0].(map[string]interface{})
-		assert.Equal(t, "test-123", node["id"])
-		assert.Equal(t, "Original", node["name"])
-		assert.Equal(t, "updated", node["status"])
-		assert.Equal(t, int64(42), node["count"])
+		node := result.Rows[0][0].(*storage.Node)
+		assert.Equal(t, "test-123", node.Properties["id"])
+		assert.Equal(t, "Original", node.Properties["name"])
+		assert.Equal(t, "updated", node.Properties["status"])
+		assert.Equal(t, int64(42), node.Properties["count"])
 	})
 
 	t.Run("SET property with RETURN n", func(t *testing.T) {
@@ -57,9 +57,9 @@ func TestSetWithReturnAlias(t *testing.T) {
 		require.Len(t, result.Rows, 1)
 
 		// Verify the returned node has updated property
-		node := result.Rows[0][0].(map[string]interface{})
-		assert.Equal(t, "test-456", node["id"])
-		assert.Equal(t, int64(10), node["value"])
+		node := result.Rows[0][0].(*storage.Node)
+		assert.Equal(t, "test-456", node.Properties["id"])
+		assert.Equal(t, int64(10), node.Properties["value"])
 	})
 
 	t.Run("SET += without RETURN returns matched count", func(t *testing.T) {
@@ -114,10 +114,10 @@ func TestSetWithReturnAlias(t *testing.T) {
 		assert.Equal(t, []string{"node"}, result.Columns, "Should use alias 'node'")
 		require.Len(t, result.Rows, 1)
 
-		node := result.Rows[0][0].(map[string]interface{})
-		assert.Equal(t, "test-def", node["id"])
-		assert.Equal(t, "MyTitle", node["title"])
-		assert.Equal(t, true, node["active"])
+		node := result.Rows[0][0].(*storage.Node)
+		assert.Equal(t, "test-def", node.Properties["id"])
+		assert.Equal(t, "MyTitle", node.Properties["title"])
+		assert.Equal(t, true, node.Properties["active"])
 	})
 }
 
@@ -148,8 +148,8 @@ func TestSetReturnMultipleNodes(t *testing.T) {
 
 	// Verify all nodes have updated status
 	for _, row := range result.Rows {
-		node := row[0].(map[string]interface{})
-		assert.Equal(t, "active", node["status"])
+		node := row[0].(*storage.Node)
+		assert.Equal(t, "active", node.Properties["status"])
 	}
 }
 
@@ -187,9 +187,9 @@ func TestSetReturnAliasRegressionBug(t *testing.T) {
 
 	require.Len(t, result.Rows, 1)
 
-	node := result.Rows[0][0].(map[string]interface{})
-	assert.Equal(t, "task-123", node["id"])
-	assert.Equal(t, "in_progress", node["status"])
-	assert.Equal(t, "alice", node["assignee"])
-	assert.Equal(t, "Implement feature", node["title"])
+	node := result.Rows[0][0].(*storage.Node)
+	assert.Equal(t, "task-123", node.Properties["id"])
+	assert.Equal(t, "in_progress", node.Properties["status"])
+	assert.Equal(t, "alice", node.Properties["assignee"])
+	assert.Equal(t, "Implement feature", node.Properties["title"])
 }

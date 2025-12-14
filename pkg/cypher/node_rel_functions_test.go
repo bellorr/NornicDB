@@ -57,19 +57,19 @@ func TestNodeRelationshipFunctions(t *testing.T) {
 			t.Fatal("No rows returned")
 		}
 
-		startNode, ok1 := result.Rows[0][0].(map[string]interface{})
-		endNode, ok2 := result.Rows[0][1].(map[string]interface{})
+		startNode, ok1 := result.Rows[0][0].(*storage.Node)
+		endNode, ok2 := result.Rows[0][1].(*storage.Node)
 
 		if !ok1 || !ok2 {
-			t.Fatalf("startNode/endNode should return maps, got %T and %T", result.Rows[0][0], result.Rows[0][1])
+			t.Fatalf("startNode/endNode should return *storage.Node, got %T and %T", result.Rows[0][0], result.Rows[0][1])
 		}
 
 		// Check properties exist
-		if startNode["name"] != "Alice" {
-			t.Errorf("startNode()['name'] = %v, want 'Alice'", startNode["name"])
+		if startNode.Properties["name"] != "Alice" {
+			t.Errorf("startNode().Properties['name'] = %v, want 'Alice'", startNode.Properties["name"])
 		}
-		if endNode["name"] != "Bob" {
-			t.Errorf("endNode()['name'] = %v, want 'Bob'", endNode["name"])
+		if endNode.Properties["name"] != "Bob" {
+			t.Errorf("endNode().Properties['name'] = %v, want 'Bob'", endNode.Properties["name"])
 		}
 	})
 

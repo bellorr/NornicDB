@@ -130,6 +130,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // Protocol versions supported
@@ -1749,6 +1751,17 @@ func encodePackStreamValue(v any) []byte {
 			}
 		}
 		return encodePackStreamMap(val)
+	// Storage types - Neo4j compatible node/edge encoding
+	case *storage.Node:
+		if val == nil {
+			return []byte{0xC0}
+		}
+		return encodeStorageNode(val)
+	case *storage.Edge:
+		if val == nil {
+			return []byte{0xC0}
+		}
+		return encodeStorageEdge(val)
 	default:
 		// Unknown type - encode as null
 		return []byte{0xC0}
@@ -1791,6 +1804,79 @@ func encodeNode(nodeId any, labels any, nodeMap map[string]any) []byte {
 		if k == "_nodeId" || k == "labels" {
 			continue
 		}
+		props[k] = v
+	}
+	buf = append(buf, encodePackStreamMap(props)...)
+
+	return buf
+}
+
+// encodeStorageNode encodes a *storage.Node as a proper Bolt Node structure (signature 0x4E).
+// This enables Neo4j drivers to receive nodes with .properties accessor.
+// Format: STRUCT(3 fields, signature 0x4E) + id + labels + properties
+func encodeStorageNode(node *storage.Node) []byte {
+	// Bolt Node structure: B3 4E (tiny struct, 3 fields, signature 'N')
+	buf := []byte{0xB3, 0x4E}
+
+	// Field 1: Node ID (as int64 for Neo4j compatibility)
+	// Hash the string ID to int64
+	var id int64 = 0
+	for _, c := range string(node.ID) {
+		id = id*31 + int64(c)
+	}
+	buf = append(buf, encodePackStreamInt(id)...)
+
+	// Field 2: Labels (list of strings)
+	labelList := make([]any, len(node.Labels))
+	for i, label := range node.Labels {
+		labelList[i] = label
+	}
+	buf = append(buf, encodePackStreamList(labelList)...)
+
+	// Field 3: Properties (map)
+	props := make(map[string]any)
+	for k, v := range node.Properties {
+		props[k] = v
+	}
+	buf = append(buf, encodePackStreamMap(props)...)
+
+	return buf
+}
+
+// encodeStorageEdge encodes a *storage.Edge as a proper Bolt Relationship structure (signature 0x52).
+// This enables Neo4j drivers to receive relationships with proper structure.
+// Format: STRUCT(5 fields, signature 0x52) + id + startNodeId + endNodeId + type + properties
+func encodeStorageEdge(edge *storage.Edge) []byte {
+	// Bolt Relationship structure: B5 52 (tiny struct, 5 fields, signature 'R')
+	buf := []byte{0xB5, 0x52}
+
+	// Field 1: Relationship ID (as int64)
+	var id int64 = 0
+	for _, c := range string(edge.ID) {
+		id = id*31 + int64(c)
+	}
+	buf = append(buf, encodePackStreamInt(id)...)
+
+	// Field 2: Start Node ID (as int64)
+	var startId int64 = 0
+	for _, c := range string(edge.StartNode) {
+		startId = startId*31 + int64(c)
+	}
+	buf = append(buf, encodePackStreamInt(startId)...)
+
+	// Field 3: End Node ID (as int64)
+	var endId int64 = 0
+	for _, c := range string(edge.EndNode) {
+		endId = endId*31 + int64(c)
+	}
+	buf = append(buf, encodePackStreamInt(endId)...)
+
+	// Field 4: Relationship Type (string)
+	buf = append(buf, encodePackStreamString(edge.Type)...)
+
+	// Field 5: Properties (map)
+	props := make(map[string]any)
+	for k, v := range edge.Properties {
 		props[k] = v
 	}
 	buf = append(buf, encodePackStreamMap(props)...)

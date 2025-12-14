@@ -63,10 +63,10 @@ func TestSetReturnSingleVariable(t *testing.T) {
 	require.Len(t, result.Rows, 1, "Should have 1 row")
 
 	// Verify the returned node has the updated property
-	returnedNode, ok := result.Rows[0][0].(map[string]interface{})
-	require.True(t, ok, "Result should be a node map")
-	assert.Equal(t, "active", returnedNode["status"], "Node should have updated status")
-	assert.Equal(t, "Alice", returnedNode["name"], "Node should retain original properties")
+	returnedNode, ok := result.Rows[0][0].(*storage.Node)
+	require.True(t, ok, "Result should be a *storage.Node")
+	assert.Equal(t, "active", returnedNode.Properties["status"], "Node should have updated status")
+	assert.Equal(t, "Alice", returnedNode.Properties["name"], "Node should retain original properties")
 }
 
 // TestSetReturnMultipleVariables tests MATCH...SET...RETURN n, m
@@ -301,12 +301,12 @@ func TestSetMergeOperatorReturn(t *testing.T) {
 	require.Len(t, result.Rows, 1, "Should have 1 row")
 
 	// Verify the returned node has merged properties
-	returnedNode, ok := result.Rows[0][0].(map[string]interface{})
-	require.True(t, ok, "Result should be a node map")
-	assert.Equal(t, "active", returnedNode["status"], "Node should have new status")
-	assert.Equal(t, "NYC", returnedNode["city"], "Node should have new city")
-	assert.Equal(t, "Alice", returnedNode["name"], "Node should retain original name")
-	assert.Equal(t, int64(30), returnedNode["age"], "Node should retain original age")
+	returnedNode, ok := result.Rows[0][0].(*storage.Node)
+	require.True(t, ok, "Result should be a *storage.Node")
+	assert.Equal(t, "active", returnedNode.Properties["status"], "Node should have new status")
+	assert.Equal(t, "NYC", returnedNode.Properties["city"], "Node should have new city")
+	assert.Equal(t, "Alice", returnedNode.Properties["name"], "Node should retain original name")
+	assert.Equal(t, int64(30), returnedNode.Properties["age"], "Node should retain original age")
 }
 
 // TestSetMultiplePropertiesReturn tests SET n.a = 1, n.b = 2 RETURN n
@@ -336,11 +336,11 @@ func TestSetMultiplePropertiesReturn(t *testing.T) {
 	require.Len(t, result.Rows, 1, "Should have 1 row")
 
 	// Verify all properties were set
-	returnedNode, ok := result.Rows[0][0].(map[string]interface{})
-	require.True(t, ok, "Result should be a node map")
-	assert.Equal(t, "active", returnedNode["status"])
-	assert.Equal(t, true, returnedNode["verified"])
-	assert.Equal(t, int64(100), returnedNode["score"])
+	returnedNode, ok := result.Rows[0][0].(*storage.Node)
+	require.True(t, ok, "Result should be a *storage.Node")
+	assert.Equal(t, "active", returnedNode.Properties["status"])
+	assert.Equal(t, true, returnedNode.Properties["verified"])
+	assert.Equal(t, int64(100), returnedNode.Properties["score"])
 }
 
 // TestSetReturnMultipleMatches tests SET with RETURN when matching multiple nodes

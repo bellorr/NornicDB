@@ -52,7 +52,7 @@ func (e *StorageExecutor) callApocAlgoLouvain(ctx context.Context, cypher string
 		if err != nil {
 			continue
 		}
-		rows = append(rows, []interface{}{e.nodeToMap(node), communityID})
+		rows = append(rows, []interface{}{node, communityID})
 	}
 
 	return &ExecuteResult{
@@ -233,7 +233,7 @@ func (e *StorageExecutor) callApocAlgoLabelPropagation(ctx context.Context, cyph
 		if err != nil {
 			continue
 		}
-		rows = append(rows, []interface{}{e.nodeToMap(node), communityID})
+		rows = append(rows, []interface{}{node, communityID})
 	}
 
 	return &ExecuteResult{
@@ -340,7 +340,7 @@ func (e *StorageExecutor) callApocAlgoWCC(ctx context.Context, cypher string) (*
 		if err != nil {
 			continue
 		}
-		rows = append(rows, []interface{}{e.nodeToMap(node), componentID})
+		rows = append(rows, []interface{}{node, componentID})
 	}
 
 	return &ExecuteResult{

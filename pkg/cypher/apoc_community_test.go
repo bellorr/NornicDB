@@ -120,8 +120,8 @@ func TestApocAlgoWCC(t *testing.T) {
 		// Z should be in a different component
 		componentMap := make(map[string]int)
 		for _, row := range result.Rows {
-			nodeMap := row[0].(map[string]interface{})
-			nodeID := nodeMap["id"].(string)
+			node := row[0].(*storage.Node)
+			nodeID := string(node.ID)
 			componentID := row[1].(int)
 			componentMap[nodeID] = componentID
 		}

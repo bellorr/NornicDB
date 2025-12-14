@@ -307,7 +307,7 @@ func (e *StorageExecutor) pathToValue(path PathResult, expr, pathVar string) int
 	if matchFuncStart(expr, "nodes") {
 		nodes := make([]interface{}, len(path.Nodes))
 		for i, n := range path.Nodes {
-			nodes[i] = e.nodeToMap(n)
+			nodes[i] = n
 		}
 		return nodes
 	}
@@ -327,7 +327,7 @@ func (e *StorageExecutor) pathToValue(path PathResult, expr, pathVar string) int
 func (e *StorageExecutor) pathToMap(path PathResult) map[string]interface{} {
 	nodes := make([]interface{}, len(path.Nodes))
 	for i, n := range path.Nodes {
-		nodes[i] = e.nodeToMap(n)
+		nodes[i] = n
 	}
 
 	rels := make([]interface{}, len(path.Relationships))

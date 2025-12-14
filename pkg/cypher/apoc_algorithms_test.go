@@ -150,8 +150,8 @@ func TestApocAlgoBetweenness(t *testing.T) {
 		// Find the betweenness scores
 		scores := make(map[string]float64)
 		for _, row := range result.Rows {
-			nodeMap := row[0].(map[string]interface{})
-			name := nodeMap["name"].(string)
+			node := row[0].(*storage.Node)
+			name := node.Properties["name"].(string)
 			score := row[1].(float64)
 			scores[name] = score
 		}

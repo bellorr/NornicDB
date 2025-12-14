@@ -258,7 +258,7 @@ func (e *StorageExecutor) callApocAlgoPageRank(ctx context.Context, cypher strin
 		if err != nil {
 			continue
 		}
-		rows = append(rows, []interface{}{e.nodeToMap(node), score})
+		rows = append(rows, []interface{}{node, score})
 	}
 	return &ExecuteResult{Columns: []string{"node", "score"}, Rows: rows}, nil
 }
@@ -314,7 +314,7 @@ func (e *StorageExecutor) callApocAlgoBetweenness(ctx context.Context, cypher st
 		if err != nil {
 			continue
 		}
-		rows = append(rows, []interface{}{e.nodeToMap(node), score})
+		rows = append(rows, []interface{}{node, score})
 	}
 	return &ExecuteResult{Columns: []string{"node", "score"}, Rows: rows}, nil
 }
@@ -395,7 +395,7 @@ func (e *StorageExecutor) callApocAlgoCloseness(ctx context.Context, cypher stri
 		if err != nil {
 			continue
 		}
-		rows = append(rows, []interface{}{e.nodeToMap(node), score})
+		rows = append(rows, []interface{}{node, score})
 	}
 	return &ExecuteResult{Columns: []string{"node", "score"}, Rows: rows}, nil
 }
@@ -457,7 +457,7 @@ func (e *StorageExecutor) callApocNeighborsTohop(ctx context.Context, cypher str
 		if err != nil {
 			continue
 		}
-		rows = append(rows, []interface{}{e.nodeToMap(node)})
+		rows = append(rows, []interface{}{node})
 	}
 	return &ExecuteResult{Columns: []string{"node"}, Rows: rows}, nil
 }
@@ -507,7 +507,7 @@ func (e *StorageExecutor) callApocNeighborsByhop(ctx context.Context, cypher str
 				if err != nil {
 					continue
 				}
-				nodesList = append(nodesList, e.nodeToMap(node))
+				nodesList = append(nodesList, node)
 			}
 			rows = append(rows, []interface{}{nodesList, depth})
 		}

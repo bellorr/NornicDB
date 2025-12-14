@@ -31,10 +31,10 @@ func TestDocumentationExamples_FirstQueries(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1)
 
-		// Result is a map representing the node
-		node, ok := result.Rows[0][0].(map[string]interface{})
-		require.True(t, ok, "Expected node map")
-		assert.Equal(t, "Alice Johnson", node["name"])
+		// Result is a *storage.Node (Neo4j compatible)
+		node, ok := result.Rows[0][0].(*storage.Node)
+		require.True(t, ok, "Expected *storage.Node")
+		assert.Equal(t, "Alice Johnson", node.Properties["name"])
 	})
 
 	t.Run("CreateMultipleNodes", func(t *testing.T) {
@@ -49,13 +49,13 @@ func TestDocumentationExamples_FirstQueries(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1)
 
-		bob, ok := result.Rows[0][0].(map[string]interface{})
-		require.True(t, ok, "Expected bob node map")
-		assert.Equal(t, "Bob Smith", bob["name"])
+		bob, ok := result.Rows[0][0].(*storage.Node)
+		require.True(t, ok, "Expected bob *storage.Node")
+		assert.Equal(t, "Bob Smith", bob.Properties["name"])
 
-		company, ok := result.Rows[0][2].(map[string]interface{})
-		require.True(t, ok, "Expected company node map")
-		assert.Equal(t, "TechCorp", company["name"])
+		company, ok := result.Rows[0][2].(*storage.Node)
+		require.True(t, ok, "Expected company *storage.Node")
+		assert.Equal(t, "TechCorp", company.Properties["name"])
 	})
 
 	t.Run("CreateRelationship", func(t *testing.T) {

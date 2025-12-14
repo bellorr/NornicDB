@@ -2509,7 +2509,7 @@ skipArrayIndexing:
 		if rel, ok := rels[inner]; ok {
 			node, err := e.storage.GetNode(rel.StartNode)
 			if err == nil {
-				return e.nodeToMap(node)
+				return node
 			}
 		}
 		return nil
@@ -2521,7 +2521,7 @@ skipArrayIndexing:
 		if rel, ok := rels[inner]; ok {
 			node, err := e.storage.GetNode(rel.EndNode)
 			if err == nil {
-				return e.nodeToMap(node)
+				return node
 			}
 		}
 		return nil
@@ -2535,7 +2535,7 @@ skipArrayIndexing:
 			if pathResult, ok := paths[inner]; ok && pathResult != nil {
 				var result []interface{}
 				for _, node := range pathResult.Nodes {
-					result = append(result, e.nodeToMap(node))
+					result = append(result, node)
 				}
 				return result
 			}
@@ -2544,13 +2544,13 @@ skipArrayIndexing:
 		if allPathNodes != nil && len(allPathNodes) > 0 {
 			var result []interface{}
 			for _, node := range allPathNodes {
-				result = append(result, e.nodeToMap(node))
+				result = append(result, node)
 			}
 			return result
 		}
 		// Fallback: return single node from node context
 		if node, ok := nodes[inner]; ok {
-			return []interface{}{e.nodeToMap(node)}
+			return []interface{}{node}
 		}
 		return []interface{}{}
 	}
@@ -4091,7 +4091,7 @@ skipArrayIndexing:
 				return val
 			}
 		}
-		return e.nodeToMap(node)
+		return node
 	}
 	if rel, ok := rels[expr]; ok {
 		return map[string]interface{}{
