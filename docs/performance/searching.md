@@ -711,7 +711,6 @@ On older CPU without AVX2/NEON:
   Implementation: generic
   Features: [SSE2]
   Accelerated: false
-```
 
 On x86 with AVX2:
   Implementation: AVX2
@@ -745,27 +744,27 @@ K-means partitions data into K clusters by iteratively:
 
 ```
 Iteration 0 (Random starts):
-┌─────────────────────────┐
-│ ●    ●    ●             │  3 centroids
-│  ● ●  ● ●  ● ●         │  scattered randomly
-│   ●   ●    ●●●         │
-└─────────────────────────┘
+ ┌─────────────────────────┐
+ │ ●    ●    ●             │  3 centroids 
+ │  ● ●  ● ●  ● ●          │  scattered randomly
+ │   ●   ●    ●●●          │
+ └─────────────────────────┘
 
-Iteration 5 (Converging):
-┌─────────────────────────┐
-│ ●●●  ●●   ●●            │
-│  ●● ●●●  ●●●●          │  Points move towards
-│ ●●●● ● ●●●●●●          │  nearest centroid
-│    ●      ●●●          │
-└─────────────────────────┘
+ Iteration 5 (Converging):
+ ┌─────────────────────────┐
+ │ ●●●  ●●   ●●            │
+ │  ●● ●●●  ●●●●           │  Points move towards
+ │ ●●●● ● ●●●●●●           │  nearest centroid
+ │    ●      ●●●           │
+ └─────────────────────────┘
 
-Iteration 50 (Converged):
-┌─────────────────────────┐
-│ ●●●  ●●   ●●            │
-│  ●●●●●●●  ●●●●●        │  Tight clusters
-│ ●●●●●●●●●●●●●●●●      │  centroids stable
-│    ●●●●●●  ●●●          │
-└─────────────────────────┘
+ Iteration 50 (Converged):
+ ┌─────────────────────────┐
+ │ ●●●  ●●   ●●            │
+ │  ●●●●●●●  ●●●●●         │  Tight clusters
+ │ ●●●●●●●●●●●●●●●●        │  centroids stable
+ │    ●●●●●●  ●●●          │
+ └─────────────────────────┘
 ```
 
 ### Performance: K-Means Search vs Brute-Force
