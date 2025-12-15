@@ -6,6 +6,43 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 
+## [1.0.8] - 2025-12-15
+
+### Added
+- **ANTLR Cypher Parser Integration**: Added optional ANTLR-based OpenCypher parser as alternative to the fast inline Nornic parser
+  - Switch via `NORNICDB_PARSER=antlr` environment variable (default: `nornic`)
+  - Full OpenCypher grammar support with detailed error messages (line/column info)
+  - Programmatic switching via `config.SetParserType()` and `config.WithANTLRParser()`
+  - New make targets: `make antlr-test`, `make antlr-generate`, `make test-parsers`
+- **SIMD Vector Math Package** (`pkg/simd`): Internal SIMD-accelerated vector operations for faster embedding similarity
+  - ARM64 NEON support via `vek` package
+  - AMD64 AVX2/SSE support
+  - Metal GPU acceleration on macOS (Apple Silicon)
+  - Integrated into vector similarity pipeline for cosine/euclidean/dot-product operations
+- **WAL Hardening**: Added trailer canary and 8-byte alignment for improved durability
+  - New tests and documentation in `docs/operations/durability.md`
+- **Search Optimizations Documentation**: Comprehensive guide at `docs/performance/searching.md`
+- **Protocol Plugin Architecture Proposal**: Design doc at `docs/architecture/protocol-plugin-architecture.md`
+- **Cypher Parser Modes Documentation**: Architecture doc at `docs/architecture/cypher-parser-modes.md`
+
+### Changed
+- **SIMD Backend**: Switched from inline assembly to `vek` package for cross-platform SIMD support
+- **Makefile**: Added auto-detection for GPU backends and Vulkan build instructions
+- Tests updated to be parser-agnostic (work with both Nornic and ANTLR parsers)
+
+### Performance
+- ANTLR parser benchmarks (Northwind database):
+  - Nornic: 3,000-4,200 ops/sec (recommended for production)
+  - ANTLR: 0.8-2,100 ops/sec (50-5000x slower, use for development/debugging)
+- SIMD vector operations: Up to 4x faster similarity calculations on supported hardware
+
+### Technical Details
+- New packages: `pkg/simd`, `pkg/cypher/antlr`
+- New config: `pkg/config/feature_flags.go` for parser type management
+- ANTLR grammar files: `pkg/cypher/antlr/CypherLexer.g4`, `pkg/cypher/antlr/CypherParser.g4`
+- 27,000+ lines of ANTLR-generated parser code
+- Metal shader implementation for GPU-accelerated SIMD on macOS
+
 ## [1.0.7] - 2025-12-14
 
 ### Added
