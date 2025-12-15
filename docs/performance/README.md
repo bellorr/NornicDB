@@ -4,6 +4,7 @@
 
 ## 📚 Documentation
 
+- **[Search Methodology](searching.md)** - Complete guide to vector, full-text, RRF, and reranking
 - **[Benchmarks vs Neo4j](benchmarks-vs-neo4j.md)** - Performance comparison
 - **[Test Results](test-results.md)** - Test suite results
 - **[Optimization Guide](optimization-guide.md)** - Performance tuning
