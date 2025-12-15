@@ -94,6 +94,7 @@ QWEN_URL := https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
 .PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
 .PHONY: download-models download-bge download-qwen check-models
+.PHONY: antlr-generate antlr-clean antlr-test
 
 # ==============================================================================
 # Model Downloads (Heimdall prerequisites)
@@ -1136,3 +1137,25 @@ else
 	@echo "❌ Signing is only available on macOS"
 	@exit 1
 endif
+
+# ==============================================================================
+# ANTLR Parser Generation
+# ==============================================================================
+# Regenerate the ANTLR Cypher parser from grammar files (.g4)
+# Requires: Java 11+ (for ANTLR tool)
+# See: pkg/cypher/antlr/README.md for details
+
+# Regenerate ANTLR parser from grammar files
+antlr-generate:
+	@echo "Regenerating ANTLR Cypher parser..."
+	$(MAKE) -C pkg/cypher/antlr generate
+
+# Run ANTLR parser tests
+antlr-test:
+	@echo "Running ANTLR parser tests..."
+	go test -v ./pkg/cypher/antlr/...
+
+# Clean ANTLR generated files and JAR
+antlr-clean:
+	@echo "Cleaning ANTLR artifacts..."
+	$(MAKE) -C pkg/cypher/antlr clean

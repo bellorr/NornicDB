@@ -121,6 +121,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/cypher/antlr"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -1194,8 +1196,26 @@ func splitReturnExpressions(clause string) []string {
 	return parts
 }
 
-// validateSyntax performs basic syntax validation.
+// validateSyntax performs syntax validation.
+// When NORNICDB_PARSER=antlr, uses ANTLR for strict OpenCypher grammar validation.
+// When NORNICDB_PARSER=nornic (default), uses fast inline validation.
 func (e *StorageExecutor) validateSyntax(cypher string) error {
+	// Use ANTLR parser for validation when configured
+	if config.IsANTLRParser() {
+		return e.validateSyntaxANTLR(cypher)
+	}
+	return e.validateSyntaxNornic(cypher)
+}
+
+// validateSyntaxANTLR uses ANTLR for strict OpenCypher grammar validation.
+// Provides detailed error messages with line/column information.
+func (e *StorageExecutor) validateSyntaxANTLR(cypher string) error {
+	_, err := antlr.Parse(cypher)
+	return err
+}
+
+// validateSyntaxNornic performs fast inline syntax validation.
+func (e *StorageExecutor) validateSyntaxNornic(cypher string) error {
 	upper := strings.ToUpper(cypher)
 
 	// Check for valid starting keyword (including EXPLAIN/PROFILE prefixes)

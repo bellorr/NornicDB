@@ -38,6 +38,7 @@ package config
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	// Note: Import config package for centralized flags
@@ -107,6 +108,16 @@ const (
 	// Requires EnvAutoTLPLLMQCEnabled to also be enabled
 	// DISABLED by default - increases SLM workload
 	EnvAutoTLPLLMAugmentEnabled = "NORNICDB_AUTO_TLP_LLM_AUGMENT_ENABLED"
+
+	// EnvParserType selects the Cypher parser implementation
+	// - "nornic" (default): Fast inline parser optimized for NornicDB
+	// - "antlr": ANTLR-based OpenCypher parser (stricter, better error messages)
+	// Environment: NORNICDB_PARSER
+	EnvParserType = "NORNICDB_PARSER"
+
+	// Parser type constants
+	ParserTypeNornic = "nornic"
+	ParserTypeANTLR  = "antlr"
 
 	// FeatureKalmanDecay enables Kalman filtering for memory decay prediction
 	FeatureKalmanDecay = "kalman_decay"
@@ -199,11 +210,28 @@ var (
 	featureFlags                         = make(map[string]bool)
 	featureFlagsMu                       sync.RWMutex
 	initOnce                             sync.Once
+
+	// Parser type - "nornic" (default) or "antlr"
+	parserType atomic.Value // string
 )
 
 func init() {
 	// Check environment variables on startup
 	initOnce.Do(func() {
+		// Parser type: "nornic" (default) or "antlr"
+		parserType.Store(ParserTypeNornic) // default
+		if env := os.Getenv(EnvParserType); env != "" {
+			switch strings.ToLower(env) {
+			case ParserTypeANTLR:
+				parserType.Store(ParserTypeANTLR)
+			case ParserTypeNornic, "":
+				parserType.Store(ParserTypeNornic)
+			default:
+				// Unknown parser type, use default
+				parserType.Store(ParserTypeNornic)
+			}
+		}
+
 		// Experimental features - DISABLED by default, enable with "true" or "1"
 		if env := os.Getenv(EnvKalmanEnabled); env == "true" || env == "1" {
 			kalmanEnabled.Store(true)
@@ -1185,5 +1213,57 @@ func WithAutoTLPLLMAugmentDisabled() func() {
 	autoTLPLLMAugmentEnabled.Store(false)
 	return func() {
 		autoTLPLLMAugmentEnabled.Store(prev)
+	}
+}
+
+// ============================================================================
+// Parser Type Configuration
+// ============================================================================
+
+// GetParserType returns the current parser type ("nornic" or "antlr").
+// Default is "nornic" (the fast inline parser).
+func GetParserType() string {
+	if v := parserType.Load(); v != nil {
+		return v.(string)
+	}
+	return ParserTypeNornic
+}
+
+// SetParserType sets the parser type ("nornic" or "antlr").
+func SetParserType(t string) {
+	switch strings.ToLower(t) {
+	case ParserTypeANTLR:
+		parserType.Store(ParserTypeANTLR)
+	default:
+		parserType.Store(ParserTypeNornic)
+	}
+}
+
+// IsANTLRParser returns true if the ANTLR parser is selected.
+func IsANTLRParser() bool {
+	return GetParserType() == ParserTypeANTLR
+}
+
+// IsNornicParser returns true if the Nornic (inline) parser is selected.
+func IsNornicParser() bool {
+	return GetParserType() == ParserTypeNornic
+}
+
+// WithANTLRParser temporarily switches to ANTLR parser and returns cleanup function.
+// Useful for A/B testing between parsers.
+func WithANTLRParser() func() {
+	prev := GetParserType()
+	SetParserType(ParserTypeANTLR)
+	return func() {
+		SetParserType(prev)
+	}
+}
+
+// WithNornicParser temporarily switches to Nornic parser and returns cleanup function.
+func WithNornicParser() func() {
+	prev := GetParserType()
+	SetParserType(ParserTypeNornic)
+	return func() {
+		SetParserType(prev)
 	}
 }
