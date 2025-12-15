@@ -458,7 +458,7 @@ build: build-ui build-binary build-plugins-if-supported
 ifeq ($(HOST_OS),windows)
 	@echo ""
 	@echo "Binary: bin\nornicdb.exe (GPU-enabled build via yzma)"
-	@echo "GPU Support: CUDA (NVIDIA), Vulkan (AMD/NVIDIA, coming soon)"
+	@echo "GPU Support: CUDA (NVIDIA), Vulkan (AMD/NVIDIA, build with Vulkan flags)"
 	@echo ""
 	@echo "Next steps:"
 	@echo "  1. Install CUDA libraries (if not done):"
@@ -500,8 +500,10 @@ endif
 check-llama-lib:
 ifeq ($(HOST_OS),windows)
 	@echo "Windows: Using yzma runtime GPU libraries (no compile-time linking)"
-	@echo "  Run setup-windows-cuda.bat to install CUDA libraries"
-	@echo "  Vulkan support coming soon for AMD GPUs"
+	@echo "  CUDA (NVIDIA):  Run scripts\setup-windows-cuda.bat"
+	@echo "  Vulkan (AMD/Intel/NVIDIA): Run scripts\setup-windows-vulkan.bat"
+	@echo ""
+	@echo "  To force Vulkan build: set NORNICDB_GPU_BACKEND=vulkan before 'make build'"
 else
 	@if [ ! -f lib/llama/libllama_$(HOST_OS)_$(HOST_ARCH).a ]; then \
 		echo "⚠️  llama.cpp library not found, building..."; \
@@ -516,8 +518,74 @@ endif
 
 build-binary: check-llama-lib
 ifeq ($(HOST_OS),windows)
-	@echo "Building with GPU support (CUDA via yzma, Vulkan coming soon)..."
+	@echo "Detecting GPU support..."
+	@powershell -Command " \
+		$$forceBackend = $$env:NORNICDB_GPU_BACKEND; \
+		$$cuda = $$false; \
+		$$vulkan = $$false; \
+		if ($$forceBackend) { \
+			Write-Host '  [**] Forced backend: '$$forceBackend -ForegroundColor Magenta; \
+		} \
+		if (Get-Command nvcc -ErrorAction SilentlyContinue) { \
+			$$cudaVer = (nvcc --version 2>$$null | Select-String 'release' | ForEach-Object { $$_ -replace '.*release ([0-9.]+).*','$$1' }); \
+			if ($$cudaVer) { \
+				Write-Host '  [OK] CUDA Toolkit detected: v'$$cudaVer -ForegroundColor Green; \
+				$$cuda = $$true; \
+			} \
+		} \
+		if (-not $$cuda) { \
+			if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { \
+				Write-Host '  [!!] NVIDIA GPU detected but CUDA Toolkit not installed' -ForegroundColor Yellow; \
+				Write-Host '       Install from: https://developer.nvidia.com/cuda-downloads' -ForegroundColor Yellow; \
+			} else { \
+				Write-Host '  [--] No NVIDIA GPU/CUDA detected' -ForegroundColor Gray; \
+			} \
+		} \
+		if (Get-Command vulkaninfo -ErrorAction SilentlyContinue) { \
+			Write-Host '  [OK] Vulkan SDK detected' -ForegroundColor Green; \
+			$$vulkan = $$true; \
+		} elseif (Test-Path 'C:\\VulkanSDK') { \
+			Write-Host '  [OK] Vulkan SDK found at C:\\VulkanSDK' -ForegroundColor Green; \
+			$$vulkan = $$true; \
+		} else { \
+			Write-Host '  [--] No Vulkan SDK detected' -ForegroundColor Gray; \
+		} \
+		Write-Host ''; \
+		if ($$forceBackend -eq 'vulkan' -and $$vulkan) { \
+			Write-Host 'Building with Vulkan support (forced)...' -ForegroundColor Cyan; \
+			Write-Host 'GPU_BACKEND=vulkan' | Out-File -FilePath .gpu-backend -Encoding ascii; \
+		} elseif ($$forceBackend -eq 'cuda' -and $$cuda) { \
+			Write-Host 'Building with CUDA support (forced)...' -ForegroundColor Cyan; \
+			Write-Host 'GPU_BACKEND=cuda' | Out-File -FilePath .gpu-backend -Encoding ascii; \
+		} elseif ($$forceBackend -eq 'cpu') { \
+			Write-Host 'Building CPU-only (forced)...' -ForegroundColor Yellow; \
+			Write-Host 'GPU_BACKEND=cpu' | Out-File -FilePath .gpu-backend -Encoding ascii; \
+		} elseif ($$cuda) { \
+			Write-Host 'Building with CUDA support (NVIDIA GPU)...' -ForegroundColor Cyan; \
+			Write-Host 'GPU_BACKEND=cuda' | Out-File -FilePath .gpu-backend -Encoding ascii; \
+		} elseif ($$vulkan) { \
+			Write-Host 'Building with Vulkan support (Universal GPU)...' -ForegroundColor Cyan; \
+			Write-Host 'GPU_BACKEND=vulkan' | Out-File -FilePath .gpu-backend -Encoding ascii; \
+		} else { \
+			Write-Host 'Building CPU-only (no GPU acceleration)...' -ForegroundColor Yellow; \
+			Write-Host 'GPU_BACKEND=cpu' | Out-File -FilePath .gpu-backend -Encoding ascii; \
+		} \
+	"
 	@go build -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
+	@powershell -Command " \
+		$$backend = (Get-Content .gpu-backend -ErrorAction SilentlyContinue) -replace 'GPU_BACKEND=',''; \
+		Remove-Item .gpu-backend -ErrorAction SilentlyContinue; \
+		Write-Host ''; \
+		if ($$backend -eq 'cuda') { \
+			Write-Host 'Next: Run scripts\\setup-windows-cuda.bat to install runtime libraries' -ForegroundColor Green; \
+		} elseif ($$backend -eq 'vulkan') { \
+			Write-Host 'Next: Run scripts\\setup-windows-vulkan.bat to install runtime libraries' -ForegroundColor Green; \
+		} else { \
+			Write-Host 'Note: GPU acceleration disabled. For better performance:' -ForegroundColor Yellow; \
+			Write-Host '  NVIDIA: Install CUDA Toolkit from https://developer.nvidia.com/cuda-downloads' -ForegroundColor Yellow; \
+			Write-Host '  AMD/Intel: Install Vulkan SDK from https://vulkan.lunarg.com/sdk/home' -ForegroundColor Yellow; \
+		} \
+	"
 else
 	CGO_ENABLED=1 go build -tags localllm -o bin/nornicdb$(BIN_EXT) ./cmd/nornicdb
 endif
@@ -638,7 +706,7 @@ endif
 # Windows x86_64 (GPU-enabled via yzma: CUDA + Vulkan support)
 cross-windows:
 	@echo "Building for Windows x86_64 (GPU-enabled via yzma)..."
-	@echo "  GPU Backends: CUDA (NVIDIA), Vulkan (AMD/NVIDIA, coming soon)"
+	@echo "  GPU Backends: CUDA (NVIDIA), Vulkan (AMD/NVIDIA, build with Vulkan flags)"
 ifeq ($(HOST_OS),windows)
 	@set CGO_ENABLED=0 && set GOOS=windows && set GOARCH=amd64 && go build -o bin/nornicdb.exe ./cmd/nornicdb
 else
@@ -648,7 +716,7 @@ endif
 	@echo ""
 	@echo "Note: GPU libraries installed separately via:"
 	@echo "  scripts\setup-windows-cuda.bat    (NVIDIA CUDA)"
-	@echo "  scripts\setup-windows-vulkan.bat  (AMD/NVIDIA Vulkan, coming soon)"
+	@echo "  scripts\setup-windows-vulkan.bat  (AMD/NVIDIA Vulkan, build with Vulkan flags)"
 
 # Windows native builds (must run on Windows)
 # See: build.bat for all Windows variants
