@@ -94,7 +94,7 @@ QWEN_URL := https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
 .PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
 .PHONY: download-models download-bge download-qwen check-models
-.PHONY: antlr-generate antlr-clean antlr-test
+.PHONY: antlr-generate antlr-clean antlr-test antlr-test-full test-parsers
 
 # ==============================================================================
 # Model Downloads (Heimdall prerequisites)
@@ -1150,10 +1150,39 @@ antlr-generate:
 	@echo "Regenerating ANTLR Cypher parser..."
 	$(MAKE) -C pkg/cypher/antlr generate
 
-# Run ANTLR parser tests
+# Run ENTIRE test suite with ANTLR parser active
+# This validates that ANTLR parser works with all tests across the codebase
 antlr-test:
-	@echo "Running ANTLR parser tests..."
-	go test -v ./pkg/cypher/antlr/...
+	@echo "=============================================="
+	@echo "Running ENTIRE test suite with ANTLR parser"
+	@echo "=============================================="
+	NORNICDB_PARSER=antlr go test -timeout 30m ./...
+	@echo ""
+	@echo "✅ Full test suite passed with ANTLR parser"
+
+# Run FULL cypher test suite with ANTLR parser
+# This validates that ANTLR parser works with all existing cypher tests
+antlr-test-full:
+	@echo "=============================================="
+	@echo "Running FULL Cypher test suite with ANTLR parser"
+	@echo "=============================================="
+	NORNICDB_PARSER=antlr go test -timeout 30m ./pkg/cypher/...
+	@echo ""
+	@echo "✅ Full Cypher test suite passed with ANTLR parser"
+
+# Run both parsers: first Nornic (default), then ANTLR
+test-parsers:
+	@echo "=============================================="
+	@echo "Running Cypher tests with NORNIC parser (default)"
+	@echo "=============================================="
+	NORNICDB_PARSER=nornic go test -timeout 30m ./pkg/cypher/...
+	@echo ""
+	@echo "=============================================="
+	@echo "Running Cypher tests with ANTLR parser"
+	@echo "=============================================="
+	NORNICDB_PARSER=antlr go test -timeout 30m ./pkg/cypher/...
+	@echo ""
+	@echo "✅ Both parsers passed all Cypher tests"
 
 # Clean ANTLR generated files and JAR
 antlr-clean:
