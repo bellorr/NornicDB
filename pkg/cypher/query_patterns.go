@@ -122,6 +122,13 @@ func DetectQueryPattern(query string) PatternInfo {
 
 	upperQuery := strings.ToUpper(query)
 
+	// Don't optimize queries with WITH clause - they have complex aggregation
+	// semantics that the optimized executors don't handle (aliases, collect, etc.)
+	// Use word boundary check to avoid matching "STARTS WITH" or "ENDS WITH"
+	if containsKeywordOutsideStrings(query, "WITH") {
+		return info
+	}
+
 	// Extract LIMIT first (affects multiple patterns)
 	if matches := patternLimitRegex.FindStringSubmatch(query); matches != nil {
 		limit, _ := strconv.Atoi(matches[1])

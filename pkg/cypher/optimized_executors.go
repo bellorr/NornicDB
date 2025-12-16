@@ -65,8 +65,12 @@ func (e *StorageExecutor) ExecuteOptimized(ctx context.Context, query string, pa
 // =============================================================================
 
 func (e *StorageExecutor) executeMutualRelationshipOptimized(ctx context.Context, query string, info PatternInfo) (*ExecuteResult, error) {
+	// Parse RETURN clause to get actual column names/aliases
+	returnItems := e.extractReturnItemsFromQuery(query)
+	columns := e.buildColumnsFromReturnItems(returnItems)
+
 	result := &ExecuteResult{
-		Columns: []string{info.StartVar + ".name", info.EndVar + ".name"},
+		Columns: columns,
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
@@ -132,8 +136,12 @@ func (e *StorageExecutor) executeMutualRelationshipOptimized(ctx context.Context
 // =============================================================================
 
 func (e *StorageExecutor) executeIncomingCountOptimized(ctx context.Context, query string, info PatternInfo) (*ExecuteResult, error) {
+	// Parse RETURN clause to get actual column names/aliases
+	returnItems := e.extractReturnItemsFromQuery(query)
+	columns := e.buildColumnsFromReturnItems(returnItems)
+
 	result := &ExecuteResult{
-		Columns: []string{info.StartVar + ".name", "count"},
+		Columns: columns,
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
@@ -196,8 +204,12 @@ func (e *StorageExecutor) executeIncomingCountOptimized(ctx context.Context, que
 // =============================================================================
 
 func (e *StorageExecutor) executeOutgoingCountOptimized(ctx context.Context, query string, info PatternInfo) (*ExecuteResult, error) {
+	// Parse RETURN clause to get actual column names/aliases
+	returnItems := e.extractReturnItemsFromQuery(query)
+	columns := e.buildColumnsFromReturnItems(returnItems)
+
 	result := &ExecuteResult{
-		Columns: []string{info.StartVar + ".name", "count"},
+		Columns: columns,
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
@@ -326,11 +338,9 @@ func (e *StorageExecutor) executeEdgePropertyAggOptimized(ctx context.Context, q
 		}
 	}
 
-	// Build columns based on aggregation functions
-	result.Columns = append(result.Columns, "name")
-	for _, fn := range info.AggFunctions {
-		result.Columns = append(result.Columns, fn)
-	}
+	// Build columns from RETURN clause (respects aliases)
+	returnItems := e.extractReturnItemsFromQuery(query)
+	result.Columns = e.buildColumnsFromReturnItems(returnItems)
 
 	// Convert to result rows
 	type aggRow struct {
@@ -390,6 +400,31 @@ func (e *StorageExecutor) executeEdgePropertyAggOptimized(ctx context.Context, q
 // =============================================================================
 // Helper Functions
 // =============================================================================
+
+// extractReturnItemsFromQuery extracts RETURN items from a Cypher query
+func (e *StorageExecutor) extractReturnItemsFromQuery(query string) []returnItem {
+	upperQuery := strings.ToUpper(query)
+	returnIdx := strings.Index(upperQuery, "RETURN")
+	if returnIdx == -1 {
+		return nil
+	}
+
+	returnPart := strings.TrimSpace(query[returnIdx+6:])
+	return e.parseReturnItems(returnPart)
+}
+
+// buildColumnsFromReturnItems builds column names from parsed return items
+func (e *StorageExecutor) buildColumnsFromReturnItems(items []returnItem) []string {
+	columns := make([]string, len(items))
+	for i, item := range items {
+		if item.alias != "" {
+			columns[i] = item.alias
+		} else {
+			columns[i] = item.expr
+		}
+	}
+	return columns
+}
 
 // getNodeCached retrieves a node, using cache to avoid repeated lookups
 func (e *StorageExecutor) getNodeCached(id storage.NodeID, cache map[storage.NodeID]*storage.Node) *storage.Node {

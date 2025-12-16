@@ -1315,10 +1315,10 @@ func (e *StorageExecutor) executeMatchRelationshipsWithClause(ctx context.Contex
 	// Check for WHERE between WITH and RETURN (post-aggregation filter, like SQL HAVING)
 	var withClause string
 	var postWithWhere string
-	postWhereIdx := findKeywordNotInBrackets(strings.ToUpper(withSection), " WHERE ")
+	postWhereIdx := findKeywordIndex(withSection, "WHERE")
 	if postWhereIdx > 0 {
 		withClause = strings.TrimSpace(withSection[:postWhereIdx])
-		postWithWhere = strings.TrimSpace(withSection[postWhereIdx+7:]) // Skip " WHERE "
+		postWithWhere = strings.TrimSpace(withSection[postWhereIdx+5:]) // Skip "WHERE"
 	} else {
 		withClause = withSection
 	}
