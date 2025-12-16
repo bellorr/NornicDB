@@ -2314,6 +2314,32 @@ func TestParseReturnItemsMapProjectionWithAlias(t *testing.T) {
 	assert.Len(t, result.Rows, 1)
 }
 
+func TestParseReturnItemsMapProjectionWithoutAlias(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Test that map projection syntax n { .*, key: value } WITHOUT AS alias
+	// Neo4j infers the column name from the variable before the map projection
+	params := map[string]interface{}{
+		"props": map[string]interface{}{
+			"name":      "TestNode",
+			"value":     float64(42),
+			"embedding": []float64{0.1, 0.2, 0.3},
+		},
+	}
+
+	result, err := exec.Execute(ctx, "CREATE (n:Node $props) RETURN n { .*, embedding: null }", params)
+	require.NoError(t, err)
+
+	// Should have exactly 1 column named "n" (inferred from variable)
+	assert.Len(t, result.Columns, 1, "Should have exactly 1 column, not split on comma inside {}")
+	assert.Equal(t, "n", result.Columns[0], "Column should be named 'n' inferred from variable before {}")
+
+	// Should have 1 row
+	assert.Len(t, result.Rows, 1)
+}
+
 func TestParseReturnItemsOrderByLimit(t *testing.T) {
 	store := storage.NewMemoryEngine()
 	exec := NewStorageExecutor(store)

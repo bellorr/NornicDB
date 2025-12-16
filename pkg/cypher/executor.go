@@ -2020,6 +2020,15 @@ func (e *StorageExecutor) parseReturnItems(returnPart string) []returnItem {
 		if asIdx > 0 {
 			item.expr = strings.TrimSpace(part[:asIdx])
 			item.alias = strings.TrimSpace(part[asIdx+4:])
+		} else {
+			// Handle map projection without AS alias: n { .*, key: value } -> column name is "n"
+			// Neo4j infers the column name from the variable before the map projection
+			if braceIdx := strings.Index(part, " {"); braceIdx > 0 {
+				varName := strings.TrimSpace(part[:braceIdx])
+				if varName != "" && !strings.Contains(varName, "(") {
+					item.alias = varName
+				}
+			}
 		}
 
 		items = append(items, item)
