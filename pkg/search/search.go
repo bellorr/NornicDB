@@ -236,6 +236,11 @@ type Service struct {
 	// before k-means clustering provides any benefit. Configurable via
 	// SetMinEmbeddingsForClustering(). Default: 1000
 	minEmbeddingsForClustering int
+
+	// defaultMinSimilarity is the minimum cosine similarity threshold for vector search.
+	// Apple Intelligence embeddings produce scores in 0.2-0.8 range, bge-m3/mxbai produce 0.7-0.99.
+	// Configurable via SetDefaultMinSimilarity(). Default: 0.0 (let RRF handle relevance)
+	defaultMinSimilarity float64
 }
 
 // NewService creates a new search Service with empty indexes.
@@ -517,6 +522,22 @@ func (s *Service) GetMinEmbeddingsForClustering() int {
 	return s.minEmbeddingsForClustering
 }
 
+// SetDefaultMinSimilarity sets the default minimum cosine similarity threshold for vector search.
+// Apple Intelligence embeddings produce scores in 0.2-0.8 range, bge-m3/mxbai produce 0.7-0.99.
+// Default: 0.0 (let RRF ranking handle relevance filtering)
+func (s *Service) SetDefaultMinSimilarity(threshold float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.defaultMinSimilarity = threshold
+}
+
+// GetDefaultMinSimilarity returns the configured minimum similarity threshold.
+func (s *Service) GetDefaultMinSimilarity() float64 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.defaultMinSimilarity
+}
+
 // ClusterStats returns k-means clustering statistics.
 func (s *Service) ClusterStats() *gpu.ClusterStats {
 	s.mu.RLock()
@@ -536,6 +557,16 @@ func (s *Service) EmbeddingCount() int {
 		return 0
 	}
 	return s.vectorIndex.Count()
+}
+
+// VectorIndexDimensions returns the configured dimensions of the vector index.
+func (s *Service) VectorIndexDimensions() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.vectorIndex == nil {
+		return 0
+	}
+	return s.vectorIndex.GetDimensions()
 }
 
 // ClearVectorIndex removes all embeddings from the vector index.
@@ -697,6 +728,15 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 	if opts == nil {
 		opts = DefaultSearchOptions()
 	}
+
+	// Apply service-configured MinSimilarity if not explicitly set in opts
+	// This allows the service to override the default based on embedding model
+	s.mu.RLock()
+	if s.defaultMinSimilarity >= 0 && opts.MinSimilarity == 0.5 {
+		// 0.5 is the hardcoded default - override with service config
+		opts.MinSimilarity = s.defaultMinSimilarity
+	}
+	s.mu.RUnlock()
 
 	// If no embedding provided, fall back to full-text only
 	if len(embedding) == 0 {
@@ -896,15 +936,23 @@ func (s *Service) fuseRRF(vectorResults, bm25Results []indexResult, opts *Search
 	if k == 0 {
 		k = 60 // Default
 	}
+	vectorWeight := opts.VectorWeight
+	if vectorWeight == 0 {
+		vectorWeight = 1.0 // Default weight
+	}
+	bm25Weight := opts.BM25Weight
+	if bm25Weight == 0 {
+		bm25Weight = 1.0 // Default weight
+	}
 
 	for id := range allIDs {
 		var vectorComponent, bm25Component float64
 
 		if rank, ok := vectorRanks[id]; ok {
-			vectorComponent = opts.VectorWeight / (k + float64(rank))
+			vectorComponent = vectorWeight / (k + float64(rank))
 		}
 		if rank, ok := bm25Ranks[id]; ok {
-			bm25Component = opts.BM25Weight / (k + float64(rank))
+			bm25Component = bm25Weight / (k + float64(rank))
 		}
 
 		rrfScore := vectorComponent + bm25Component

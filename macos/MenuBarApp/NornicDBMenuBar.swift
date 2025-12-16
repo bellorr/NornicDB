@@ -1762,6 +1762,8 @@ struct SettingsView: View {
                 <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
                 <key>NORNICDB_EMBEDDING_API_KEY</key>
                 <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
+                <key>NORNICDB_SEARCH_MIN_SIMILARITY</key>
+                <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
                 <string>\(config.kmeansEnabled ? "true" : "false")</string>
                 <key>NORNICDB_AUTO_TLP_ENABLED</key>
@@ -2654,6 +2656,8 @@ struct FirstRunWizard: View {
                                 <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
                                 <key>NORNICDB_EMBEDDING_API_KEY</key>
                                 <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
+                                <key>NORNICDB_SEARCH_MIN_SIMILARITY</key>
+                                <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
                                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
                                 <string>\(config.kmeansEnabled ? "true" : "false")</string>
                                 <key>NORNICDB_AUTO_TLP_ENABLED</key>

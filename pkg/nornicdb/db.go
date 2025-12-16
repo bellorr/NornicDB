@@ -303,12 +303,13 @@ type Config struct {
 	DataDir string `yaml:"data_dir"`
 
 	// Embeddings
-	EmbeddingProvider   string `yaml:"embedding_provider"` // ollama, openai
-	EmbeddingAPIURL     string `yaml:"embedding_api_url"`
-	EmbeddingAPIKey     string `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
-	EmbeddingModel      string `yaml:"embedding_model"`
-	EmbeddingDimensions int    `yaml:"embedding_dimensions"`
-	AutoEmbedEnabled    bool   `yaml:"auto_embed_enabled"` // Auto-generate embeddings on node create/update
+	EmbeddingProvider   string  `yaml:"embedding_provider"` // ollama, openai
+	EmbeddingAPIURL     string  `yaml:"embedding_api_url"`
+	EmbeddingAPIKey     string  `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
+	EmbeddingModel      string  `yaml:"embedding_model"`
+	EmbeddingDimensions int     `yaml:"embedding_dimensions"`
+	AutoEmbedEnabled    bool    `yaml:"auto_embed_enabled"`    // Auto-generate embeddings on node create/update
+	SearchMinSimilarity float64 `yaml:"search_min_similarity"` // Min cosine similarity for vector search (0.0 = no filter)
 
 	// Decay
 	DecayEnabled             bool          `yaml:"decay_enabled"`
@@ -963,6 +964,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	db.searchService = search.NewServiceWithDimensions(db.storage, embeddingDims)
 	log.Printf("🔍 Search service initialized with %d-dimension vector index", embeddingDims)
 
+	// Configure search MinSimilarity threshold from config
+	// Apple Intelligence embeddings produce scores in 0.2-0.8 range, bge-m3/mxbai produce 0.7-0.99
+	// Always set this - 0.0 is a valid value meaning "no filtering"
+	db.searchService.SetDefaultMinSimilarity(config.SearchMinSimilarity)
+	log.Printf("🔍 Search MinSimilarity threshold set to %.2f", config.SearchMinSimilarity)
+
 	// Wire up storage event callbacks to keep search indexes synchronized
 	// Storage is the single source of truth - it notifies when changes happen
 	// The storage chain can be: AsyncEngine -> WALEngine -> BadgerEngine
@@ -1220,6 +1227,17 @@ func (db *DB) EmbeddingCount() int {
 		return 0
 	}
 	return db.searchService.EmbeddingCount()
+}
+
+// VectorIndexDimensions returns the actual dimensions of the search service's vector index.
+// This is useful for debugging dimension mismatches between config and runtime.
+func (db *DB) VectorIndexDimensions() int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	if db.searchService == nil {
+		return 0
+	}
+	return db.searchService.VectorIndexDimensions()
 }
 
 // EmbedExisting triggers the worker to scan for nodes without embeddings.

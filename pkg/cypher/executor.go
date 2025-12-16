@@ -289,10 +289,7 @@ func (e *StorageExecutor) SetDefaultEmbeddingDimensions(dims int) {
 // GetDefaultEmbeddingDimensions returns the configured default embedding dimensions.
 // Returns 1024 as fallback if not configured.
 func (e *StorageExecutor) GetDefaultEmbeddingDimensions() int {
-	if e.defaultEmbeddingDimensions > 0 {
-		return e.defaultEmbeddingDimensions
-	}
-	return 1024 // Fallback only if not configured
+	return e.defaultEmbeddingDimensions
 }
 
 // notifyNodeCreated calls the onNodeCreated callback if set.

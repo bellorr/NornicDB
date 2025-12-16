@@ -250,6 +250,11 @@ type MemoryConfig struct {
 	// Each cached embedding uses ~4KB (1024 dims × 4 bytes)
 	// 10000 cache = ~40MB memory, provides significant speedup for repeated queries
 	EmbeddingCacheSize int
+	// SearchMinSimilarity is the minimum cosine similarity threshold for vector search results.
+	// Apple Intelligence embeddings produce scores in 0.2-0.8 range, bge-m3/mxbai produce 0.7-0.99.
+	// Default: 0.0 (let RRF ranking handle relevance filtering)
+	// Env: NORNICDB_SEARCH_MIN_SIMILARITY
+	SearchMinSimilarity float64
 	// ModelsDir is the directory containing local GGUF models
 	// Env: NORNICDB_MODELS_DIR (default: ./models)
 	ModelsDir string
@@ -768,6 +773,9 @@ func legacyLoadFromEnv() *Config {
 	if v := os.Getenv("NORNICDB_EMBEDDING_CACHE_SIZE"); v != "" {
 		config.Memory.EmbeddingCacheSize = getEnvInt("NORNICDB_EMBEDDING_CACHE_SIZE", 10000)
 	}
+	if v := os.Getenv("NORNICDB_SEARCH_MIN_SIMILARITY"); v != "" {
+		config.Memory.SearchMinSimilarity = getEnvFloat("NORNICDB_SEARCH_MIN_SIMILARITY", 0.5)
+	}
 	config.Memory.AutoLinksEnabled = getEnvBool("NORNICDB_AUTO_LINKS_ENABLED", true)
 	config.Memory.AutoLinksSimilarityThreshold = getEnvFloat("NORNICDB_AUTO_LINKS_THRESHOLD", 0.82)
 
@@ -1021,13 +1029,14 @@ type YAMLConfig struct {
 
 	// Embedding configuration
 	Embedding struct {
-		Enabled    bool   `yaml:"enabled"`
-		Provider   string `yaml:"provider"`
-		Model      string `yaml:"model"`
-		URL        string `yaml:"url"`
-		APIKey     string `yaml:"api_key"`
-		Dimensions int    `yaml:"dimensions"`
-		CacheSize  int    `yaml:"cache_size"`
+		Enabled       bool    `yaml:"enabled"`
+		Provider      string  `yaml:"provider"`
+		Model         string  `yaml:"model"`
+		URL           string  `yaml:"url"`
+		APIKey        string  `yaml:"api_key"`
+		Dimensions    int     `yaml:"dimensions"`
+		CacheSize     int     `yaml:"cache_size"`
+		MinSimilarity float64 `yaml:"min_similarity"`
 	} `yaml:"embedding"`
 
 	// Memory/Decay configuration
@@ -1885,6 +1894,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Embedding.CacheSize > 0 {
 		config.Memory.EmbeddingCacheSize = yamlCfg.Embedding.CacheSize
+	}
+	if yamlCfg.Embedding.MinSimilarity > 0 {
+		config.Memory.SearchMinSimilarity = yamlCfg.Embedding.MinSimilarity
 	}
 
 	// === Memory Settings ===

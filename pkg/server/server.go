@@ -1817,11 +1817,11 @@ func (s *Server) edgeToNeo4jHTTPFormat(edge *storage.Edge) map[string]interface{
 	endElementId := fmt.Sprintf("4:nornicdb:%s", edge.EndNode)
 
 	return map[string]interface{}{
-		"elementId":           elementId,
-		"type":                edge.Type,
+		"elementId":          elementId,
+		"type":               edge.Type,
 		"startNodeElementId": startElementId,
 		"endNodeElementId":   endElementId,
-		"properties":          edge.Properties,
+		"properties":         edge.Properties,
 	}
 }
 
@@ -2174,26 +2174,29 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleEmbedStats(w http.ResponseWriter, r *http.Request) {
 	stats := s.db.EmbedQueueStats()
 	totalEmbeddings := s.db.EmbeddingCount()
+	vectorIndexDims := s.db.VectorIndexDimensions()
 
 	if stats == nil {
 		response := map[string]interface{}{
-			"enabled":               false,
-			"message":               "Auto-embed not enabled",
-			"total_embeddings":      totalEmbeddings,
-			"configured_model":      s.config.EmbeddingModel,
-			"configured_dimensions": s.config.EmbeddingDimensions,
-			"configured_provider":   s.config.EmbeddingProvider,
+			"enabled":                 false,
+			"message":                 "Auto-embed not enabled",
+			"total_embeddings":        totalEmbeddings,
+			"configured_model":        s.config.EmbeddingModel,
+			"configured_dimensions":   s.config.EmbeddingDimensions,
+			"configured_provider":     s.config.EmbeddingProvider,
+			"vector_index_dimensions": vectorIndexDims,
 		}
 		s.writeJSON(w, http.StatusOK, response)
 		return
 	}
 	response := map[string]interface{}{
-		"enabled":               true,
-		"stats":                 stats,
-		"total_embeddings":      totalEmbeddings,
-		"configured_model":      s.config.EmbeddingModel,
-		"configured_dimensions": s.config.EmbeddingDimensions,
-		"configured_provider":   s.config.EmbeddingProvider,
+		"enabled":                 true,
+		"stats":                   stats,
+		"total_embeddings":        totalEmbeddings,
+		"configured_model":        s.config.EmbeddingModel,
+		"configured_dimensions":   s.config.EmbeddingDimensions,
+		"configured_provider":     s.config.EmbeddingProvider,
+		"vector_index_dimensions": vectorIndexDims,
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -2792,7 +2795,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Try to generate embedding for hybrid search
-	queryEmbedding, _ := s.db.EmbedQuery(r.Context(), req.Query)
+	queryEmbedding, embedErr := s.db.EmbedQuery(r.Context(), req.Query)
+	if embedErr != nil {
+		log.Printf("⚠️ Query embedding failed: %v", embedErr)
+	}
 
 	var results []*nornicdb.SearchResult
 	var err error

@@ -486,8 +486,9 @@ func TestNewEmbeddingIndex(t *testing.T) {
 
 	t.Run("nil config", func(t *testing.T) {
 		ei := NewEmbeddingIndex(m, nil)
-		if ei.dimensions != 1024 {
-			t.Errorf("expected 1024 default dimensions, got %d", ei.dimensions)
+		// nil config now defaults to 0 dimensions to avoid hardcoding model-specific values
+		if ei.dimensions != 0 {
+			t.Errorf("expected 0 default dimensions (caller must provide explicit config), got %d", ei.dimensions)
 		}
 	})
 }

@@ -961,7 +961,15 @@ func DefaultEmbeddingIndexConfig(dimensions int) *EmbeddingIndexConfig {
 //	Setting InitialCap avoids repeated memory allocations during bulk loading.
 func NewEmbeddingIndex(manager *Manager, config *EmbeddingIndexConfig) *EmbeddingIndex {
 	if config == nil {
-		config = DefaultEmbeddingIndexConfig(1024)
+		// Default to 0 dimensions - caller MUST provide config with explicit dimensions
+		// to avoid hardcoding any specific model's dimensions (e.g., 1024 for bge-m3, 512 for Apple Intelligence)
+		config = &EmbeddingIndexConfig{
+			Dimensions:     0, // Will cause dimension mismatch errors if not configured properly
+			InitialCap:     10000,
+			GPUEnabled:     true,
+			AutoSync:       false,
+			BatchThreshold: 1000,
+		}
 	}
 
 	return &EmbeddingIndex{
