@@ -389,7 +389,7 @@ func DefaultConfig() *Config {
 		EncryptionPassword:           "",                    // Must be set if encryption enabled
 		BoltPort:                     7687,
 		HTTPPort:                     7474,
-		KmeansClusterInterval:        15 * time.Minute,      // Run k-means every 15 min (skips if no changes)
+		KmeansClusterInterval:        15 * time.Minute, // Run k-means every 15 min (skips if no changes)
 	}
 }
 
@@ -445,9 +445,9 @@ type DB struct {
 	embedWorkerConfig *EmbedWorkerConfig // Configurable via ENV vars
 
 	// K-means clustering timer (runs on schedule instead of trigger)
-	clusterTicker            *time.Ticker
-	clusterTickerStop        chan struct{}
-	lastClusteredEmbedCount  int // Track embedding count at last clustering
+	clusterTicker           *time.Ticker
+	clusterTickerStop       chan struct{}
+	lastClusteredEmbedCount int // Track embedding count at last clustering
 
 	// Encryption flag - when true, all data is encrypted at BadgerDB level
 	encryptionEnabled bool
@@ -864,6 +864,11 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Initialize Cypher executor
 	db.cypherExecutor = cypher.NewStorageExecutor(db.storage)
+
+	// Configure executor with embedding dimensions for vector index creation
+	if config.EmbeddingDimensions > 0 {
+		db.cypherExecutor.SetDefaultEmbeddingDimensions(config.EmbeddingDimensions)
+	}
 
 	// Load function plugins from configured directory
 	// Heimdall plugins will be loaded later by the server after Heimdall is initialized
@@ -2909,7 +2914,9 @@ func (db *DB) CreateIndex(ctx context.Context, label, property, indexType string
 	case "fulltext":
 		return schema.AddFulltextIndex(indexName, []string{label}, []string{property})
 	case "vector":
-		return schema.AddVectorIndex(indexName, label, property, 1024, "cosine")
+		// Use configured embedding dimensions instead of hardcoded value
+		dims := db.config.EmbeddingDimensions
+		return schema.AddVectorIndex(indexName, label, property, dims, "cosine")
 	case "range":
 		return schema.AddRangeIndex(indexName, label, property)
 	default:

@@ -241,7 +241,7 @@ type Service struct {
 // NewService creates a new search Service with empty indexes.
 //
 // The service is created with:
-//   - 1024-dimensional vector index (default for mxbai-embed-large)
+//   - 1024-dimensional vector index (default for bge-m3)
 //   - Empty full-text index
 //   - Reference to storage engine for data enrichment
 //
@@ -328,7 +328,7 @@ type Service struct {
 //
 //	Safe for concurrent searches from multiple goroutines.
 func NewService(engine storage.Engine) *Service {
-	return NewServiceWithDimensions(engine, 1024) // Default to 1024 dimensions (mxbai-embed-large)
+	return NewServiceWithDimensions(engine, 1024)
 }
 
 // NewServiceWithDimensions creates a search Service with the specified embedding dimensions.
@@ -342,9 +342,6 @@ func NewService(engine storage.Engine) *Service {
 //	// For OpenAI text-embedding-3-small (1536 dimensions)
 //	svc := search.NewServiceWithDimensions(engine, 1536)
 func NewServiceWithDimensions(engine storage.Engine, dimensions int) *Service {
-	if dimensions <= 0 {
-		dimensions = 1024 // Fallback to default
-	}
 	return &Service{
 		engine:                     engine,
 		vectorIndex:                NewVectorIndex(dimensions),
@@ -390,11 +387,12 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 		InitMethod:    "kmeans++",
 	}
 
-	// Use the same dimensions as the vector index
-	dimensions := 1024 // Default
-	if s.vectorIndex != nil {
-		dimensions = s.vectorIndex.dimensions
+	// Use the same dimensions as the vector index (no hardcoded fallback)
+	if s.vectorIndex == nil {
+		log.Printf("[K-MEANS] ⚠️ Cannot enable clustering: vector index not initialized")
+		return
 	}
+	dimensions := s.vectorIndex.dimensions
 	embConfig := gpu.DefaultEmbeddingIndexConfig(dimensions)
 
 	s.clusterIndex = gpu.NewClusterIndex(gpuManager, embConfig, kmeansConfig)

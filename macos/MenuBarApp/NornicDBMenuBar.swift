@@ -882,6 +882,7 @@ class ConfigManager: ObservableObject {
     @Published var encryptionKeychainAccessDenied: Bool = false  // Track if user denied Keychain access
     
     @Published var embeddingModel: String = "bge-m3.gguf"
+    @Published var embeddingDimensions: Int = 1024  // Read from config, default 1024 for bge-m3
     @Published var heimdallModel: String = "qwen2.5-0.5b-instruct.gguf"
     @Published var availableModels: [String] = []
     
@@ -950,6 +951,15 @@ class ConfigManager: ObservableObject {
         }
         return nil
     }
+    
+    /// Get an integer value from a YAML section
+    private func getYAMLInt(key: String, from section: String) -> Int? {
+        if let stringValue = getYAMLString(key: key, from: section) {
+            return Int(stringValue)
+        }
+        return nil
+    }
+    
     private let firstRunPath = NSString(string: "~/.nornicdb/.first_run").expandingTildeInPath
     private let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
     private let modelsPath = "/usr/local/var/nornicdb/models"
@@ -1006,6 +1016,12 @@ class ConfigManager: ObservableObject {
                let url = getYAMLString(key: "url", from: embeddingSection) {
                 useAppleIntelligence = provider == "openai" && url.contains("localhost:\(ConfigManager.appleEmbeddingPort)")
                 print("✅ Loaded use Apple Intelligence: \(useAppleIntelligence)")
+            }
+            
+            // Load embedding dimensions from config
+            if let dims = getYAMLInt(key: "dimensions", from: embeddingSection), dims > 0 {
+                embeddingDimensions = dims
+                print("✅ Loaded embedding dimensions: \(dims)")
             }
         }
         
@@ -1743,7 +1759,7 @@ struct SettingsView: View {
                 <key>NORNICDB_EMBEDDING_MODEL</key>
                 <string>\(config.useAppleIntelligence ? "apple-ml-embeddings" : config.embeddingModel)</string>
                 <key>NORNICDB_EMBEDDING_DIMENSIONS</key>
-                <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "1024")</string>
+                <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
                 <key>NORNICDB_EMBEDDING_API_KEY</key>
                 <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
@@ -2635,7 +2651,7 @@ struct FirstRunWizard: View {
                                 <key>NORNICDB_EMBEDDING_MODEL</key>
                                 <string>\(config.useAppleIntelligence ? "apple-ml-embeddings" : config.embeddingModel)</string>
                                 <key>NORNICDB_EMBEDDING_DIMENSIONS</key>
-                                <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "1024")</string>
+                                <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
                                 <key>NORNICDB_EMBEDDING_API_KEY</key>
                                 <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
                                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>

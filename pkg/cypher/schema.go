@@ -287,8 +287,8 @@ func (e *StorageExecutor) executeCreateVectorIndex(ctx context.Context, cypher s
 	label := matches[3]
 	property := matches[5]
 
-	// Parse OPTIONS if present
-	dimensions := 1024         // Default
+	// Parse OPTIONS if present - use configured default dimensions
+	dimensions := e.GetDefaultEmbeddingDimensions()
 	similarityFunc := "cosine" // Default
 
 	if strings.Contains(cypher, "OPTIONS") {

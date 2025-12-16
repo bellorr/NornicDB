@@ -237,6 +237,21 @@ func runServe(cmd *cobra.Command, args []string) error {
 		cfg = config.LoadFromEnv()
 	}
 
+	// YAML config file is the source of truth for embedding settings
+	// Always use config file values if they are set (non-zero/non-empty)
+	if cfg.Memory.EmbeddingDimensions > 0 {
+		embeddingDim = cfg.Memory.EmbeddingDimensions
+	}
+	if cfg.Memory.EmbeddingProvider != "" {
+		embeddingProvider = cfg.Memory.EmbeddingProvider
+	}
+	if cfg.Memory.EmbeddingModel != "" {
+		embeddingModel = cfg.Memory.EmbeddingModel
+	}
+	if cfg.Memory.EmbeddingAPIURL != "" {
+		embeddingURL = cfg.Memory.EmbeddingAPIURL
+	}
+
 	// Override with CLI flags if provided
 	if memoryLimit != "" {
 		cfg.Memory.RuntimeLimitStr = memoryLimit

@@ -145,7 +145,7 @@ func DefaultOllamaConfig() *Config {
 		Provider:   "ollama",
 		APIURL:     "http://localhost:11434",
 		APIPath:    "/api/embeddings",
-		Model:      "mxbai-embed-large",
+		Model:      "bge-m3",
 		Dimensions: 1024,
 		Timeout:    30 * time.Second,
 	}
@@ -241,12 +241,12 @@ type OllamaEmbedder struct {
 //
 //	// Uses localhost:11434 by default
 //	embedder := embed.NewOllama(nil)
-//	
+//
 //	vec, err := embedder.Embed(ctx, "Hello world")
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	fmt.Printf("Generated %d-dimensional embedding\n", len(vec))
 //	// Output: Generated 1024-dimensional embedding
 //
@@ -255,9 +255,9 @@ type OllamaEmbedder struct {
 //	config := embed.DefaultOllamaConfig()
 //	config.Model = "nomic-embed-text"
 //	config.Dimensions = 768
-//	
+//
 //	embedder := embed.NewOllama(config)
-//	
+//
 //	// Good for English text
 //	vec, _ := embedder.Embed(ctx, "The quick brown fox")
 //	fmt.Printf("Nomic embedding: %d dims\n", len(vec)) // 768
@@ -267,9 +267,9 @@ type OllamaEmbedder struct {
 //	config := embed.DefaultOllamaConfig()
 //	config.APIURL = "http://ollama-server.internal:11434"
 //	config.Timeout = 60 * time.Second
-//	
+//
 //	embedder := embed.NewOllama(config)
-//	
+//
 //	// Connect to remote Ollama instance
 //	vec, err := embedder.Embed(ctx, "distributed embeddings")
 //	if err != nil {
@@ -279,19 +279,19 @@ type OllamaEmbedder struct {
 // Example 4 - Batch Processing for Efficiency:
 //
 //	embedder := embed.NewOllama(nil)
-//	
+//
 //	documents := []string{
 //		"Document 1 about AI",
 //		"Document 2 about ML",
 //		"Document 3 about NLP",
 //	}
-//	
+//
 //	// Process in batch
 //	embeddings, err := embedder.EmbedBatch(ctx, documents)
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	// Store embeddings in database
 //	for i, emb := range embeddings {
 //		storeEmbedding(documents[i], emb)
@@ -313,10 +313,10 @@ type OllamaEmbedder struct {
 //   - OFFLINE (works without internet)
 //
 // How it works:
-//   1. Install Ollama: `ollama run mxbai-embed-large`
-//   2. Ollama runs on localhost:11434
-//   3. Send text, get back 1024 numbers
-//   4. Use numbers to find similar text
+//  1. Install Ollama: `ollama run mxbai-embed-large`
+//  2. Ollama runs on localhost:11434
+//  3. Send text, get back 1024 numbers
+//  4. Use numbers to find similar text
 //
 // Models Available:
 //   - mxbai-embed-large: 1024 dims, best quality (default)
@@ -337,7 +337,8 @@ type OllamaEmbedder struct {
 //   - Memory: ~500MB-2GB for model
 //
 // Thread Safety:
-//   Safe to call from multiple goroutines.
+//
+//	Safe to call from multiple goroutines.
 func NewOllama(config *Config) *OllamaEmbedder {
 	if config == nil {
 		config = DefaultOllamaConfig()
@@ -508,12 +509,12 @@ type OpenAIEmbedder struct {
 //
 //	apiKey := os.Getenv("OPENAI_API_KEY") // sk-...
 //	embedder := embed.NewOpenAI(embed.DefaultOpenAIConfig(apiKey))
-//	
+//
 //	vec, err := embedder.Embed(ctx, "artificial intelligence")
 //	if err != nil {
 //		log.Fatal(err)
 //	}
-//	
+//
 //	fmt.Printf("Generated %d-dimensional embedding\n", len(vec))
 //	// Output: Generated 1536-dimensional embedding
 //
@@ -522,9 +523,9 @@ type OpenAIEmbedder struct {
 //	config := embed.DefaultOpenAIConfig(apiKey)
 //	config.Model = "text-embedding-3-large"
 //	config.Dimensions = 3072 // Maximum quality
-//	
+//
 //	embedder := embed.NewOpenAI(config)
-//	
+//
 //	// Higher quality embeddings for critical applications
 //	vec, _ := embedder.Embed(ctx, "complex semantic meaning")
 //	fmt.Printf("High-quality: %d dims\n", len(vec)) // 3072
@@ -534,9 +535,9 @@ type OpenAIEmbedder struct {
 //	config := embed.DefaultOpenAIConfig(apiKey)
 //	config.Model = "text-embedding-3-small"
 //	config.Dimensions = 1536
-//	
+//
 //	embedder := embed.NewOpenAI(config)
-//	
+//
 //	// 5x cheaper than text-embedding-3-large
 //	// $0.02 per 1M tokens vs $0.13 per 1M tokens
 //	vec, _ := embedder.Embed(ctx, "cost effective")
@@ -545,9 +546,9 @@ type OpenAIEmbedder struct {
 //
 //	config := embed.DefaultOpenAIConfig(apiKey)
 //	config.Timeout = 30 * time.Second
-//	
+//
 //	embedder := embed.NewOpenAI(config)
-//	
+//
 //	texts := []string{"doc1", "doc2", "doc3"}
 //	embeddings, err := embedder.EmbedBatch(ctx, texts)
 //	if err != nil {
@@ -568,9 +569,9 @@ type OpenAIEmbedder struct {
 //		Model:      "text-embedding-ada-002",
 //		Dimensions: 1536,
 //	}
-//	
+//
 //	embedder := embed.NewOpenAI(config)
-//	
+//
 //	// Works with multiple languages
 //	embeddings, _ := embedder.EmbedBatch(ctx, []string{
 //		"Hello world",           // English
@@ -602,20 +603,20 @@ type OpenAIEmbedder struct {
 //
 // Models & Pricing (2024):
 //
-//   text-embedding-3-small:
-//   - 1536 dimensions
-//   - $0.02 per 1M tokens (~750k words)
-//   - Best for: Cost-sensitive applications
+//	text-embedding-3-small:
+//	- 1536 dimensions
+//	- $0.02 per 1M tokens (~750k words)
+//	- Best for: Cost-sensitive applications
 //
-//   text-embedding-3-large:
-//   - 3072 dimensions (can truncate to 256-3072)
-//   - $0.13 per 1M tokens
-//   - Best for: Maximum quality
+//	text-embedding-3-large:
+//	- 3072 dimensions (can truncate to 256-3072)
+//	- $0.13 per 1M tokens
+//	- Best for: Maximum quality
 //
-//   text-embedding-ada-002 (legacy):
-//   - 1536 dimensions
-//   - $0.10 per 1M tokens
-//   - Still works but use v3 instead
+//	text-embedding-ada-002 (legacy):
+//	- 1536 dimensions
+//	- $0.10 per 1M tokens
+//	- Still works but use v3 instead
 //
 // Rate Limits:
 //   - Free tier: 3 RPM (requests per minute)
@@ -634,7 +635,8 @@ type OpenAIEmbedder struct {
 //   - Use batch processing to reduce costs
 //
 // Thread Safety:
-//   Safe to call from multiple goroutines.
+//
+//	Safe to call from multiple goroutines.
 func NewOpenAI(config *Config) *OpenAIEmbedder {
 	if config == nil {
 		config = DefaultOpenAIConfig("")

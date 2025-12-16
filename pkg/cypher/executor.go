@@ -208,6 +208,10 @@ type StorageExecutor struct {
 	// onNodeCreated is called when a node is created or updated via CREATE/MERGE
 	// This allows the embed queue to be notified of new content requiring embeddings
 	onNodeCreated NodeCreatedCallback
+
+	// defaultEmbeddingDimensions is the configured embedding dimensions for vector indexes
+	// Used as default when CREATE VECTOR INDEX doesn't specify dimensions
+	defaultEmbeddingDimensions int
 }
 
 // QueryEmbedder generates embeddings for search queries.
@@ -274,6 +278,21 @@ func (e *StorageExecutor) SetEmbedder(embedder QueryEmbedder) {
 //	})
 func (e *StorageExecutor) SetNodeCreatedCallback(cb NodeCreatedCallback) {
 	e.onNodeCreated = cb
+}
+
+// SetDefaultEmbeddingDimensions sets the default dimensions for vector indexes.
+// This is used when CREATE VECTOR INDEX doesn't specify dimensions in OPTIONS.
+func (e *StorageExecutor) SetDefaultEmbeddingDimensions(dims int) {
+	e.defaultEmbeddingDimensions = dims
+}
+
+// GetDefaultEmbeddingDimensions returns the configured default embedding dimensions.
+// Returns 1024 as fallback if not configured.
+func (e *StorageExecutor) GetDefaultEmbeddingDimensions() int {
+	if e.defaultEmbeddingDimensions > 0 {
+		return e.defaultEmbeddingDimensions
+	}
+	return 1024 // Fallback only if not configured
 }
 
 // notifyNodeCreated calls the onNodeCreated callback if set.
@@ -1386,7 +1405,7 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	if strings.HasPrefix(upperDeleteClause, "DELETE ") {
 		deleteClause = deleteClause[7:] // len("DELETE ")
 	}
-	
+
 	// Strip RETURN clause from deleteVars if present
 	returnInDelete := findKeywordIndex(deleteClause, "RETURN")
 	if returnInDelete > 0 {
