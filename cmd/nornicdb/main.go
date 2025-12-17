@@ -486,6 +486,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	serverConfig.EmbeddingModel = embeddingModel
 	serverConfig.EmbeddingDimensions = embeddingDim
 	serverConfig.EmbeddingCacheSize = embeddingCache
+	serverConfig.ModelsDir = cfg.Memory.ModelsDir
 	serverConfig.Headless = headless
 	serverConfig.BasePath = basePath
 	serverConfig.Features = &cfg.Features // Pass features loaded from YAML config

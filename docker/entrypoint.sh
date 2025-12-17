@@ -33,8 +33,11 @@ ARGS="$ARGS --address=${NORNICDB_ADDRESS:-0.0.0.0}"
 [ "${NORNICDB_NO_AUTH:-false}" = "true" ] && ARGS="$ARGS --no-auth"
 
 # Embedding config
+[ -n "$NORNICDB_EMBEDDING_PROVIDER" ] && ARGS="$ARGS --embedding-provider=$NORNICDB_EMBEDDING_PROVIDER"
 [ -n "$NORNICDB_EMBEDDING_URL" ] && ARGS="$ARGS --embedding-url=$NORNICDB_EMBEDDING_URL"
 [ -n "$NORNICDB_EMBEDDING_MODEL" ] && ARGS="$ARGS --embedding-model=$NORNICDB_EMBEDDING_MODEL"
 [ -n "$NORNICDB_EMBEDDING_DIM" ] && ARGS="$ARGS --embedding-dim=$NORNICDB_EMBEDDING_DIM"
+[ -n "$NORNICDB_EMBEDDING_DIMENSIONS" ] && ARGS="$ARGS --embedding-dim=$NORNICDB_EMBEDDING_DIMENSIONS"
+[ -n "$NORNICDB_EMBEDDING_GPU_LAYERS" ] && ARGS="$ARGS --embedding-gpu-layers=$NORNICDB_EMBEDDING_GPU_LAYERS"
 
 exec /app/nornicdb $ARGS "$@"

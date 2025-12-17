@@ -63,6 +63,8 @@ IMAGE_AMD64_BGE_HEIMDALL := $(REGISTRY)/nornicdb-amd64-cuda-bge-heimdall:$(VERSI
 IMAGE_AMD64_HEADLESS := $(REGISTRY)/nornicdb-amd64-cuda-headless:$(VERSION)
 IMAGE_AMD64_CPU := $(REGISTRY)/nornicdb-amd64-cpu:$(VERSION)
 IMAGE_AMD64_CPU_HEADLESS := $(REGISTRY)/nornicdb-amd64-cpu-headless:$(VERSION)
+IMAGE_CPU_BGE := $(REGISTRY)/nornicdb-cpu-bge:$(VERSION)
+IMAGE_CPU_BGE_HEADLESS := $(REGISTRY)/nornicdb-cpu-bge-headless:$(VERSION)
 IMAGE_AMD64_VULKAN := $(REGISTRY)/nornicdb-amd64-vulkan:$(VERSION)
 IMAGE_AMD64_VULKAN_BGE := $(REGISTRY)/nornicdb-amd64-vulkan-bge:$(VERSION)
 IMAGE_AMD64_VULKAN_HEADLESS := $(REGISTRY)/nornicdb-amd64-vulkan-headless:$(VERSION)
@@ -81,14 +83,17 @@ QWEN_URL := https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/
 .PHONY: build-arm64-metal build-arm64-metal-bge build-arm64-metal-bge-heimdall build-arm64-metal-headless
 .PHONY: build-amd64-cuda build-amd64-cuda-bge build-amd64-cuda-bge-heimdall build-amd64-cuda-headless
 .PHONY: build-amd64-cpu build-amd64-cpu-headless
+.PHONY: build-cpu-bge build-cpu-bge-headless
 .PHONY: build-amd64-vulkan build-amd64-vulkan-bge build-amd64-vulkan-headless
 .PHONY: build-all build-arm64-all build-amd64-all
 .PHONY: push-arm64-metal push-arm64-metal-bge push-arm64-metal-bge-heimdall push-arm64-metal-headless
 .PHONY: push-amd64-cuda push-amd64-cuda-bge push-amd64-cuda-bge-heimdall push-amd64-cuda-headless
 .PHONY: push-amd64-cpu push-amd64-cpu-headless
+.PHONY: push-cpu-bge push-cpu-bge-headless
 .PHONY: deploy-arm64-metal deploy-arm64-metal-bge deploy-arm64-metal-bge-heimdall deploy-arm64-metal-headless
 .PHONY: deploy-amd64-cuda deploy-amd64-cuda-bge deploy-amd64-cuda-bge-heimdall deploy-amd64-cuda-headless
 .PHONY: deploy-amd64-cpu deploy-amd64-cpu-headless
+.PHONY: deploy-cpu-bge deploy-cpu-bge-headless
 .PHONY: deploy-amd64-vulkan deploy-amd64-vulkan-bge deploy-amd64-vulkan-headless
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
@@ -270,6 +275,19 @@ build-amd64-cpu-headless:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg HEADLESS=true -t $(IMAGE_AMD64_CPU_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.amd64-cpu .
 
+# CPU-only with BGE embeddings (cross-platform: works on both AMD64 and ARM64)
+build-cpu-bge: download-bge
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_CPU_BGE) [CPU + BGE embeddings]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build $(DOCKER_BUILD_FLAGS) -t $(IMAGE_CPU_BGE) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
+
+build-cpu-bge-headless: download-bge
+	@echo "╔══════════════════════════════════════════════════════════════╗"
+	@echo "║ Building: $(IMAGE_CPU_BGE_HEADLESS) [CPU + BGE, headless]"
+	@echo "╚══════════════════════════════════════════════════════════════╝"
+	docker build $(DOCKER_BUILD_FLAGS) --build-arg HEADLESS=true -t $(IMAGE_CPU_BGE_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
+
 # AMD64 Vulkan (any GPU: NVIDIA/AMD/Intel)
 build-amd64-vulkan:
 	@echo "╔══════════════════════════════════════════════════════════════╗"
@@ -350,6 +368,14 @@ push-amd64-cpu-headless:
 	@echo "→ Pushing $(IMAGE_AMD64_CPU_HEADLESS)"
 	docker push $(IMAGE_AMD64_CPU_HEADLESS)
 
+push-cpu-bge:
+	@echo "→ Pushing $(IMAGE_CPU_BGE)"
+	docker push $(IMAGE_CPU_BGE)
+
+push-cpu-bge-headless:
+	@echo "→ Pushing $(IMAGE_CPU_BGE_HEADLESS)"
+	docker push $(IMAGE_CPU_BGE_HEADLESS)
+
 push-amd64-vulkan:
 	@echo "→ Pushing $(IMAGE_AMD64_VULKAN)"
 	docker push $(IMAGE_AMD64_VULKAN)
@@ -397,6 +423,13 @@ deploy-amd64-cpu: build-amd64-cpu push-amd64-cpu
 
 deploy-amd64-cpu-headless: build-amd64-cpu-headless push-amd64-cpu-headless
 	@echo "✓ Deployed $(IMAGE_AMD64_CPU_HEADLESS)"
+
+deploy-cpu-bge: build-cpu-bge push-cpu-bge
+	@echo "✓ Deployed $(IMAGE_CPU_BGE)"
+	@echo "🧠 CPU-only with local BGE embeddings enabled"
+
+deploy-cpu-bge-headless: build-cpu-bge-headless push-cpu-bge-headless
+	@echo "✓ Deployed $(IMAGE_CPU_BGE_HEADLESS)"
 
 deploy-amd64-vulkan: build-amd64-vulkan push-amd64-vulkan
 	@echo "✓ Deployed $(IMAGE_AMD64_VULKAN)"
