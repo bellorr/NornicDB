@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 
+// Base path from environment variable (set at build time)
+const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
+
 interface GeneratedToken {
   token: string;
   subject: string;
@@ -23,7 +26,7 @@ export function Security() {
 
   useEffect(() => {
     // Check if user is admin
-    fetch('/auth/me', {
+    fetch(`${BASE_PATH}/auth/me`, {
       credentials: 'include'
     })
       .then(res => res.json())
@@ -46,7 +49,7 @@ export function Security() {
     const expiry = expiresIn === 'custom' ? customExpiry : expiresIn;
 
     try {
-      const response = await fetch('/auth/api-token', {
+      const response = await fetch(`${BASE_PATH}/auth/api-token`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

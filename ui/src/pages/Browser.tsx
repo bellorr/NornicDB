@@ -1,5 +1,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+
+// Base path from environment variable (set at build time)
+const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
 import {
   Database,
   Search,
@@ -75,7 +78,7 @@ export function Browser() {
   useEffect(() => {
     const fetchEmbedStats = async () => {
       try {
-        const res = await fetch("/nornicdb/embed/stats");
+        const res = await fetch(`${BASE_PATH}/nornicdb/embed/stats`);
         if (res.ok) {
           const data = await res.json();
           setEmbedData({
@@ -98,7 +101,7 @@ export function Browser() {
     setEmbedMessage(null);
     try {
       // Use regenerate=true to clear existing embeddings and regenerate all
-      const res = await fetch("/nornicdb/embed/trigger?regenerate=true", {
+      const res = await fetch(`${BASE_PATH}/nornicdb/embed/trigger?regenerate=true`, {
         method: "POST",
       });
       const data = await res.json();
