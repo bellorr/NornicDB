@@ -4,9 +4,13 @@ import { Browser } from './pages/Browser';
 import { Security } from './pages/Security';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
+// Base path from environment variable (set at build time)
+// Env: VITE_BASE_PATH (same as NORNICDB_BASE_PATH on server)
+const basename = import.meta.env.VITE_BASE_PATH || '';
+
 function App() {
   return (
-    <BrowserRouter>
+    <BrowserRouter basename={basename}>
       <Routes>
         <Route path="/login" element={<Login />} />
         <Route path="/" element={

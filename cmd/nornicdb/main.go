@@ -128,6 +128,8 @@ Features:
 	serveCmd.Flags().Bool("log-queries", getEnvBool("NORNICDB_LOG_QUERIES", false), "Log all Bolt queries to stdout (for debugging)")
 	// Headless mode
 	serveCmd.Flags().Bool("headless", getEnvBool("NORNICDB_HEADLESS", false), "Disable web UI and browser-related endpoints")
+	// Base path for reverse proxy deployment
+	serveCmd.Flags().String("base-path", getEnvStr("NORNICDB_BASE_PATH", ""), "Base URL path for reverse proxy deployment (e.g., /nornicdb)")
 	rootCmd.AddCommand(serveCmd)
 
 	// Init command
@@ -219,6 +221,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	queryCacheTTL, _ := cmd.Flags().GetString("query-cache-ttl")
 	logQueries, _ := cmd.Flags().GetBool("log-queries")
 	headless, _ := cmd.Flags().GetBool("headless")
+	basePath, _ := cmd.Flags().GetString("base-path")
 
 	// Apply memory configuration FIRST (before heavy allocations)
 	// First, try to load from config file, then fall back to environment variables
@@ -484,6 +487,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	serverConfig.EmbeddingDimensions = embeddingDim
 	serverConfig.EmbeddingCacheSize = embeddingCache
 	serverConfig.Headless = headless
+	serverConfig.BasePath = basePath
 	serverConfig.Features = &cfg.Features // Pass features loaded from YAML config
 	// Pass plugin directories from loaded config
 	serverConfig.PluginsDir = cfg.Server.PluginsDir

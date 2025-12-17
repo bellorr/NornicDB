@@ -274,6 +274,12 @@ type Config struct {
 	// Env: NORNICDB_HEADLESS=true|false
 	Headless bool
 
+	// BasePath for deployment behind a reverse proxy with URL prefix
+	// Example: "/nornicdb" when deployed at https://example.com/nornicdb/
+	// Leave empty for root deployment (default)
+	// Env: NORNICDB_BASE_PATH
+	BasePath string
+
 	// Plugins Configuration
 	// PluginsDir is the directory for APOC/function plugins
 	// Env: NORNICDB_PLUGINS_DIR
@@ -1149,6 +1155,8 @@ func (s *Server) buildRouter() http.Handler {
 	handler = s.loggingMiddleware(handler)
 	handler = s.recoveryMiddleware(handler)
 	handler = s.metricsMiddleware(handler)
+	// Base path middleware runs FIRST (outermost) to strip prefix before routing
+	handler = s.basePathMiddleware(handler)
 
 	return handler
 }

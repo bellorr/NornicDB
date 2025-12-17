@@ -1,5 +1,8 @@
 // NornicDB API Client
 
+// Base path from environment variable (set at build time)
+const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
+
 export interface AuthConfig {
   devLoginEnabled: boolean;
   securityEnabled: boolean;
@@ -54,7 +57,7 @@ export interface CypherResponse {
 class NornicDBClient {
   async getAuthConfig(): Promise<AuthConfig> {
     try {
-      const res = await fetch('/auth/config', { credentials: 'include' });
+      const res = await fetch(`${BASE_PATH}/auth/config`, { credentials: 'include' });
       if (res.ok) {
         return await res.json();
       }
@@ -76,7 +79,7 @@ class NornicDBClient {
 
   async checkAuth(): Promise<{ authenticated: boolean; user?: string }> {
     try {
-      const res = await fetch('/auth/me', { credentials: 'include' });
+      const res = await fetch(`${BASE_PATH}/auth/me`, { credentials: 'include' });
       if (res.ok) {
         const data = await res.json();
         return { authenticated: true, user: data.username };
@@ -89,7 +92,7 @@ class NornicDBClient {
 
   async login(username: string, password: string): Promise<{ success: boolean; error?: string }> {
     try {
-      const res = await fetch('/auth/token', {
+      const res = await fetch(`${BASE_PATH}/auth/token`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -102,30 +105,30 @@ class NornicDBClient {
       
       const data = await res.json().catch(() => ({ message: 'Login failed' }));
       return { success: false, error: data.message || 'Invalid credentials' };
-    } catch (err) {
+    } catch {
       return { success: false, error: 'Network error' };
     }
   }
 
   async logout(): Promise<void> {
-    await fetch('/auth/logout', {
+    await fetch(`${BASE_PATH}/auth/logout`, {
       method: 'POST',
       credentials: 'include',
     });
   }
 
   async getHealth(): Promise<{ status: string; time: string }> {
-    const res = await fetch('/health');
+    const res = await fetch(`${BASE_PATH}/health`);
     return await res.json();
   }
 
   async getStatus(): Promise<DatabaseStats> {
-    const res = await fetch('/status');
+    const res = await fetch(`${BASE_PATH}/status`);
     return await res.json();
   }
 
   async search(query: string, limit: number = 10, labels?: string[]): Promise<SearchResult[]> {
-    const res = await fetch('/nornicdb/search', {
+    const res = await fetch(`${BASE_PATH}/nornicdb/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -135,7 +138,7 @@ class NornicDBClient {
   }
 
   async findSimilar(nodeId: string, limit: number = 10): Promise<SearchResult[]> {
-    const res = await fetch('/nornicdb/similar', {
+    const res = await fetch(`${BASE_PATH}/nornicdb/similar`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -145,7 +148,7 @@ class NornicDBClient {
   }
 
   async executeCypher(statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
-    const res = await fetch('/db/neo4j/tx/commit', {
+    const res = await fetch(`${BASE_PATH}/db/neo4j/tx/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
