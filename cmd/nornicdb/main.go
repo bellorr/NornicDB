@@ -493,6 +493,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Pass plugin directories from loaded config
 	serverConfig.PluginsDir = cfg.Server.PluginsDir
 	serverConfig.HeimdallPluginsDir = cfg.Server.HeimdallPluginsDir
+	// CORS configuration from loaded config
+	serverConfig.EnableCORS = cfg.Server.EnableCORS
+	serverConfig.CORSOrigins = cfg.Server.CORSOrigins
 
 	// Enable embedded UI from the ui package (unless headless mode)
 	if !headless {

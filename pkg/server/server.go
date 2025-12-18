@@ -340,11 +340,11 @@ func DefaultConfig() *Config {
 		WriteTimeout:   60 * time.Second,
 		IdleTimeout:    120 * time.Second,
 		MaxRequestSize: 10 * 1024 * 1024, // 10MB
-		// SECURITY: CORS disabled by default - enable only for known origins
-		// To enable: config.EnableCORS = true; config.CORSOrigins = []string{"https://yourapp.com"}
-		// WARNING: Never use "*" with credentials in production (CSRF risk)
-		EnableCORS:        false,
-		CORSOrigins:       []string{}, // Must explicitly configure allowed origins
+		// CORS enabled by default for ease of use (allows all origins)
+		// Override via: NORNICDB_CORS_ENABLED=false or NORNICDB_CORS_ORIGINS=https://myapp.com
+		// WARNING: "*" allows any origin - configure specific origins for production
+		EnableCORS:        true,
+		CORSOrigins:       []string{"*"}, // Allow all origins by default
 		EnableCompression: true,
 
 		// Rate limiting enabled by default to prevent DoS attacks

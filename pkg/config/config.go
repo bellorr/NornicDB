@@ -230,6 +230,15 @@ type ServerConfig struct {
 	// HeimdallPluginsDir is the directory for Heimdall plugins
 	// Env: NORNICDB_HEIMDALL_PLUGINS_DIR (default: ./plugins/heimdall)
 	HeimdallPluginsDir string
+
+	// EnableCORS enables CORS headers for cross-origin requests
+	// Env: NORNICDB_CORS_ENABLED (default: false for security)
+	EnableCORS bool
+	// CORSOrigins is a comma-separated list of allowed origins
+	// Use "*" to allow all origins (not recommended for production with credentials)
+	// Env: NORNICDB_CORS_ORIGINS (default: empty - must be explicitly configured)
+	// Example: "https://myapp.com,https://admin.myapp.com"
+	CORSOrigins []string
 }
 
 // EmbeddingWorkerConfig holds settings for the background embedding worker.
@@ -1223,6 +1232,10 @@ func LoadDefaults() *Config {
 	config.Server.PluginsDir = "./plugins"
 	config.Server.HeimdallPluginsDir = "./plugins/heimdall"
 
+	// Server defaults - CORS
+	config.Server.EnableCORS = true
+	config.Server.CORSOrigins = []string{"*"} // Allow all origins by default
+
 	// Memory defaults
 	config.Memory.DecayEnabled = true
 	config.Memory.DecayInterval = time.Hour
@@ -1465,6 +1478,25 @@ func applyEnvVars(config *Config) {
 	}
 	if v := getEnv("NORNICDB_HEIMDALL_PLUGINS_DIR", ""); v != "" {
 		config.Server.HeimdallPluginsDir = v
+	}
+
+	// CORS settings
+	if getEnv("NORNICDB_CORS_ENABLED", "") == "true" {
+		config.Server.EnableCORS = true
+	} else if getEnv("NORNICDB_CORS_ENABLED", "") == "false" {
+		config.Server.EnableCORS = false
+	}
+	if v := getEnv("NORNICDB_CORS_ORIGINS", ""); v != "" {
+		// Parse comma-separated origins
+		origins := strings.Split(v, ",")
+		for i, o := range origins {
+			origins[i] = strings.TrimSpace(o)
+		}
+		config.Server.CORSOrigins = origins
+		// Auto-enable CORS if origins are specified
+		if len(origins) > 0 && origins[0] != "" {
+			config.Server.EnableCORS = true
+		}
 	}
 
 	// Database encryption
