@@ -218,10 +218,6 @@ func (e *LocalGGUFEmbedder) embedWithRecovery(ctx context.Context, text string) 
 			fmt.Printf("   Text length: %d\n", len(text))
 			fmt.Printf("   Model: %s\n", e.modelName)
 			fmt.Printf("   Total panics: %d\n", e.panicCount.Load())
-			// Stack trace logged only in debug mode to prevent info exposure
-			if os.Getenv("NORNICDB_DEBUG") == "true" {
-				fmt.Printf("   Stack trace:\n%s\n", stackTrace)
-			}
 		}
 	}()
 

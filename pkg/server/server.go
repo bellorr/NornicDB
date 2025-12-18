@@ -1374,13 +1374,15 @@ func (s *Server) recoveryMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if err := recover(); err != nil {
-				// Log panic summary (without stack trace to prevent info exposure)
-				fmt.Printf("PANIC: %v\n", err)
-				// Stack trace only in debug mode
+				// Log panic summary to stderr (without stack trace to prevent info exposure)
+				// #nosec CWE-209 -- Panic type only logged to stderr, not exposed to clients
+				log.Printf("PANIC: %v", err)
+				// Stack trace only in debug mode, written to stderr
 				if os.Getenv("NORNICDB_DEBUG") == "true" {
 					buf := make([]byte, 4096)
 					n := runtime.Stack(buf, false)
-					fmt.Printf("Stack trace:\n%s\n", buf[:n])
+					// #nosec CWE-209 -- Debug-only, stderr output, not exposed to clients
+					log.Printf("Stack trace:\n%s", buf[:n])
 				}
 
 				s.errorCount.Add(1)

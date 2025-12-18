@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -33,6 +35,33 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/eval"
 )
+
+// safeClient wraps http.Client with SSRF-safe methods that only allow validated URLs.
+// This struct satisfies static analyzers by encapsulating URL validation.
+type safeClient struct {
+	client *http.Client
+}
+
+// newSafeClient creates an HTTP client restricted to validated localhost URLs.
+func newSafeClient(timeout time.Duration) *safeClient {
+	return &safeClient{client: &http.Client{Timeout: timeout}}
+}
+
+// Get performs a GET request after validating the URL is localhost-only.
+func (s *safeClient) Get(rawURL string) (*http.Response, error) {
+	if err := validateURL(rawURL); err != nil {
+		return nil, fmt.Errorf("SSRF protection: %w", err)
+	}
+	return s.client.Get(rawURL)
+}
+
+// Post performs a POST request after validating the URL is localhost-only.
+func (s *safeClient) Post(rawURL, contentType string, body io.Reader) (*http.Response, error) {
+	if err := validateURL(rawURL); err != nil {
+		return nil, fmt.Errorf("SSRF protection: %w", err)
+	}
+	return s.client.Post(rawURL, contentType, body)
+}
 
 func main() {
 	// Parse flags
@@ -435,8 +464,10 @@ func min(a, b int) int {
 	return b
 }
 
-// validateURL validates that the URL is well-formed and uses an allowed scheme.
-// This prevents SSRF attacks by ensuring only http/https URLs to expected hosts.
+// validateURL validates that the URL is well-formed, uses an allowed scheme,
+// and targets only allowed hosts. This prevents SSRF attacks by resolving
+// hostnames and checking actual IP addresses (blocking bypass techniques like
+// octal IPs, IPv4-mapped IPv6, etc.).
 func validateURL(rawURL string) error {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
@@ -450,15 +481,50 @@ func validateURL(rawURL string) error {
 	if parsed.Host == "" {
 		return fmt.Errorf("missing host in URL")
 	}
+	// Reject URLs with userinfo (potential confusion attacks)
+	if parsed.User != nil {
+		return fmt.Errorf("URLs with userinfo are not allowed")
+	}
+	// Allow override via NORNICDB_ALLOW_REMOTE_EVAL=true for legitimate remote testing
+	if os.Getenv("NORNICDB_ALLOW_REMOTE_EVAL") == "true" {
+		return nil
+	}
+	// Restrict to localhost by default for security (SSRF prevention)
+	// Resolve hostname to actual IPs to prevent bypass techniques
+	hostname := parsed.Hostname()
+	if !isLoopbackHost(hostname) {
+		return fmt.Errorf("host %q not allowed: only localhost permitted unless NORNICDB_ALLOW_REMOTE_EVAL=true", hostname)
+	}
 	return nil
 }
 
-func checkHealth(serverURL string) error {
-	if err := validateURL(serverURL); err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+// isLoopbackHost checks if a hostname resolves exclusively to loopback addresses.
+// This prevents SSRF bypasses using octal IPs, IPv4-mapped IPv6, DNS tricks, etc.
+func isLoopbackHost(hostname string) bool {
+	// First check if it's a direct IP address
+	if ip := net.ParseIP(hostname); ip != nil {
+		return ip.IsLoopback()
 	}
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(serverURL + "/health")
+	// For hostnames, resolve and verify all IPs are loopback
+	addrs, err := net.LookupIP(hostname)
+	if err != nil || len(addrs) == 0 {
+		return false
+	}
+	for _, addr := range addrs {
+		if !addr.IsLoopback() {
+			return false
+		}
+	}
+	return true
+}
+
+func checkHealth(serverURL string) error {
+	healthURL, err := url.JoinPath(serverURL, "health")
+	if err != nil {
+		return fmt.Errorf("failed to construct health URL: %w", err)
+	}
+	client := newSafeClient(5 * time.Second)
+	resp, err := client.Get(healthURL)
 	if err != nil {
 		return err
 	}
@@ -491,10 +557,13 @@ func parseThresholds(s string) eval.Thresholds {
 }
 
 func createSampleData(serverURL string) error {
-	if err := validateURL(serverURL); err != nil {
-		return fmt.Errorf("invalid URL: %w", err)
+	// Construct full URL safely using url.JoinPath to prevent path traversal
+	targetURL, err := url.JoinPath(serverURL, "db", "neo4j", "tx", "commit")
+	if err != nil {
+		return fmt.Errorf("failed to construct request URL: %w", err)
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
+
+	client := newSafeClient(30 * time.Second)
 
 	// Sample nodes to create
 	cypher := `
@@ -512,7 +581,7 @@ func createSampleData(serverURL string) error {
 	}
 	body, _ := json.Marshal(reqBody)
 
-	resp, err := client.Post(serverURL+"/db/neo4j/tx/commit", "application/json", bytes.NewReader(body))
+	resp, err := client.Post(targetURL, "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err
 	}
