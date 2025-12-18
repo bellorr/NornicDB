@@ -2408,14 +2408,14 @@ func TestDefaultConfig_SecureDefaults(t *testing.T) {
 		t.Errorf("expected default address 127.0.0.1, got %s", config.Address)
 	}
 
-	// SECURITY: Default CORS origins should be empty (explicit configuration required)
-	if len(config.CORSOrigins) != 0 {
-		t.Errorf("expected empty default CORS origins, got %v", config.CORSOrigins)
+	// SECURITY: Default CORS origins should be asterisk (explicit configuration required)
+	if len(config.CORSOrigins) != 1 || config.CORSOrigins[0] != "*" {
+		t.Errorf("expected default CORS origins to be [\"*\"], got %v", config.CORSOrigins)
 	}
 
-	// SECURITY: CORS should be disabled by default - must be explicitly enabled with specific origins
-	if config.EnableCORS {
-		t.Error("expected EnableCORS=false by default for security")
+	// SECURITY: CORS should be enabled by default - must be explicitly diabled if not desired
+	if config.EnableCORS == false {
+		t.Error("expected EnableCORS=true by default")
 	}
 }
 
