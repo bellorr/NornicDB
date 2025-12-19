@@ -227,6 +227,12 @@ type DatabaseManagerInterface interface {
 	DropDatabase(name string) error
 	ListDatabases() []DatabaseInfoInterface
 	Exists(name string) bool
+	CreateAlias(alias, databaseName string) error
+	DropAlias(alias string) error
+	ListAliases(databaseName string) map[string]string
+	ResolveDatabase(nameOrAlias string) (string, error)
+	SetDatabaseLimits(databaseName string, limits interface{}) error
+	GetDatabaseLimits(databaseName string) (interface{}, error)
 }
 
 // DatabaseInfoInterface provides database metadata without importing multidb.
@@ -471,6 +477,40 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	// Store params in context for handlers to use
 	ctx = context.WithValue(ctx, paramsKey, params)
 
+	// Check query limits if storage engine supports it
+	// Uses interface{} to avoid importing multidb package (prevents circular dependencies)
+	var queryLimitCancel context.CancelFunc
+	if namespacedEngine, ok := e.storage.(interface {
+		GetQueryLimitChecker() interface {
+			CheckQueryRate() error
+			CheckQueryLimits(context.Context) (context.Context, context.CancelFunc, error)
+		}
+	}); ok {
+		if qlc := namespacedEngine.GetQueryLimitChecker(); qlc != nil {
+			// Check query rate limit
+			if err := qlc.CheckQueryRate(); err != nil {
+				return nil, err
+			}
+
+			// Check write rate limit for write queries
+			// We need to check this early, but we don't know if it's a write query yet
+			// So we'll check it in the write handlers too
+
+			// Apply query timeout and concurrent query limits
+			var err error
+			ctx, queryLimitCancel, err = qlc.CheckQueryLimits(ctx)
+			if err != nil {
+				return nil, err
+			}
+			// Ensure cancel is called when done
+			defer func() {
+				if queryLimitCancel != nil {
+					queryLimitCancel()
+				}
+			}()
+		}
+	}
+
 	// Analyze query - uses cached analysis if available
 	// This extracts query metadata (HasMatch, IsReadOnly, Labels, etc.) once
 	// and caches it for repeated queries, avoiding redundant string parsing
@@ -511,6 +551,30 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 	// This uses AsyncEngine's write-behind cache instead of synchronous disk I/O
 	// For strict ACID, users should use explicit BEGIN/COMMIT transactions
 	result, err := e.executeImplicitAsync(ctx, cypher, upperQuery)
+
+	// Apply result limit if set
+	if err == nil && result != nil {
+		if namespacedEngine, ok := e.storage.(interface {
+			GetQueryLimitChecker() interface {
+				GetQueryLimits() interface{}
+			}
+		}); ok {
+			if qlc := namespacedEngine.GetQueryLimitChecker(); qlc != nil {
+				if queryLimits := qlc.GetQueryLimits(); queryLimits != nil {
+					// Type assert to check if it has MaxResults field
+					// We use reflection-like approach: check if it's a struct with MaxResults
+					if limits, ok := queryLimits.(interface {
+						GetMaxResults() int64
+					}); ok {
+						if maxResults := limits.GetMaxResults(); maxResults > 0 && int64(len(result.Rows)) > maxResults {
+							// Truncate results to limit
+							result.Rows = result.Rows[:maxResults]
+						}
+					}
+				}
+			}
+		}
+	}
 
 	// Cache successful read-only queries
 	// EXCEPT: Don't cache aggregation queries (COUNT, SUM, etc.) - they must always be fresh
@@ -1086,9 +1150,9 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 			// Fall through to generic on optimization failure
 		}
 		return e.executeMatch(ctx, cypher)
-	case findKeywordIndex(cypher, "CREATE CONSTRAINT") == 0,
-		findKeywordIndex(cypher, "CREATE FULLTEXT INDEX") == 0,
-		findKeywordIndex(cypher, "CREATE VECTOR INDEX") == 0,
+	case findMultiWordKeywordIndex(cypher, "CREATE", "CONSTRAINT") == 0,
+		findMultiWordKeywordIndex(cypher, "CREATE", "FULLTEXT INDEX") == 0,
+		findMultiWordKeywordIndex(cypher, "CREATE", "VECTOR INDEX") == 0,
 		findKeywordIndex(cypher, "CREATE INDEX") == 0:
 		// Schema commands - constraints and indexes (check more specific patterns first)
 		// Must be at start (position 0) to be a standalone clause
@@ -1098,6 +1162,11 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Must be at start (position 0) to be a standalone clause
 		// Handles flexible whitespace: "CREATE DATABASE", "CREATE\tDATABASE", "CREATE\nDATABASE", etc.
 		return e.executeCreateDatabase(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "CREATE", "ALIAS") == 0:
+		// System command: CREATE ALIAS (check before generic CREATE)
+		// Must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "CREATE ALIAS", "CREATE\tALIAS", "CREATE\nALIAS", etc.
+		return e.executeCreateAlias(ctx, cypher)
 	case startsWithCreate:
 		return e.executeCreate(ctx, cypher)
 	case hasDelete || hasDetachDelete:
@@ -1118,6 +1187,11 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Must be at start (position 0) to be a standalone clause
 		// Handles flexible whitespace: "DROP DATABASE", "DROP\tDATABASE", "DROP\nDATABASE", etc.
 		return e.executeDropDatabase(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "DROP", "ALIAS") == 0:
+		// System command: DROP ALIAS (check before generic DROP)
+		// Must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "DROP ALIAS", "DROP\tALIAS", "DROP\nALIAS", etc.
+		return e.executeDropAlias(ctx, cypher)
 	case findKeywordIndex(cypher, "DROP") == 0:
 		// DROP INDEX/CONSTRAINT - treat as no-op (NornicDB manages indexes internally)
 		// Must be at start (position 0) to be a standalone clause
@@ -1141,15 +1215,15 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Must be at start (position 0) to be a standalone clause
 		return e.executeLoadCSV(ctx, cypher)
 	// SHOW commands for Neo4j compatibility
-	case findKeywordIndex(cypher, "SHOW INDEXES") == 0,
-		findKeywordIndex(cypher, "SHOW INDEX") == 0:
+	case findMultiWordKeywordIndex(cypher, "SHOW", "INDEXES") == 0,
+		findMultiWordKeywordIndex(cypher, "SHOW", "INDEX") == 0:
 		// Must be at start (position 0) to be a standalone clause
 		return e.executeShowIndexes(ctx, cypher)
-	case findKeywordIndex(cypher, "SHOW CONSTRAINTS") == 0,
-		findKeywordIndex(cypher, "SHOW CONSTRAINT") == 0:
+	case findMultiWordKeywordIndex(cypher, "SHOW", "CONSTRAINTS") == 0,
+		findMultiWordKeywordIndex(cypher, "SHOW", "CONSTRAINT") == 0:
 		// Must be at start (position 0) to be a standalone clause
 		return e.executeShowConstraints(ctx, cypher)
-	case findKeywordIndex(cypher, "SHOW PROCEDURES") == 0:
+	case findMultiWordKeywordIndex(cypher, "SHOW", "PROCEDURES") == 0:
 		// Must be at start (position 0) to be a standalone clause
 		return e.executeShowProcedures(ctx, cypher)
 	case findKeywordIndex(cypher, "SHOW FUNCTIONS") == 0:
@@ -1165,9 +1239,22 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Must be at start (position 0) to be a standalone clause
 		// Handles flexible whitespace: "SHOW DATABASE", "SHOW\tDATABASE", "SHOW\nDATABASE", etc.
 		return e.executeShowDatabase(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "SHOW", "ALIASES") == 0:
+		// System command: SHOW ALIASES
+		// Must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "SHOW ALIASES", "SHOW\tALIASES", "SHOW\nALIASES", etc.
+		return e.executeShowAliases(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "ALTER", "DATABASE") == 0:
+		// System command: ALTER DATABASE SET LIMIT
+		// Must be at start (position 0) to be a standalone clause
+		return e.executeAlterDatabase(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "SHOW", "LIMITS") == 0:
+		// System command: SHOW LIMITS
+		// Must be at start (position 0) to be a standalone clause
+		return e.executeShowLimits(ctx, cypher)
 	default:
 		firstWord := strings.Split(upperQuery, " ")[0]
-		return nil, fmt.Errorf("unsupported query type: %s (supported: MATCH, CREATE, MERGE, DELETE, SET, REMOVE, RETURN, WITH, UNWIND, CALL, FOREACH, LOAD CSV, SHOW, DROP)", firstWord)
+		return nil, fmt.Errorf("unsupported query type: %s (supported: MATCH, CREATE, MERGE, DELETE, SET, REMOVE, RETURN, WITH, UNWIND, CALL, FOREACH, LOAD CSV, SHOW, DROP, ALTER)", firstWord)
 	}
 }
 
@@ -4339,6 +4426,364 @@ func (e *StorageExecutor) executeDropDatabase(ctx context.Context, cypher string
 		Columns: []string{"name"},
 		Rows:    [][]interface{}{{dbName}},
 	}, nil
+}
+
+// executeCreateAlias handles CREATE ALIAS command (Neo4j-compatible).
+//
+// Creates an alias for a database. Aliases allow referencing databases with
+// alternative names, useful for database renaming, environment mapping, etc.
+//
+// Syntax:
+//   - CREATE ALIAS alias_name FOR DATABASE database_name
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//
+//	// Create alias
+//	result, err := executor.Execute(ctx, "CREATE ALIAS main FOR DATABASE tenant_primary_2024", nil)
+//
+// Returns:
+//   - Success: Result with alias name in single row
+//   - Error: If alias already exists or database doesn't exist
+func (e *StorageExecutor) executeCreateAlias(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - CREATE ALIAS requires multi-database support")
+	}
+
+	// Find "CREATE ALIAS" keyword position
+	createAliasIdx := findMultiWordKeywordIndex(cypher, "CREATE", "ALIAS")
+	if createAliasIdx == -1 {
+		return nil, fmt.Errorf("invalid CREATE ALIAS syntax")
+	}
+
+	// Skip "CREATE" and whitespace to find "ALIAS"
+	startPos := createAliasIdx + len("CREATE")
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+	// Skip "ALIAS" and whitespace
+	if startPos+len("ALIAS") <= len(cypher) && strings.EqualFold(cypher[startPos:startPos+len("ALIAS")], "ALIAS") {
+		startPos += len("ALIAS")
+		for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+			startPos++
+		}
+	}
+
+	if startPos >= len(cypher) {
+		return nil, fmt.Errorf("invalid CREATE ALIAS syntax: alias name expected")
+	}
+
+	// Find "FOR DATABASE" to separate alias name from database name
+	forIdx := findMultiWordKeywordIndex(cypher[startPos:], "FOR", "DATABASE")
+	if forIdx == -1 {
+		return nil, fmt.Errorf("invalid CREATE ALIAS syntax: FOR DATABASE expected")
+	}
+
+	// Extract alias name (trim all whitespace)
+	aliasName := strings.TrimSpace(cypher[startPos : startPos+forIdx])
+	// Remove all whitespace from alias name (handle cases where whitespace variations
+	// might have left whitespace in the extracted name)
+	aliasName = strings.ReplaceAll(aliasName, " ", "")
+	aliasName = strings.ReplaceAll(aliasName, "\t", "")
+	aliasName = strings.ReplaceAll(aliasName, "\n", "")
+	aliasName = strings.ReplaceAll(aliasName, "\r", "")
+
+	if aliasName == "" {
+		return nil, fmt.Errorf("invalid CREATE ALIAS syntax: alias name cannot be empty")
+	}
+
+	// Validate alias name (should not contain whitespace after cleaning)
+	if strings.ContainsAny(aliasName, " \t\n\r") {
+		return nil, fmt.Errorf("invalid alias name: '%s' (cannot contain whitespace)", aliasName)
+	}
+
+	// Skip "FOR" and whitespace
+	dbStartPos := startPos + forIdx + len("FOR")
+	for dbStartPos < len(cypher) && isWhitespace(cypher[dbStartPos]) {
+		dbStartPos++
+	}
+	// Skip "DATABASE" and whitespace
+	if dbStartPos+len("DATABASE") <= len(cypher) && strings.EqualFold(cypher[dbStartPos:dbStartPos+len("DATABASE")], "DATABASE") {
+		dbStartPos += len("DATABASE")
+		for dbStartPos < len(cypher) && isWhitespace(cypher[dbStartPos]) {
+			dbStartPos++
+		}
+	}
+
+	if dbStartPos >= len(cypher) {
+		return nil, fmt.Errorf("invalid CREATE ALIAS syntax: database name expected")
+	}
+
+	// Extract database name (rest of query, trim all whitespace)
+	dbName := strings.TrimSpace(cypher[dbStartPos:])
+	// Remove all whitespace from database name
+	dbName = strings.ReplaceAll(dbName, " ", "")
+	dbName = strings.ReplaceAll(dbName, "\t", "")
+	dbName = strings.ReplaceAll(dbName, "\n", "")
+	dbName = strings.ReplaceAll(dbName, "\r", "")
+
+	if dbName == "" {
+		return nil, fmt.Errorf("invalid CREATE ALIAS syntax: database name cannot be empty")
+	}
+
+	// Validate database name (should not contain whitespace after cleaning)
+	if strings.ContainsAny(dbName, " \t\n\r") {
+		return nil, fmt.Errorf("invalid database name: '%s' (cannot contain whitespace)", dbName)
+	}
+
+	// Create alias
+	err := e.dbManager.CreateAlias(aliasName, dbName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create alias '%s' for database '%s': %w", aliasName, dbName, err)
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"alias"},
+		Rows:    [][]interface{}{{aliasName}},
+	}, nil
+}
+
+// executeDropAlias handles DROP ALIAS command (Neo4j-compatible).
+//
+// Removes an alias for a database.
+//
+// Syntax:
+//   - DROP ALIAS alias_name
+//   - DROP ALIAS alias_name IF EXISTS
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//
+//	// Drop alias
+//	result, err := executor.Execute(ctx, "DROP ALIAS main", nil)
+//
+// Returns:
+//   - Success: Result with alias name in single row (empty if IF EXISTS and not found)
+//   - Error: If alias doesn't exist (unless IF EXISTS is used)
+func (e *StorageExecutor) executeDropAlias(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - DROP ALIAS requires multi-database support")
+	}
+
+	// Find "DROP ALIAS" keyword position
+	dropAliasIdx := findMultiWordKeywordIndex(cypher, "DROP", "ALIAS")
+	if dropAliasIdx == -1 {
+		return nil, fmt.Errorf("invalid DROP ALIAS syntax")
+	}
+
+	// Skip "DROP" and whitespace to find "ALIAS"
+	startPos := dropAliasIdx + len("DROP")
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+	// Skip "ALIAS" and whitespace
+	if startPos+len("ALIAS") <= len(cypher) && strings.EqualFold(cypher[startPos:startPos+len("ALIAS")], "ALIAS") {
+		startPos += len("ALIAS")
+		for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+			startPos++
+		}
+	}
+
+	if startPos >= len(cypher) {
+		return nil, fmt.Errorf("invalid DROP ALIAS syntax: alias name expected")
+	}
+
+	// Find end of alias name (whitespace, end of string, or "IF EXISTS")
+	ifExistsIdx := findMultiWordKeywordIndex(cypher[startPos:], "IF", "EXISTS")
+	var aliasNameEnd int
+	if ifExistsIdx >= 0 {
+		aliasNameEnd = startPos + ifExistsIdx
+	} else {
+		aliasNameEnd = len(cypher)
+	}
+
+	// Extract alias name (trim all whitespace)
+	aliasName := strings.TrimSpace(cypher[startPos:aliasNameEnd])
+	// Remove all whitespace from alias name
+	aliasName = strings.ReplaceAll(aliasName, " ", "")
+	aliasName = strings.ReplaceAll(aliasName, "\t", "")
+	aliasName = strings.ReplaceAll(aliasName, "\n", "")
+	aliasName = strings.ReplaceAll(aliasName, "\r", "")
+
+	if aliasName == "" {
+		return nil, fmt.Errorf("invalid DROP ALIAS syntax: alias name cannot be empty")
+	}
+
+	// Validate alias name (should not contain whitespace after cleaning)
+	if strings.ContainsAny(aliasName, " \t\n\r") {
+		return nil, fmt.Errorf("invalid alias name: '%s' (cannot contain whitespace)", aliasName)
+	}
+
+	// Check if alias exists (by checking if it resolves)
+	_, err := e.dbManager.ResolveDatabase(aliasName)
+	if err != nil {
+		if ifExistsIdx >= 0 {
+			// IF EXISTS - return success with no error
+			return &ExecuteResult{
+				Columns: []string{"alias"},
+				Rows:    [][]interface{}{},
+			}, nil
+		}
+		return nil, fmt.Errorf("alias '%s' does not exist", aliasName)
+	}
+
+	// Drop alias
+	err = e.dbManager.DropAlias(aliasName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to drop alias '%s': %w", aliasName, err)
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"alias"},
+		Rows:    [][]interface{}{{aliasName}},
+	}, nil
+}
+
+// executeShowAliases handles SHOW ALIASES command (Neo4j-compatible).
+//
+// Lists all database aliases, optionally filtered by database.
+//
+// Syntax:
+//   - SHOW ALIASES
+//   - SHOW ALIASES FOR DATABASE database_name
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//
+//	// List all aliases
+//	result, err := executor.Execute(ctx, "SHOW ALIASES", nil)
+//
+//	// List aliases for specific database
+//	result, err = executor.Execute(ctx, "SHOW ALIASES FOR DATABASE tenant_a", nil)
+//
+// Returns:
+//   - Success: Result with alias and database columns
+func (e *StorageExecutor) executeShowAliases(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - SHOW ALIASES requires multi-database support")
+	}
+
+	// Find "SHOW ALIASES" keyword position
+	showAliasesIdx := findMultiWordKeywordIndex(cypher, "SHOW", "ALIASES")
+	if showAliasesIdx == -1 {
+		return nil, fmt.Errorf("invalid SHOW ALIASES syntax")
+	}
+
+	// Skip "SHOW" and whitespace to find "ALIASES"
+	startPos := showAliasesIdx + len("SHOW")
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+	// Skip "ALIASES" and whitespace
+	if startPos+len("ALIASES") <= len(cypher) && strings.EqualFold(cypher[startPos:startPos+len("ALIASES")], "ALIASES") {
+		startPos += len("ALIASES")
+		for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+			startPos++
+		}
+	}
+
+	// Check for "FOR DATABASE" clause
+	var databaseName string
+	if startPos < len(cypher) {
+		forIdx := findMultiWordKeywordIndex(cypher[startPos:], "FOR", "DATABASE")
+		if forIdx >= 0 {
+			// Extract database name
+			dbStartPos := startPos + forIdx + len("FOR")
+			for dbStartPos < len(cypher) && isWhitespace(cypher[dbStartPos]) {
+				dbStartPos++
+			}
+			// Skip "DATABASE" and whitespace
+			if dbStartPos+len("DATABASE") <= len(cypher) && strings.EqualFold(cypher[dbStartPos:dbStartPos+len("DATABASE")], "DATABASE") {
+				dbStartPos += len("DATABASE")
+				for dbStartPos < len(cypher) && isWhitespace(cypher[dbStartPos]) {
+					dbStartPos++
+				}
+			}
+			if dbStartPos < len(cypher) {
+				databaseName = strings.TrimSpace(cypher[dbStartPos:])
+			}
+		}
+	}
+
+	// List aliases
+	aliases := e.dbManager.ListAliases(databaseName)
+
+	// Format results
+	rows := make([][]interface{}, 0, len(aliases))
+	for alias, dbName := range aliases {
+		rows = append(rows, []interface{}{alias, dbName})
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"alias", "database"},
+		Rows:    rows,
+	}, nil
+}
+
+// executeAlterDatabase handles ALTER DATABASE SET LIMIT command.
+//
+// Sets resource limits for a database. This is a simplified implementation
+// that supports basic limit syntax. Full Neo4j syntax would require more
+// complex parsing.
+//
+// Syntax:
+//   - ALTER DATABASE database_name SET LIMIT limit_name = value
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//
+//	// Set max nodes limit
+//	result, err := executor.Execute(ctx, "ALTER DATABASE tenant_a SET LIMIT max_nodes = 1000000", nil)
+//
+// Returns:
+//   - Success: Result with database name
+//   - Error: If database doesn't exist or syntax is invalid
+func (e *StorageExecutor) executeAlterDatabase(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - ALTER DATABASE requires multi-database support")
+	}
+
+	// This is a placeholder implementation
+	// Full implementation would parse the LIMIT clause and update limits
+	// For now, return an error indicating it's not fully implemented
+	return nil, fmt.Errorf("ALTER DATABASE SET LIMIT is not yet fully implemented")
+}
+
+// executeShowLimits handles SHOW LIMITS command.
+//
+// Lists resource limits for a database.
+//
+// Syntax:
+//   - SHOW LIMITS FOR DATABASE database_name
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//
+//	// Show limits for database
+//	result, err := executor.Execute(ctx, "SHOW LIMITS FOR DATABASE tenant_a", nil)
+//
+// Returns:
+//   - Success: Result with limit information
+//   - Error: If database doesn't exist
+func (e *StorageExecutor) executeShowLimits(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - SHOW LIMITS requires multi-database support")
+	}
+
+	// This is a placeholder implementation
+	// Full implementation would retrieve and format limits
+	// For now, return an error indicating it's not fully implemented
+	return nil, fmt.Errorf("SHOW LIMITS is not yet fully implemented")
 }
 
 // truncateQuery truncates a query string to maxLen characters for error messages

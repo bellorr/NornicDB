@@ -75,6 +75,33 @@ func (m *mockDatabaseManager) Exists(name string) bool {
 	return exists
 }
 
+func (m *mockDatabaseManager) CreateAlias(alias, databaseName string) error {
+	return fmt.Errorf("not implemented in mock")
+}
+
+func (m *mockDatabaseManager) DropAlias(alias string) error {
+	return fmt.Errorf("not implemented in mock")
+}
+
+func (m *mockDatabaseManager) ListAliases(databaseName string) map[string]string {
+	return make(map[string]string)
+}
+
+func (m *mockDatabaseManager) ResolveDatabase(nameOrAlias string) (string, error) {
+	if m.Exists(nameOrAlias) {
+		return nameOrAlias, nil
+	}
+	return "", fmt.Errorf("database not found")
+}
+
+func (m *mockDatabaseManager) SetDatabaseLimits(databaseName string, limits interface{}) error {
+	return fmt.Errorf("not implemented in mock")
+}
+
+func (m *mockDatabaseManager) GetDatabaseLimits(databaseName string) (interface{}, error) {
+	return nil, fmt.Errorf("not implemented in mock")
+}
+
 func TestSystemCommands_CreateDatabase(t *testing.T) {
 	store := storage.NewMemoryEngine()
 	exec := NewStorageExecutor(store)

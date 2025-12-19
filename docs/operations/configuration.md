@@ -30,6 +30,8 @@ database:
 - System database: `"system"` (for metadata, not user-accessible)
 - Multiple databases can be created via `CREATE DATABASE` command
 - Each database is completely isolated (multi-tenancy)
+- **Database Aliases**: Create alternate names for databases (`CREATE ALIAS`, `DROP ALIAS`, `SHOW ALIASES`)
+- **Resource Limits**: Set per-database resource limits (`ALTER DATABASE SET LIMIT`, `SHOW LIMITS`)
 - **Automatic migration**: Existing data is automatically migrated to the default database on first startup after upgrading
 - Configuration precedence: CLI args > Env vars > Config file > Defaults
 

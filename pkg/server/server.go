@@ -1546,6 +1546,35 @@ func (a *databaseManagerAdapter) Exists(name string) bool {
 	return a.manager.Exists(name)
 }
 
+func (a *databaseManagerAdapter) CreateAlias(alias, databaseName string) error {
+	return a.manager.CreateAlias(alias, databaseName)
+}
+
+func (a *databaseManagerAdapter) DropAlias(alias string) error {
+	return a.manager.DropAlias(alias)
+}
+
+func (a *databaseManagerAdapter) ListAliases(databaseName string) map[string]string {
+	return a.manager.ListAliases(databaseName)
+}
+
+func (a *databaseManagerAdapter) ResolveDatabase(nameOrAlias string) (string, error) {
+	return a.manager.ResolveDatabase(nameOrAlias)
+}
+
+func (a *databaseManagerAdapter) SetDatabaseLimits(databaseName string, limits interface{}) error {
+	// Convert interface{} to *multidb.Limits
+	limitsPtr, ok := limits.(*multidb.Limits)
+	if !ok {
+		return fmt.Errorf("invalid limits type")
+	}
+	return a.manager.SetDatabaseLimits(databaseName, limitsPtr)
+}
+
+func (a *databaseManagerAdapter) GetDatabaseLimits(databaseName string) (interface{}, error) {
+	return a.manager.GetDatabaseLimits(databaseName)
+}
+
 // databaseInfoAdapter wraps multidb.DatabaseInfo to implement
 // cypher.DatabaseInfoInterface.
 type databaseInfoAdapter struct {

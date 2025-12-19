@@ -7,6 +7,7 @@ package multidb
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -64,6 +65,8 @@ type DatabaseInfo struct {
 	IsDefault bool      `json:"is_default"`
 	NodeCount int64     `json:"node_count,omitempty"` // Cached, may be stale
 	UpdatedAt time.Time `json:"updated_at"`
+	Aliases   []string  `json:"aliases,omitempty"` // Database aliases (Neo4j-compatible)
+	Limits    *Limits   `json:"limits,omitempty"`  // Resource limits
 }
 
 // Config holds DatabaseManager configuration.
@@ -279,6 +282,8 @@ func (m *DatabaseManager) GetStorage(name string) (storage.Engine, error) {
 	}
 
 	// Create namespaced engine
+	// Note: Limit enforcement is handled separately via LimitChecker
+	// which is created on-demand when needed (not stored here)
 	engine := storage.NewNamespacedEngine(m.inner, name)
 	m.engines[name] = engine
 
@@ -367,3 +372,161 @@ func (m *DatabaseManager) Close() error {
 	return m.inner.Close()
 }
 
+// ResolveDatabase resolves an alias or database name to the actual database name.
+func (m *DatabaseManager) ResolveDatabase(nameOrAlias string) (string, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// Check if it's an actual database name
+	if _, exists := m.databases[nameOrAlias]; exists {
+		return nameOrAlias, nil
+	}
+
+	// Check if it's an alias
+	for dbName, info := range m.databases {
+		for _, alias := range info.Aliases {
+			if alias == nameOrAlias {
+				return dbName, nil
+			}
+		}
+	}
+
+	return "", ErrDatabaseNotFound
+}
+
+// CreateAlias creates an alias for a database (Neo4j-compatible).
+func (m *DatabaseManager) CreateAlias(alias, databaseName string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Validate target database exists
+	info, exists := m.databases[databaseName]
+	if !exists {
+		return ErrDatabaseNotFound
+	}
+
+	// Validate alias doesn't conflict with existing database name
+	if m.Exists(alias) {
+		return ErrAliasConflict
+	}
+
+	// Validate alias name
+	if err := m.validateAliasName(alias); err != nil {
+		return err
+	}
+
+	// Check if alias is already used by another database
+	for _, dbInfo := range m.databases {
+		for _, existingAlias := range dbInfo.Aliases {
+			if existingAlias == alias {
+				return ErrAliasExists
+			}
+		}
+	}
+
+	// Add alias
+	if info.Aliases == nil {
+		info.Aliases = []string{}
+	}
+	info.Aliases = append(info.Aliases, alias)
+	info.UpdatedAt = time.Now()
+
+	return m.persistMetadata()
+}
+
+// DropAlias removes an alias (Neo4j-compatible).
+func (m *DatabaseManager) DropAlias(alias string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Find database with this alias
+	for _, info := range m.databases {
+		for i, existingAlias := range info.Aliases {
+			if existingAlias == alias {
+				// Remove alias
+				info.Aliases = append(info.Aliases[:i], info.Aliases[i+1:]...)
+				info.UpdatedAt = time.Now()
+				return m.persistMetadata()
+			}
+		}
+	}
+
+	return ErrAliasNotFound
+}
+
+// ListAliases returns all aliases for a database, or all aliases if database is empty.
+func (m *DatabaseManager) ListAliases(databaseName string) map[string]string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make(map[string]string)
+
+	if databaseName != "" {
+		// List aliases for specific database
+		if info, exists := m.databases[databaseName]; exists {
+			for _, alias := range info.Aliases {
+				result[alias] = databaseName
+			}
+		}
+	} else {
+		// List all aliases
+		for dbName, info := range m.databases {
+			for _, alias := range info.Aliases {
+				result[alias] = dbName
+			}
+		}
+	}
+
+	return result
+}
+
+// SetDatabaseLimits sets resource limits for a database.
+func (m *DatabaseManager) SetDatabaseLimits(databaseName string, limits *Limits) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	info, exists := m.databases[databaseName]
+	if !exists {
+		return ErrDatabaseNotFound
+	}
+
+	info.Limits = limits
+	info.UpdatedAt = time.Now()
+
+	return m.persistMetadata()
+}
+
+// GetDatabaseLimits returns resource limits for a database.
+func (m *DatabaseManager) GetDatabaseLimits(databaseName string) (*Limits, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	info, exists := m.databases[databaseName]
+	if !exists {
+		return nil, ErrDatabaseNotFound
+	}
+
+	return info.Limits, nil
+}
+
+// validateAliasName validates an alias name.
+func (m *DatabaseManager) validateAliasName(alias string) error {
+	if alias == "" {
+		return ErrInvalidAliasName
+	}
+
+	// Alias cannot contain whitespace
+	if strings.ContainsAny(alias, " \t\n\r") {
+		return fmt.Errorf("%w: '%s' (cannot contain whitespace)", ErrInvalidAliasName, alias)
+	}
+
+	// Alias cannot be reserved names
+	reserved := []string{"system", m.config.DefaultDatabase}
+	for _, reservedName := range reserved {
+		if alias == reservedName {
+			return fmt.Errorf("%w: '%s' (reserved name)", ErrInvalidAliasName, alias)
+		}
+	}
+
+	return nil
+}

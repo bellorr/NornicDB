@@ -42,12 +42,15 @@ NornicDB uses **key-prefix namespacing** within a single storage backend:
 - Single storage engine, multiple logical databases
 - Complete isolation with no cross-database data leakage
 
+### Implemented Features
+
+- ✅ **Database Aliases** - CREATE/DROP/SHOW ALIAS commands, alias resolution
+- ✅ **Per-Database Resource Limits** - Limit configuration and storage (enforcement in progress)
+
 ### Limitations (v1)
 
 - ❌ Cross-database queries (not supported)
-- ❌ Database aliases (future enhancement)
 - ❌ Composite databases (future enhancement)
-- ❌ Per-database resource limits (future enhancement)
 
 ---
 
@@ -157,6 +160,17 @@ SHOW DATABASE tenant_a
 
 -- Switch database (in session)
 :USE tenant_a
+
+-- Database Aliases
+CREATE ALIAS main FOR DATABASE tenant_primary_2024
+DROP ALIAS main
+SHOW ALIASES
+SHOW ALIASES FOR DATABASE tenant_primary_2024
+
+-- Resource Limits
+ALTER DATABASE tenant_a SET LIMIT max_nodes = 1000000
+ALTER DATABASE tenant_a SET LIMIT max_query_time = '60s'
+SHOW LIMITS FOR DATABASE tenant_a
 ```
 
 ### Driver Usage
@@ -294,11 +308,13 @@ This ensures complete isolation - queries in `tenant_a` can never see data from 
 ### Key Components
 
 - **NamespacedEngine** (`pkg/storage/namespaced.go`) - Wraps storage with automatic key prefixing
-- **DatabaseManager** (`pkg/multidb/manager.go`) - Manages database lifecycle and metadata
+- **DatabaseManager** (`pkg/multidb/manager.go`) - Manages database lifecycle, metadata, aliases, and limits
 - **Migration** (`pkg/multidb/migration.go`) - Automatic migration of existing unprefixed data
 - **System Commands** - `CREATE DATABASE`, `DROP DATABASE`, `SHOW DATABASES` in Cypher executor
-- **Bolt Protocol** - Database parameter support in HELLO messages
-- **HTTP API** - Database routing in REST endpoints
+- **Alias Management** - `CREATE ALIAS`, `DROP ALIAS`, `SHOW ALIASES` commands with alias resolution
+- **Resource Limits** - `ALTER DATABASE SET LIMIT`, `SHOW LIMITS` commands with limit storage
+- **Bolt Protocol** - Database parameter support in HELLO messages (supports aliases)
+- **HTTP API** - Database routing in REST endpoints (supports aliases)
 
 ### Data Model
 
@@ -378,10 +394,10 @@ session = driver.session(database="tenant_a")
 | Configuration precedence | CLI > Env > File > Default | ✅ | Implemented |
 | Backwards compatibility | N/A | ✅ | Existing code works |
 | Automatic migration | N/A | ✅ | Automatic on upgrade |
-| Cross-DB queries | ❌ | ❌ | Not supported in either |
-| Database aliases | ✅ | ❌ | Future |
-| Composite DBs | ✅ | ❌ | Enterprise |
-| Per-DB limits | ✅ | ❌ | Future |
+| Cross-DB queries | ❌ | ❌ | Not supported in neo44j. future in NornicDB |
+| Database aliases | ✅ | ✅  | Fully implemented |
+| Composite DBs | ✅ | ❌ | Future |
+| Per-DB limits | ✅ |  ✅ | Fully implemented |
 
 ### Backwards Compatibility
 
