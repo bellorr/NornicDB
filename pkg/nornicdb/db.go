@@ -327,10 +327,10 @@ type Config struct {
 	ParallelMinBatchSize int  `yaml:"parallel_min_batch_size"` // Min items before parallelizing (default: 1000)
 
 	// Async writes (eventual consistency)
-	AsyncWritesEnabled   bool          `yaml:"async_writes_enabled"`     // Enable async writes for faster performance
-	AsyncFlushInterval   time.Duration `yaml:"async_flush_interval"`     // How often to flush pending writes (default: 50ms)
-	AsyncMaxNodeCacheSize int          `yaml:"async_max_node_cache_size"` // Max nodes to buffer before forcing flush (default: 50000, 0=unlimited)
-	AsyncMaxEdgeCacheSize int          `yaml:"async_max_edge_cache_size"` // Max edges to buffer before forcing flush (default: 100000, 0=unlimited)
+	AsyncWritesEnabled    bool          `yaml:"async_writes_enabled"`      // Enable async writes for faster performance
+	AsyncFlushInterval    time.Duration `yaml:"async_flush_interval"`      // How often to flush pending writes (default: 50ms)
+	AsyncMaxNodeCacheSize int           `yaml:"async_max_node_cache_size"` // Max nodes to buffer before forcing flush (default: 50000, 0=unlimited)
+	AsyncMaxEdgeCacheSize int           `yaml:"async_max_edge_cache_size"` // Max edges to buffer before forcing flush (default: 100000, 0=unlimited)
 
 	// Encryption (data-at-rest) - AES-256 full database encryption
 	// Disabled by default for performance. Enable for HIPAA/GDPR/SOC2 compliance.
@@ -1167,7 +1167,48 @@ func (db *DB) BuildSearchIndexes(ctx context.Context) error {
 	return db.searchService.BuildIndexes(ctx)
 }
 
+// GetStorage returns the underlying storage engine.
+//
+// This method exposes the raw storage engine for advanced use cases, particularly
+// multi-database support where a DatabaseManager needs direct access to the storage
+// layer to create namespaced views.
+//
+// The returned storage engine is the actual storage backend (BadgerEngine, MemoryEngine,
+// or wrapped with WAL/Async layers). Modifications to this engine will affect the
+// database, so use with caution.
+//
+// Returns:
+//   - storage.Engine: The underlying storage engine
+//
+// Example:
+//
+//	db, _ := nornicdb.Open("./data", nil)
+//	storage := db.GetStorage()
+//
+//	// Use with DatabaseManager for multi-database support
+//	manager, _ := multidb.NewDatabaseManager(storage, config)
+//
+// Thread Safety:
+//   - Safe for concurrent use
+//   - Returns the same storage instance (shared reference)
+//   - Storage engine itself is thread-safe
+//
+// Performance:
+//   - O(1) operation (just returns a reference)
+//   - No copying or allocation
+//
+// Warning:
+//   - Direct manipulation of the storage engine bypasses NornicDB's higher-level
+//     APIs (decay, inference, search). Use only when necessary for multi-database
+//     support or other advanced scenarios.
+func (db *DB) GetStorage() storage.Engine {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.storage
+}
+
 // Close closes the database.
+
 func (db *DB) Close() error {
 	db.mu.Lock()
 	defer db.mu.Unlock()

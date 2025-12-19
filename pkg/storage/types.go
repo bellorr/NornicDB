@@ -401,6 +401,14 @@ type Engine interface {
 	// Stats
 	NodeCount() (int64, error)
 	EdgeCount() (int64, error)
+
+	// DeleteByPrefix deletes all nodes and edges with IDs starting with the given prefix.
+	// Used for DROP DATABASE operations to delete all data in a namespace.
+	// Returns the number of nodes and edges deleted.
+	//
+	// This is an optional interface - engines that don't support it will return an error.
+	// For multi-database support, this must be implemented.
+	DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error)
 }
 
 // NodeEventCallback is called when storage operations complete successfully.

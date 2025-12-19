@@ -454,7 +454,7 @@ func TestHandleImplicitTransaction(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", tt.body, "Bearer "+token)
+			resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", tt.body, "Bearer "+token)
 
 			if resp.Code != tt.wantStatus {
 				t.Errorf("expected status %d, got %d: %s", tt.wantStatus, resp.Code, resp.Body.String())
@@ -481,7 +481,7 @@ func TestHandleOpenTransaction(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Open a new transaction
-	resp := makeRequest(t, server, "POST", "/db/neo4j/tx", map[string]interface{}{
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
 
@@ -505,7 +505,7 @@ func TestExplicitTransactionWorkflow(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Step 1: Open transaction
-	openResp := makeRequest(t, server, "POST", "/db/neo4j/tx", map[string]interface{}{
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
 
@@ -519,10 +519,10 @@ func TestExplicitTransactionWorkflow(t *testing.T) {
 	commitURL := openResult["commit"].(string)
 	// Extract transaction ID from commit URL
 	parts := strings.Split(commitURL, "/")
-	txID := parts[len(parts)-2] // Format: /db/neo4j/tx/{txId}/commit
+	txID := parts[len(parts)-2] // Format: /db/nornic/tx/{txId}/commit
 
 	// Step 2: Execute in transaction
-	execResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/neo4j/tx/%s", txID), map[string]interface{}{
+	execResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s", txID), map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "MATCH (n) RETURN count(n) AS count"},
 		},
@@ -533,7 +533,7 @@ func TestExplicitTransactionWorkflow(t *testing.T) {
 	}
 
 	// Step 3: Commit transaction
-	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/neo4j/tx/%s/commit", txID), map[string]interface{}{
+	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s/commit", txID), map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
 
@@ -547,7 +547,7 @@ func TestRollbackTransaction(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Open transaction
-	openResp := makeRequest(t, server, "POST", "/db/neo4j/tx", map[string]interface{}{
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
 
@@ -563,7 +563,7 @@ func TestRollbackTransaction(t *testing.T) {
 	txID := parts[len(parts)-2]
 
 	// Rollback transaction
-	rollbackResp := makeRequest(t, server, "DELETE", fmt.Sprintf("/db/neo4j/tx/%s", txID), nil, "Bearer "+token)
+	rollbackResp := makeRequest(t, server, "DELETE", fmt.Sprintf("/db/nornic/tx/%s", txID), nil, "Bearer "+token)
 
 	if rollbackResp.Code != http.StatusOK {
 		t.Errorf("expected status 200 for rollback, got %d", rollbackResp.Code)
@@ -609,7 +609,7 @@ func TestHandleQuery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			resp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", tt.body, "Bearer "+token)
+			resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", tt.body, "Bearer "+token)
 
 			if resp.Code != tt.wantStatus {
 				t.Errorf("expected status %d, got %d: %s", tt.wantStatus, resp.Code, resp.Body.String())
@@ -627,7 +627,7 @@ func TestNodesCRUDViaCypher(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Create a node via Cypher
-	createResp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	createResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "CREATE (n:Person {name: 'Test User'}) RETURN n"},
 		},
@@ -638,7 +638,7 @@ func TestNodesCRUDViaCypher(t *testing.T) {
 	}
 
 	// Query nodes
-	queryResp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	queryResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "MATCH (n:Person) RETURN n"},
 		},
@@ -654,7 +654,7 @@ func TestEdgesCRUDViaCypher(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Create two nodes and a relationship via Cypher
-	createResp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	createResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "CREATE (a:Person {name: 'Alice'})-[r:KNOWS]->(b:Person {name: 'Bob'}) RETURN a, r, b"},
 		},
@@ -665,7 +665,7 @@ func TestEdgesCRUDViaCypher(t *testing.T) {
 	}
 
 	// Query relationships
-	queryResp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	queryResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "MATCH (a)-[r:KNOWS]->(b) RETURN a.name, r, b.name"},
 		},
@@ -719,7 +719,7 @@ func TestSchemaViaCypher(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Get labels via CALL db.labels()
-	labelsResp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	labelsResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "CALL db.labels()"},
 		},
@@ -730,7 +730,7 @@ func TestSchemaViaCypher(t *testing.T) {
 	}
 
 	// Get relationship types via CALL db.relationshipTypes()
-	relTypesResp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	relTypesResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "CALL db.relationshipTypes()"},
 		},
@@ -814,7 +814,7 @@ func TestRBACWritePermission(t *testing.T) {
 	readerToken := getAuthToken(t, auth, "reader")
 
 	// Reader (viewer role) should not be able to run mutation queries
-	resp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "CREATE (n:Test {name: 'test'}) RETURN n"},
 		},
@@ -834,7 +834,7 @@ func TestRBACMutationQuery(t *testing.T) {
 	readerToken := getAuthToken(t, auth, "reader")
 
 	// Reader (viewer role) should be able to run read queries
-	resp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "MATCH (n) RETURN n LIMIT 10"},
 		},
@@ -853,7 +853,7 @@ func TestHandleDatabaseInfo(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	resp := makeRequest(t, server, "GET", "/db/neo4j", nil, "Bearer "+token)
+	resp := makeRequest(t, server, "GET", "/db/nornic", nil, "Bearer "+token)
 
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", resp.Code)
@@ -888,7 +888,7 @@ func TestInvalidJSON(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	req := httptest.NewRequest("POST", "/db/neo4j/tx/commit", strings.NewReader("invalid json"))
+	req := httptest.NewRequest("POST", "/db/nornic/tx/commit", strings.NewReader("invalid json"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
@@ -1261,7 +1261,7 @@ func TestClusterStatus(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	resp := makeRequest(t, server, "GET", "/db/neo4j/cluster", nil, "Bearer "+token)
+	resp := makeRequest(t, server, "GET", "/db/nornic/cluster", nil, "Bearer "+token)
 	if resp.Code != http.StatusOK {
 		t.Errorf("expected status 200, got %d", resp.Code)
 	}
@@ -1272,7 +1272,7 @@ func TestTransactionWithStatements(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Open transaction with initial statements
-	openResp := makeRequest(t, server, "POST", "/db/neo4j/tx", map[string]interface{}{
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "MATCH (n) RETURN count(n) as count"},
 		},
@@ -1297,7 +1297,7 @@ func TestCommitTransactionWithStatements(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Open transaction
-	openResp := makeRequest(t, server, "POST", "/db/neo4j/tx", map[string]interface{}{
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
 
@@ -1309,7 +1309,7 @@ func TestCommitTransactionWithStatements(t *testing.T) {
 	txID := parts[len(parts)-2]
 
 	// Commit with final statements
-	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/neo4j/tx/%s/commit", txID), map[string]interface{}{
+	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s/commit", txID), map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "MATCH (n) RETURN count(n) as count"},
 		},
@@ -1325,7 +1325,7 @@ func TestImplicitTransactionBadJSON(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Send malformed request (bad JSON) - this should give an error
-	req := httptest.NewRequest("POST", "/db/neo4j/tx/commit", strings.NewReader("not valid json"))
+	req := httptest.NewRequest("POST", "/db/nornic/tx/commit", strings.NewReader("not valid json"))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
@@ -1444,7 +1444,7 @@ func TestDatabaseUnknownPath(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	resp := makeRequest(t, server, "GET", "/db/neo4j/unknown/path", nil, "Bearer "+token)
+	resp := makeRequest(t, server, "GET", "/db/nornic/unknown/path", nil, "Bearer "+token)
 	if resp.Code != http.StatusNotFound {
 		t.Errorf("expected status 404, got %d", resp.Code)
 	}
@@ -1465,7 +1465,7 @@ func TestTransactionMethodNotAllowed(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// GET on tx should fail
-	resp := makeRequest(t, server, "GET", "/db/neo4j/tx", nil, "Bearer "+token)
+	resp := makeRequest(t, server, "GET", "/db/nornic/tx", nil, "Bearer "+token)
 	if resp.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405, got %d", resp.Code)
 	}
@@ -1848,7 +1848,7 @@ func TestImplicitTransactionWithError(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Send a query with syntax error
-	resp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "INVALID CYPHER SYNTAX HERE"},
 		},
@@ -1872,7 +1872,7 @@ func TestImplicitTransactionMultipleStatementsWithError(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// First statement is valid, second is invalid
-	resp := makeRequest(t, server, "POST", "/db/neo4j/tx/commit", map[string]interface{}{
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "MATCH (n) RETURN count(n)"},
 			{"statement": "INVALID SYNTAX"},
@@ -1896,7 +1896,7 @@ func TestOpenTransactionWithError(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Open transaction with invalid statement
-	resp := makeRequest(t, server, "POST", "/db/neo4j/tx", map[string]interface{}{
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "INVALID CYPHER"},
 		},
@@ -1919,7 +1919,7 @@ func TestCommitTransactionWithError(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Open transaction
-	openResp := makeRequest(t, server, "POST", "/db/neo4j/tx", map[string]interface{}{
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
 		"statements": []map[string]interface{}{},
 	}, "Bearer "+token)
 
@@ -1931,7 +1931,7 @@ func TestCommitTransactionWithError(t *testing.T) {
 	txID := parts[len(parts)-2]
 
 	// Commit with invalid statement
-	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/neo4j/tx/%s/commit", txID), map[string]interface{}{
+	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s/commit", txID), map[string]interface{}{
 		"statements": []map[string]interface{}{
 			{"statement": "INVALID SYNTAX"},
 		},
@@ -1953,7 +1953,7 @@ func TestTransactionMethodNotAllowedCommit(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	resp := makeRequest(t, server, "GET", "/db/neo4j/tx/commit", nil, "Bearer "+token)
+	resp := makeRequest(t, server, "GET", "/db/nornic/tx/commit", nil, "Bearer "+token)
 	if resp.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405, got %d", resp.Code)
 	}
@@ -1963,7 +1963,7 @@ func TestTransactionMethodNotAllowedTxID(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	resp := makeRequest(t, server, "GET", "/db/neo4j/tx/123456", nil, "Bearer "+token)
+	resp := makeRequest(t, server, "GET", "/db/nornic/tx/123456", nil, "Bearer "+token)
 	if resp.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405, got %d", resp.Code)
 	}
@@ -1973,7 +1973,7 @@ func TestTransactionMethodNotAllowedCommitID(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
-	resp := makeRequest(t, server, "GET", "/db/neo4j/tx/123456/commit", nil, "Bearer "+token)
+	resp := makeRequest(t, server, "GET", "/db/nornic/tx/123456/commit", nil, "Bearer "+token)
 	if resp.Code != http.StatusMethodNotAllowed {
 		t.Errorf("expected status 405, got %d", resp.Code)
 	}

@@ -20,9 +20,22 @@ Or via environment variables (see Environment Variables section).
 # Database storage and basic settings
 database:
   path: /data/nornicdb.db
+  default_database: "nornic"  # Default database name (like Neo4j's "neo4j")
   max_connections: 100
   connection_timeout: 30s
 ```
+
+**Multi-Database Support:**
+- Default database name: `"nornic"` (configurable)
+- System database: `"system"` (for metadata, not user-accessible)
+- Multiple databases can be created via `CREATE DATABASE` command
+- Each database is completely isolated (multi-tenancy)
+- **Automatic migration**: Existing data is automatically migrated to the default database on first startup after upgrading
+- Configuration precedence: CLI args > Env vars > Config file > Defaults
+
+**Environment Variables:**
+- `NORNICDB_DEFAULT_DATABASE` - Set default database name
+- `NEO4J_dbms_default__database` - Neo4j-compatible env var (backwards compat)
 
 ### Server Settings
 

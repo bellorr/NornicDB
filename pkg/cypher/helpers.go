@@ -359,3 +359,103 @@ func extractPolygonPoints(geom map[string]interface{}) []interface{} {
 	}
 	return nil
 }
+
+// findMultiWordKeywordIndex finds a multi-word keyword with flexible whitespace.
+// For example, "SHOW DATABASES" will match "SHOW DATABASES", "SHOW\tDATABASES", "SHOW\nDATABASES", etc.
+// This is used for keywords like "SHOW DATABASES", "CREATE DATABASE", "DROP DATABASE", "OPTIONAL MATCH".
+//
+// Parameters:
+//   - s: The string to search in
+//   - firstWord: First word of the keyword (e.g., "SHOW")
+//   - secondWord: Second word of the keyword (e.g., "DATABASES")
+//
+// Returns the position of the first word if the multi-word keyword is found, -1 otherwise.
+func findMultiWordKeywordIndex(s, firstWord, secondWord string) int {
+	upper := strings.ToUpper(s)
+	firstUpper := strings.ToUpper(firstWord)
+	secondUpper := strings.ToUpper(secondWord)
+
+	// Build masks for positions inside string literals and parentheses
+	inStringLiteral := makeStringLiteralMask(s)
+	inParentheses := makeParenthesesMask(s)
+
+	idx := 0
+	for {
+		// Find first word
+		pos := strings.Index(upper[idx:], firstUpper)
+		if pos == -1 {
+			return -1
+		}
+		absolutePos := idx + pos
+
+		// Skip if inside string literal or parentheses
+		if absolutePos < len(inStringLiteral) && inStringLiteral[absolutePos] {
+			idx = absolutePos + 1
+			if idx >= len(upper) {
+				return -1
+			}
+			continue
+		}
+		if absolutePos < len(inParentheses) && inParentheses[absolutePos] {
+			idx = absolutePos + 1
+			if idx >= len(upper) {
+				return -1
+			}
+			continue
+		}
+
+		// Check left boundary
+		leftOK := absolutePos == 0 || isLeftKeywordBoundary(rune(upper[absolutePos-1]))
+		if !leftOK {
+			idx = absolutePos + 1
+			if idx >= len(upper) {
+				return -1
+			}
+			continue
+		}
+
+		// Check that first word ends at word boundary
+		firstEnd := absolutePos + len(firstUpper)
+		if firstEnd < len(upper) && !isWordBoundary(rune(upper[firstEnd])) {
+			idx = absolutePos + 1
+			if idx >= len(upper) {
+				return -1
+			}
+			continue
+		}
+
+		// Skip whitespace after first word (spaces, tabs, newlines)
+		secondStart := firstEnd
+		for secondStart < len(upper) {
+			ch := upper[secondStart]
+			if ch != ' ' && ch != '\t' && ch != '\n' && ch != '\r' {
+				break
+			}
+			secondStart++
+		}
+
+		// Check if second word follows
+		if secondStart+len(secondUpper) > len(upper) {
+			idx = absolutePos + 1
+			if idx >= len(upper) {
+				return -1
+			}
+			continue
+		}
+
+		if strings.HasPrefix(upper[secondStart:], secondUpper) {
+			// Check right boundary after second word
+			secondEnd := secondStart + len(secondUpper)
+			rightOK := secondEnd >= len(upper) || isWordBoundary(rune(upper[secondEnd]))
+			if rightOK {
+				return absolutePos
+			}
+		}
+
+		// Move past this occurrence and continue searching
+		idx = absolutePos + 1
+		if idx >= len(upper) {
+			return -1
+		}
+	}
+}

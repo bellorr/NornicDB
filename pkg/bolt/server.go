@@ -131,6 +131,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -203,8 +204,19 @@ type Server struct {
 	sessions map[string]*Session
 	closed   atomic.Bool
 
-	// Query executor (injected dependency)
+	// Query executor (injected dependency) - used if dbManager is nil
 	executor QueryExecutor
+
+	// Database manager for multi-database support (optional)
+	// If set, queries are routed to the correct database based on HELLO message
+	dbManager DatabaseManagerInterface
+}
+
+// DatabaseManagerInterface provides database management without importing multidb.
+type DatabaseManagerInterface interface {
+	GetStorage(name string) (storage.Engine, error)
+	Exists(name string) bool
+	DefaultDatabaseName() string
 }
 
 // QueryExecutor executes Cypher queries for the Bolt server.
@@ -461,10 +473,15 @@ func DefaultConfig() *Config {
 //
 // Parameters:
 //   - config: Server configuration (uses DefaultConfig() if nil)
-//   - executor: Query executor for handling Cypher queries (required)
+//   - executor: Query executor for handling Cypher queries (required if dbManager is nil)
+//   - dbManager: Database manager for multi-database support (optional, if nil uses executor)
 //
 // Returns:
 //   - Server instance ready to start
+//
+// Note: If dbManager is provided, it takes precedence and executor is ignored.
+// The dbManager enables multi-database support where each connection can specify
+// a database in the HELLO message.
 //
 // Example:
 //
@@ -634,14 +651,32 @@ func DefaultConfig() *Config {
 //
 //	Server handles concurrent connections safely.
 func New(config *Config, executor QueryExecutor) *Server {
+	return NewWithDatabaseManager(config, executor, nil)
+}
+
+// NewWithDatabaseManager creates a new Bolt protocol server with multi-database support.
+//
+// Parameters:
+//   - config: Server configuration (uses DefaultConfig() if nil)
+//   - executor: Query executor (ignored if dbManager is provided, kept for backward compatibility)
+//   - dbManager: Database manager for multi-database support (optional)
+//
+// Returns:
+//   - Server instance ready to start
+//
+// If dbManager is provided, queries are routed to the correct database based on
+// the "db" or "database" parameter in the HELLO message. If not provided, the
+// server uses the single executor for all queries (backward compatible).
+func NewWithDatabaseManager(config *Config, executor QueryExecutor, dbManager DatabaseManagerInterface) *Server {
 	if config == nil {
 		config = DefaultConfig()
 	}
 
 	return &Server{
-		config:   config,
-		sessions: make(map[string]*Session),
-		executor: executor,
+		config:    config,
+		sessions:  make(map[string]*Session),
+		executor:  executor,
+		dbManager: dbManager,
 	}
 }
 
@@ -788,6 +823,9 @@ type Session struct {
 	server   *Server
 	executor QueryExecutor
 	version  uint32
+
+	// Database context (from HELLO message)
+	database string // Database name for this session (defaults to default database)
 
 	// Authentication state
 	authenticated bool            // Whether HELLO auth succeeded
@@ -1101,14 +1139,36 @@ func (s *Session) handleHello(data []byte) error {
 		}
 	}
 
+	// Extract and validate database name
+	dbName := authParams["database"]
+	if dbName == "" && s.server != nil && s.server.dbManager != nil {
+		// Use default database if not specified
+		dbName = s.server.dbManager.DefaultDatabaseName()
+	}
+
+	// Validate database exists (if dbManager is configured)
+	if dbName != "" && s.server != nil && s.server.dbManager != nil {
+		if !s.server.dbManager.Exists(dbName) {
+			return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
+				fmt.Sprintf("Database '%s' does not exist", dbName))
+		}
+	}
+
+	// Store database for this session
+	s.database = dbName
+
 	// Log successful auth
 	if s.server != nil && s.server.config.LogQueries {
 		remoteAddr := "unknown"
 		if s.conn != nil {
 			remoteAddr = s.conn.RemoteAddr().String()
 		}
-		fmt.Printf("[BOLT] Auth success: user=%s roles=%v from=%s\n",
-			s.authResult.Username, s.authResult.Roles, remoteAddr)
+		dbInfo := ""
+		if dbName != "" {
+			dbInfo = fmt.Sprintf(" db=%s", dbName)
+		}
+		fmt.Printf("[BOLT] Auth success: user=%s roles=%v from=%s%s\n",
+			s.authResult.Username, s.authResult.Roles, remoteAddr, dbInfo)
 	}
 
 	return s.sendSuccess(map[string]any{
@@ -1118,13 +1178,14 @@ func (s *Session) handleHello(data []byte) error {
 	})
 }
 
-// parseHelloAuth parses authentication parameters from a HELLO message.
-// Returns a map with keys: scheme, principal, credentials
+// parseHelloAuth parses authentication parameters and database from a HELLO message.
+// Returns a map with keys: scheme, principal, credentials, database
 func (s *Session) parseHelloAuth(data []byte) (map[string]string, error) {
 	result := map[string]string{
 		"scheme":      "",
 		"principal":   "",
 		"credentials": "",
+		"database":    "",
 	}
 
 	if len(data) == 0 {
@@ -1164,6 +1225,14 @@ func (s *Session) parseHelloAuth(data []byte) (map[string]string, error) {
 	}
 	if credentials, ok := extraMap["credentials"].(string); ok {
 		result["credentials"] = credentials
+	}
+
+	// Extract database parameter (Neo4j 4.x multi-database support)
+	if db, ok := extraMap["db"].(string); ok {
+		result["database"] = db
+	} else if db, ok := extraMap["database"].(string); ok {
+		// Some drivers use "database" instead of "db"
+		result["database"] = db
 	}
 
 	return result, nil
@@ -1222,9 +1291,25 @@ func (s *Session) handleRun(data []byte) error {
 		}
 	}
 
+	// Get executor for the database (if multi-database is enabled)
+	executor := s.executor
+	if s.server != nil && s.server.dbManager != nil {
+		// Get database-specific executor
+		dbName := s.database
+		if dbName == "" {
+			dbName = s.server.dbManager.DefaultDatabaseName()
+		}
+		dbExecutor, err := s.getExecutorForDatabase(dbName)
+		if err != nil {
+			return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
+				fmt.Sprintf("Database '%s' not found: %v", dbName, err))
+		}
+		executor = dbExecutor
+	}
+
 	// Execute query
 	ctx := context.Background()
-	result, err := s.executor.Execute(ctx, query, params)
+	result, err := executor.Execute(ctx, query, params)
 	if err != nil {
 		if s.server != nil && s.server.config.LogQueries {
 			fmt.Printf("[BOLT] ERROR: %v\n", err)
@@ -2177,4 +2262,52 @@ func decodePackStreamList(data []byte, offset int) ([]any, int, error) {
 	}
 
 	return result, offset - startOffset, nil
+}
+
+// getExecutorForDatabase returns a Cypher executor for the specified database.
+// This is used when DatabaseManager is configured to route queries to the correct database.
+func (s *Session) getExecutorForDatabase(dbName string) (QueryExecutor, error) {
+	if s.server == nil || s.server.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available")
+	}
+
+	// Get namespaced storage for this database
+	storage, err := s.server.dbManager.GetStorage(dbName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create Cypher executor scoped to this database
+	executor := cypher.NewStorageExecutor(storage)
+
+	// Note: System commands (CREATE/DROP/SHOW DATABASE) are not supported via Bolt
+	// They must be executed via HTTP API. This is by design to maintain compatibility
+	// with Neo4j drivers which don't support these commands via Bolt.
+
+	return &boltQueryExecutorAdapter{executor: executor}, nil
+}
+
+// boltQueryExecutorAdapter adapts cypher.StorageExecutor to bolt.QueryExecutor interface.
+type boltQueryExecutorAdapter struct {
+	executor *cypher.StorageExecutor
+}
+
+func (a *boltQueryExecutorAdapter) Execute(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+	// Convert params from map[string]any to map[string]interface{}
+	paramsMap := make(map[string]interface{}, len(params))
+	for k, v := range params {
+		paramsMap[k] = v
+	}
+
+	// Execute query
+	result, err := a.executor.Execute(ctx, query, paramsMap)
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert result to Bolt format
+	return &QueryResult{
+		Columns: result.Columns,
+		Rows:    result.Rows,
+	}, nil
 }

@@ -1471,6 +1471,13 @@ func (ae *AsyncEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn f
 	return nil
 }
 
+// DeleteByPrefix delegates to the underlying engine.
+func (ae *AsyncEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
+	// Flush any pending writes first
+	ae.Flush()
+	return ae.engine.DeleteByPrefix(prefix)
+}
+
 // Verify AsyncEngine implements Engine interface
 var _ Engine = (*AsyncEngine)(nil)
 

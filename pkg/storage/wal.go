@@ -2354,6 +2354,11 @@ func (w *WALEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func
 	return nil
 }
 
+// DeleteByPrefix delegates to the underlying engine.
+func (w *WALEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
+	return w.engine.DeleteByPrefix(prefix)
+}
+
 // Verify WALEngine implements Engine interface
 var _ Engine = (*WALEngine)(nil)
 

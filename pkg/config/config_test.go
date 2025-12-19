@@ -35,8 +35,8 @@ func TestLoadFromEnv_Defaults(t *testing.T) {
 	if cfg.Database.DataDir != "./data" {
 		t.Errorf("expected data dir './data', got %q", cfg.Database.DataDir)
 	}
-	if cfg.Database.DefaultDatabase != "nornicdb" {
-		t.Errorf("expected default db 'nornicdb', got %q", cfg.Database.DefaultDatabase)
+	if cfg.Database.DefaultDatabase != "nornic" {
+		t.Errorf("expected default db 'nornic', got %q", cfg.Database.DefaultDatabase)
 	}
 	if cfg.Database.ReadOnly {
 		t.Error("expected ReadOnly to be false by default")

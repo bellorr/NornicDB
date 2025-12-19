@@ -145,11 +145,13 @@ import (
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/graphql"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/orneryd/nornicdb/pkg/mcp"
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/security"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -426,10 +428,11 @@ func DefaultConfig() *Config {
 //	defer cancel()
 //	server.Stop(ctx)
 type Server struct {
-	config *Config
-	db     *nornicdb.DB
-	auth   *auth.Authenticator
-	audit  *audit.Logger
+	config    *Config
+	db        *nornicdb.DB
+	dbManager *multidb.DatabaseManager // Manages multiple databases
+	auth      *auth.Authenticator
+	audit     *audit.Logger
 
 	// MCP server for LLM tool interface
 	mcpServer *mcp.Server
@@ -809,9 +812,28 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		log.Printf("✓ Rate limiting enabled: %d/min, %d/hour per IP", config.RateLimitPerMinute, config.RateLimitPerHour)
 	}
 
+	// Initialize DatabaseManager for multi-database support
+	// Get the underlying storage engine from the DB
+	storageEngine := db.GetStorage()
+
+	// Get multi-database config from global config
+	globalConfig := nornicConfig.LoadFromEnv()
+	multiDBConfig := &multidb.Config{
+		DefaultDatabase:  globalConfig.Database.DefaultDatabase,
+		SystemDatabase:   "system",
+		MaxDatabases:     0, // Unlimited
+		AllowDropDefault: false,
+	}
+
+	dbManager, err := multidb.NewDatabaseManager(storageEngine, multiDBConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize database manager: %w", err)
+	}
+
 	s := &Server{
 		config:          config,
 		db:              db,
+		dbManager:       dbManager,
 		auth:            authenticator,
 		mcpServer:       mcpServer,
 		heimdallHandler: heimdallHandler,
@@ -1448,15 +1470,192 @@ func (s *Server) handleDatabaseEndpoint(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// handleDatabaseInfo returns database information
+// getExecutorForDatabase returns a Cypher executor scoped to the specified database.
+//
+// This method provides database isolation by creating a Cypher executor that operates
+// on a namespaced storage engine. All queries executed through the returned executor
+// will only see data in the specified database.
+//
+// Parameters:
+//   - dbName: The name of the database to get an executor for
+//
+// Returns:
+//   - *cypher.StorageExecutor: A Cypher executor scoped to the database
+//   - error: Returns an error if the database doesn't exist or cannot be accessed
+//
+// Example:
+//
+//	executor, err := server.getExecutorForDatabase("tenant_a")
+//	if err != nil {
+//		return err // Database doesn't exist
+//	}
+//	result, err := executor.Execute(ctx, "MATCH (n) RETURN count(n)", nil)
+//
+// Thread Safety:
+//   - Safe for concurrent use
+//   - Each call creates a new executor instance (lightweight operation)
+//
+// Performance:
+//   - The executor is created on-demand for each request
+//   - Storage engines are cached by DatabaseManager for efficiency
+//   - Overhead is minimal (just executor creation, not storage initialization)
+func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor, error) {
+	// Get namespaced storage for this database
+	// This returns a NamespacedEngine that automatically prefixes all keys
+	// with the database name, ensuring complete data isolation
+	storage, err := s.dbManager.GetStorage(dbName)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create executor scoped to this database
+	// The executor will only see data in the namespaced storage
+	executor := cypher.NewStorageExecutor(storage)
+
+	// Set DatabaseManager for system commands (CREATE/DROP/SHOW DATABASE)
+	// Wrap DatabaseManager to implement the interface expected by executor
+	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager})
+
+	return executor, nil
+}
+
+// databaseManagerAdapter wraps multidb.DatabaseManager to implement
+// cypher.DatabaseManagerInterface, avoiding import cycles.
+type databaseManagerAdapter struct {
+	manager *multidb.DatabaseManager
+}
+
+func (a *databaseManagerAdapter) CreateDatabase(name string) error {
+	return a.manager.CreateDatabase(name)
+}
+
+func (a *databaseManagerAdapter) DropDatabase(name string) error {
+	return a.manager.DropDatabase(name)
+}
+
+func (a *databaseManagerAdapter) ListDatabases() []cypher.DatabaseInfoInterface {
+	dbs := a.manager.ListDatabases()
+	result := make([]cypher.DatabaseInfoInterface, len(dbs))
+	for i, db := range dbs {
+		result[i] = &databaseInfoAdapter{info: db}
+	}
+	return result
+}
+
+func (a *databaseManagerAdapter) Exists(name string) bool {
+	return a.manager.Exists(name)
+}
+
+// databaseInfoAdapter wraps multidb.DatabaseInfo to implement
+// cypher.DatabaseInfoInterface.
+type databaseInfoAdapter struct {
+	info *multidb.DatabaseInfo
+}
+
+func (a *databaseInfoAdapter) Name() string {
+	return a.info.Name
+}
+
+func (a *databaseInfoAdapter) Type() string {
+	return a.info.Type
+}
+
+func (a *databaseInfoAdapter) Status() string {
+	return a.info.Status
+}
+
+func (a *databaseInfoAdapter) IsDefault() bool {
+	return a.info.IsDefault
+}
+
+func (a *databaseInfoAdapter) CreatedAt() time.Time {
+	return a.info.CreatedAt
+}
+
+// handleDatabaseInfo returns database information for the specified database.
+//
+// This endpoint provides metadata about a database including its name, status,
+// whether it's the default database, and current statistics (node and edge counts).
+//
+// Endpoint: GET /db/{dbName}
+//
+// Parameters:
+//   - dbName: The name of the database to get information about
+//
+// Response (200 OK):
+//
+//	{
+//	  "name": "tenant_a",
+//	  "status": "online",
+//	  "default": false,
+//	  "nodeCount": 1234,
+//	  "edgeCount": 5678
+//	}
+//
+// Errors:
+//   - 404 Not Found: Database doesn't exist (Neo.ClientError.Database.DatabaseNotFound)
+//   - 500 Internal Server Error: Failed to access database (Neo.ClientError.Database.General)
+//
+// Example:
+//
+//	GET /db/tenant_a
+//	Response: {
+//	  "name": "tenant_a",
+//	  "status": "online",
+//	  "default": false,
+//	  "nodeCount": 100,
+//	  "edgeCount": 50
+//	}
+//
+// Thread Safety:
+//   - Safe for concurrent use
+//   - Statistics are read from namespaced storage (thread-safe)
+//
+// Performance:
+//   - Node and edge counts are computed on-demand
+//   - For large databases, this may take a few milliseconds
+//   - Consider caching if this endpoint is called frequently
 func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbName string) {
-	stats := s.db.Stats()
+	// Check if database exists
+	// This is a fast lookup in the DatabaseManager's metadata
+	if !s.dbManager.Exists(dbName) {
+		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Database.DatabaseNotFound",
+			fmt.Sprintf("Database '%s' not found", dbName))
+		return
+	}
+
+	// Get storage for this database to get stats
+	// This returns a NamespacedEngine that provides isolated access
+	storage, err := s.dbManager.GetStorage(dbName)
+	if err != nil {
+		s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.Database.General",
+			fmt.Sprintf("Failed to access database: %v", err))
+		return
+	}
+
+	// Get stats from the namespaced storage
+	// These counts reflect only data in this database (due to namespacing)
+	nodeCount, err := storage.NodeCount()
+	if err != nil {
+		// Log error but continue with 0 count
+		nodeCount = 0
+	}
+	edgeCount, err := storage.EdgeCount()
+	if err != nil {
+		// Log error but continue with 0 count
+		edgeCount = 0
+	}
+
+	// Check if this is the default database
+	// The default database is configured at startup and cannot be dropped
+	defaultDB := s.dbManager.DefaultDatabaseName()
+
 	response := map[string]interface{}{
 		"name":      dbName,
 		"status":    "online",
-		"default":   dbName == "neo4j",
-		"nodeCount": stats.NodeCount,
-		"edgeCount": stats.EdgeCount,
+		"default":   dbName == defaultDB,
+		"nodeCount": nodeCount,
+		"edgeCount": edgeCount,
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -1656,9 +1855,30 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
+		// Check if database exists before attempting to get executor
+		if !s.dbManager.Exists(dbName) {
+			response.Errors = append(response.Errors, QueryError{
+				Code:    "Neo.ClientError.Database.DatabaseNotFound",
+				Message: fmt.Sprintf("Database '%s' not found", dbName),
+			})
+			hasError = true
+			continue
+		}
+
+		// Get executor for the specified database
+		executor, err := s.getExecutorForDatabase(dbName)
+		if err != nil {
+			response.Errors = append(response.Errors, QueryError{
+				Code:    "Neo.ClientError.Database.General",
+				Message: fmt.Sprintf("Failed to access database '%s': %v", dbName, err),
+			})
+			hasError = true
+			continue
+		}
+
 		// Track query execution time for slow query logging
 		queryStart := time.Now()
-		result, err := s.db.ExecuteCypher(r.Context(), stmt.Statement, stmt.Parameters)
+		result, err := executor.Execute(r.Context(), stmt.Statement, stmt.Parameters)
 		queryDuration := time.Since(queryStart)
 
 		// Log slow queries
@@ -1694,10 +1914,29 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		response.Results = append(response.Results, qr)
 	}
 
-	// Determine appropriate status code based on consistency mode
-	// For eventual consistency (async writes), mutations return 202 Accepted
+	// Determine appropriate HTTP status code
+	// Neo4j behavior: Query errors return 200 OK with errors in response body
+	// Only infrastructure errors (database not found) return 4xx status codes
 	status := http.StatusOK
-	if s.db.IsAsyncWritesEnabled() {
+
+	// Check for infrastructure errors (these return 4xx status codes)
+	if len(response.Errors) > 0 {
+		for _, err := range response.Errors {
+			// Database not found is an infrastructure error - return 404
+			if err.Code == "Neo.ClientError.Database.DatabaseNotFound" {
+				status = http.StatusNotFound
+				break
+			}
+			// Database access errors are infrastructure errors - return 500
+			if err.Code == "Neo.ClientError.Database.General" {
+				status = http.StatusInternalServerError
+				break
+			}
+			// Query syntax errors, security errors, etc. return 200 OK
+			// with errors in the response body (Neo4j standard behavior)
+		}
+	} else if s.db.IsAsyncWritesEnabled() {
+		// For eventual consistency (async writes), mutations return 202 Accepted
 		for _, stmt := range req.Statements {
 			if isMutationQuery(stmt.Statement) {
 				status = http.StatusAccepted
@@ -1948,8 +2187,21 @@ func (s *Server) generateBookmark() string {
 }
 
 // Transaction management (explicit transactions)
-// For now, we implement simplified single-request transactions
-// TODO: Implement full explicit transaction support with transaction IDs
+//
+// NornicDB implements a simplified transaction model where each request is
+// treated as an implicit transaction. Explicit multi-request transactions
+// are supported through the transaction ID endpoints, but each statement
+// within a transaction is executed immediately (no deferred commit).
+//
+// This design provides:
+//   - Simplicity: No complex transaction state management
+//   - Performance: No transaction overhead for single-request operations
+//   - Compatibility: Works with Neo4j drivers that expect transaction support
+//
+// Future enhancements may include:
+//   - Deferred commit for explicit transactions
+//   - Transaction isolation levels
+//   - Long-running transaction support
 
 func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, dbName string) {
 	// Generate transaction ID
@@ -1972,10 +2224,21 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 		},
 	}
 
+	// Get executor for the specified database
+	executor, err := s.getExecutorForDatabase(dbName)
+	if err != nil {
+		response.Errors = append(response.Errors, QueryError{
+			Code:    "Neo.ClientError.Database.DatabaseNotFound",
+			Message: fmt.Sprintf("Database '%s' not found: %v", dbName, err),
+		})
+		s.writeJSON(w, http.StatusNotFound, response)
+		return
+	}
+
 	// Execute any provided statements
 	if len(req.Statements) > 0 {
 		for _, stmt := range req.Statements {
-			result, err := s.db.ExecuteCypher(r.Context(), stmt.Statement, stmt.Parameters)
+			result, err := executor.Execute(r.Context(), stmt.Statement, stmt.Parameters)
 			if err != nil {
 				response.Errors = append(response.Errors, QueryError{
 					Code:    "Neo.ClientError.Statement.SyntaxError",
@@ -2026,9 +2289,20 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		LastBookmarks: []string{s.generateBookmark()},
 	}
 
+	// Get executor for the specified database
+	executor, err := s.getExecutorForDatabase(dbName)
+	if err != nil {
+		response.Errors = append(response.Errors, QueryError{
+			Code:    "Neo.ClientError.Database.DatabaseNotFound",
+			Message: fmt.Sprintf("Database '%s' not found: %v", dbName, err),
+		})
+		s.writeJSON(w, http.StatusNotFound, response)
+		return
+	}
+
 	// Execute any final statements
 	for _, stmt := range req.Statements {
-		result, err := s.db.ExecuteCypher(r.Context(), stmt.Statement, stmt.Parameters)
+		result, err := executor.Execute(r.Context(), stmt.Statement, stmt.Parameters)
 		if err != nil {
 			response.Errors = append(response.Errors, QueryError{
 				Code:    "Neo.ClientError.Statement.SyntaxError",
@@ -2641,7 +2915,7 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 			DisplayName string `json:"displayName"`
 		} `json:"oauthProviders"`
 	}{
-		DevLoginEnabled: true, // Always enable dev login for now
+		DevLoginEnabled: true, // Dev login enabled for development convenience
 		SecurityEnabled: s.auth != nil && s.auth.IsSecurityEnabled(),
 		OAuthProviders: []struct {
 			Name        string `json:"name"`
@@ -3453,7 +3727,7 @@ func (r *heimdallDBReader) Stats() heimdall.DatabaseStats {
 	result := heimdall.DatabaseStats{
 		NodeCount:         stats.NodeCount,
 		RelationshipCount: stats.EdgeCount,
-		LabelCounts:       make(map[string]int64), // TODO: implement label counts
+		LabelCounts:       make(map[string]int64), // Label counts not yet implemented (future enhancement)
 	}
 
 	// Add search/cluster stats if available

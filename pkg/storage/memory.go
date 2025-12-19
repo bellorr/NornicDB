@@ -74,3 +74,8 @@ func NewMemoryEngine() *MemoryEngine {
 func (m *MemoryEngine) BeginTransaction() (*BadgerTransaction, error) {
 	return m.BadgerEngine.BeginTransaction()
 }
+
+// DeleteByPrefix delegates to the underlying BadgerEngine.
+func (m *MemoryEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
+	return m.BadgerEngine.DeleteByPrefix(prefix)
+}

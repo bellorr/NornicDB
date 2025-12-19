@@ -667,7 +667,7 @@ func (f *FeatureFlagsConfig) GetHeimdallMaxUserTokens() int     { return f.Heimd
 //
 //	Storage:
 //	- NORNICDB_DATA_DIR="./data"
-//	- NORNICDB_DEFAULT_DATABASE="nornicdb"
+//	- NORNICDB_DEFAULT_DATABASE="nornic"
 //
 //	Memory (NornicDB-specific):
 //	- NORNICDB_MEMORY_DECAY_ENABLED=true
@@ -745,7 +745,7 @@ func legacyLoadFromEnv() *Config {
 
 	// Database settings
 	config.Database.DataDir = getEnv("NORNICDB_DATA_DIR", "./data")
-	config.Database.DefaultDatabase = getEnv("NORNICDB_DEFAULT_DATABASE", "nornicdb")
+	config.Database.DefaultDatabase = getEnv("NORNICDB_DEFAULT_DATABASE", "nornic")
 	config.Database.ReadOnly = getEnvBool("NORNICDB_READ_ONLY", false)
 	config.Database.TransactionTimeout = getEnvDuration("NORNICDB_TRANSACTION_TIMEOUT", 30*time.Second)
 	config.Database.MaxConcurrentTransactions = getEnvInt("NORNICDB_MAX_TRANSACTIONS", 1000)
@@ -1200,7 +1200,7 @@ func LoadDefaults() *Config {
 
 	// Database defaults
 	config.Database.DataDir = "./data"
-	config.Database.DefaultDatabase = "nornicdb"
+	config.Database.DefaultDatabase = "nornic" // Default database name (like Neo4j's "neo4j")
 	config.Database.ReadOnly = false
 	config.Database.TransactionTimeout = 30 * time.Second
 	config.Database.MaxConcurrentTransactions = 1000

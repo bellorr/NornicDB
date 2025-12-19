@@ -33,8 +33,10 @@ go build -o bin/nornicdb-bolt ./cmd/nornicdb-bolt
 
 - **Port**: 7687 (Neo4j Bolt protocol default)
 - **Data Directory**: ./data
+- **Default Database**: `nornic` (like Neo4j's `neo4j`)
 - **Protocol**: Bolt 4.x
 - **Authentication**: None (for development)
+- **Multi-Database**: Enabled (create multiple isolated databases)
 
 ## 🔌 Connecting with Neo4j Drivers
 

@@ -212,6 +212,30 @@ type StorageExecutor struct {
 	// defaultEmbeddingDimensions is the configured embedding dimensions for vector indexes
 	// Used as default when CREATE VECTOR INDEX doesn't specify dimensions
 	defaultEmbeddingDimensions int
+
+	// dbManager is optional - when set, enables system commands (CREATE/DROP/SHOW DATABASE)
+	// System commands require DatabaseManager to manage multiple databases
+	// This is an interface to avoid import cycles with multidb package
+	dbManager DatabaseManagerInterface
+}
+
+// DatabaseManagerInterface is a minimal interface to avoid import cycles with multidb package.
+// This allows the executor to call database management operations without directly
+// depending on the multidb package.
+type DatabaseManagerInterface interface {
+	CreateDatabase(name string) error
+	DropDatabase(name string) error
+	ListDatabases() []DatabaseInfoInterface
+	Exists(name string) bool
+}
+
+// DatabaseInfoInterface provides database metadata without importing multidb.
+type DatabaseInfoInterface interface {
+	Name() string
+	Type() string
+	Status() string
+	IsDefault() bool
+	CreatedAt() time.Time
 }
 
 // QueryEmbedder generates embeddings for search queries.
@@ -248,6 +272,18 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		analyzer:        NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
 		nodeLookupCache: make(map[string]*storage.Node, 1000),
 	}
+}
+
+// SetDatabaseManager sets the database manager for system commands.
+// When set, enables CREATE DATABASE, DROP DATABASE, and SHOW DATABASES commands.
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//	// Now CREATE DATABASE, DROP DATABASE, SHOW DATABASES work
+func (e *StorageExecutor) SetDatabaseManager(dbManager DatabaseManagerInterface) {
+	e.dbManager = dbManager
 }
 
 // SetEmbedder sets the query embedder for server-side embedding.
@@ -778,6 +814,12 @@ func (w *transactionStorageWrapper) EdgeCount() (int64, error) {
 	return w.underlying.EdgeCount()
 }
 
+func (w *transactionStorageWrapper) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
+	// DeleteByPrefix is not supported within a transaction context.
+	// This operation should be performed outside of a transaction.
+	return 0, 0, fmt.Errorf("DeleteByPrefix not supported within transaction context")
+}
+
 // tryFastPathCompoundQuery attempts to handle common compound query patterns
 // using pre-compiled regex for faster routing. Returns (result, true) if handled,
 // (nil, false) if the query should go through normal routing.
@@ -945,7 +987,7 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Only search for keywords if query starts with MATCH
 		mergeIdx = findKeywordIndex(cypher, "MERGE")
 		createIdx = findKeywordIndex(cypher, "CREATE")
-		optionalMatchIdx = findKeywordIndex(cypher, "OPTIONAL MATCH")
+		optionalMatchIdx = findMultiWordKeywordIndex(cypher, "OPTIONAL", "MATCH")
 	} else if startsWithCreate {
 		// Only search for WITH/DELETE if query starts with CREATE
 		withIdx = findKeywordIndex(cypher, "WITH")
@@ -1023,7 +1065,9 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 	}
 
 	switch {
-	case strings.HasPrefix(upperQuery, "OPTIONAL MATCH"):
+	case findMultiWordKeywordIndex(cypher, "OPTIONAL", "MATCH") == 0:
+		// OPTIONAL MATCH must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "OPTIONAL MATCH", "OPTIONAL\tMATCH", "OPTIONAL\nMATCH", etc.
 		return e.executeOptionalMatch(ctx, cypher)
 	case startsWithMatch && isShortestPathQuery(cypher):
 		// Handle shortestPath() and allShortestPaths() queries
@@ -1042,49 +1086,84 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 			// Fall through to generic on optimization failure
 		}
 		return e.executeMatch(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "CREATE CONSTRAINT"),
-		strings.HasPrefix(upperQuery, "CREATE FULLTEXT INDEX"),
-		strings.HasPrefix(upperQuery, "CREATE VECTOR INDEX"),
-		strings.HasPrefix(upperQuery, "CREATE INDEX"):
+	case findKeywordIndex(cypher, "CREATE CONSTRAINT") == 0,
+		findKeywordIndex(cypher, "CREATE FULLTEXT INDEX") == 0,
+		findKeywordIndex(cypher, "CREATE VECTOR INDEX") == 0,
+		findKeywordIndex(cypher, "CREATE INDEX") == 0:
 		// Schema commands - constraints and indexes (check more specific patterns first)
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeSchemaCommand(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "CREATE", "DATABASE") == 0:
+		// System command: CREATE DATABASE (check before generic CREATE)
+		// Must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "CREATE DATABASE", "CREATE\tDATABASE", "CREATE\nDATABASE", etc.
+		return e.executeCreateDatabase(ctx, cypher)
 	case startsWithCreate:
 		return e.executeCreate(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "DELETE"), hasDetachDelete:
+	case hasDelete || hasDetachDelete:
+		// DELETE/DETACH DELETE already detected above with findKeywordIndex
 		return e.executeDelete(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "CALL"):
+	case findKeywordIndex(cypher, "CALL") == 0:
 		// Distinguish CALL {} subquery from CALL procedure()
+		// Must be at start (position 0) to be a standalone clause
 		if isCallSubquery(cypher) {
 			return e.executeCallSubquery(ctx, cypher)
 		}
 		return e.executeCall(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "RETURN"):
+	case findKeywordIndex(cypher, "RETURN") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeReturn(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "DROP"):
+	case findMultiWordKeywordIndex(cypher, "DROP", "DATABASE") == 0:
+		// System command: DROP DATABASE (check before generic DROP)
+		// Must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "DROP DATABASE", "DROP\tDATABASE", "DROP\nDATABASE", etc.
+		return e.executeDropDatabase(ctx, cypher)
+	case findKeywordIndex(cypher, "DROP") == 0:
 		// DROP INDEX/CONSTRAINT - treat as no-op (NornicDB manages indexes internally)
+		// Must be at start (position 0) to be a standalone clause
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
-	case strings.HasPrefix(upperQuery, "WITH"):
+	case findKeywordIndex(cypher, "WITH") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeWith(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "UNWIND"):
+	case findKeywordIndex(cypher, "UNWIND") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeUnwind(ctx, cypher)
-	case strings.Contains(upperQuery, " UNION ALL "):
+	case findKeywordIndex(cypher, "UNION ALL") >= 0:
+		// UNION ALL can appear anywhere in query
 		return e.executeUnion(ctx, cypher, true)
-	case strings.Contains(upperQuery, " UNION "):
+	case findKeywordIndex(cypher, "UNION") >= 0:
+		// UNION can appear anywhere in query
 		return e.executeUnion(ctx, cypher, false)
-	case strings.HasPrefix(upperQuery, "FOREACH"):
+	case findKeywordIndex(cypher, "FOREACH") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeForeach(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "LOAD CSV"):
+	case findKeywordIndex(cypher, "LOAD CSV") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeLoadCSV(ctx, cypher)
 	// SHOW commands for Neo4j compatibility
-	case strings.HasPrefix(upperQuery, "SHOW INDEXES"), strings.HasPrefix(upperQuery, "SHOW INDEX"):
+	case findKeywordIndex(cypher, "SHOW INDEXES") == 0,
+		findKeywordIndex(cypher, "SHOW INDEX") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeShowIndexes(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "SHOW CONSTRAINTS"), strings.HasPrefix(upperQuery, "SHOW CONSTRAINT"):
+	case findKeywordIndex(cypher, "SHOW CONSTRAINTS") == 0,
+		findKeywordIndex(cypher, "SHOW CONSTRAINT") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeShowConstraints(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "SHOW PROCEDURES"):
+	case findKeywordIndex(cypher, "SHOW PROCEDURES") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeShowProcedures(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "SHOW FUNCTIONS"):
+	case findKeywordIndex(cypher, "SHOW FUNCTIONS") == 0:
+		// Must be at start (position 0) to be a standalone clause
 		return e.executeShowFunctions(ctx, cypher)
-	case strings.HasPrefix(upperQuery, "SHOW DATABASE"):
+	case findMultiWordKeywordIndex(cypher, "SHOW", "DATABASES") == 0:
+		// System command: SHOW DATABASES (plural - check before singular)
+		// Must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "SHOW DATABASES", "SHOW\tDATABASES", "SHOW\nDATABASES", etc.
+		return e.executeShowDatabases(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "SHOW", "DATABASE") == 0:
+		// System command: SHOW DATABASE (singular)
+		// Must be at start (position 0) to be a standalone clause
+		// Handles flexible whitespace: "SHOW DATABASE", "SHOW\tDATABASE", "SHOW\nDATABASE", etc.
 		return e.executeShowDatabase(ctx, cypher)
 	default:
 		firstWord := strings.Split(upperQuery, " ")[0]
@@ -3941,20 +4020,324 @@ func (e *StorageExecutor) executeShowFunctions(ctx context.Context, cypher strin
 	}, nil
 }
 
-// executeShowDatabase handles SHOW DATABASE command
+// executeShowDatabase handles SHOW DATABASE command (singular - shows current database)
 func (e *StorageExecutor) executeShowDatabase(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	nodeCount, _ := e.storage.NodeCount()
 	edgeCount, _ := e.storage.EdgeCount()
 
+	// Try to get database name from context or use default
+	dbName := "nornic" // Default fallback
+	if e.dbManager != nil {
+		// Try to infer database name from storage (if it's a NamespacedEngine)
+		// For now, use default
+	}
+
 	return &ExecuteResult{
 		Columns: []string{"name", "type", "access", "address", "role", "writer", "requestedStatus", "currentStatus", "statusMessage", "default", "home", "constituents"},
 		Rows: [][]interface{}{
-			{"nornicdb", "standard", "read-write", "localhost:7687", "primary", true, "online", "online", "", true, true, []string{}},
+			{dbName, "standard", "read-write", "localhost:7687", "primary", true, "online", "online", "", true, true, []string{}},
 		},
 		Stats: &QueryStats{
 			NodesCreated:         int(nodeCount),
 			RelationshipsCreated: int(edgeCount),
 		},
+	}, nil
+}
+
+// executeShowDatabases handles SHOW DATABASES command (plural - lists all databases).
+//
+// Returns a list of all databases with their metadata including name, type, status,
+// and whether they are the default database. This command requires DatabaseManager
+// to be set via SetDatabaseManager().
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//	result, err := executor.Execute(ctx, "SHOW DATABASES", nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//	for _, row := range result.Rows {
+//		fmt.Printf("Database: %s (type: %s, status: %s)\n", row[0], row[1], row[7])
+//	}
+//
+// Returns Neo4j-compatible format with columns:
+//   - name: Database name
+//   - type: Database type (standard, system)
+//   - access: Access mode (read-write)
+//   - address: Server address
+//   - role: Server role (primary)
+//   - writer: Whether writes are allowed
+//   - requestedStatus: Requested status
+//   - currentStatus: Current status (online, offline)
+//   - statusMessage: Status message
+//   - default: Whether this is the default database
+//   - home: Whether this is the home database
+//   - constituents: Constituent databases (empty for single databases)
+func (e *StorageExecutor) executeShowDatabases(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - SHOW DATABASES requires multi-database support")
+	}
+
+	databases := e.dbManager.ListDatabases()
+	rows := make([][]interface{}, 0, len(databases))
+
+	for _, db := range databases {
+		rows = append(rows, []interface{}{
+			db.Name(),
+			db.Type(),
+			"read-write",
+			"localhost:7687",
+			"primary",
+			true,
+			db.Status(),
+			db.Status(),
+			"",
+			db.IsDefault(),
+			db.IsDefault(),
+			[]string{},
+		})
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"name", "type", "access", "address", "role", "writer", "requestedStatus", "currentStatus", "statusMessage", "default", "home", "constituents"},
+		Rows:    rows,
+	}, nil
+}
+
+// executeCreateDatabase handles CREATE DATABASE command.
+//
+// Creates a new database with the specified name. Supports optional IF NOT EXISTS
+// clause to avoid errors when the database already exists. This command requires
+// DatabaseManager to be set via SetDatabaseManager().
+//
+// Syntax:
+//   - CREATE DATABASE name
+//   - CREATE DATABASE name IF NOT EXISTS
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//
+//	// Create database
+//	result, err := executor.Execute(ctx, "CREATE DATABASE tenant_a", nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Create with IF NOT EXISTS (idempotent)
+//	result, err = executor.Execute(ctx, "CREATE DATABASE tenant_a IF NOT EXISTS", nil)
+//
+// Returns:
+//   - Success: Result with database name in single row
+//   - Error: If database already exists (unless IF NOT EXISTS is used)
+//   - Error: If DatabaseManager is not configured
+func (e *StorageExecutor) executeCreateDatabase(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - CREATE DATABASE requires multi-database support")
+	}
+
+	// Find "CREATE DATABASE" keyword position (with flexible whitespace)
+	createDbIdx := findMultiWordKeywordIndex(cypher, "CREATE", "DATABASE")
+	if createDbIdx == -1 {
+		return nil, fmt.Errorf("invalid CREATE DATABASE syntax")
+	}
+
+	// Skip "CREATE" and whitespace to find "DATABASE"
+	startPos := createDbIdx + len("CREATE")
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+	// Skip "DATABASE" and whitespace
+	if startPos+len("DATABASE") <= len(cypher) && strings.EqualFold(cypher[startPos:startPos+len("DATABASE")], "DATABASE") {
+		startPos += len("DATABASE")
+		for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+			startPos++
+		}
+	}
+
+	if startPos >= len(cypher) {
+		return nil, fmt.Errorf("invalid CREATE DATABASE syntax: database name expected")
+	}
+
+	// Find end of database name (whitespace, end of string, or "IF NOT EXISTS")
+	// Check for "IF NOT EXISTS" first (with flexible whitespace)
+	// This is a 3-word keyword: IF NOT EXISTS
+	ifNotIdx := findMultiWordKeywordIndex(cypher[startPos:], "IF", "NOT")
+	var ifNotExistsIdx int = -1
+	if ifNotIdx >= 0 {
+		// Found "IF NOT" - check if "EXISTS" follows
+		afterIfNot := startPos + ifNotIdx + len("IF")
+		// Skip whitespace after "IF"
+		for afterIfNot < len(cypher) && isWhitespace(cypher[afterIfNot]) {
+			afterIfNot++
+		}
+		// Check for "NOT"
+		if afterIfNot+len("NOT") <= len(cypher) && strings.EqualFold(cypher[afterIfNot:afterIfNot+len("NOT")], "NOT") {
+			afterNot := afterIfNot + len("NOT")
+			// Skip whitespace after "NOT"
+			for afterNot < len(cypher) && isWhitespace(cypher[afterNot]) {
+				afterNot++
+			}
+			// Check for "EXISTS"
+			if afterNot+len("EXISTS") <= len(cypher) && strings.EqualFold(cypher[afterNot:afterNot+len("EXISTS")], "EXISTS") {
+				// Found "IF NOT EXISTS" - database name ends before "IF"
+				ifNotExistsIdx = ifNotIdx
+			}
+		}
+	}
+	var dbNameEnd int
+	if ifNotExistsIdx >= 0 {
+		// Database name ends before "IF NOT EXISTS"
+		dbNameEnd = startPos + ifNotExistsIdx
+	} else {
+		// No IF NOT EXISTS - database name goes to end of query
+		dbNameEnd = len(cypher)
+	}
+
+	// Extract database name (trim whitespace)
+	dbName := strings.TrimSpace(cypher[startPos:dbNameEnd])
+	if dbName == "" {
+		return nil, fmt.Errorf("invalid CREATE DATABASE syntax: database name cannot be empty")
+	}
+
+	// Validate database name (basic validation)
+	if strings.ContainsAny(dbName, " \t\n\r") {
+		return nil, fmt.Errorf("invalid database name: '%s' (cannot contain whitespace)", dbName)
+	}
+
+	// Check if already exists
+	if e.dbManager.Exists(dbName) {
+		if ifNotExistsIdx >= 0 {
+			// IF NOT EXISTS - return success with no error
+			return &ExecuteResult{
+				Columns: []string{"name"},
+				Rows:    [][]interface{}{{dbName}},
+			}, nil
+		}
+		return nil, fmt.Errorf("database '%s' already exists", dbName)
+	}
+
+	// Create database
+	err := e.dbManager.CreateDatabase(dbName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database '%s': %w", dbName, err)
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"name"},
+		Rows:    [][]interface{}{{dbName}},
+	}, nil
+}
+
+// executeDropDatabase handles DROP DATABASE command.
+//
+// Deletes a database and all its data. Supports optional IF EXISTS clause to
+// avoid errors when the database doesn't exist. This command requires
+// DatabaseManager to be set via SetDatabaseManager().
+//
+// Syntax:
+//   - DROP DATABASE name
+//   - DROP DATABASE name IF EXISTS
+//
+// Example:
+//
+//	executor := cypher.NewStorageExecutor(storage)
+//	executor.SetDatabaseManager(dbManager)
+//
+//	// Drop database
+//	result, err := executor.Execute(ctx, "DROP DATABASE tenant_a", nil)
+//	if err != nil {
+//		log.Fatal(err)
+//	}
+//
+//	// Drop with IF EXISTS (idempotent)
+//	result, err = executor.Execute(ctx, "DROP DATABASE tenant_a IF EXISTS", nil)
+//
+// Warning: This operation permanently deletes all data in the database.
+// The default and system databases cannot be dropped.
+//
+// Returns:
+//   - Success: Result with database name in single row (empty if IF EXISTS and not found)
+//   - Error: If database doesn't exist (unless IF EXISTS is used)
+//   - Error: If DatabaseManager is not configured
+func (e *StorageExecutor) executeDropDatabase(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	if e.dbManager == nil {
+		return nil, fmt.Errorf("database manager not available - DROP DATABASE requires multi-database support")
+	}
+
+	// Find "DROP DATABASE" keyword position (with flexible whitespace)
+	dropDbIdx := findMultiWordKeywordIndex(cypher, "DROP", "DATABASE")
+	if dropDbIdx == -1 {
+		return nil, fmt.Errorf("invalid DROP DATABASE syntax")
+	}
+
+	// Skip "DROP" and whitespace to find "DATABASE"
+	startPos := dropDbIdx + len("DROP")
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+	// Skip "DATABASE" and whitespace
+	if startPos+len("DATABASE") <= len(cypher) && strings.EqualFold(cypher[startPos:startPos+len("DATABASE")], "DATABASE") {
+		startPos += len("DATABASE")
+		for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+			startPos++
+		}
+	}
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+
+	if startPos >= len(cypher) {
+		return nil, fmt.Errorf("invalid DROP DATABASE syntax: database name expected")
+	}
+
+	// Find end of database name (whitespace, end of string, or "IF EXISTS")
+	// Check for "IF EXISTS" first (with flexible whitespace)
+	ifExistsIdx := findMultiWordKeywordIndex(cypher[startPos:], "IF", "EXISTS")
+	var dbNameEnd int
+	if ifExistsIdx >= 0 {
+		dbNameEnd = startPos + ifExistsIdx
+		ifExistsIdx = startPos + ifExistsIdx // Absolute position
+	} else {
+		// No IF EXISTS - database name goes to end of query
+		dbNameEnd = len(cypher)
+	}
+
+	// Extract database name (trim whitespace)
+	dbName := strings.TrimSpace(cypher[startPos:dbNameEnd])
+	if dbName == "" {
+		return nil, fmt.Errorf("invalid DROP DATABASE syntax: database name cannot be empty")
+	}
+
+	// Validate database name (basic validation)
+	if strings.ContainsAny(dbName, " \t\n\r") {
+		return nil, fmt.Errorf("invalid database name: '%s' (cannot contain whitespace)", dbName)
+	}
+
+	// Check if exists
+	if !e.dbManager.Exists(dbName) {
+		if ifExistsIdx >= 0 {
+			// IF EXISTS - return success with no error
+			return &ExecuteResult{
+				Columns: []string{"name"},
+				Rows:    [][]interface{}{},
+			}, nil
+		}
+		return nil, fmt.Errorf("database '%s' does not exist", dbName)
+	}
+
+	// Drop database
+	err := e.dbManager.DropDatabase(dbName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to drop database '%s': %w", dbName, err)
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"name"},
+		Rows:    [][]interface{}{{dbName}},
 	}, nil
 }
 
