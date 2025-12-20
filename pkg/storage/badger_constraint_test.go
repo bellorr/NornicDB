@@ -26,7 +26,7 @@ func TestBadgerTransaction_FullScanUniqueConstraint(t *testing.T) {
 		t.Fatalf("BeginTransaction failed: %v", err)
 	}
 
-	err = tx1.CreateNode(&Node{
+	_, err = tx1.CreateNode(&Node{
 		ID:     "user-1",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -48,7 +48,7 @@ func TestBadgerTransaction_FullScanUniqueConstraint(t *testing.T) {
 		t.Fatalf("BeginTransaction failed: %v", err)
 	}
 
-	err = tx2.CreateNode(&Node{
+	_, err = tx2.CreateNode(&Node{
 		ID:     "user-2",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -70,7 +70,7 @@ func TestBadgerTransaction_FullScanUniqueConstraint(t *testing.T) {
 
 	// Verify different email succeeds
 	tx3, _ := engine.BeginTransaction()
-	err = tx3.CreateNode(&Node{
+	_, err = tx3.CreateNode(&Node{
 		ID:     "user-3",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -113,7 +113,7 @@ func TestBadgerTransaction_FullScanNodeKeyConstraint(t *testing.T) {
 
 	// Try to insert duplicate composite key in NEW transaction
 	tx2, _ := engine.BeginTransaction()
-	err := tx2.CreateNode(&Node{
+	_, err := tx2.CreateNode(&Node{
 		ID:     "user-2",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -130,7 +130,7 @@ func TestBadgerTransaction_FullScanNodeKeyConstraint(t *testing.T) {
 
 	// Different domain should succeed
 	tx3, _ := engine.BeginTransaction()
-	err = tx3.CreateNode(&Node{
+	_, err = tx3.CreateNode(&Node{
 		ID:     "user-3",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -245,7 +245,7 @@ func TestBadgerTransaction_UniqueConstraintWithinTransaction(t *testing.T) {
 	})
 
 	// Second node with same ID - should fail immediately
-	err := tx.CreateNode(&Node{
+	_, err := tx.CreateNode(&Node{
 		ID:     "node-2",
 		Labels: []string{"Node"},
 		Properties: map[string]interface{}{
@@ -276,16 +276,16 @@ func TestBadgerTransaction_NullValuesAllowed(t *testing.T) {
 
 	// Multiple nodes with NULL - should be allowed
 	tx.CreateNode(&Node{
-		ID:     "node-1",
-		Labels: []string{"Node"},
+		ID:         "node-1",
+		Labels:     []string{"Node"},
 		Properties: map[string]interface{}{
 			// optionalField is NULL
 		},
 	})
 
-	err := tx.CreateNode(&Node{
-		ID:     "node-2",
-		Labels: []string{"Node"},
+	_, err := tx.CreateNode(&Node{
+		ID:         "node-2",
+		Labels:     []string{"Node"},
 		Properties: map[string]interface{}{
 			// optionalField is NULL
 		},
@@ -313,7 +313,7 @@ func TestBadgerTransaction_NodeKeyRequiresAllProperties(t *testing.T) {
 	tx, _ := engine.BeginTransaction()
 
 	// Missing part2 - should fail
-	err := tx.CreateNode(&Node{
+	_, err := tx.CreateNode(&Node{
 		ID:     "entity-1",
 		Labels: []string{"Entity"},
 		Properties: map[string]interface{}{
@@ -351,7 +351,7 @@ func TestBadgerTransaction_ExistenceConstraint(t *testing.T) {
 	tx, _ := engine.BeginTransaction()
 
 	// Missing required property - should fail
-	err := tx.CreateNode(&Node{
+	_, err := tx.CreateNode(&Node{
 		ID:     "user-1",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -368,7 +368,7 @@ func TestBadgerTransaction_ExistenceConstraint(t *testing.T) {
 
 	// With required property - should succeed
 	tx2, _ := engine.BeginTransaction()
-	err = tx2.CreateNode(&Node{
+	_, err = tx2.CreateNode(&Node{
 		ID:     "user-2",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -407,7 +407,7 @@ func TestBadgerTransaction_MultipleConstraints(t *testing.T) {
 	tx, _ := engine.BeginTransaction()
 
 	// Violates EXISTS constraint
-	err := tx.CreateNode(&Node{
+	_, err := tx.CreateNode(&Node{
 		ID:     "user-1",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -424,7 +424,7 @@ func TestBadgerTransaction_MultipleConstraints(t *testing.T) {
 
 	// Satisfies all constraints
 	tx2, _ := engine.BeginTransaction()
-	err = tx2.CreateNode(&Node{
+	_, err = tx2.CreateNode(&Node{
 		ID:     "user-2",
 		Labels: []string{"User"},
 		Properties: map[string]interface{}{
@@ -495,7 +495,7 @@ func TestBadgerTransaction_ConstraintAcrossCommits(t *testing.T) {
 
 	// Transaction 2: Try to create another alice
 	tx2, _ := engine.BeginTransaction()
-	err := tx2.CreateNode(&Node{
+	_, err := tx2.CreateNode(&Node{
 		ID:     "account-2",
 		Labels: []string{"Account"},
 		Properties: map[string]interface{}{
@@ -511,7 +511,7 @@ func TestBadgerTransaction_ConstraintAcrossCommits(t *testing.T) {
 
 	// Transaction 3: Different username should work
 	tx3, _ := engine.BeginTransaction()
-	err = tx3.CreateNode(&Node{
+	_, err = tx3.CreateNode(&Node{
 		ID:     "account-3",
 		Labels: []string{"Account"},
 		Properties: map[string]interface{}{
@@ -529,7 +529,7 @@ func TestBadgerTransaction_ConstraintAcrossCommits(t *testing.T) {
 // setupTestBadgerEngine creates a temporary BadgerDB for testing.
 func setupTestBadgerEngine(t *testing.T) (*BadgerEngine, func()) {
 	dir := fmt.Sprintf("/tmp/badger-test-%d", os.Getpid())
-	
+
 	engine, err := NewBadgerEngine(dir)
 	if err != nil {
 		t.Fatalf("Failed to create BadgerEngine: %v", err)

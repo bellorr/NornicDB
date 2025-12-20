@@ -39,7 +39,7 @@ func TestTransaction_CreateNode_Basic(t *testing.T) {
 	}
 
 	// Create in transaction
-	err := tx.CreateNode(node)
+	_, err := tx.CreateNode(node)
 	if err != nil {
 		t.Fatalf("CreateNode failed: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestTransaction_Rollback(t *testing.T) {
 			ID:     NodeID("rollback-node-" + string(rune('0'+i))),
 			Labels: []string{"Rollback"},
 		}
-		if err := tx.CreateNode(node); err != nil {
+		if _, err := tx.CreateNode(node); err != nil {
 			t.Fatalf("CreateNode failed: %v", err)
 		}
 	}
@@ -120,7 +120,7 @@ func TestTransaction_Atomicity(t *testing.T) {
 
 	// Pre-create a node that will cause conflict
 	conflictNode := &Node{ID: "conflict-node", Labels: []string{"Conflict"}}
-	if err := engine.CreateNode(conflictNode); err != nil {
+	if _, err := engine.CreateNode(conflictNode); err != nil {
 		t.Fatalf("Pre-create failed: %v", err)
 	}
 
@@ -132,7 +132,7 @@ func TestTransaction_Atomicity(t *testing.T) {
 			ID:     NodeID("atomic-node-" + string(rune('0'+i))),
 			Labels: []string{"Atomic"},
 		}
-		if err := tx.CreateNode(node); err != nil {
+		if _, err := tx.CreateNode(node); err != nil {
 			t.Fatalf("CreateNode failed: %v", err)
 		}
 	}
@@ -143,7 +143,7 @@ func TestTransaction_Atomicity(t *testing.T) {
 	// But when we commit, it should fail
 
 	// For this test, let's verify that creating a node with same ID in TX fails
-	err := tx.CreateNode(node)
+	_, err := tx.CreateNode(node)
 	if err != ErrAlreadyExists {
 		t.Errorf("Expected ErrAlreadyExists, got %v", err)
 	}
@@ -168,7 +168,7 @@ func TestTransaction_DeleteNode(t *testing.T) {
 
 	// Create a node first
 	node := &Node{ID: "delete-me", Labels: []string{"Delete"}}
-	if err := engine.CreateNode(node); err != nil {
+	if _, err := engine.CreateNode(node); err != nil {
 		t.Fatalf("CreateNode failed: %v", err)
 	}
 
@@ -214,7 +214,7 @@ func TestTransaction_UpdateNode(t *testing.T) {
 		Labels:     []string{"Update"},
 		Properties: map[string]interface{}{"version": 1},
 	}
-	if err := engine.CreateNode(node); err != nil {
+	if _, err := engine.CreateNode(node); err != nil {
 		t.Fatalf("CreateNode failed: %v", err)
 	}
 
@@ -408,7 +408,7 @@ func TestTransaction_ClosedTransaction(t *testing.T) {
 
 	// Try operations on closed transaction
 	node := &Node{ID: "closed-test", Labels: []string{"Test"}}
-	err := tx.CreateNode(node)
+	_, err := tx.CreateNode(node)
 	if err != ErrTransactionClosed {
 		t.Errorf("Expected ErrTransactionClosed, got %v", err)
 	}

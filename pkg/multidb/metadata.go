@@ -54,8 +54,8 @@ func (m *DatabaseManager) persistMetadata() error {
 		ID:     storage.NodeID(metadataNodeID),
 		Labels: []string{"_System", "_Metadata"},
 		Properties: map[string]any{
-			"data":      string(data),
-			"type":      "databases",
+			"data":       string(data),
+			"type":       "databases",
 			"updated_at": time.Now().Unix(),
 		},
 	}
@@ -64,7 +64,8 @@ func (m *DatabaseManager) persistMetadata() error {
 	existing, err := systemEngine.GetNode(storage.NodeID(metadataNodeID))
 	if err == storage.ErrNotFound {
 		// Create new
-		return systemEngine.CreateNode(node)
+		_, err := systemEngine.CreateNode(node)
+		return err
 	}
 	if err != nil {
 		return err
@@ -74,4 +75,3 @@ func (m *DatabaseManager) persistMetadata() error {
 	node.CreatedAt = existing.CreatedAt
 	return systemEngine.UpdateNode(node)
 }
-

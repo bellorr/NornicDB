@@ -592,7 +592,7 @@ func TestWALEngine(t *testing.T) {
 		defer walEngine.Close()
 
 		// Create node
-		err = walEngine.CreateNode(&Node{ID: "n1", Labels: []string{"Test"}})
+		_, err = walEngine.CreateNode(&Node{ID: "n1", Labels: []string{"Test"}})
 		require.NoError(t, err)
 
 		// Verify node exists
@@ -1429,7 +1429,7 @@ func TestWALEngine_StreamNodes(t *testing.T) {
 
 	// Create 100 nodes
 	for i := 0; i < 100; i++ {
-		err := walEngine.CreateNode(&Node{
+		_, err := walEngine.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -1477,7 +1477,7 @@ func TestWALEngine_StreamEdges(t *testing.T) {
 
 	// Create nodes first
 	for i := 0; i < 10; i++ {
-		err := walEngine.CreateNode(&Node{
+		_, err := walEngine.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -1536,7 +1536,7 @@ func TestWALEngine_StreamNodeChunks(t *testing.T) {
 
 	// Create 100 nodes
 	for i := 0; i < 100; i++ {
-		err := walEngine.CreateNode(&Node{
+		_, err := walEngine.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -1605,7 +1605,7 @@ func TestFullStorageChain_Streaming(t *testing.T) {
 
 	// Create 100 nodes through the full chain
 	for i := 0; i < 100; i++ {
-		err := asyncEngine.CreateNode(&Node{
+		_, err := asyncEngine.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("chain-node-%d", i)),
 			Labels: []string{"ChainTest"},
 		})

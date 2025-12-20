@@ -503,7 +503,7 @@ func BenchmarkRRFFusion(b *testing.B) {
 
 	// Create nodes
 	for i := 0; i < 100; i++ {
-		engine.CreateNode(&storage.Node{
+		_, _ = engine.CreateNode(&storage.Node{
 			ID:         storage.NodeID(string(rune('a'+i%26)) + string(rune(i))),
 			Labels:     []string{"Node"},
 			Properties: map[string]any{"title": "Test"},
@@ -669,8 +669,8 @@ func TestSearchService_RemoveNode(t *testing.T) {
 		Properties: map[string]any{"name": "Bob", "embedding": []float32{0, 1, 0, 0}},
 	}
 
-	engine.CreateNode(node1)
-	engine.CreateNode(node2)
+	_, _ = engine.CreateNode(node1)
+	_, _ = engine.CreateNode(node2)
 	svc.IndexNode(node1)
 	svc.IndexNode(node2)
 
@@ -722,7 +722,8 @@ func TestSearchService_RemoveNode_DecrementsEmbeddingCount(t *testing.T) {
 	}
 
 	for _, node := range nodes {
-		require.NoError(t, engine.CreateNode(node))
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
 		require.NoError(t, svc.IndexNode(node))
 	}
 
@@ -776,7 +777,8 @@ func TestSearchService_RemoveNode_OnlyRemovesTargetNode(t *testing.T) {
 	}
 
 	for _, node := range []*storage.Node{node1, node2, node3} {
-		require.NoError(t, engine.CreateNode(node))
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
 		require.NoError(t, svc.IndexNode(node))
 	}
 
@@ -844,7 +846,7 @@ func TestSearchService_HybridSearch(t *testing.T) {
 	}
 
 	for _, node := range nodes {
-		engine.CreateNode(node)
+		_, _ = engine.CreateNode(node)
 		svc.IndexNode(node)
 	}
 
@@ -893,7 +895,7 @@ func TestSearchService_VectorSearchOnly(t *testing.T) {
 	}
 
 	for _, node := range nodes {
-		engine.CreateNode(node)
+		_, _ = engine.CreateNode(node)
 		err := svc.IndexNode(node)
 		require.NoError(t, err)
 	}
@@ -929,7 +931,7 @@ func TestSearchService_FilterByType(t *testing.T) {
 	}
 
 	for _, node := range nodes {
-		engine.CreateNode(node)
+		_, _ = engine.CreateNode(node)
 		svc.IndexNode(node)
 	}
 
@@ -962,7 +964,7 @@ func TestSearchService_EnrichResults(t *testing.T) {
 			"embedding": []float32{1, 0, 0, 0},
 		},
 	}
-	engine.CreateNode(node)
+	_, _ = engine.CreateNode(node)
 
 	svc := NewService(engine)
 	svc.IndexNode(node)
@@ -1054,7 +1056,7 @@ func TestSearchService_BuildIndexesFromStorage(t *testing.T) {
 		},
 	}
 	for _, node := range nodes {
-		engine.CreateNode(node)
+		_, _ = engine.CreateNode(node)
 	}
 
 	// Create service and build indexes
@@ -1122,7 +1124,7 @@ func TestSearchService_SpecialCharacters(t *testing.T) {
 		Labels:     []string{"Doc"},
 		Properties: map[string]any{"content": "C++ programming & Java!"},
 	}
-	engine.CreateNode(node)
+	_, _ = engine.CreateNode(node)
 	svc.IndexNode(node)
 
 	// Search should handle special chars without panicking
@@ -1149,7 +1151,7 @@ func TestVectorSearchOnlyDirect(t *testing.T) {
 			embedding[i] = float32(i) / 1024.0
 		}
 
-		store.CreateNode(&storage.Node{
+		_, _ = store.CreateNode(&storage.Node{
 			ID:        "node-1",
 			Labels:    []string{"Document"},
 			Embedding: embedding,
@@ -1224,7 +1226,7 @@ func TestBuildIndexesDirect(t *testing.T) {
 			embedding[i] = 0.5
 		}
 
-		store.CreateNode(&storage.Node{
+		_, _ = store.CreateNode(&storage.Node{
 			ID:        "doc-1",
 			Labels:    []string{"Document"},
 			Embedding: embedding,
@@ -1232,7 +1234,7 @@ func TestBuildIndexesDirect(t *testing.T) {
 				"content": "First document content",
 			},
 		})
-		store.CreateNode(&storage.Node{
+		_, _ = store.CreateNode(&storage.Node{
 			ID:     "doc-2",
 			Labels: []string{"Document"},
 			Properties: map[string]interface{}{
@@ -1287,7 +1289,7 @@ func TestSearchServiceSearchDirect(t *testing.T) {
 			embedding[i] = 0.5
 		}
 
-		store.CreateNode(&storage.Node{
+		_, _ = store.CreateNode(&storage.Node{
 			ID:        "doc-1",
 			Labels:    []string{"Document"},
 			Embedding: embedding,
@@ -1350,7 +1352,7 @@ func TestRRFHybridSearchDirect(t *testing.T) {
 			embedding[i] = 0.5
 		}
 
-		store.CreateNode(&storage.Node{
+		_, _ = store.CreateNode(&storage.Node{
 			ID:        "doc-1",
 			Labels:    []string{"Document"},
 			Embedding: embedding,
@@ -1400,7 +1402,7 @@ func TestMMRDiversification(t *testing.T) {
 			Properties: props,
 			Embedding:  embedding,
 		}
-		store.CreateNode(node)
+		_, _ = store.CreateNode(node)
 		service.IndexNode(node)
 	}
 
@@ -1491,7 +1493,7 @@ func TestSearchWithMMROption(t *testing.T) {
 		for j := range node.Embedding {
 			node.Embedding[j] = float32(i)*0.01 + float32(j)*0.001
 		}
-		store.CreateNode(node)
+		_, _ = store.CreateNode(node)
 		service.IndexNode(node)
 	}
 

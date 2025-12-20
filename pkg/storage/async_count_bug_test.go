@@ -36,7 +36,7 @@ func TestBug_AsyncEngineNodeCountAfterDeleteRecreate(t *testing.T) {
 			Labels:     []string{"TestNode"},
 			Properties: map[string]any{"idx": i},
 		}
-		err := async.CreateNode(node)
+		_, err := async.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -89,7 +89,7 @@ func TestBug_AsyncEngineNodeCountAfterDeleteRecreate(t *testing.T) {
 			Labels:     []string{"TestNode"},
 			Properties: map[string]any{"idx": i + 100},
 		}
-		err := async.CreateNode(node)
+		_, err := async.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -130,7 +130,7 @@ func TestBug_AsyncEngineNodeCountWithSameIDs(t *testing.T) {
 	// Create nodes
 	t.Log("Creating 3 nodes...")
 	for _, id := range nodeIDs {
-		err := async.CreateNode(&Node{ID: id, Labels: []string{"Test"}})
+		_, err := async.CreateNode(&Node{ID: id, Labels: []string{"Test"}})
 		require.NoError(t, err)
 	}
 	async.Flush()
@@ -153,7 +153,7 @@ func TestBug_AsyncEngineNodeCountWithSameIDs(t *testing.T) {
 	// Recreate with SAME IDs
 	t.Log("Recreating with SAME IDs...")
 	for _, id := range nodeIDs {
-		err := async.CreateNode(&Node{ID: id, Labels: []string{"Test"}, Properties: map[string]any{"recreated": true}})
+		_, err := async.CreateNode(&Node{ID: id, Labels: []string{"Test"}, Properties: map[string]any{"recreated": true}})
 		require.NoError(t, err)
 	}
 

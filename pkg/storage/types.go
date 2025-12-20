@@ -337,7 +337,7 @@ type Edge struct {
 //		Labels: []string{"Person"},
 //		Properties: map[string]any{"name": "Alice"},
 //	}
-//	if err := engine.CreateNode(node); err != nil {
+//	if _, err := engine.CreateNode(node); err != nil {
 //		log.Fatal(err)
 //	}
 //
@@ -352,7 +352,7 @@ type Edge struct {
 //	}
 type Engine interface {
 	// Node operations
-	CreateNode(node *Node) error
+	CreateNode(node *Node) (NodeID, error) // Returns the actual stored ID (may be prefixed for namespaced engines)
 	GetNode(id NodeID) (*Node, error)
 	UpdateNode(node *Node) error
 	DeleteNode(id NodeID) error

@@ -27,7 +27,7 @@ func createTestNode(t *testing.T, e *StorageExecutor, id string, labels []string
 		Labels:     labels,
 		Properties: props,
 	}
-	if err := e.storage.CreateNode(node); err != nil {
+	if _, err := e.storage.CreateNode(node); err != nil {
 		t.Fatalf("Failed to create test node: %v", err)
 	}
 	return node

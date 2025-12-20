@@ -165,22 +165,22 @@ func TestRRFHybridSearch_SearchMethodIndicatesClusteredSearch(t *testing.T) {
 	// Test cases for different combinations
 
 	testCases := []struct {
-		name              string
+		name               string
 		useClusteredSearch bool
-		mmrEnabled        bool
-		expectedMethod    string
+		mmrEnabled         bool
+		expectedMethod     string
 	}{
 		{
-			name:              "standard RRF without clustering",
+			name:               "standard RRF without clustering",
 			useClusteredSearch: false,
-			mmrEnabled:        false,
-			expectedMethod:    "rrf_hybrid",
+			mmrEnabled:         false,
+			expectedMethod:     "rrf_hybrid",
 		},
 		{
-			name:              "standard RRF with MMR",
+			name:               "standard RRF with MMR",
 			useClusteredSearch: false,
-			mmrEnabled:        true,
-			expectedMethod:    "rrf_hybrid+mmr",
+			mmrEnabled:         true,
+			expectedMethod:     "rrf_hybrid+mmr",
 		},
 		// Note: clustered tests would require actual cluster index setup
 	}
@@ -205,7 +205,7 @@ func TestRRFHybridSearch_SearchMethodIndicatesClusteredSearch(t *testing.T) {
 					"content": "Test content for search",
 				},
 			}
-			err := engine.CreateNode(node)
+			_, err := engine.CreateNode(node)
 			require.NoError(t, err)
 			err = svc.IndexNode(node)
 			require.NoError(t, err)
@@ -332,7 +332,7 @@ func TestVectorSearchOnly_UsesClusterWhenAvailable(t *testing.T) {
 			"title": "Test Document",
 		},
 	}
-	err := engine.CreateNode(node)
+	_, err := engine.CreateNode(node)
 	require.NoError(t, err)
 	err = svc.IndexNode(node)
 	require.NoError(t, err)
@@ -403,7 +403,7 @@ func TestRRFHybridSearch_MinEmbeddingsThreshold(t *testing.T) {
 				"content": "Test content for searching",
 			},
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 		err = svc.IndexNode(node)
 		require.NoError(t, err)
@@ -460,7 +460,7 @@ func TestBug_RRFHybridSearchUsedBruteForceOnly(t *testing.T) {
 				"content": "Search content",
 			},
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 		err = svc.IndexNode(node)
 		require.NoError(t, err)
@@ -513,7 +513,7 @@ func TestSearchPathIntegrity(t *testing.T) {
 			"content": "Content for testing search paths",
 		},
 	}
-	err := engine.CreateNode(node)
+	_, err := engine.CreateNode(node)
 	require.NoError(t, err)
 	err = svc.IndexNode(node)
 	require.NoError(t, err)

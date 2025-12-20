@@ -23,7 +23,7 @@ func TestBadgerEngine_DeleteByPrefix(t *testing.T) {
 					"prefix": prefix,
 				},
 			}
-			err := engine.CreateNode(node)
+			_, err := engine.CreateNode(node)
 			require.NoError(t, err)
 		}
 	}
@@ -70,9 +70,9 @@ func TestBadgerEngine_DeleteByPrefix_WithEdges(t *testing.T) {
 	prefix := "tenant_a:"
 	node1 := &Node{ID: NodeID(prefix + "n1"), Labels: []string{"Person"}}
 	node2 := &Node{ID: NodeID(prefix + "n2"), Labels: []string{"Person"}}
-	err = engine.CreateNode(node1)
+	_, err = engine.CreateNode(node1)
 	require.NoError(t, err)
-	err = engine.CreateNode(node2)
+	_, err = engine.CreateNode(node2)
 	require.NoError(t, err)
 
 	edge := &Edge{
@@ -117,7 +117,7 @@ func TestBadgerEngine_DeleteByPrefix_NoMatches(t *testing.T) {
 
 	// Create node with different prefix
 	node := &Node{ID: NodeID("other:node"), Labels: []string{"Test"}}
-	err = engine.CreateNode(node)
+	_, err = engine.CreateNode(node)
 	require.NoError(t, err)
 
 	// Delete non-matching prefix
@@ -142,7 +142,7 @@ func TestMemoryEngine_DeleteByPrefix(t *testing.T) {
 			ID:     NodeID("tenant_a:node-" + string(rune('0'+i))),
 			Labels: []string{"Test"},
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -157,4 +157,3 @@ func TestMemoryEngine_DeleteByPrefix(t *testing.T) {
 	require.NoError(t, err)
 	assert.Len(t, allNodes, 0)
 }
-

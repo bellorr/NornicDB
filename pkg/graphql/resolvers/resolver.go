@@ -55,10 +55,20 @@ func (r *Resolver) getCypherExecutor(ctx context.Context) (*cypher.StorageExecut
 	if r.DB != nil {
 		baseExecutor := r.DB.GetCypherExecutor()
 		if baseExecutor != nil {
-			// Note: embedder and callback are set on the base executor,
-			// but we can't easily copy them without getters. The namespaced
-			// executor will work without them, but embedding generation may
-			// not work until the base executor's callbacks are wired up.
+			// Copy embedder for vector search queries (CALL db.index.vector.queryNodes)
+			// This ensures GraphQL queries can use string-based vector search
+			if embedder := baseExecutor.GetEmbedder(); embedder != nil {
+				executor.SetEmbedder(embedder)
+			}
+		}
+
+		// Wire up embedding callback to use the base DB's embed queue
+		// This ensures nodes created via GraphQL get automatically queued for embedding
+		embedQueue := r.DB.GetEmbedQueue()
+		if embedQueue != nil {
+			executor.SetNodeCreatedCallback(func(nodeID string) {
+				embedQueue.Enqueue(nodeID)
+			})
 		}
 	}
 	return executor, nil

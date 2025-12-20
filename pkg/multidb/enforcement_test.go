@@ -58,7 +58,7 @@ func TestDatabaseLimitChecker_CheckStorageLimits_NoLimits(t *testing.T) {
 			ID:     storage.NodeID("node-" + string(rune(i))),
 			Labels: []string{"Test"},
 		}
-		err := store.CreateNode(node)
+		_, err := store.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -91,7 +91,7 @@ func TestDatabaseLimitChecker_CheckStorageLimits_MaxNodes(t *testing.T) {
 			ID:     storage.NodeID("node-" + string(rune(i))),
 			Labels: []string{"Test"},
 		}
-		err := store.CreateNode(node)
+		_, err := store.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -124,7 +124,7 @@ func TestDatabaseLimitChecker_CheckStorageLimits_MaxNodes_UnderLimit(t *testing.
 			ID:     storage.NodeID("node-" + string(rune(i))),
 			Labels: []string{"Test"},
 		}
-		err := store.CreateNode(node)
+		_, err := store.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -150,8 +150,10 @@ func TestDatabaseLimitChecker_CheckStorageLimits_MaxEdges(t *testing.T) {
 	// Create nodes first
 	node1 := &storage.Node{ID: storage.NodeID("node-1"), Labels: []string{"Test"}}
 	node2 := &storage.Node{ID: storage.NodeID("node-2"), Labels: []string{"Test"}}
-	require.NoError(t, store.CreateNode(node1))
-	require.NoError(t, store.CreateNode(node2))
+	_, err = store.CreateNode(node1)
+	require.NoError(t, err)
+	_, err = store.CreateNode(node2)
+	require.NoError(t, err)
 
 	// Create edges up to limit
 	for i := 0; i < 3; i++ {
@@ -190,8 +192,10 @@ func TestDatabaseLimitChecker_CheckStorageLimits_MaxEdges_UnderLimit(t *testing.
 	// Create nodes
 	node1 := &storage.Node{ID: storage.NodeID("node-1"), Labels: []string{"Test"}}
 	node2 := &storage.Node{ID: storage.NodeID("node-2"), Labels: []string{"Test"}}
-	require.NoError(t, store.CreateNode(node1))
-	require.NoError(t, store.CreateNode(node2))
+	_, err = store.CreateNode(node1)
+	require.NoError(t, err)
+	_, err = store.CreateNode(node2)
+	require.NoError(t, err)
 
 	// Create edges under limit
 	for i := 0; i < 3; i++ {

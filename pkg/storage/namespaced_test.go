@@ -23,7 +23,7 @@ func TestNamespacedEngine_BasicOperations(t *testing.T) {
 			"name": "Alice",
 		},
 	}
-	err := tenantA.CreateNode(node)
+	_, err := tenantA.CreateNode(node)
 	require.NoError(t, err)
 
 	// Get the node back
@@ -47,19 +47,19 @@ func TestNamespacedEngine_Isolation(t *testing.T) {
 
 	// Create nodes in different tenants
 	nodeA := &Node{
-		ID:     NodeID("node-1"),
-		Labels: []string{"Person"},
+		ID:         NodeID("node-1"),
+		Labels:     []string{"Person"},
 		Properties: map[string]any{"tenant": "a"},
 	}
-	err := tenantA.CreateNode(nodeA)
+	_, err := tenantA.CreateNode(nodeA)
 	require.NoError(t, err)
 
 	nodeB := &Node{
-		ID:     NodeID("node-1"), // Same ID, different tenant
-		Labels: []string{"Person"},
+		ID:         NodeID("node-1"), // Same ID, different tenant
+		Labels:     []string{"Person"},
 		Properties: map[string]any{"tenant": "b"},
 	}
-	err = tenantB.CreateNode(nodeB)
+	_, err = tenantB.CreateNode(nodeB)
 	require.NoError(t, err)
 
 	// Each tenant should only see their own nodes
@@ -83,9 +83,9 @@ func TestNamespacedEngine_Edges(t *testing.T) {
 	// Create two nodes
 	node1 := &Node{ID: NodeID("n1"), Labels: []string{"Person"}}
 	node2 := &Node{ID: NodeID("n2"), Labels: []string{"Person"}}
-	err := tenantA.CreateNode(node1)
+	_, err := tenantA.CreateNode(node1)
 	require.NoError(t, err)
-	err = tenantA.CreateNode(node2)
+	_, err = tenantA.CreateNode(node2)
 	require.NoError(t, err)
 
 	// Create edge
@@ -125,21 +125,21 @@ func TestNamespacedEngine_QueryOperations(t *testing.T) {
 	// Create nodes with same label in different tenants
 	for i := 0; i < 3; i++ {
 		node := &Node{
-			ID:     NodeID("node-" + string(rune('a'+i))),
-			Labels: []string{"Person"},
+			ID:         NodeID("node-" + string(rune('a'+i))),
+			Labels:     []string{"Person"},
 			Properties: map[string]any{"id": i},
 		}
-		err := tenantA.CreateNode(node)
+		_, err := tenantA.CreateNode(node)
 		require.NoError(t, err)
 	}
 
 	for i := 0; i < 2; i++ {
 		node := &Node{
-			ID:     NodeID("node-" + string(rune('x'+i))),
-			Labels: []string{"Person"},
+			ID:         NodeID("node-" + string(rune('x'+i))),
+			Labels:     []string{"Person"},
 			Properties: map[string]any{"id": i},
 		}
-		err := tenantB.CreateNode(node)
+		_, err := tenantB.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -165,7 +165,7 @@ func TestNamespacedEngine_DeleteByPrefix(t *testing.T) {
 			ID:     NodeID("node-" + string(rune('0'+i))),
 			Labels: []string{"Test"},
 		}
-		err := tenantA.CreateNode(node)
+		_, err := tenantA.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -185,9 +185,9 @@ func TestNamespacedEngine_Stats(t *testing.T) {
 	// Create nodes and edges
 	node1 := &Node{ID: NodeID("n1"), Labels: []string{"Person"}}
 	node2 := &Node{ID: NodeID("n2"), Labels: []string{"Person"}}
-	err := tenantA.CreateNode(node1)
+	_, err := tenantA.CreateNode(node1)
 	require.NoError(t, err)
-	err = tenantA.CreateNode(node2)
+	_, err = tenantA.CreateNode(node2)
 	require.NoError(t, err)
 
 	edge := &Edge{
@@ -252,7 +252,6 @@ func TestNamespacedEngine_Close(t *testing.T) {
 
 	// Underlying engine should still work
 	node := &Node{ID: NodeID("test"), Labels: []string{"Test"}}
-	err = inner.CreateNode(node)
+	_, err = inner.CreateNode(node)
 	require.NoError(t, err)
 }
-

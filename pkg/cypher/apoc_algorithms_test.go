@@ -10,7 +10,8 @@ import (
 )
 
 // Helper to create test graph: A -> B -> C -> D
-//                              \-> E -> F
+//
+//	\-> E -> F
 func createTestGraph(t *testing.T) *StorageExecutor {
 	engine := storage.NewMemoryEngine()
 	exec := NewStorageExecutor(engine)
@@ -30,7 +31,7 @@ func createTestGraph(t *testing.T) *StorageExecutor {
 	}
 
 	for _, n := range nodes {
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:         storage.NodeID(n.id),
 			Labels:     n.labels,
 			Properties: n.props,
@@ -226,7 +227,7 @@ func TestDijkstraWithWeights(t *testing.T) {
 	//   \---10-----/
 	nodes := []string{"A", "B", "C"}
 	for _, n := range nodes {
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     storage.NodeID(n),
 			Labels: []string{"Node"},
 		})

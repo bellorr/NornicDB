@@ -1503,6 +1503,89 @@ func TestMultipleSubqueriesInWhere(t *testing.T) {
 	}
 }
 
+// TestExistsSubqueryWithWherePropertyComparison tests EXISTS subquery with WHERE property comparison
+// This verifies that evaluateInnerWhere correctly handles property comparisons
+func TestExistsSubqueryWithWherePropertyComparison(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create test data
+	_, err := exec.Execute(ctx, `
+		CREATE (a:Person {name: 'Alice', age: 30})-[:KNOWS]->(b:Person {name: 'Bob', age: 25}),
+		       (a)-[:KNOWS]->(c:Person {name: 'Charlie', age: 35}),
+		       (d:Person {name: 'Dave', age: 20})
+	`, nil)
+	if err != nil {
+		t.Fatalf("Failed to create test data: %v", err)
+	}
+
+	// Find people who know someone older than 30
+	result, err := exec.Execute(ctx, `
+		MATCH (p:Person)
+		WHERE EXISTS { MATCH (p)-[:KNOWS]->(other) WHERE other.age > 30 }
+		RETURN p.name ORDER BY p.name
+	`, nil)
+	if err != nil {
+		t.Fatalf("EXISTS with WHERE property comparison failed: %v", err)
+	}
+
+	// Only Alice knows Charlie (age 35 > 30)
+	if len(result.Rows) != 1 {
+		t.Errorf("Expected 1 result (Alice), got %d", len(result.Rows))
+	}
+	if result.Rows[0][0] != "Alice" {
+		t.Errorf("Expected Alice, got %v", result.Rows[0][0])
+	}
+
+	// Find people who know someone with name = 'Bob'
+	result2, err := exec.Execute(ctx, `
+		MATCH (p:Person)
+		WHERE EXISTS { MATCH (p)-[:KNOWS]->(other) WHERE other.name = 'Bob' }
+		RETURN p.name ORDER BY p.name
+	`, nil)
+	if err != nil {
+		t.Fatalf("EXISTS with WHERE equality failed: %v", err)
+	}
+
+	// Only Alice knows Bob
+	if len(result2.Rows) != 1 {
+		t.Errorf("Expected 1 result (Alice), got %d", len(result2.Rows))
+	}
+
+	// Test IS NOT NULL
+	result3, err := exec.Execute(ctx, `
+		MATCH (p:Person)
+		WHERE EXISTS { MATCH (p)-[:KNOWS]->(other) WHERE other.age IS NOT NULL }
+		RETURN p.name ORDER BY p.name
+	`, nil)
+	if err != nil {
+		t.Fatalf("EXISTS with WHERE IS NOT NULL failed: %v", err)
+	}
+
+	// Alice knows Bob and Charlie (both have age), Dave has no connections
+	if len(result3.Rows) != 1 {
+		t.Errorf("Expected 1 result (Alice), got %d", len(result3.Rows))
+	}
+
+	// Test AND condition
+	// Bob's age is 25, Charlie's age is 35
+	// Condition: other.age > 24 AND other.age < 26 matches Bob (25)
+	result4, err := exec.Execute(ctx, `
+		MATCH (p:Person)
+		WHERE EXISTS { MATCH (p)-[:KNOWS]->(other) WHERE other.age > 24 AND other.age < 26 }
+		RETURN p.name ORDER BY p.name
+	`, nil)
+	if err != nil {
+		t.Fatalf("EXISTS with WHERE AND condition failed: %v", err)
+	}
+
+	// Only Alice knows Bob (age 25 matches 24 < 25 < 26)
+	if len(result4.Rows) != 1 {
+		t.Errorf("Expected 1 result (Alice), got %d", len(result4.Rows))
+	}
+}
+
 // TestNestedExistsSubquery tests nested EXISTS subqueries
 func TestNestedExistsSubquery(t *testing.T) {
 	store := storage.NewMemoryEngine()

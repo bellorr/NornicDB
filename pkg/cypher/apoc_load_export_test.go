@@ -22,7 +22,7 @@ func TestApocLoadJson(t *testing.T) {
 		tmpDir := t.TempDir()
 		jsonFile := filepath.Join(tmpDir, "test.json")
 		data := map[string]interface{}{
-			"name": "Test",
+			"name":  "Test",
 			"value": 42,
 		}
 		jsonBytes, _ := json.Marshal(data)
@@ -97,16 +97,18 @@ func TestApocExportJsonAll(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test data
-	require.NoError(t, engine.CreateNode(&storage.Node{
+	_, err := engine.CreateNode(&storage.Node{
 		ID:         "n1",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
-	}))
-	require.NoError(t, engine.CreateNode(&storage.Node{
+	})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{
 		ID:         "n2",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Bob"},
-	}))
+	})
+	require.NoError(t, err)
 	require.NoError(t, engine.CreateEdge(&storage.Edge{
 		ID:        "e1",
 		StartNode: "n1",
@@ -151,11 +153,12 @@ func TestApocExportCsvAll(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test data
-	require.NoError(t, engine.CreateNode(&storage.Node{
+	_, err := engine.CreateNode(&storage.Node{
 		ID:         "n1",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
-	}))
+	})
+	require.NoError(t, err)
 
 	t.Run("export_all_to_csv", func(t *testing.T) {
 		tmpDir := t.TempDir()

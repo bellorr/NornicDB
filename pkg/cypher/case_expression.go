@@ -328,11 +328,14 @@ func findTopLevelKeyword(s, keyword string) int {
 			continue
 		}
 
-		// Track parentheses
+		// Track parentheses, brackets, and curly braces
+		// This ensures we don't find keywords inside nested structures like EXISTS { ... }
+		// NOTE: We track curly braces here because they're used in EXISTS subqueries in WHERE clauses
+		// Property maps with curly braces are parsed separately and don't use this function
 		if !inString {
-			if ch == '(' {
+			if ch == '(' || ch == '[' || ch == '{' {
 				depth++
-			} else if ch == ')' {
+			} else if ch == ')' || ch == ']' || ch == '}' {
 				depth--
 			}
 		}

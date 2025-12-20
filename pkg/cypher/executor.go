@@ -123,6 +123,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher/antlr"
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -314,6 +315,12 @@ func (e *StorageExecutor) SetDatabaseManager(dbManager DatabaseManagerInterface)
 //	// CALL db.index.vector.queryNodes('idx', 10, 'search query')   // String (auto-embedded)
 func (e *StorageExecutor) SetEmbedder(embedder QueryEmbedder) {
 	e.embedder = embedder
+}
+
+// GetEmbedder returns the query embedder if set.
+// This allows copying the embedder to namespaced executors for GraphQL.
+func (e *StorageExecutor) GetEmbedder() QueryEmbedder {
+	return e.embedder
 }
 
 // SetNodeCreatedCallback sets a callback that is invoked when nodes are created
@@ -808,7 +815,7 @@ type transactionStorageWrapper struct {
 }
 
 // Write operations - go through transaction for atomicity
-func (w *transactionStorageWrapper) CreateNode(node *storage.Node) error {
+func (w *transactionStorageWrapper) CreateNode(node *storage.Node) (storage.NodeID, error) {
 	return w.tx.CreateNode(node)
 }
 
@@ -897,7 +904,7 @@ func (w *transactionStorageWrapper) GetSchema() *storage.SchemaManager {
 func (w *transactionStorageWrapper) BulkCreateNodes(nodes []*storage.Node) error {
 	// For bulk operations within transaction, create one by one
 	for _, node := range nodes {
-		if err := w.tx.CreateNode(node); err != nil {
+		if _, err := w.tx.CreateNode(node); err != nil {
 			return err
 		}
 	}
@@ -1178,6 +1185,11 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		return e.executeCreateSet(ctx, cypher)
 	}
 
+	// Check for ALTER DATABASE before generic SET (ALTER DATABASE SET LIMIT contains "SET")
+	if findMultiWordKeywordIndex(cypher, "ALTER", "DATABASE") == 0 {
+		return e.executeAlterDatabase(ctx, cypher)
+	}
+
 	// Only route to executeSet if it's a MATCH ... SET or standalone SET
 	if hasSet && !hasOnCreateSet && !hasOnMatchSet {
 		return e.executeSet(ctx, cypher)
@@ -1343,10 +1355,7 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// System command: ALTER COMPOSITE DATABASE (check before ALTER DATABASE)
 		// Must be at start (position 0) to be a standalone clause
 		return e.executeAlterCompositeDatabase(ctx, cypher)
-	case findMultiWordKeywordIndex(cypher, "ALTER", "DATABASE") == 0:
-		// System command: ALTER DATABASE SET LIMIT
-		// Must be at start (position 0) to be a standalone clause
-		return e.executeAlterDatabase(ctx, cypher)
+	// Note: ALTER DATABASE is handled earlier (before SET check) to avoid routing conflict
 	case findMultiWordKeywordIndex(cypher, "SHOW", "LIMITS") == 0:
 		// System command: SHOW LIMITS
 		// Must be at start (position 0) to be a standalone clause
@@ -2814,11 +2823,16 @@ func (e *StorageExecutor) checkSubqueryMatch(node *storage.Node, variable, subqu
 		for _, edge := range edges {
 			if len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes) {
 				// If there's an inner WHERE, check it against the connected node
-				if innerWhere != "" {
+				// Only evaluate WHERE if we have a target variable (otherwise we can't match properties)
+				if innerWhere != "" && targetVar != "" {
 					sourceNode, err := e.storage.GetNode(edge.StartNode)
 					if err != nil || !e.evaluateInnerWhere(sourceNode, targetVar, innerWhere) {
 						continue
 					}
+				} else if innerWhere != "" && targetVar == "" {
+					// If we have a WHERE clause but no target variable, we can't evaluate it
+					// This means the pattern doesn't have a named target, so skip this edge
+					continue
 				}
 				return true
 			}
@@ -2830,11 +2844,16 @@ func (e *StorageExecutor) checkSubqueryMatch(node *storage.Node, variable, subqu
 		for _, edge := range edges {
 			if len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes) {
 				// If there's an inner WHERE, check it against the connected node
-				if innerWhere != "" {
+				// Only evaluate WHERE if we have a target variable (otherwise we can't match properties)
+				if innerWhere != "" && targetVar != "" {
 					targetNode, err := e.storage.GetNode(edge.EndNode)
 					if err != nil || !e.evaluateInnerWhere(targetNode, targetVar, innerWhere) {
 						continue
 					}
+				} else if innerWhere != "" && targetVar == "" {
+					// If we have a WHERE clause but no target variable, we can't evaluate it
+					// This means the pattern doesn't have a named target, so skip this edge
+					continue
 				}
 				return true
 			}
@@ -3034,9 +3053,45 @@ func (e *StorageExecutor) extractTargetVariable(pattern, sourceVar string) strin
 }
 
 // evaluateInnerWhere evaluates an inner WHERE clause against a node
-// Handles nested EXISTS subqueries
+// Handles nested EXISTS subqueries and property comparisons
 func (e *StorageExecutor) evaluateInnerWhere(node *storage.Node, variable, whereClause string) bool {
+	whereClause = strings.TrimSpace(whereClause)
 	upperWhere := strings.ToUpper(whereClause)
+
+	// Handle parenthesized expressions - strip outer parens and recurse
+	if strings.HasPrefix(whereClause, "(") && strings.HasSuffix(whereClause, ")") {
+		// Verify these are matching outer parens, not separate groups
+		depth := 0
+		isOuterParen := true
+		for i, ch := range whereClause {
+			if ch == '(' {
+				depth++
+			} else if ch == ')' {
+				depth--
+			}
+			// If depth goes to 0 before the last char, these aren't outer parens
+			if depth == 0 && i < len(whereClause)-1 {
+				isOuterParen = false
+				break
+			}
+		}
+		if isOuterParen {
+			return e.evaluateInnerWhere(node, variable, whereClause[1:len(whereClause)-1])
+		}
+	}
+
+	// Handle AND/OR at top level
+	if andIdx := findTopLevelKeyword(whereClause, " AND "); andIdx > 0 {
+		left := strings.TrimSpace(whereClause[:andIdx])
+		right := strings.TrimSpace(whereClause[andIdx+5:])
+		return e.evaluateInnerWhere(node, variable, left) && e.evaluateInnerWhere(node, variable, right)
+	}
+
+	if orIdx := findTopLevelKeyword(whereClause, " OR "); orIdx > 0 {
+		left := strings.TrimSpace(whereClause[:orIdx])
+		right := strings.TrimSpace(whereClause[orIdx+4:])
+		return e.evaluateInnerWhere(node, variable, left) || e.evaluateInnerWhere(node, variable, right)
+	}
 
 	// Check for nested EXISTS subquery
 	if hasSubqueryPattern(whereClause, existsSubqueryRe) {
@@ -3052,10 +3107,137 @@ func (e *StorageExecutor) evaluateInnerWhere(node *storage.Node, variable, where
 		return e.evaluateCountSubqueryComparison(node, variable, whereClause)
 	}
 
-	// Simple property comparison (placeholder for basic WHERE support)
-	// For now, return true if no subquery patterns found
-	_ = upperWhere
-	return true
+	// Handle NOT prefix
+	if strings.HasPrefix(upperWhere, "NOT ") {
+		inner := strings.TrimSpace(whereClause[4:])
+		return !e.evaluateInnerWhere(node, variable, inner)
+	}
+
+	// Handle string operators
+	if strings.Contains(upperWhere, " CONTAINS ") {
+		return e.evaluateStringOp(node, variable, whereClause, "CONTAINS")
+	}
+	if strings.Contains(upperWhere, " STARTS WITH ") {
+		return e.evaluateStringOp(node, variable, whereClause, "STARTS WITH")
+	}
+	if strings.Contains(upperWhere, " ENDS WITH ") {
+		return e.evaluateStringOp(node, variable, whereClause, "ENDS WITH")
+	}
+	if strings.Contains(upperWhere, " IN ") {
+		return e.evaluateInOp(node, variable, whereClause)
+	}
+
+	// Handle IS NULL / IS NOT NULL
+	if strings.Contains(upperWhere, " IS NULL") {
+		return e.evaluateIsNull(node, variable, whereClause, false)
+	}
+	if strings.Contains(upperWhere, " IS NOT NULL") {
+		return e.evaluateIsNull(node, variable, whereClause, true)
+	}
+
+	// Determine operator and split accordingly
+	var op string
+	var opIdx int
+
+	// Check operators in order of length (longest first to avoid partial matches)
+	operators := []string{"<>", "!=", ">=", "<=", "=~", ">", "<", "="}
+	for _, testOp := range operators {
+		idx := strings.Index(whereClause, testOp)
+		if idx >= 0 {
+			op = testOp
+			opIdx = idx
+			break
+		}
+	}
+
+	if op == "" {
+		return true // No valid operator found, include all
+	}
+
+	left := strings.TrimSpace(whereClause[:opIdx])
+	right := strings.TrimSpace(whereClause[opIdx+len(op):])
+
+	// Handle id(variable) = value comparisons
+	lowerLeft := strings.ToLower(left)
+	if strings.HasPrefix(lowerLeft, "id(") && strings.HasSuffix(left, ")") {
+		// Extract variable name from id(varName)
+		idVar := strings.TrimSpace(left[3 : len(left)-1])
+		if idVar == variable {
+			// Compare node ID with expected value
+			expectedVal := e.parseValue(right)
+			actualId := string(node.ID)
+			switch op {
+			case "=":
+				return e.compareEqual(actualId, expectedVal)
+			case "<>", "!=":
+				return !e.compareEqual(actualId, expectedVal)
+			default:
+				return true
+			}
+		}
+		return true // Different variable, not our concern
+	}
+
+	// Handle elementId(variable) = value comparisons
+	if strings.HasPrefix(lowerLeft, "elementid(") && strings.HasSuffix(left, ")") {
+		// Extract variable name from elementId(varName)
+		idVar := strings.TrimSpace(left[10 : len(left)-1])
+		if idVar == variable {
+			// Compare node ID with expected value
+			expectedVal := e.parseValue(right)
+			actualId := string(node.ID)
+			switch op {
+			case "=":
+				return e.compareEqual(actualId, expectedVal)
+			case "<>", "!=":
+				return !e.compareEqual(actualId, expectedVal)
+			default:
+				return true
+			}
+		}
+		return true // Different variable, not our concern
+	}
+
+	// Extract property from left side (e.g., "n.name")
+	// Use TrimSpace to handle whitespace around the dot
+	varName := strings.TrimSpace(left)
+	if !strings.HasPrefix(varName, variable+".") {
+		// In EXISTS subqueries, if we can't evaluate the condition (variable doesn't match),
+		// we should return false (exclude) rather than true (include all)
+		// This ensures WHERE clauses in subqueries actually filter correctly
+		return false // Not a property comparison we can handle for this variable
+	}
+
+	propName := strings.TrimSpace(varName[len(variable)+1:])
+
+	// Get actual value
+	actualVal, exists := node.Properties[propName]
+	if !exists {
+		return false
+	}
+
+	// Parse the expected value from right side
+	expectedVal := e.parseValue(right)
+
+	// Perform comparison based on operator
+	switch op {
+	case "=":
+		return e.compareEqual(actualVal, expectedVal)
+	case "<>", "!=":
+		return !e.compareEqual(actualVal, expectedVal)
+	case ">":
+		return e.compareGreater(actualVal, expectedVal)
+	case ">=":
+		return e.compareGreater(actualVal, expectedVal) || e.compareEqual(actualVal, expectedVal)
+	case "<":
+		return e.compareLess(actualVal, expectedVal)
+	case "<=":
+		return e.compareLess(actualVal, expectedVal) || e.compareEqual(actualVal, expectedVal)
+	case "=~":
+		return e.compareRegex(actualVal, expectedVal)
+	default:
+		return true
+	}
 }
 
 // extractRelTypesFromPattern extracts relationship types from a pattern
@@ -4834,12 +5016,23 @@ func (e *StorageExecutor) executeShowAliases(ctx context.Context, cypher string)
 
 // executeAlterDatabase handles ALTER DATABASE SET LIMIT command.
 //
-// Sets resource limits for a database. This is a simplified implementation
-// that supports basic limit syntax. Full Neo4j syntax would require more
-// complex parsing.
+// Sets resource limits for a database. Supports setting individual limits
+// or multiple limits in a single command.
 //
 // Syntax:
 //   - ALTER DATABASE database_name SET LIMIT limit_name = value
+//   - ALTER DATABASE database_name SET LIMIT limit_name1 = value1, limit_name2 = value2
+//
+// Supported limit names:
+//   - max_nodes: Maximum number of nodes (int64)
+//   - max_edges: Maximum number of edges (int64)
+//   - max_bytes: Maximum storage size in bytes (int64)
+//   - max_query_time: Maximum query execution time (duration string, e.g., "60s", "5m")
+//   - max_results: Maximum number of query results (int64)
+//   - max_concurrent_queries: Maximum concurrent queries (int)
+//   - max_connections: Maximum connections (int)
+//   - max_queries_per_second: Maximum queries per second (int)
+//   - max_writes_per_second: Maximum writes per second (int)
 //
 // Example:
 //
@@ -4849,6 +5042,9 @@ func (e *StorageExecutor) executeShowAliases(ctx context.Context, cypher string)
 //	// Set max nodes limit
 //	result, err := executor.Execute(ctx, "ALTER DATABASE tenant_a SET LIMIT max_nodes = 1000000", nil)
 //
+//	// Set multiple limits
+//	result, err = executor.Execute(ctx, "ALTER DATABASE tenant_a SET LIMIT max_nodes = 1000000, max_edges = 5000000", nil)
+//
 // Returns:
 //   - Success: Result with database name
 //   - Error: If database doesn't exist or syntax is invalid
@@ -4857,15 +5053,205 @@ func (e *StorageExecutor) executeAlterDatabase(ctx context.Context, cypher strin
 		return nil, fmt.Errorf("database manager not available - ALTER DATABASE requires multi-database support")
 	}
 
-	// This is a placeholder implementation
-	// Full implementation would parse the LIMIT clause and update limits
-	// For now, return an error indicating it's not fully implemented
-	return nil, fmt.Errorf("ALTER DATABASE SET LIMIT is not yet fully implemented")
+	// Find "ALTER DATABASE" keyword position
+	alterDbIdx := findMultiWordKeywordIndex(cypher, "ALTER", "DATABASE")
+	if alterDbIdx == -1 {
+		return nil, fmt.Errorf("invalid ALTER DATABASE syntax")
+	}
+
+	// Skip "ALTER" and whitespace to find "DATABASE"
+	startPos := alterDbIdx + len("ALTER")
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+	// Skip "DATABASE" and whitespace
+	if startPos+len("DATABASE") <= len(cypher) && strings.EqualFold(cypher[startPos:startPos+len("DATABASE")], "DATABASE") {
+		startPos += len("DATABASE")
+		for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+			startPos++
+		}
+	} else {
+		return nil, fmt.Errorf("invalid ALTER DATABASE syntax: DATABASE keyword expected")
+	}
+
+	// Find "SET LIMIT" keyword
+	setLimitIdx := findMultiWordKeywordIndex(cypher[startPos:], "SET", "LIMIT")
+	if setLimitIdx == -1 {
+		return nil, fmt.Errorf("invalid ALTER DATABASE syntax: SET LIMIT clause expected")
+	}
+
+	// Extract database name (between "DATABASE" and "SET LIMIT")
+	dbNameEnd := startPos + setLimitIdx
+	databaseName := strings.TrimSpace(cypher[startPos:dbNameEnd])
+	if databaseName == "" {
+		return nil, fmt.Errorf("invalid ALTER DATABASE syntax: database name expected")
+	}
+
+	// Skip "SET LIMIT" and whitespace
+	limitStartPos := startPos + setLimitIdx + len("SET")
+	for limitStartPos < len(cypher) && isWhitespace(cypher[limitStartPos]) {
+		limitStartPos++
+	}
+	if limitStartPos+len("LIMIT") <= len(cypher) && strings.EqualFold(cypher[limitStartPos:limitStartPos+len("LIMIT")], "LIMIT") {
+		limitStartPos += len("LIMIT")
+		for limitStartPos < len(cypher) && isWhitespace(cypher[limitStartPos]) {
+			limitStartPos++
+		}
+	} else {
+		return nil, fmt.Errorf("invalid ALTER DATABASE syntax: LIMIT keyword expected")
+	}
+
+	// Get existing limits or create new ones
+	existingLimitsInterface, err := e.dbManager.GetDatabaseLimits(databaseName)
+	if err != nil {
+		return nil, fmt.Errorf("database '%s' not found: %w", databaseName, err)
+	}
+
+	// Type assert to *multidb.Limits
+	var existingLimits *multidb.Limits
+	if existingLimitsInterface != nil {
+		var ok bool
+		existingLimits, ok = existingLimitsInterface.(*multidb.Limits)
+		if !ok {
+			return nil, fmt.Errorf("invalid limits type returned from database manager")
+		}
+	}
+
+	// Create new limits if none exist, otherwise deep copy
+	var limits *multidb.Limits
+	if existingLimits == nil {
+		limits = &multidb.Limits{}
+	} else {
+		// Deep copy to avoid modifying the original
+		limits = &multidb.Limits{
+			Storage: multidb.StorageLimits{
+				MaxNodes: existingLimits.Storage.MaxNodes,
+				MaxEdges: existingLimits.Storage.MaxEdges,
+				MaxBytes: existingLimits.Storage.MaxBytes,
+			},
+			Query: multidb.QueryLimits{
+				MaxQueryTime:         existingLimits.Query.MaxQueryTime,
+				MaxResults:           existingLimits.Query.MaxResults,
+				MaxConcurrentQueries: existingLimits.Query.MaxConcurrentQueries,
+			},
+			Connection: multidb.ConnectionLimits{
+				MaxConnections: existingLimits.Connection.MaxConnections,
+			},
+			Rate: multidb.RateLimits{
+				MaxQueriesPerSecond: existingLimits.Rate.MaxQueriesPerSecond,
+				MaxWritesPerSecond:  existingLimits.Rate.MaxWritesPerSecond,
+			},
+		}
+	}
+
+	// Parse limit assignments: "limit_name = value, limit_name2 = value2"
+	limitClause := strings.TrimSpace(cypher[limitStartPos:])
+	if limitClause == "" {
+		return nil, fmt.Errorf("invalid ALTER DATABASE syntax: limit assignment expected")
+	}
+
+	// Split by comma to handle multiple limits
+	assignments := strings.Split(limitClause, ",")
+	for _, assignment := range assignments {
+		assignment = strings.TrimSpace(assignment)
+		if assignment == "" {
+			continue
+		}
+
+		// Parse "limit_name = value"
+		parts := strings.SplitN(assignment, "=", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid limit assignment syntax: expected 'limit_name = value', got '%s'", assignment)
+		}
+
+		limitName := strings.TrimSpace(strings.ToLower(parts[0]))
+		limitValue := strings.TrimSpace(parts[1])
+
+		// Parse and set the limit based on name
+		switch limitName {
+		case "max_nodes":
+			val, err := strconv.ParseInt(limitValue, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_nodes value: %w", err)
+			}
+			limits.Storage.MaxNodes = val
+
+		case "max_edges":
+			val, err := strconv.ParseInt(limitValue, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_edges value: %w", err)
+			}
+			limits.Storage.MaxEdges = val
+
+		case "max_bytes":
+			val, err := strconv.ParseInt(limitValue, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_bytes value: %w", err)
+			}
+			limits.Storage.MaxBytes = val
+
+		case "max_query_time":
+			duration, err := time.ParseDuration(limitValue)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_query_time value (expected duration like '60s' or '5m'): %w", err)
+			}
+			limits.Query.MaxQueryTime = duration
+
+		case "max_results":
+			val, err := strconv.ParseInt(limitValue, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_results value: %w", err)
+			}
+			limits.Query.MaxResults = val
+
+		case "max_concurrent_queries":
+			val, err := strconv.Atoi(limitValue)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_concurrent_queries value: %w", err)
+			}
+			limits.Query.MaxConcurrentQueries = val
+
+		case "max_connections":
+			val, err := strconv.Atoi(limitValue)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_connections value: %w", err)
+			}
+			limits.Connection.MaxConnections = val
+
+		case "max_queries_per_second":
+			val, err := strconv.Atoi(limitValue)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_queries_per_second value: %w", err)
+			}
+			limits.Rate.MaxQueriesPerSecond = val
+
+		case "max_writes_per_second":
+			val, err := strconv.Atoi(limitValue)
+			if err != nil {
+				return nil, fmt.Errorf("invalid max_writes_per_second value: %w", err)
+			}
+			limits.Rate.MaxWritesPerSecond = val
+
+		default:
+			return nil, fmt.Errorf("unknown limit name: '%s' (supported: max_nodes, max_edges, max_bytes, max_query_time, max_results, max_concurrent_queries, max_connections, max_queries_per_second, max_writes_per_second)", limitName)
+		}
+	}
+
+	// Update limits in database manager (pass as interface{} to match interface)
+	err = e.dbManager.SetDatabaseLimits(databaseName, limits)
+	if err != nil {
+		return nil, fmt.Errorf("failed to set limits for database '%s': %w", databaseName, err)
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"database"},
+		Rows:    [][]interface{}{{databaseName}},
+	}, nil
 }
 
 // executeShowLimits handles SHOW LIMITS command.
 //
-// Lists resource limits for a database.
+// Lists resource limits for a database in Neo4j-compatible format.
 //
 // Syntax:
 //   - SHOW LIMITS FOR DATABASE database_name
@@ -4879,17 +5265,130 @@ func (e *StorageExecutor) executeAlterDatabase(ctx context.Context, cypher strin
 //	result, err := executor.Execute(ctx, "SHOW LIMITS FOR DATABASE tenant_a", nil)
 //
 // Returns:
-//   - Success: Result with limit information
+//   - Success: Result with limit information in Neo4j-compatible format
 //   - Error: If database doesn't exist
 func (e *StorageExecutor) executeShowLimits(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	if e.dbManager == nil {
 		return nil, fmt.Errorf("database manager not available - SHOW LIMITS requires multi-database support")
 	}
 
-	// This is a placeholder implementation
-	// Full implementation would retrieve and format limits
-	// For now, return an error indicating it's not fully implemented
-	return nil, fmt.Errorf("SHOW LIMITS is not yet fully implemented")
+	// Find "SHOW LIMITS" keyword position
+	showLimitsIdx := findMultiWordKeywordIndex(cypher, "SHOW", "LIMITS")
+	if showLimitsIdx == -1 {
+		return nil, fmt.Errorf("invalid SHOW LIMITS syntax")
+	}
+
+	// Skip "SHOW" and whitespace to find "LIMITS"
+	startPos := showLimitsIdx + len("SHOW")
+	for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+		startPos++
+	}
+	// Skip "LIMITS" and whitespace
+	if startPos+len("LIMITS") <= len(cypher) && strings.EqualFold(cypher[startPos:startPos+len("LIMITS")], "LIMITS") {
+		startPos += len("LIMITS")
+		for startPos < len(cypher) && isWhitespace(cypher[startPos]) {
+			startPos++
+		}
+	} else {
+		return nil, fmt.Errorf("invalid SHOW LIMITS syntax: LIMITS keyword expected")
+	}
+
+	// Check for "FOR DATABASE" clause
+	forDbIdx := findMultiWordKeywordIndex(cypher[startPos:], "FOR", "DATABASE")
+	if forDbIdx == -1 {
+		return nil, fmt.Errorf("invalid SHOW LIMITS syntax: FOR DATABASE clause expected")
+	}
+
+	// Skip "FOR" and whitespace
+	dbNameStart := startPos + forDbIdx + len("FOR")
+	for dbNameStart < len(cypher) && isWhitespace(cypher[dbNameStart]) {
+		dbNameStart++
+	}
+	// Skip "DATABASE" and whitespace
+	if dbNameStart+len("DATABASE") <= len(cypher) && strings.EqualFold(cypher[dbNameStart:dbNameStart+len("DATABASE")], "DATABASE") {
+		dbNameStart += len("DATABASE")
+		for dbNameStart < len(cypher) && isWhitespace(cypher[dbNameStart]) {
+			dbNameStart++
+		}
+	} else {
+		return nil, fmt.Errorf("invalid SHOW LIMITS syntax: DATABASE keyword expected")
+	}
+
+	// Extract database name (rest of query)
+	databaseName := strings.TrimSpace(cypher[dbNameStart:])
+	if databaseName == "" {
+		return nil, fmt.Errorf("invalid SHOW LIMITS syntax: database name expected")
+	}
+
+	// Get limits from database manager
+	limitsInterface, err := e.dbManager.GetDatabaseLimits(databaseName)
+	if err != nil {
+		return nil, fmt.Errorf("database '%s' not found: %w", databaseName, err)
+	}
+
+	// Type assert to *multidb.Limits
+	var limits *multidb.Limits
+	if limitsInterface != nil {
+		var ok bool
+		limits, ok = limitsInterface.(*multidb.Limits)
+		if !ok {
+			return nil, fmt.Errorf("invalid limits type returned from database manager")
+		}
+	}
+
+	// If no limits set, return empty/unlimited values
+	if limits == nil {
+		limits = &multidb.Limits{}
+	}
+
+	// Format limits in Neo4j-compatible format
+	// Neo4j returns: name, type, value, description
+	rows := make([][]interface{}, 0)
+
+	// Storage limits
+	if limits.Storage.MaxNodes > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_nodes", limits.Storage.MaxNodes, "Maximum number of nodes"})
+	}
+	if limits.Storage.MaxEdges > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_edges", limits.Storage.MaxEdges, "Maximum number of edges"})
+	}
+	if limits.Storage.MaxBytes > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_bytes", limits.Storage.MaxBytes, "Maximum storage size in bytes"})
+	}
+
+	// Query limits
+	if limits.Query.MaxQueryTime > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_query_time", limits.Query.MaxQueryTime.String(), "Maximum query execution time"})
+	}
+	if limits.Query.MaxResults > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_results", limits.Query.MaxResults, "Maximum number of query results"})
+	}
+	if limits.Query.MaxConcurrentQueries > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_concurrent_queries", limits.Query.MaxConcurrentQueries, "Maximum concurrent queries"})
+	}
+
+	// Connection limits
+	if limits.Connection.MaxConnections > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_connections", limits.Connection.MaxConnections, "Maximum concurrent connections"})
+	}
+
+	// Rate limits
+	if limits.Rate.MaxQueriesPerSecond > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_queries_per_second", limits.Rate.MaxQueriesPerSecond, "Maximum queries per second"})
+	}
+	if limits.Rate.MaxWritesPerSecond > 0 {
+		rows = append(rows, []interface{}{databaseName, "max_writes_per_second", limits.Rate.MaxWritesPerSecond, "Maximum writes per second"})
+	}
+
+	// If no limits are set, return a single row indicating unlimited
+	if len(rows) == 0 {
+		rows = append(rows, []interface{}{databaseName, "unlimited", nil, "No limits configured (unlimited)"})
+	}
+
+	return &ExecuteResult{
+		Columns: []string{"database", "limit", "value", "description"},
+		Rows:    rows,
+	}, nil
 }
 
 // truncateQuery truncates a query string to maxLen characters for error messages

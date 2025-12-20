@@ -547,21 +547,26 @@ func extractNodeFromResult(val interface{}) (*nornicdb.Node, error) {
 	node := &nornicdb.Node{}
 
 	// Prefer _nodeId (internal storage ID), then id, then elementId
+	var rawID string
 	if id, ok := nodeMap["_nodeId"].(string); ok && id != "" {
-		node.ID = id
+		rawID = id
 	} else if id, ok := nodeMap["id"].(string); ok && id != "" {
-		node.ID = id
+		rawID = id
 	} else if id, ok := nodeMap["elementId"].(string); ok && id != "" {
 		// Extract ID from elementId format (4:nornicdb:uuid -> uuid)
 		parts := strings.Split(id, ":")
 		if len(parts) >= 3 {
-			node.ID = parts[2]
+			rawID = parts[2]
 		} else {
-			node.ID = id
+			rawID = id
 		}
 	} else {
 		return nil, fmt.Errorf("node missing ID field")
 	}
+
+	// IDs are already unprefixed by GetNode/GetEdge in NamespacedEngine
+	// No need to unprefix here - just use the ID as-is
+	node.ID = rawID
 
 	if labels, ok := nodeMap["labels"].([]string); ok {
 		node.Labels = labels

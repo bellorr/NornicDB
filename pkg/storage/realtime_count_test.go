@@ -36,7 +36,7 @@ func TestRealtimeCountTracking(t *testing.T) {
 			Labels:     []string{"TestNode"},
 			Properties: map[string]interface{}{"name": "test1"},
 		}
-		err := async.CreateNode(node)
+		_, err := async.CreateNode(node)
 		require.NoError(t, err)
 
 		// Check count IMMEDIATELY (before flush)
@@ -74,7 +74,7 @@ func TestRealtimeCountTracking(t *testing.T) {
 				Labels:     []string{"TestNode"},
 				Properties: map[string]interface{}{"name": "test"},
 			}
-			err := async.CreateNode(node)
+			_, err := async.CreateNode(node)
 			require.NoError(t, err)
 		}
 
@@ -117,7 +117,7 @@ func TestRealtimeCountWithCypher(t *testing.T) {
 			Labels:     []string{"Person"},
 			Properties: map[string]interface{}{"name": "Alice"},
 		}
-		err := async.CreateNode(node)
+		_, err := async.CreateNode(node)
 		require.NoError(t, err)
 
 		// Stats endpoint called immediately

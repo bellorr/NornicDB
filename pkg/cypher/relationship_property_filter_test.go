@@ -33,7 +33,8 @@ func TestRelationshipPropertyFilter(t *testing.T) {
 			Labels:     []string{"IssueType"},
 			Properties: map[string]interface{}{"name": it.name},
 		}
-		require.NoError(t, store.CreateNode(node))
+		_, err := store.CreateNode(node)
+		require.NoError(t, err)
 	}
 
 	// Create translation entries
@@ -55,7 +56,8 @@ func TestRelationshipPropertyFilter(t *testing.T) {
 			Labels:     []string{"TranslationEntry"},
 			Properties: map[string]interface{}{"textKey": e.id},
 		}
-		require.NoError(t, store.CreateNode(node))
+		_, err := store.CreateNode(node)
+		require.NoError(t, err)
 
 		for i, issueRef := range e.issueRefs {
 			edge := &storage.Edge{
@@ -165,7 +167,8 @@ func TestCategoryRelationshipTraversal(t *testing.T) {
 			Labels:     []string{"FeatureCategory"},
 			Properties: map[string]interface{}{"name": name},
 		}
-		require.NoError(t, store.CreateNode(node))
+		_, err := store.CreateNode(node)
+		require.NoError(t, err)
 	}
 
 	// Create entries with category relationships
@@ -187,7 +190,8 @@ func TestCategoryRelationshipTraversal(t *testing.T) {
 			Labels:     []string{"TranslationEntry"},
 			Properties: map[string]interface{}{"aiAuditScore": e.score},
 		}
-		require.NoError(t, store.CreateNode(node))
+		_, err := store.CreateNode(node)
+		require.NoError(t, err)
 
 		edge := &storage.Edge{
 			ID:        storage.EdgeID(e.id + "-IN_CATEGORY"),
@@ -256,7 +260,8 @@ func TestSpecialCharacterPropertyValues(t *testing.T) {
 			Labels:     []string{"SpecialChar"},
 			Properties: map[string]interface{}{"value": sv.value},
 		}
-		require.NoError(t, store.CreateNode(node))
+		_, err := store.CreateNode(node)
+		require.NoError(t, err)
 	}
 
 	for _, sv := range specialValues {
@@ -317,21 +322,24 @@ func TestMultipleRelationshipPatterns(t *testing.T) {
 		Labels:     []string{"Team"},
 		Properties: map[string]interface{}{"name": "PCW - Orders"},
 	}
-	require.NoError(t, store.CreateNode(team))
+	_, err := store.CreateNode(team)
+	require.NoError(t, err)
 
 	category := &storage.Node{
 		ID:         "category-1",
 		Labels:     []string{"FeatureCategory"},
 		Properties: map[string]interface{}{"name": "Orders (Guest)"},
 	}
-	require.NoError(t, store.CreateNode(category))
+	_, err = store.CreateNode(category)
+	require.NoError(t, err)
 
 	issueType := &storage.Node{
 		ID:         "issue-type-1",
 		Labels:     []string{"IssueType"},
 		Properties: map[string]interface{}{"name": "Informal Register (tú)"},
 	}
-	require.NoError(t, store.CreateNode(issueType))
+	_, err = store.CreateNode(issueType)
+	require.NoError(t, err)
 
 	entry := &storage.Node{
 		ID:     "entry-1",
@@ -341,7 +349,8 @@ func TestMultipleRelationshipPatterns(t *testing.T) {
 			"aiAuditScore": 80,
 		},
 	}
-	require.NoError(t, store.CreateNode(entry))
+	_, err = store.CreateNode(entry)
+	require.NoError(t, err)
 
 	// Create relationships
 	edges := []*storage.Edge{

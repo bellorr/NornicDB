@@ -53,7 +53,7 @@ func createSocialNetwork(t *testing.T, engine storage.Engine) {
 				"age":  p.age,
 			},
 		}
-		if err := engine.CreateNode(node); err != nil {
+		if _, err := engine.CreateNode(node); err != nil {
 			t.Fatalf("Failed to create node %s: %v", p.id, err)
 		}
 	}
@@ -105,7 +105,7 @@ func createLargeGraph(t *testing.T, engine storage.Engine, numNodes, avgDegree i
 				"value": float64(i) / float64(numNodes),
 			},
 		}
-		if err := engine.CreateNode(node); err != nil {
+		if _, err := engine.CreateNode(node); err != nil {
 			t.Fatalf("Failed to create node n%d: %v", i, err)
 		}
 	}
@@ -839,7 +839,7 @@ func TestFastRPIsolatedNodes(t *testing.T) {
 				"index": i,
 			},
 		}
-		if err := engine.CreateNode(node); err != nil {
+		if _, err := engine.CreateNode(node); err != nil {
 			t.Fatalf("Failed to create node: %v", err)
 		}
 	}

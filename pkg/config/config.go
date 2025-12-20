@@ -248,7 +248,11 @@ type ServerConfig struct {
 //   - NORNICDB_EMBED_MAX_RETRIES: Max retry attempts per node (default: 3)
 //   - NORNICDB_EMBED_CHUNK_SIZE: Max characters per chunk (default: 512)
 //   - NORNICDB_EMBED_CHUNK_OVERLAP: Characters to overlap between chunks (default: 50)
+//   - NORNICDB_EMBED_WORKER_NUM_WORKERS: Number of concurrent embedding workers (default: 1)
 type EmbeddingWorkerConfig struct {
+	// NumWorkers is the number of concurrent workers processing embeddings
+	// Use more workers for network-based embedders (OpenAI, etc.) or multiple GPUs
+	NumWorkers int
 	// ScanInterval is how often to scan for nodes without embeddings
 	ScanInterval time.Duration
 	// BatchDelay is the delay between processing individual nodes
@@ -818,6 +822,7 @@ func legacyLoadFromEnv() *Config {
 	config.Memory.QueryCacheTTL = getEnvDuration("NORNICDB_QUERY_CACHE_TTL", 5*time.Minute)
 
 	// Embedding worker settings (NornicDB-specific)
+	config.EmbeddingWorker.NumWorkers = getEnvInt("NORNICDB_EMBED_WORKER_NUM_WORKERS", 1)
 	config.EmbeddingWorker.ScanInterval = getEnvDuration("NORNICDB_EMBED_SCAN_INTERVAL", 15*time.Minute)
 	config.EmbeddingWorker.BatchDelay = getEnvDuration("NORNICDB_EMBED_BATCH_DELAY", 500*time.Millisecond)
 	config.EmbeddingWorker.MaxRetries = getEnvInt("NORNICDB_EMBED_MAX_RETRIES", 3)
@@ -1263,6 +1268,7 @@ func LoadDefaults() *Config {
 	config.Memory.QueryCacheTTL = 5 * time.Minute
 
 	// Embedding worker defaults
+	config.EmbeddingWorker.NumWorkers = 1
 	config.EmbeddingWorker.ScanInterval = 15 * time.Minute
 	config.EmbeddingWorker.BatchDelay = 500 * time.Millisecond
 	config.EmbeddingWorker.MaxRetries = 3

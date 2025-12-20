@@ -18,7 +18,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 			Properties: map[string]interface{}{"name": "Alice"},
 			Embedding:  nil,
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 
 		// Check pending count
@@ -41,7 +41,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 			Properties: map[string]interface{}{"name": "Bob"},
 			Embedding:  []float32{0.1, 0.2, 0.3},
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 
 		// Check pending count - should be 0
@@ -63,7 +63,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 			Properties: map[string]interface{}{"name": "Charlie"},
 			Embedding:  nil,
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 
 		// Verify it's in pending
@@ -87,7 +87,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 				Properties: map[string]interface{}{"index": i},
 				Embedding:  nil,
 			}
-			err := engine.CreateNode(node)
+			_, err := engine.CreateNode(node)
 			require.NoError(t, err)
 		}
 
@@ -117,7 +117,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 				Properties: map[string]interface{}{"content": "test content"},
 				Embedding:  []float32{0.1, 0.2, 0.3},
 			}
-			err := engine.CreateNode(node)
+			_, err := engine.CreateNode(node)
 			require.NoError(t, err)
 		}
 
@@ -152,7 +152,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 			},
 			Embedding: nil, // But no actual embedding
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 
 		// Should be in pending index because Embedding array is nil
@@ -175,7 +175,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 			Properties: map[string]interface{}{"data": "internal"},
 			Embedding:  nil,
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 
 		// Should NOT be in pending index
@@ -195,7 +195,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 				Properties: map[string]interface{}{"id": id},
 				Embedding:  nil,
 			}
-			err := engine.CreateNode(node)
+			_, err := engine.CreateNode(node)
 			require.NoError(t, err)
 		}
 

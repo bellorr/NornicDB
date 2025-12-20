@@ -36,7 +36,7 @@ func TestMemoryEngine_CreateNode(t *testing.T) {
 			Properties: map[string]any{"name": "Alice", "age": 30},
 		}
 
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 
 		// Verify stored
@@ -49,22 +49,23 @@ func TestMemoryEngine_CreateNode(t *testing.T) {
 
 	t.Run("nil node", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		err := engine.CreateNode(nil)
+		_, err := engine.CreateNode(nil)
 		assert.ErrorIs(t, err, ErrInvalidData)
 	})
 
 	t.Run("empty ID", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		err := engine.CreateNode(&Node{ID: ""})
+		_, err := engine.CreateNode(&Node{ID: ""})
 		assert.ErrorIs(t, err, ErrInvalidID)
 	})
 
 	t.Run("duplicate ID", func(t *testing.T) {
 		engine := NewMemoryEngine()
 		node := &Node{ID: "node-1"}
-		require.NoError(t, engine.CreateNode(node))
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
 
-		err := engine.CreateNode(&Node{ID: "node-1"})
+		_, err = engine.CreateNode(&Node{ID: "node-1"})
 		assert.ErrorIs(t, err, ErrAlreadyExists)
 	})
 
@@ -72,7 +73,7 @@ func TestMemoryEngine_CreateNode(t *testing.T) {
 		engine := NewMemoryEngine()
 		engine.Close()
 
-		err := engine.CreateNode(&Node{ID: "node-1"})
+		_, err := engine.CreateNode(&Node{ID: "node-1"})
 		assert.ErrorIs(t, err, ErrStorageClosed)
 	})
 
@@ -84,7 +85,8 @@ func TestMemoryEngine_CreateNode(t *testing.T) {
 			Properties: props,
 		}
 
-		require.NoError(t, engine.CreateNode(node))
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
 
 		// Mutate original
 		props["key"] = "mutated"
@@ -100,11 +102,12 @@ func TestMemoryEngine_CreateNode(t *testing.T) {
 func TestMemoryEngine_GetNode(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:         "node-1",
 			Labels:     []string{"Test"},
 			Properties: map[string]any{"data": "value"},
-		}))
+		})
+		require.NoError(t, err)
 
 		node, err := engine.GetNode("node-1")
 		require.NoError(t, err)
@@ -125,19 +128,21 @@ func TestMemoryEngine_GetNode(t *testing.T) {
 
 	t.Run("closed engine", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "node-1"}))
+		_, err := engine.CreateNode(&Node{ID: "node-1"})
+		require.NoError(t, err)
 		engine.Close()
 
-		_, err := engine.GetNode("node-1")
+		_, err = engine.GetNode("node-1")
 		assert.ErrorIs(t, err, ErrStorageClosed)
 	})
 
 	t.Run("returns copy not reference", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:         "node-1",
 			Properties: map[string]any{"key": "value"},
-		}))
+		})
+		require.NoError(t, err)
 
 		node1, _ := engine.GetNode("node-1")
 		node1.Properties["key"] = "mutated"
@@ -150,13 +155,14 @@ func TestMemoryEngine_GetNode(t *testing.T) {
 func TestMemoryEngine_UpdateNode(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:         "node-1",
 			Labels:     []string{"Old"},
 			Properties: map[string]any{"name": "Old Name"},
-		}))
+		})
+		require.NoError(t, err)
 
-		err := engine.UpdateNode(&Node{
+		err = engine.UpdateNode(&Node{
 			ID:         "node-1",
 			Labels:     []string{"New"},
 			Properties: map[string]any{"name": "New Name"},
@@ -170,10 +176,11 @@ func TestMemoryEngine_UpdateNode(t *testing.T) {
 
 	t.Run("updates label index", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:     "node-1",
 			Labels: []string{"OldLabel"},
-		}))
+		})
+		require.NoError(t, err)
 
 		require.NoError(t, engine.UpdateNode(&Node{
 			ID:     "node-1",
@@ -217,9 +224,10 @@ func TestMemoryEngine_UpdateNode(t *testing.T) {
 func TestMemoryEngine_DeleteNode(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "node-1"}))
+		_, err := engine.CreateNode(&Node{ID: "node-1"})
+		require.NoError(t, err)
 
-		err := engine.DeleteNode("node-1")
+		err = engine.DeleteNode("node-1")
 		require.NoError(t, err)
 
 		_, err = engine.GetNode("node-1")
@@ -228,10 +236,11 @@ func TestMemoryEngine_DeleteNode(t *testing.T) {
 
 	t.Run("removes from label index", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:     "node-1",
 			Labels: []string{"TestLabel"},
-		}))
+		})
+		require.NoError(t, err)
 
 		require.NoError(t, engine.DeleteNode("node-1"))
 
@@ -241,8 +250,10 @@ func TestMemoryEngine_DeleteNode(t *testing.T) {
 
 	t.Run("cascades to outgoing edges", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "source"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "target"}))
+		_, err := engine.CreateNode(&Node{ID: "source"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "target"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "source",
@@ -252,14 +263,16 @@ func TestMemoryEngine_DeleteNode(t *testing.T) {
 
 		require.NoError(t, engine.DeleteNode("source"))
 
-		_, err := engine.GetEdge("edge-1")
+		_, err = engine.GetEdge("edge-1")
 		assert.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("cascades to incoming edges", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "source"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "target"}))
+		_, err := engine.CreateNode(&Node{ID: "source"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "target"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "source",
@@ -269,7 +282,7 @@ func TestMemoryEngine_DeleteNode(t *testing.T) {
 
 		require.NoError(t, engine.DeleteNode("target"))
 
-		_, err := engine.GetEdge("edge-1")
+		_, err = engine.GetEdge("edge-1")
 		assert.ErrorIs(t, err, ErrNotFound)
 	})
 
@@ -291,8 +304,10 @@ func TestMemoryEngine_DeleteNode(t *testing.T) {
 func TestMemoryEngine_CreateEdge(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "node-1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "node-2"}))
+		_, err := engine.CreateNode(&Node{ID: "node-1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "node-2"})
+		require.NoError(t, err)
 
 		edge := &Edge{
 			ID:         "edge-1",
@@ -302,7 +317,7 @@ func TestMemoryEngine_CreateEdge(t *testing.T) {
 			Properties: map[string]any{"since": 2020},
 		}
 
-		err := engine.CreateEdge(edge)
+		err = engine.CreateEdge(edge)
 		require.NoError(t, err)
 
 		stored, err := engine.GetEdge("edge-1")
@@ -327,15 +342,17 @@ func TestMemoryEngine_CreateEdge(t *testing.T) {
 
 	t.Run("duplicate ID", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n1",
 			EndNode:   "n2",
 		}))
 
-		err := engine.CreateEdge(&Edge{
+		err = engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n1",
 			EndNode:   "n2",
@@ -345,9 +362,10 @@ func TestMemoryEngine_CreateEdge(t *testing.T) {
 
 	t.Run("start node not found", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "node-2"}))
+		_, err := engine.CreateNode(&Node{ID: "node-2"})
+		require.NoError(t, err)
 
-		err := engine.CreateEdge(&Edge{
+		err = engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "nonexistent",
 			EndNode:   "node-2",
@@ -357,9 +375,10 @@ func TestMemoryEngine_CreateEdge(t *testing.T) {
 
 	t.Run("end node not found", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "node-1"}))
+		_, err := engine.CreateNode(&Node{ID: "node-1"})
+		require.NoError(t, err)
 
-		err := engine.CreateEdge(&Edge{
+		err = engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "node-1",
 			EndNode:   "nonexistent",
@@ -371,8 +390,10 @@ func TestMemoryEngine_CreateEdge(t *testing.T) {
 func TestMemoryEngine_GetEdge(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n1",
@@ -401,8 +422,10 @@ func TestMemoryEngine_GetEdge(t *testing.T) {
 func TestMemoryEngine_UpdateEdge(t *testing.T) {
 	t.Run("success - update properties", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:         "edge-1",
 			StartNode:  "n1",
@@ -411,7 +434,7 @@ func TestMemoryEngine_UpdateEdge(t *testing.T) {
 			Properties: map[string]any{"weight": 1},
 		}))
 
-		err := engine.UpdateEdge(&Edge{
+		err = engine.UpdateEdge(&Edge{
 			ID:         "edge-1",
 			StartNode:  "n1",
 			EndNode:    "n2",
@@ -426,16 +449,19 @@ func TestMemoryEngine_UpdateEdge(t *testing.T) {
 
 	t.Run("success - change endpoints", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n3"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n3"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n1",
 			EndNode:   "n2",
 		}))
 
-		err := engine.UpdateEdge(&Edge{
+		err = engine.UpdateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n2",
 			EndNode:   "n3",
@@ -459,15 +485,17 @@ func TestMemoryEngine_UpdateEdge(t *testing.T) {
 
 	t.Run("new start node not found", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n1",
 			EndNode:   "n2",
 		}))
 
-		err := engine.UpdateEdge(&Edge{
+		err = engine.UpdateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "nonexistent",
 			EndNode:   "n2",
@@ -479,15 +507,17 @@ func TestMemoryEngine_UpdateEdge(t *testing.T) {
 func TestMemoryEngine_DeleteEdge(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n1",
 			EndNode:   "n2",
 		}))
 
-		err := engine.DeleteEdge("edge-1")
+		err = engine.DeleteEdge("edge-1")
 		require.NoError(t, err)
 
 		_, err = engine.GetEdge("edge-1")
@@ -496,8 +526,10 @@ func TestMemoryEngine_DeleteEdge(t *testing.T) {
 
 	t.Run("updates indexes", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "edge-1",
 			StartNode: "n1",
@@ -531,18 +563,21 @@ func TestMemoryEngine_DeleteEdge(t *testing.T) {
 func TestMemoryEngine_GetNodesByLabel(t *testing.T) {
 	t.Run("returns matching nodes", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:     "node-1",
 			Labels: []string{"Person"},
-		}))
-		require.NoError(t, engine.CreateNode(&Node{
+		})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{
 			ID:     "node-2",
 			Labels: []string{"Person", "Employee"},
-		}))
-		require.NoError(t, engine.CreateNode(&Node{
+		})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{
 			ID:     "node-3",
 			Labels: []string{"Company"},
-		}))
+		})
+		require.NoError(t, err)
 
 		persons, err := engine.GetNodesByLabel("Person")
 		require.NoError(t, err)
@@ -574,10 +609,11 @@ func TestMemoryEngine_GetNodesByLabel(t *testing.T) {
 	t.Run("case insensitive matching (Neo4j compatible)", func(t *testing.T) {
 		engine := NewMemoryEngine()
 		// Create node with PascalCase label
-		require.NoError(t, engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:     "node-1",
 			Labels: []string{"Person"},
-		}))
+		})
+		require.NoError(t, err)
 
 		// Query with different cases - all should match
 		lowercase, err := engine.GetNodesByLabel("person")
@@ -600,9 +636,12 @@ func TestMemoryEngine_GetNodesByLabel(t *testing.T) {
 func TestMemoryEngine_GetOutgoingEdges(t *testing.T) {
 	t.Run("returns outgoing edges", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "center"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "target1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "target2"}))
+		_, err := engine.CreateNode(&Node{ID: "center"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "target1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "target2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "e1",
 			StartNode: "center",
@@ -626,7 +665,8 @@ func TestMemoryEngine_GetOutgoingEdges(t *testing.T) {
 
 	t.Run("returns empty for node with no outgoing", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "isolated"}))
+		_, err := engine.CreateNode(&Node{ID: "isolated"})
+		require.NoError(t, err)
 
 		edges, err := engine.GetOutgoingEdges("isolated")
 		require.NoError(t, err)
@@ -643,9 +683,12 @@ func TestMemoryEngine_GetOutgoingEdges(t *testing.T) {
 func TestMemoryEngine_GetIncomingEdges(t *testing.T) {
 	t.Run("returns incoming edges", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "center"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "source1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "source2"}))
+		_, err := engine.CreateNode(&Node{ID: "center"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "source1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "source2"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "e1",
 			StartNode: "source1",
@@ -677,9 +720,12 @@ func TestMemoryEngine_GetIncomingEdges(t *testing.T) {
 func TestMemoryEngine_GetEdgesBetween(t *testing.T) {
 	t.Run("returns edges between nodes", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n3"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n3"})
+		require.NoError(t, err)
 		require.NoError(t, engine.CreateEdge(&Edge{
 			ID:        "e1",
 			StartNode: "n1",
@@ -705,8 +751,10 @@ func TestMemoryEngine_GetEdgesBetween(t *testing.T) {
 
 	t.Run("returns empty if no edges", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 
 		edges, err := engine.GetEdgesBetween("n1", "n2")
 		require.NoError(t, err)
@@ -750,7 +798,8 @@ func TestMemoryEngine_BulkCreateNodes(t *testing.T) {
 
 	t.Run("atomic - fails on duplicate", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "existing"}))
+		_, err := engine.CreateNode(&Node{ID: "existing"})
+		require.NoError(t, err)
 
 		nodes := []*Node{
 			{ID: "new-1"},
@@ -758,7 +807,7 @@ func TestMemoryEngine_BulkCreateNodes(t *testing.T) {
 			{ID: "new-2"},
 		}
 
-		err := engine.BulkCreateNodes(nodes)
+		err = engine.BulkCreateNodes(nodes)
 		assert.ErrorIs(t, err, ErrAlreadyExists)
 
 		// Verify none were created
@@ -781,9 +830,12 @@ func TestMemoryEngine_BulkCreateNodes(t *testing.T) {
 func TestMemoryEngine_BulkCreateEdges(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n3"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n3"})
+		require.NoError(t, err)
 
 		edges := []*Edge{
 			{ID: "e1", StartNode: "n1", EndNode: "n2"},
@@ -791,7 +843,7 @@ func TestMemoryEngine_BulkCreateEdges(t *testing.T) {
 			{ID: "e3", StartNode: "n1", EndNode: "n3"},
 		}
 
-		err := engine.BulkCreateEdges(edges)
+		err = engine.BulkCreateEdges(edges)
 		require.NoError(t, err)
 
 		count, _ := engine.EdgeCount()
@@ -800,15 +852,17 @@ func TestMemoryEngine_BulkCreateEdges(t *testing.T) {
 
 	t.Run("atomic - fails on missing node", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-		require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&Node{ID: "n2"})
+		require.NoError(t, err)
 
 		edges := []*Edge{
 			{ID: "e1", StartNode: "n1", EndNode: "n2"},
 			{ID: "e2", StartNode: "n2", EndNode: "nonexistent"},
 		}
 
-		err := engine.BulkCreateEdges(edges)
+		err = engine.BulkCreateEdges(edges)
 		assert.ErrorIs(t, err, ErrNotFound)
 
 		// Verify none were created
@@ -826,8 +880,10 @@ func TestMemoryEngine_NodeCount(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
 
-	require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-	require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+	_, err = engine.CreateNode(&Node{ID: "n1"})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "n2"})
+	require.NoError(t, err)
 
 	count, err = engine.NodeCount()
 	require.NoError(t, err)
@@ -841,8 +897,10 @@ func TestMemoryEngine_EdgeCount(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
 
-	require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
-	require.NoError(t, engine.CreateNode(&Node{ID: "n2"}))
+	_, err = engine.CreateNode(&Node{ID: "n1"})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&Node{ID: "n2"})
+	require.NoError(t, err)
 	require.NoError(t, engine.CreateEdge(&Edge{
 		ID:        "e1",
 		StartNode: "n1",
@@ -859,9 +917,10 @@ func TestMemoryEngine_EdgeCount(t *testing.T) {
 func TestMemoryEngine_Close(t *testing.T) {
 	t.Run("success", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "n1"}))
+		_, err := engine.CreateNode(&Node{ID: "n1"})
+		require.NoError(t, err)
 
-		err := engine.Close()
+		err = engine.Close()
 		require.NoError(t, err)
 		// After close, operations should fail
 		_, err = engine.GetNode("n1")
@@ -885,7 +944,9 @@ func TestMemoryEngine_Close(t *testing.T) {
 func TestMemoryEngine_Concurrency(t *testing.T) {
 	t.Run("concurrent reads", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "node-1", Labels: []string{"Test"}}))
+
+		_, err := engine.CreateNode(&Node{ID: "node-1", Labels: []string{"Test"}})
+		require.NoError(t, err)
 
 		var wg sync.WaitGroup
 		for i := 0; i < 100; i++ {
@@ -911,7 +972,7 @@ func TestMemoryEngine_Concurrency(t *testing.T) {
 				defer wg.Done()
 				// Use unique ID based on goroutine index
 				nodeID := NodeID(fmt.Sprintf("node-%d", id))
-				err := engine.CreateNode(&Node{ID: nodeID})
+				_, err := engine.CreateNode(&Node{ID: nodeID})
 				if err != nil {
 					errors <- err
 				}
@@ -928,7 +989,9 @@ func TestMemoryEngine_Concurrency(t *testing.T) {
 
 	t.Run("concurrent read-write", func(t *testing.T) {
 		engine := NewMemoryEngine()
-		require.NoError(t, engine.CreateNode(&Node{ID: "shared"}))
+
+		_, err := engine.CreateNode(&Node{ID: "shared"})
+		require.NoError(t, err)
 
 		var wg sync.WaitGroup
 

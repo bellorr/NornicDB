@@ -32,7 +32,7 @@ func TestBadgerEngine_UpdateNode_WasInsertAfterDelete(t *testing.T) {
 				"name": fmt.Sprintf("Node %d", i),
 			},
 		}
-		err := engine.CreateNode(node)
+		_, err := engine.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -87,7 +87,8 @@ func TestBadgerEngine_UpdateNode_WasInsertWithSameIDs(t *testing.T) {
 			ID:     NodeID(fmt.Sprintf("reuse-id-%d", i)),
 			Labels: []string{"Test"},
 		}
-		require.NoError(t, engine.CreateNode(node))
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
 	}
 
 	count1, _ := engine.NodeCount()
@@ -127,7 +128,8 @@ func TestBadgerEngine_DeleteActuallyRemovesKey(t *testing.T) {
 
 	// Create a node
 	node := &Node{ID: "test-delete", Labels: []string{"Test"}}
-	require.NoError(t, engine.CreateNode(node))
+	_, err = engine.CreateNode(node)
+	require.NoError(t, err)
 
 	// Verify it exists
 	retrieved, err := engine.GetNode("test-delete")

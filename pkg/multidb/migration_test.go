@@ -12,10 +12,10 @@ import (
 // is automatically migrated to the default database namespace.
 //
 // This test simulates the upgrade scenario:
-//   1. Create unprefixed data (simulating old version)
-//   2. Create DatabaseManager (triggers automatic migration)
-//   3. Verify migrated data is accessible through default database
-//   4. Verify all properties and relationships are preserved
+//  1. Create unprefixed data (simulating old version)
+//  2. Create DatabaseManager (triggers automatic migration)
+//  3. Verify migrated data is accessible through default database
+//  4. Verify all properties and relationships are preserved
 func TestMigration_LegacyDataMigration(t *testing.T) {
 	inner := storage.NewMemoryEngine()
 	defer inner.Close()
@@ -30,7 +30,7 @@ func TestMigration_LegacyDataMigration(t *testing.T) {
 			"version":    "1.0",
 		},
 	}
-	err := inner.CreateNode(oldNode)
+	_, err := inner.CreateNode(oldNode)
 	require.NoError(t, err)
 
 	oldNode2 := &storage.Node{
@@ -40,7 +40,7 @@ func TestMigration_LegacyDataMigration(t *testing.T) {
 			"version": "1.0",
 		},
 	}
-	err = inner.CreateNode(oldNode2)
+	_, err = inner.CreateNode(oldNode2)
 	require.NoError(t, err)
 
 	oldEdge := &storage.Edge{
@@ -128,7 +128,7 @@ func TestMigration_NoUnprefixedData(t *testing.T) {
 		ID:     storage.NodeID("new-node"),
 		Labels: []string{"New"},
 	}
-	err = store.CreateNode(newNode)
+	_, err = store.CreateNode(newNode)
 	require.NoError(t, err)
 
 	// Verify new data is accessible
@@ -151,7 +151,7 @@ func TestMigration_AlreadyPrefixedData(t *testing.T) {
 			"status": "migrated",
 		},
 	}
-	err := inner.CreateNode(prefixedNode)
+	_, err := inner.CreateNode(prefixedNode)
 	require.NoError(t, err)
 
 	// Create DatabaseManager
@@ -186,7 +186,7 @@ func TestMigration_MixedData(t *testing.T) {
 			"type": "unprefixed",
 		},
 	}
-	err := inner.CreateNode(unprefixedNode)
+	_, err := inner.CreateNode(unprefixedNode)
 	require.NoError(t, err)
 
 	prefixedNode := &storage.Node{
@@ -196,7 +196,7 @@ func TestMigration_MixedData(t *testing.T) {
 			"type": "prefixed",
 		},
 	}
-	err = inner.CreateNode(prefixedNode)
+	_, err = inner.CreateNode(prefixedNode)
 	require.NoError(t, err)
 
 	// Create DatabaseManager
@@ -243,7 +243,7 @@ func TestMigration_NoMigrationOnSecondStart(t *testing.T) {
 			"migrated": true,
 		},
 	}
-	err := inner.CreateNode(oldNode)
+	_, err := inner.CreateNode(oldNode)
 	require.NoError(t, err)
 
 	manager1, err := NewDatabaseManager(inner, nil)
@@ -279,14 +279,14 @@ func TestMigration_EdgeRelationshipsPreserved(t *testing.T) {
 		ID:     storage.NodeID("node-1"),
 		Labels: []string{"Test"},
 	}
-	err := inner.CreateNode(node1)
+	_, err := inner.CreateNode(node1)
 	require.NoError(t, err)
 
 	node2 := &storage.Node{
 		ID:     storage.NodeID("node-2"),
 		Labels: []string{"Test"},
 	}
-	err = inner.CreateNode(node2)
+	_, err = inner.CreateNode(node2)
 	require.NoError(t, err)
 
 	edge := &storage.Edge{
@@ -340,7 +340,7 @@ func TestMigration_LabelIndexesPreserved(t *testing.T) {
 			"name": "Alice",
 		},
 	}
-	err := inner.CreateNode(node1)
+	_, err := inner.CreateNode(node1)
 	require.NoError(t, err)
 
 	node2 := &storage.Node{
@@ -350,7 +350,7 @@ func TestMigration_LabelIndexesPreserved(t *testing.T) {
 			"name": "Bob",
 		},
 	}
-	err = inner.CreateNode(node2)
+	_, err = inner.CreateNode(node2)
 	require.NoError(t, err)
 
 	// Migrate
@@ -390,7 +390,7 @@ func TestMigration_CustomDefaultDatabase(t *testing.T) {
 		ID:     storage.NodeID("legacy-node"),
 		Labels: []string{"Legacy"},
 	}
-	err := inner.CreateNode(oldNode)
+	_, err := inner.CreateNode(oldNode)
 	require.NoError(t, err)
 
 	// Create manager with custom default database
@@ -430,7 +430,7 @@ func TestMigration_AddsDbProperty(t *testing.T) {
 			// No db property
 		},
 	}
-	err := inner.CreateNode(oldNode)
+	_, err := inner.CreateNode(oldNode)
 	require.NoError(t, err)
 
 	// Create DatabaseManager - this should trigger migration
@@ -490,7 +490,7 @@ func TestEnsureDefaultDatabaseProperty(t *testing.T) {
 			// No db property
 		},
 	}
-	err = store.CreateNode(node)
+	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 
 	// Call ensureDefaultDatabaseProperty

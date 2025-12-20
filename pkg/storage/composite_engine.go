@@ -7,6 +7,7 @@ package storage
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 )
 
@@ -25,6 +26,10 @@ type CompositeEngine struct {
 	// Access modes for each constituent
 	accessModes map[string]string // "read", "write", "read_write"
 
+	// Track which constituent each node was created in (for same-statement edge creation)
+	// Following Neo4j TransactionState pattern: track nodes created in current transaction
+	nodeToConstituent map[NodeID]string
+
 	mu sync.RWMutex
 }
 
@@ -40,9 +45,10 @@ func NewCompositeEngine(
 	accessModes map[string]string,
 ) *CompositeEngine {
 	return &CompositeEngine{
-		constituents:     constituents,
-		constituentNames: constituentNames,
-		accessModes:      accessModes,
+		constituents:      constituents,
+		constituentNames:  constituentNames,
+		accessModes:       accessModes,
+		nodeToConstituent: make(map[NodeID]string),
 	}
 }
 
@@ -148,10 +154,10 @@ func (c *CompositeEngine) routeWrite(operation string, labels []string, properti
 // ============================================================================
 
 // CreateNode creates a node. Routes to the appropriate constituent based on routing rules.
-func (c *CompositeEngine) CreateNode(node *Node) error {
+func (c *CompositeEngine) CreateNode(node *Node) (NodeID, error) {
 	writeConstituents := c.getConstituentsForWrite()
 	if len(writeConstituents) == 0 {
-		return fmt.Errorf("no writable constituents available")
+		return "", fmt.Errorf("no writable constituents available")
 	}
 
 	// Determine routing based on node labels and properties
@@ -163,10 +169,39 @@ func (c *CompositeEngine) CreateNode(node *Node) error {
 
 	engine, err := c.getConstituent(targetConstituent)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	return engine.CreateNode(node)
+	// Create node and track which constituent it was created in
+	// This allows CreateEdge to find nodes created in the same statement
+	nodeID, err := engine.CreateNode(node)
+	if err != nil {
+		return "", err
+	}
+
+	// CRITICAL: For composite databases, creates must be atomic - no async write queue
+	// Flush immediately to ensure node is visible when CreateEdge is called
+	// This prevents race conditions where edge creation fails because node isn't persisted yet
+	c.flushAsyncEngine(engine)
+
+	// Track node -> constituent mapping (following Neo4j TransactionState pattern)
+	// CRITICAL: Store BOTH prefixed and unprefixed IDs in nodeToConstituent
+	// This allows CreateEdge to find nodes whether it receives prefixed or unprefixed IDs
+	// Get the actual prefixed ID from the engine (NamespacedEngine returns unprefixed)
+	actualPrefixedID := nodeID
+	if namespacedEngine, ok := engine.(*NamespacedEngine); ok {
+		// NamespacedEngine.CreateNode returns unprefixed, but we need the prefixed ID
+		// Reconstruct it by prefixing the returned ID
+		actualPrefixedID = namespacedEngine.prefixNodeID(nodeID)
+	}
+	c.mu.Lock()
+	// Store both prefixed and unprefixed -> constituent mappings
+	c.nodeToConstituent[actualPrefixedID] = targetConstituent
+	c.nodeToConstituent[nodeID] = targetConstituent // Also store unprefixed for direct lookup
+	c.mu.Unlock()
+
+	// Return unprefixed ID to user (user-facing API)
+	return nodeID, nil
 }
 
 // GetNode retrieves a node. Searches all readable constituents.
@@ -243,16 +278,133 @@ func (c *CompositeEngine) DeleteNode(id NodeID) error {
 // ============================================================================
 
 // CreateEdge creates an edge. Routes to the constituent containing the start node.
+// Following Neo4j TransactionState pattern: check if nodes were created in current transaction,
+// and if so, try that constituent first. Otherwise try all constituents.
 func (c *CompositeEngine) CreateEdge(edge *Edge) error {
 	writeConstituents := c.getConstituentsForWrite()
 	if len(writeConstituents) == 0 {
 		return fmt.Errorf("no writable constituents available")
 	}
 
-	// Find constituent with start node
-	readConstituents := c.getConstituentsForRead()
+	// Check if start node was created in current transaction (following Neo4j pattern)
+	// This allows us to route directly to the correct constituent
+	// CRITICAL: edge.StartNode/EndNode may be unprefixed (from user), but nodeToConstituent
+	// stores both prefixed and unprefixed IDs. Try unprefixed first, then prefixed.
+	c.mu.RLock()
+	// Try unprefixed first (most common case - IDs from CreateNode are unprefixed)
+	startConstituent, startNodeInTx := c.nodeToConstituent[edge.StartNode]
+	endConstituent, endNodeInTx := c.nodeToConstituent[edge.EndNode]
 
+	// If not found unprefixed, try prefixed versions by checking all constituents
+	if !startNodeInTx {
+		for _, engine := range c.constituents {
+			if namespacedEngine, ok := engine.(*NamespacedEngine); ok {
+				prefixedStartID := namespacedEngine.prefixNodeID(edge.StartNode)
+				if constituent, found := c.nodeToConstituent[prefixedStartID]; found {
+					startConstituent = constituent
+					startNodeInTx = true
+					break
+				}
+			}
+		}
+	}
+	if !endNodeInTx {
+		for _, engine := range c.constituents {
+			if namespacedEngine, ok := engine.(*NamespacedEngine); ok {
+				prefixedEndID := namespacedEngine.prefixNodeID(edge.EndNode)
+				if constituent, found := c.nodeToConstituent[prefixedEndID]; found {
+					endConstituent = constituent
+					endNodeInTx = true
+					break
+				}
+			}
+		}
+	}
+	// Ensure we have valid constituent names
+	if startNodeInTx && startConstituent == "" {
+		startNodeInTx = false
+	}
+	if endNodeInTx && endConstituent == "" {
+		endNodeInTx = false
+	}
+	c.mu.RUnlock()
+
+	// If both nodes were created in the same transaction, try that constituent first
+	// Following Neo4j pattern: trust transaction state, don't verify with GetNode
+	// The underlying engine will verify nodes exist when creating the edge
+	if startNodeInTx && endNodeInTx && startConstituent == endConstituent {
+		engine, err := c.getConstituent(startConstituent)
+		if err == nil && engine != nil {
+			// Trust transaction state - nodes were created here, so try creating edge
+			if err := engine.CreateEdge(edge); err == nil {
+				// CRITICAL: Flush async writes to ensure edge is immediately visible
+				c.flushAsyncEngine(engine)
+				return nil
+			}
+			// If error is not "not found", return it immediately
+			if err != ErrNotFound && !strings.Contains(err.Error(), "not found") {
+				return err
+			}
+		}
+	}
+
+	// If start node was created in transaction, try that constituent first
+	if startNodeInTx && startConstituent != "" {
+		engine, err := c.getConstituent(startConstituent)
+		if err == nil && engine != nil {
+			if err := engine.CreateEdge(edge); err == nil {
+				// CRITICAL: Flush async writes to ensure edge is immediately visible
+				c.flushAsyncEngine(engine)
+				return nil
+			}
+			// If error is not "not found", return it immediately
+			if err != ErrNotFound && !strings.Contains(err.Error(), "not found") {
+				return err
+			}
+		}
+	}
+
+	// Try all writable constituents (fallback for nodes not in transaction state)
+	// The underlying engine will verify nodes exist before creating the edge.
+	for _, alias := range writeConstituents {
+		// Skip if already tried
+		if startNodeInTx && alias == startConstituent {
+			continue
+		}
+
+		engine, err := c.getConstituent(alias)
+		if err != nil || engine == nil {
+			continue
+		}
+
+		// Try creating edge - underlying engine will verify nodes exist
+		if err := engine.CreateEdge(edge); err == nil {
+			// CRITICAL: Flush async writes to ensure edge is immediately visible
+			c.flushAsyncEngine(engine)
+			return nil
+		}
+		// If error is not "not found", return it immediately (something else went wrong)
+		if err != ErrNotFound && !strings.Contains(err.Error(), "not found") {
+			return err
+		}
+		// Continue to next constituent if it was "not found"
+	}
+
+	// If still not found, try read-only constituents as a last resort
+	readConstituents := c.getConstituentsForRead()
 	for _, alias := range readConstituents {
+		// Skip if already tried in writeConstituents
+		alreadyTried := false
+		for _, writeAlias := range writeConstituents {
+			if alias == writeAlias {
+				alreadyTried = true
+				break
+			}
+		}
+		if alreadyTried {
+			continue
+		}
+
 		engine, err := c.getConstituent(alias)
 		if err != nil {
 			continue
@@ -260,23 +412,15 @@ func (c *CompositeEngine) CreateEdge(edge *Edge) error {
 
 		_, err = engine.GetNode(edge.StartNode)
 		if err == nil {
-			// Start node found, create edge here
-			// Verify end node exists (could be in same or different constituent)
-			_, err = engine.GetNode(edge.EndNode)
-			if err == nil {
-				// Both nodes in same constituent - create edge here
-				return engine.CreateEdge(edge)
-			}
-			// End node might be in different constituent
-			// For composite databases, we allow cross-constituent edges
-			// The edge is stored in the constituent containing the start node
-			return engine.CreateEdge(edge)
+			// Start node found, but can't write to read-only constituent
+			return fmt.Errorf("start node found in read-only constituent '%s', cannot create edge", alias)
 		}
 		if err != ErrNotFound {
 			return err
 		}
 	}
 
+	// If we got here, all attempts failed
 	return fmt.Errorf("start node not found in any constituent")
 }
 
@@ -1139,6 +1283,19 @@ func (c *CompositeEngine) StreamNodeChunks(ctx context.Context, chunkSize int, f
 	}
 
 	return nil
+}
+
+// flushAsyncEngine flushes async writes if the engine is AsyncEngine (directly or wrapped in NamespacedEngine).
+// This ensures atomicity for composite database operations - no async write queue delays.
+func (c *CompositeEngine) flushAsyncEngine(engine Engine) {
+	if asyncEngine, ok := engine.(*AsyncEngine); ok {
+		_ = asyncEngine.Flush() // Ignore errors - flush is best effort for atomicity
+	} else if namespacedEngine, ok := engine.(*NamespacedEngine); ok {
+		// NamespacedEngine wraps another engine - check if it's AsyncEngine
+		if asyncEngine, ok := namespacedEngine.inner.(*AsyncEngine); ok {
+			_ = asyncEngine.Flush() // Ignore errors - flush is best effort for atomicity
+		}
+	}
 }
 
 // Ensure CompositeEngine implements Engine interface

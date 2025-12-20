@@ -49,7 +49,7 @@ func TestCallDbCreateSetNodeVectorProperty(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a node first
-	err := engine.CreateNode(&storage.Node{
+	_, err := engine.CreateNode(&storage.Node{
 		ID:         "node1",
 		Labels:     []string{"Document"},
 		Properties: map[string]interface{}{"title": "Test"},
@@ -97,9 +97,9 @@ func TestCallDbCreateSetRelationshipVectorProperty(t *testing.T) {
 	ctx := context.Background()
 
 	// Create nodes and relationship first
-	err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}})
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}})
 	require.NoError(t, err)
-	err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}})
+	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}})
 	require.NoError(t, err)
 	err = engine.CreateEdge(&storage.Edge{
 		ID:         "rel1",
@@ -413,9 +413,9 @@ func TestCallDbIndexFulltextQueryRelationships(t *testing.T) {
 	ctx := context.Background()
 
 	// Create nodes and relationship with text property
-	err := engine.CreateNode(&storage.Node{ID: "x", Labels: []string{"Node"}})
+	_, err := engine.CreateNode(&storage.Node{ID: "x", Labels: []string{"Node"}})
 	require.NoError(t, err)
-	err = engine.CreateNode(&storage.Node{ID: "y", Labels: []string{"Node"}})
+	_, err = engine.CreateNode(&storage.Node{ID: "y", Labels: []string{"Node"}})
 	require.NoError(t, err)
 	err = engine.CreateEdge(&storage.Edge{
 		ID:         "rel_text",
@@ -698,7 +698,7 @@ func TestVectorIndexWorkflow(t *testing.T) {
 		assert.Equal(t, "edge_similarity", result.Rows[0][0])
 
 		// 3. Create a memory node directly in storage with known ID
-		err = engine.CreateNode(&storage.Node{
+		_, err = engine.CreateNode(&storage.Node{
 			ID:         "mem1",
 			Labels:     []string{"Memory"},
 			Properties: map[string]interface{}{"content": "Test memory"},

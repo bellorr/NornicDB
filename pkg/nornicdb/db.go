@@ -303,13 +303,14 @@ type Config struct {
 	DataDir string `yaml:"data_dir"`
 
 	// Embeddings
-	EmbeddingProvider   string  `yaml:"embedding_provider"` // ollama, openai
-	EmbeddingAPIURL     string  `yaml:"embedding_api_url"`
-	EmbeddingAPIKey     string  `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
-	EmbeddingModel      string  `yaml:"embedding_model"`
-	EmbeddingDimensions int     `yaml:"embedding_dimensions"`
-	AutoEmbedEnabled    bool    `yaml:"auto_embed_enabled"`    // Auto-generate embeddings on node create/update
-	SearchMinSimilarity float64 `yaml:"search_min_similarity"` // Min cosine similarity for vector search (0.0 = no filter)
+	EmbeddingProvider     string  `yaml:"embedding_provider"` // ollama, openai
+	EmbeddingAPIURL       string  `yaml:"embedding_api_url"`
+	EmbeddingAPIKey       string  `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
+	EmbeddingModel        string  `yaml:"embedding_model"`
+	EmbeddingDimensions   int     `yaml:"embedding_dimensions"`
+	AutoEmbedEnabled      bool    `yaml:"auto_embed_enabled"`       // Auto-generate embeddings on node create/update
+	EmbedWorkerNumWorkers int     `yaml:"embed_worker_num_workers"` // Number of concurrent embedding workers (default: 1, use more for network/parallel processing)
+	SearchMinSimilarity   float64 `yaml:"search_min_similarity"`    // Min cosine similarity for vector search (0.0 = no filter)
 
 	// Decay
 	DecayEnabled             bool          `yaml:"decay_enabled"`
@@ -377,6 +378,7 @@ func DefaultConfig() *Config {
 		EmbeddingModel:               "bge-m3",
 		EmbeddingDimensions:          1024,
 		AutoEmbedEnabled:             true, // Auto-generate embeddings on node creation
+		EmbedWorkerNumWorkers:        1,    // Single worker by default, increase for network-based embedders or multiple GPUs
 		DecayEnabled:                 true,
 		DecayRecalculateInterval:     time.Hour,
 		DecayArchiveThreshold:        0.05,
@@ -966,6 +968,18 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		}
 	}
 
+	// Initialize embedding worker config from main config
+	db.embedWorkerConfig = &EmbedWorkerConfig{
+		NumWorkers:           config.EmbedWorkerNumWorkers,
+		ScanInterval:         15 * time.Minute,       // Scan for missed nodes every 15 minutes
+		BatchDelay:           500 * time.Millisecond, // Delay between processing nodes
+		MaxRetries:           3,
+		ChunkSize:            512,
+		ChunkOverlap:         50,
+		ClusterDebounceDelay: 30 * time.Second, // Wait 30s after last embedding before k-means
+		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
+	}
+
 	// Initialize search service with configured embedding dimensions
 	// This must match the embedding model's output dimensions (e.g., 512 for Apple Intelligence, 1024 for bge-m3)
 	embeddingDims := config.EmbeddingDimensions
@@ -1387,7 +1401,8 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 	node.Properties = db.encryptProperties(node.Properties)
 
 	// Store in storage engine
-	if err := db.storage.CreateNode(node); err != nil {
+	_, err := db.storage.CreateNode(node)
+	if err != nil {
 		return nil, fmt.Errorf("storing memory: %w", err)
 	}
 
@@ -1589,6 +1604,15 @@ func (db *DB) GetCypherExecutor() *cypher.StorageExecutor {
 	db.mu.RLock()
 	defer db.mu.RUnlock()
 	return db.cypherExecutor
+}
+
+// GetEmbedQueue returns the embedding queue for this database.
+// This is used by GraphQL and other integrations that need to wire up
+// embedding callbacks for namespaced executors.
+func (db *DB) GetEmbedQueue() *EmbedQueue {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+	return db.embedQueue
 }
 
 // Cypher executes a Cypher query.
@@ -2423,13 +2447,14 @@ func (db *DB) CreateNode(ctx context.Context, labels []string, properties map[st
 		CreatedAt:  now,
 	}
 
-	if err := db.storage.CreateNode(node); err != nil {
+	actualID, err := db.storage.CreateNode(node)
+	if err != nil {
 		return nil, err
 	}
 
 	// Always queue for async embedding generation (non-blocking)
 	if db.embedQueue != nil {
-		db.embedQueue.Enqueue(id)
+		db.embedQueue.Enqueue(string(actualID))
 	}
 
 	// Update search indexes (live indexing for seamless Mimir compatibility)
@@ -3088,7 +3113,8 @@ func (db *DB) Restore(ctx context.Context, path string) error {
 
 	// Restore nodes
 	for _, node := range backup.Nodes {
-		if err := db.storage.CreateNode(node); err != nil {
+		_, err := db.storage.CreateNode(node)
+		if err != nil {
 			// Try update if node exists
 			if updateErr := db.storage.UpdateNode(node); updateErr != nil {
 				return fmt.Errorf("failed to restore node %s: %w", node.ID, err)
@@ -3400,7 +3426,8 @@ func (db *DB) RecordConsent(ctx context.Context, consent *Consent) error {
 		Properties: props,
 	}
 
-	return db.storage.CreateNode(node)
+	_, err = db.storage.CreateNode(node)
+	return err
 }
 
 // HasConsent checks if a user has given consent for a specific purpose.
@@ -3470,7 +3497,8 @@ func (db *DB) RevokeConsent(ctx context.Context, userID, purpose string) error {
 					"source":    "revocation",
 				},
 			}
-			return db.storage.CreateNode(node)
+			_, err := db.storage.CreateNode(node)
+			return err
 		}
 		return fmt.Errorf("getting consent: %w", err)
 	}

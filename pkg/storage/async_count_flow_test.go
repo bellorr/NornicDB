@@ -44,7 +44,7 @@ func TestBug_CountAfterDeleteRecreate_AsyncEngine(t *testing.T) {
 				"idx": i,
 			},
 		}
-		err := asyncEngine.CreateNode(node)
+		_, err := asyncEngine.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -111,7 +111,7 @@ func TestBug_CountAfterDeleteRecreate_AsyncEngine(t *testing.T) {
 				"recreated": true,
 			},
 		}
-		err := asyncEngine.CreateNode(node)
+		_, err := asyncEngine.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -170,7 +170,7 @@ func TestBug_CountWithWAL_AsyncEngine(t *testing.T) {
 				"idx": i,
 			},
 		}
-		err := asyncEngine.CreateNode(node)
+		_, err := asyncEngine.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -209,7 +209,7 @@ func TestBug_CountWithWAL_AsyncEngine(t *testing.T) {
 				"idx": i,
 			},
 		}
-		err := asyncEngine.CreateNode(node)
+		_, err := asyncEngine.CreateNode(node)
 		require.NoError(t, err)
 	}
 

@@ -35,7 +35,8 @@ func TestWALEngine_CountAfterDeleteRecreate(t *testing.T) {
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		}
-		require.NoError(t, walEngine.CreateNode(node))
+		_, err := walEngine.CreateNode(node)
+		require.NoError(t, err)
 	}
 
 	count1, _ := walEngine.NodeCount()
@@ -87,7 +88,8 @@ func TestAsyncEngine_CountAfterDeleteRecreate(t *testing.T) {
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		}
-		require.NoError(t, asyncEngine.CreateNode(node))
+		_, err := asyncEngine.CreateNode(node)
+		require.NoError(t, err)
 	}
 	asyncEngine.Flush()
 
@@ -109,7 +111,8 @@ func TestAsyncEngine_CountAfterDeleteRecreate(t *testing.T) {
 			ID:     NodeID(fmt.Sprintf("new-node-%d", i)),
 			Labels: []string{"NewTest"},
 		}
-		require.NoError(t, asyncEngine.CreateNode(node))
+		_, err := asyncEngine.CreateNode(node)
+		require.NoError(t, err)
 	}
 	asyncEngine.Flush()
 

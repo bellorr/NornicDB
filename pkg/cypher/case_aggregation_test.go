@@ -187,7 +187,7 @@ func TestEvaluateCaseExpressionDirectly(t *testing.T) {
 			"name":   "test",
 		},
 	}
-	_ = store.CreateNode(node)
+	_, _ = store.CreateNode(node)
 
 	nodes := map[string]*storage.Node{"n": node}
 
@@ -235,7 +235,7 @@ func TestEvaluateConditionContains(t *testing.T) {
 			"name":   "test",
 		},
 	}
-	_ = store.CreateNode(node)
+	_, _ = store.CreateNode(node)
 
 	nodes := map[string]*storage.Node{"n": node}
 

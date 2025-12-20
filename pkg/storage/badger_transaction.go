@@ -78,22 +78,22 @@ func (tx *BadgerTransaction) IsActive() bool {
 }
 
 // CreateNode adds a node to the transaction with constraint validation.
-func (tx *BadgerTransaction) CreateNode(node *Node) error {
+func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 
 	if tx.Status != TxStatusActive {
-		return ErrTransactionClosed
+		return "", ErrTransactionClosed
 	}
 
 	// Validate constraints BEFORE writing
 	if err := tx.validateNodeConstraints(node); err != nil {
-		return err
+		return "", err
 	}
 
 	// Check for duplicates in pending
 	if _, exists := tx.pendingNodes[node.ID]; exists {
-		return ErrAlreadyExists
+		return "", ErrAlreadyExists
 	}
 
 	// Check if exists in storage (read from Badger)
@@ -101,29 +101,29 @@ func (tx *BadgerTransaction) CreateNode(node *Node) error {
 		key := nodeKey(node.ID)
 		_, err := tx.badgerTx.Get(key)
 		if err == nil {
-			return ErrAlreadyExists
+			return "", ErrAlreadyExists
 		}
 		if err != badger.ErrKeyNotFound {
-			return fmt.Errorf("checking node existence: %w", err)
+			return "", fmt.Errorf("checking node existence: %w", err)
 		}
 	}
 
 	// Serialize and write to Badger
 	nodeBytes, err := serializeNode(node)
 	if err != nil {
-		return fmt.Errorf("serializing node: %w", err)
+		return "", fmt.Errorf("serializing node: %w", err)
 	}
 
 	key := nodeKey(node.ID)
 	if err := tx.badgerTx.Set(key, nodeBytes); err != nil {
-		return fmt.Errorf("writing node to transaction: %w", err)
+		return "", fmt.Errorf("writing node to transaction: %w", err)
 	}
 
 	// Update label indexes
 	for _, label := range node.Labels {
 		indexKey := labelIndexKey(label, node.ID)
 		if err := tx.badgerTx.Set(indexKey, []byte{}); err != nil {
-			return fmt.Errorf("writing label index: %w", err)
+			return "", fmt.Errorf("writing label index: %w", err)
 		}
 	}
 
@@ -139,7 +139,7 @@ func (tx *BadgerTransaction) CreateNode(node *Node) error {
 		Node:      nodeCopy,
 	})
 
-	return nil
+	return node.ID, nil
 }
 
 // UpdateNode updates a node in the transaction.

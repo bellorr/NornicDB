@@ -40,7 +40,8 @@ func TestDetachDeleteStatsTracking(t *testing.T) {
 				ID:     NodeID(t.Name() + "_node_" + string(rune(i+'0'))),
 				Labels: []string{"TestNode"},
 			}
-			require.NoError(t, asyncEngine.CreateNode(node))
+			_, err := asyncEngine.CreateNode(node)
+			require.NoError(t, err)
 		}
 
 		// Create 49 relationships (chain pattern)
@@ -118,7 +119,8 @@ func TestDetachDeleteStatsTracking(t *testing.T) {
 
 		// Create a node
 		node := &Node{ID: "single_node", Labels: []string{"Test"}}
-		require.NoError(t, asyncEngine.CreateNode(node))
+		_, err := asyncEngine.CreateNode(node)
+		require.NoError(t, err)
 
 		// Flush to engine
 		require.NoError(t, asyncEngine.Flush())
@@ -162,8 +164,10 @@ func TestDetachDeleteStatsTracking(t *testing.T) {
 		// Create two nodes with a relationship
 		nodeA := &Node{ID: "nodeA", Labels: []string{"Test"}}
 		nodeB := &Node{ID: "nodeB", Labels: []string{"Test"}}
-		require.NoError(t, asyncEngine.CreateNode(nodeA))
-		require.NoError(t, asyncEngine.CreateNode(nodeB))
+		_, err := asyncEngine.CreateNode(nodeA)
+		require.NoError(t, err)
+		_, err = asyncEngine.CreateNode(nodeB)
+		require.NoError(t, err)
 
 		edge := &Edge{ID: "edge1", StartNode: "nodeA", EndNode: "nodeB", Type: "KNOWS"}
 		require.NoError(t, asyncEngine.CreateEdge(edge))
@@ -280,7 +284,8 @@ func TestBadgerEngineDetachDeleteStats(t *testing.T) {
 		// Create nodes
 		for i := 0; i < 10; i++ {
 			node := &Node{ID: NodeID(string(rune('a' + i))), Labels: []string{"Test"}}
-			require.NoError(t, engine.CreateNode(node))
+			_, err := engine.CreateNode(node)
+			require.NoError(t, err)
 		}
 
 		// Create edges (chain)
@@ -322,8 +327,8 @@ func TestBadgerEngineDetachDeleteStats(t *testing.T) {
 		// Create one edge
 		node1 := &Node{ID: "n1", Labels: []string{"Test"}}
 		node2 := &Node{ID: "n2", Labels: []string{"Test"}}
-		engine.CreateNode(node1)
-		engine.CreateNode(node2)
+		_, _ = engine.CreateNode(node1)
+		_, _ = engine.CreateNode(node2)
 
 		edge := &Edge{ID: "e1", StartNode: "n1", EndNode: "n2", Type: "REL"}
 		engine.CreateEdge(edge)
@@ -358,7 +363,8 @@ func TestBulkOperationsUpdateCounts(t *testing.T) {
 		// Create a graph: A -> B -> C -> D -> E (4 edges)
 		for i := 0; i < 5; i++ {
 			node := &Node{ID: NodeID(string(rune('A' + i))), Labels: []string{"Test"}}
-			require.NoError(t, engine.CreateNode(node))
+			_, err := engine.CreateNode(node)
+			require.NoError(t, err)
 		}
 		for i := 0; i < 4; i++ {
 			edge := &Edge{
@@ -399,8 +405,8 @@ func TestBulkOperationsUpdateCounts(t *testing.T) {
 		defer cleanup()
 
 		// Create A -> B
-		engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
-		engine.CreateNode(&Node{ID: "B", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "B", Labels: []string{"Test"}})
 		engine.CreateEdge(&Edge{ID: "e1", StartNode: "A", EndNode: "B", Type: "REL"})
 
 		nc, _ := engine.NodeCount()
@@ -423,9 +429,9 @@ func TestBulkOperationsUpdateCounts(t *testing.T) {
 		defer cleanup()
 
 		// Create: A -> B -> C (B has both incoming and outgoing edges)
-		engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
-		engine.CreateNode(&Node{ID: "B", Labels: []string{"Test"}})
-		engine.CreateNode(&Node{ID: "C", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "B", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "C", Labels: []string{"Test"}})
 		engine.CreateEdge(&Edge{ID: "e1", StartNode: "A", EndNode: "B", Type: "REL"})
 		engine.CreateEdge(&Edge{ID: "e2", StartNode: "B", EndNode: "C", Type: "REL"})
 
@@ -448,8 +454,8 @@ func TestBulkOperationsUpdateCounts(t *testing.T) {
 		engine, cleanup := createDeleteStatsTestBadgerEngine(t)
 		defer cleanup()
 
-		engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
-		engine.CreateNode(&Node{ID: "B", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "B", Labels: []string{"Test"}})
 		engine.CreateEdge(&Edge{ID: "e1", StartNode: "A", EndNode: "B", Type: "REL"})
 
 		// Delete A
@@ -471,7 +477,7 @@ func TestBulkOperationsUpdateCounts(t *testing.T) {
 		defer cleanup()
 
 		// Create only A
-		engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
+		_, _ = engine.CreateNode(&Node{ID: "A", Labels: []string{"Test"}})
 
 		nc, _ := engine.NodeCount()
 		assert.Equal(t, int64(1), nc)

@@ -33,7 +33,7 @@ func TestEmbedThenFindNext(t *testing.T) {
 				"content": "Test content " + string(rune('a'+i)),
 			},
 		}
-		err := async.CreateNode(node)
+		_, err := async.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -94,7 +94,7 @@ func TestEmbedThenFindNextWithFlush(t *testing.T) {
 				"content": "Test content " + string(rune('a'+i)),
 			},
 		}
-		err := async.CreateNode(node)
+		_, err := async.CreateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -157,7 +157,7 @@ func TestProductionScenario(t *testing.T) {
 				"content":   "# Test Document\n\nThis is test content.",
 			},
 		}
-		err := async.CreateNode(node)
+		_, err := async.CreateNode(node)
 		require.NoError(t, err)
 	}
 

@@ -117,7 +117,11 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			Labels:     labels,
 			Properties: matchProps,
 		}
-		e.storage.CreateNode(node)
+		actualID, err := e.storage.CreateNode(node)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
+		}
+		node.ID = actualID
 		e.notifyNodeCreated(string(node.ID))
 		result.Stats.NodesCreated = 1
 
@@ -171,7 +175,11 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			Labels:     labels,
 			Properties: matchProps,
 		}
-		e.storage.CreateNode(node)
+		actualID, err := e.storage.CreateNode(node)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
+		}
+		node.ID = actualID
 		e.notifyNodeCreated(string(node.ID))
 		result.Stats.NodesCreated = 1
 
@@ -756,7 +764,11 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 			Labels:     labels,
 			Properties: matchProps,
 		}
-		e.storage.CreateNode(node)
+		actualID, err := e.storage.CreateNode(node)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
+		}
+		node.ID = actualID
 		e.notifyNodeCreated(string(node.ID))
 		result.Stats.NodesCreated = 1
 
@@ -1381,7 +1393,11 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			Labels:     labels,
 			Properties: props,
 		}
-		e.storage.CreateNode(node)
+		actualID, err := e.storage.CreateNode(node)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create node: %w", err)
+		}
+		node.ID = actualID
 		e.notifyNodeCreated(string(node.ID))
 
 		// Apply ON CREATE SET if present

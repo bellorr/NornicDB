@@ -160,12 +160,57 @@ func (e *StorageExecutor) executeMatchWithRelationshipsWithPath(pattern string, 
 		matches.PathVariable = pathVariable
 	}
 
-	// Execute traversal
-	paths := e.traverseGraph(matches)
-
-	// Apply WHERE clause filter if present
+	// OPTIMIZATION: If WHERE clause filters by id(startNode) = value, filter start nodes before traversal
+	// This avoids traversing from all nodes when we only need one specific node
+	var optimizedStartNodes []*storage.Node
 	if whereClause != "" {
-		paths = e.filterPathsByWhere(paths, matches, whereClause)
+		// Check if WHERE clause has id(startVar) = $param pattern
+		startVar := matches.StartNode.variable
+		if startVar != "" {
+			// Try to extract id(startVar) = value from WHERE clause
+			idPattern := fmt.Sprintf("id(%s) = ", startVar)
+			if strings.Contains(whereClause, idPattern) {
+				// Extract the value after the = sign
+				idx := strings.Index(whereClause, idPattern)
+				if idx >= 0 {
+					afterEq := strings.TrimSpace(whereClause[idx+len(idPattern):])
+					// Handle OR conditions: id(n) = $nodeId OR n.id = $nodeId
+					if strings.Contains(afterEq, " OR ") {
+						parts := strings.Split(afterEq, " OR ")
+						afterEq = strings.TrimSpace(parts[0])
+					}
+					// Handle AND conditions: id(n) = $nodeId AND ...
+					if strings.Contains(afterEq, " AND ") {
+						parts := strings.Split(afterEq, " AND ")
+						afterEq = strings.TrimSpace(parts[0])
+					}
+					// Remove quotes if present
+					afterEq = strings.Trim(afterEq, "'\"")
+					// Try to get the specific node
+					if node, err := e.storage.GetNode(storage.NodeID(afterEq)); err == nil && node != nil {
+						optimizedStartNodes = []*storage.Node{node}
+					}
+				}
+			}
+		}
+	}
+
+	// Execute traversal with optimized start nodes if available
+	var paths []PathResult
+	if len(optimizedStartNodes) > 0 {
+		// Use optimized start nodes (single node from WHERE clause)
+		paths = e.traverseGraphSequential(matches, optimizedStartNodes)
+		// Still need to apply WHERE clause filter (in case there are other conditions)
+		if whereClause != "" {
+			paths = e.filterPathsByWhere(paths, matches, whereClause)
+		}
+	} else {
+		// Normal traversal from all matching nodes
+		paths = e.traverseGraph(matches)
+		// Apply WHERE clause filter if present
+		if whereClause != "" {
+			paths = e.filterPathsByWhere(paths, matches, whereClause)
+		}
 	}
 
 	// Pre-compute upper-case expressions and aggregation flags ONCE for all items

@@ -163,7 +163,7 @@ func TestSchemaManager(t *testing.T) {
 
 	t.Run("GetIndexes", func(t *testing.T) {
 		sm := NewSchemaManager()
-		
+
 		sm.AddPropertyIndex("prop_idx", "User", []string{"name"})
 		sm.AddFulltextIndex("ft_idx", []string{"User"}, []string{"bio"})
 		sm.AddVectorIndex("vec_idx", "User", "embedding", 768, "euclidean")
@@ -206,7 +206,7 @@ func TestSchemaManager(t *testing.T) {
 func TestMemoryEngineConstraintIntegration(t *testing.T) {
 	t.Run("ConstraintEnforcementOnCreate", func(t *testing.T) {
 		store := NewMemoryEngine()
-		
+
 		// Add constraint
 		store.GetSchema().AddUniqueConstraint("email_unique", "User", "email")
 
@@ -219,7 +219,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 				"name":  "Alice",
 			},
 		}
-		err := store.CreateNode(node1)
+		_, err := store.CreateNode(node1)
 		if err != nil {
 			t.Fatalf("Failed to create first node: %v", err)
 		}
@@ -233,7 +233,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 				"name":  "Bob",
 			},
 		}
-		err = store.CreateNode(node2)
+		_, err = store.CreateNode(node2)
 		if err == nil {
 			t.Fatal("Expected constraint violation error")
 		}
@@ -247,7 +247,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 				"name":  "Charlie",
 			},
 		}
-		err = store.CreateNode(node3)
+		_, err = store.CreateNode(node3)
 		if err != nil {
 			t.Fatalf("Failed to create node with different email: %v", err)
 		}
@@ -255,7 +255,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 	t.Run("ConstraintOnMultipleLabels", func(t *testing.T) {
 		store := NewMemoryEngine()
-		
+
 		store.GetSchema().AddUniqueConstraint("id_unique", "Entity", "id")
 
 		// Node with Entity label
@@ -266,7 +266,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 				"id": "unique-id-1",
 			},
 		}
-		err := store.CreateNode(node1)
+		_, err := store.CreateNode(node1)
 		if err != nil {
 			t.Fatalf("Failed to create first node: %v", err)
 		}
@@ -279,7 +279,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 				"id": "unique-id-1",
 			},
 		}
-		err = store.CreateNode(node2)
+		_, err = store.CreateNode(node2)
 		if err == nil {
 			t.Fatal("Expected constraint violation")
 		}
@@ -287,7 +287,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 
 	t.Run("NoConstraintForDifferentLabel", func(t *testing.T) {
 		store := NewMemoryEngine()
-		
+
 		store.GetSchema().AddUniqueConstraint("user_email", "User", "email")
 
 		// Create User with email
@@ -308,7 +308,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 				"email": "test@example.com",
 			},
 		}
-		err := store.CreateNode(post)
+		_, err := store.CreateNode(post)
 		if err != nil {
 			t.Errorf("Unexpected error for different label: %v", err)
 		}

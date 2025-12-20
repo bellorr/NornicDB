@@ -672,18 +672,18 @@ func decodeEdge(data []byte) (*Edge, error) {
 // ============================================================================
 
 // CreateNode creates a new node in persistent storage.
-func (b *BadgerEngine) CreateNode(node *Node) error {
+func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 	if node == nil {
-		return ErrInvalidData
+		return "", ErrInvalidData
 	}
 	if node.ID == "" {
-		return ErrInvalidID
+		return "", ErrInvalidID
 	}
 
 	b.mu.RLock()
 	if b.closed {
 		b.mu.RUnlock()
-		return ErrStorageClosed
+		return "", ErrStorageClosed
 	}
 	b.mu.RUnlock()
 
@@ -691,7 +691,7 @@ func (b *BadgerEngine) CreateNode(node *Node) error {
 	for _, label := range node.Labels {
 		for propName, propValue := range node.Properties {
 			if err := b.schema.CheckUniqueConstraint(label, propName, propValue, ""); err != nil {
-				return fmt.Errorf("constraint violation: %w", err)
+				return "", fmt.Errorf("constraint violation: %w", err)
 			}
 		}
 	}
@@ -757,7 +757,10 @@ func (b *BadgerEngine) CreateNode(node *Node) error {
 		b.notifyNodeCreated(node)
 	}
 
-	return err
+	if err != nil {
+		return "", err
+	}
+	return node.ID, nil
 }
 
 // GetNode retrieves a node by ID.

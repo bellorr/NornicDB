@@ -57,6 +57,9 @@ type AsyncEngine struct {
 	// Stats
 	pendingWrites int64
 	totalFlushes  int64
+
+	// Flush mutex prevents concurrent flushes (race condition fix)
+	flushMu sync.Mutex
 }
 
 // AsyncEngineConfig configures the async engine behavior.
@@ -171,7 +174,13 @@ func (r FlushResult) HasErrors() bool {
 // Design: Snapshot caches, clear them, UNLOCK, then write to engine.
 // Reads during write see engine data (consistent since cache is empty).
 // This avoids blocking reads during I/O which kills Mac M-series performance.
+//
+// Thread-safe: Uses flushMu to prevent concurrent flushes which can cause
+// race conditions when cache limit is reached during concurrent writes.
 func (ae *AsyncEngine) Flush() error {
+	ae.flushMu.Lock()
+	defer ae.flushMu.Unlock()
+
 	result := ae.FlushWithResult()
 	if result.HasErrors() {
 		return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed",
@@ -374,7 +383,7 @@ func (ae *AsyncEngine) GetEngine() Engine {
 }
 
 // CreateNode adds to cache and returns immediately.
-func (ae *AsyncEngine) CreateNode(node *Node) error {
+func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
 	// Check cache size limit BEFORE acquiring lock to avoid deadlock
 	// If cache is full, flush synchronously to make room
 	if ae.maxNodeCacheSize > 0 {
@@ -382,7 +391,9 @@ func (ae *AsyncEngine) CreateNode(node *Node) error {
 		cacheSize := len(ae.nodeCache)
 		ae.mu.RUnlock()
 		if cacheSize >= ae.maxNodeCacheSize {
-			ae.Flush() // Synchronous flush - blocks until complete
+			if err := ae.Flush(); err != nil {
+				return "", err
+			}
 		}
 	}
 
@@ -418,7 +429,7 @@ func (ae *AsyncEngine) CreateNode(node *Node) error {
 	}
 
 	ae.pendingWrites++
-	return nil
+	return node.ID, nil
 }
 
 // UpdateNode adds to cache and returns immediately.

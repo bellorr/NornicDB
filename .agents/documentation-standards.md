@@ -390,7 +390,7 @@ func (e *Executor) Execute(ctx context.Context, query string, params map[string]
 //			"name": "Alice",
 //		},
 //	}
-//	err := engine.CreateNode(node)
+//	_, err := engine.CreateNode(node)
 //
 // # Example 2 - Node with Multiple Labels
 //
@@ -403,7 +403,7 @@ func (e *Executor) Execute(ctx context.Context, query string, params map[string]
 //			"role":  "administrator",
 //		},
 //	}
-//	err := engine.CreateNode(node)
+//	_, err := engine.CreateNode(node)
 //
 // # Example 3 - Node with Embedding
 //
@@ -414,7 +414,7 @@ func (e *Executor) Execute(ctx context.Context, query string, params map[string]
 //		Properties: map[string]any{"content": content},
 //		Embedding: embedding,
 //	}
-//	err := engine.CreateNode(node)
+//	_, err := engine.CreateNode(node)
 //
 // # Thread Safety
 //
@@ -669,7 +669,7 @@ func (e *MemoryEngine) CreateNode(node *Node) error
 //		Labels: []string{"User"},
 //		Properties: map[string]any{"name": "Alice"},
 //	}
-//	err := engine.CreateNode(node)
+//	_, err := engine.CreateNode(node)
 func (e *MemoryEngine) CreateNode(node *Node) error
 ```
 

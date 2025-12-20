@@ -233,7 +233,7 @@ func TestBuildGraphFromEngine(t *testing.T) {
 	}
 
 	for _, node := range nodes {
-		if err := engine.CreateNode(node); err != nil {
+		if _, err := engine.CreateNode(node); err != nil {
 			t.Fatalf("Failed to create node: %v", err)
 		}
 	}

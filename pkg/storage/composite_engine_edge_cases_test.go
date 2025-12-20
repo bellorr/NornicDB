@@ -34,7 +34,7 @@ func TestCompositeEngine_EmptyComposite(t *testing.T) {
 
 	// Write operations should fail with clear error
 	node := &Node{ID: NodeID("node1"), Labels: []string{"Person"}}
-	err = composite.CreateNode(node)
+	_, err = composite.CreateNode(node)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no writable constituents available")
 }
@@ -61,7 +61,7 @@ func TestCompositeEngine_OfflineConstituent(t *testing.T) {
 
 	// Create node in db1
 	node1 := &Node{ID: NodeID("node1"), Labels: []string{"Person"}}
-	err := engine1.CreateNode(node1)
+	_, err := engine1.CreateNode(node1)
 	require.NoError(t, err)
 
 	// Close db2 (simulate offline)
@@ -76,7 +76,7 @@ func TestCompositeEngine_OfflineConstituent(t *testing.T) {
 	// Write should still work with db1
 	// Note: CreateNode routes to a constituent, so it should work if db1 is still open
 	node2 := &Node{ID: NodeID("node2"), Labels: []string{"Person"}}
-	err = composite.CreateNode(node2)
+	_, err = composite.CreateNode(node2)
 	// May succeed if routed to db1, or fail if routed to db2
 	// Either way, the composite engine handles it
 	if err != nil {
@@ -115,11 +115,11 @@ func TestCompositeEngine_AllConstituentsOffline(t *testing.T) {
 
 	// Write operations should fail with storage closed error
 	node := &Node{ID: NodeID("node1"), Labels: []string{"Person"}}
-	err = composite.CreateNode(node)
+	_, err = composite.CreateNode(node)
 	assert.Error(t, err)
 	// May be "no writable constituents available" or "storage closed" depending on routing
-	assert.True(t, err.Error() == "no writable constituents available" || 
-		err.Error() == "storage closed" || 
+	assert.True(t, err.Error() == "no writable constituents available" ||
+		err.Error() == "storage closed" ||
 		containsSubstring(err.Error(), "storage closed"))
 }
 
@@ -129,4 +129,3 @@ func TestCompositeEngine_CircularDependencyPrevention(t *testing.T) {
 	// This is tested in pkg/multidb/composite_test.go
 	t.Skip("Circular dependency prevention is tested in pkg/multidb/composite_test.go")
 }
-

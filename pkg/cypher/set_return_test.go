@@ -48,7 +48,8 @@ func TestSetReturnSingleVariable(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice", "age": int64(30)},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN n should return column "n", not "matched"
 	result, err := exec.Execute(ctx, `
@@ -86,8 +87,10 @@ func TestSetReturnMultipleVariables(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Bob"},
 	}
-	require.NoError(t, store.CreateNode(node1))
-	require.NoError(t, store.CreateNode(node2))
+	_, err := store.CreateNode(node1)
+	require.NoError(t, err)
+	_, err = store.CreateNode(node2)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN n, m (if we can match multiple nodes)
 	// For now, test single node with multiple RETURN expressions
@@ -116,7 +119,8 @@ func TestSetReturnWithAlias(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN n AS person
 	result, err := exec.Execute(ctx, `
@@ -143,7 +147,8 @@ func TestSetReturnProperty(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice", "age": int64(30)},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN n.name, n.status
 	result, err := exec.Execute(ctx, `
@@ -173,7 +178,8 @@ func TestSetReturnPropertyWithAlias(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN n.name AS fullName, n.status AS currentStatus
 	result, err := exec.Execute(ctx, `
@@ -203,7 +209,8 @@ func TestSetReturnFunction(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN id(n)
 	result, err := exec.Execute(ctx, `
@@ -231,7 +238,8 @@ func TestSetReturnMixedExpressions(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN n.name, id(n) AS nodeId, n
 	result, err := exec.Execute(ctx, `
@@ -260,7 +268,8 @@ func TestSetNoReturn(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET without RETURN should return matched count
 	result, err := exec.Execute(ctx, `
@@ -286,7 +295,8 @@ func TestSetMergeOperatorReturn(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice", "age": int64(30)},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET n += {...} RETURN n
 	result, err := exec.Execute(ctx, `
@@ -321,7 +331,8 @@ func TestSetMultiplePropertiesReturn(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET multiple properties...RETURN n
 	result, err := exec.Execute(ctx, `
@@ -368,7 +379,8 @@ func TestSetReturnMultipleMatches(t *testing.T) {
 		},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+		require.NoError(t, err)
 	}
 
 	// MATCH all users...SET...RETURN names
@@ -407,7 +419,8 @@ func TestSetReturnComplexQuery(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice", "age": int64(30), "score": int64(100)},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// Complex query with multiple SET operations and complex RETURN
 	result, err := exec.Execute(ctx, `
@@ -445,7 +458,8 @@ func TestSetReturnStarRegression(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET...RETURN * should return all matched variables
 	result, err := exec.Execute(ctx, `
@@ -491,7 +505,8 @@ func TestSetReturnWithParameters(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// MATCH...SET with parameters...RETURN
 	params := map[string]interface{}{
@@ -546,7 +561,8 @@ func TestSetReturnWhitespaceVariations(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	// Test various whitespace patterns
 	queries := []string{

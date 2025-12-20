@@ -72,7 +72,8 @@ func (a *StorageAdapter) applyCreateNode(data []byte) error {
 	if err := json.Unmarshal(data, &node); err != nil {
 		return fmt.Errorf("unmarshal node: %w", err)
 	}
-	return a.engine.CreateNode(&node)
+	_, err := a.engine.CreateNode(&node)
+	return err
 }
 
 // applyUpdateNode updates a node from command data.
@@ -120,7 +121,7 @@ func (a *StorageAdapter) applySetProperty(data []byte) error {
 	if err := json.Unmarshal(data, &req); err != nil {
 		return fmt.Errorf("unmarshal set property request: %w", err)
 	}
-	
+
 	// Get node, update property, save
 	node, err := a.engine.GetNode(storage.NodeID(req.NodeID))
 	if err != nil {
@@ -144,7 +145,7 @@ func (a *StorageAdapter) applyBatchWrite(data []byte) error {
 	}
 
 	for _, node := range batch.Nodes {
-		if err := a.engine.CreateNode(node); err != nil {
+		if _, err := a.engine.CreateNode(node); err != nil {
 			return err
 		}
 	}
@@ -171,7 +172,7 @@ func (a *StorageAdapter) GetWALPosition() (uint64, error) {
 // GetWALEntries returns WAL entries starting from the given position.
 func (a *StorageAdapter) GetWALEntries(fromPosition uint64, maxEntries int) ([]*WALEntry, error) {
 	var entries []*WALEntry
-	
+
 	for i := range a.walEntries {
 		if a.walEntries[i].Position > fromPosition {
 			entries = append(entries, &a.walEntries[i])
@@ -180,7 +181,7 @@ func (a *StorageAdapter) GetWALEntries(fromPosition uint64, maxEntries int) ([]*
 			}
 		}
 	}
-	
+
 	return entries, nil
 }
 
@@ -191,7 +192,7 @@ func (a *StorageAdapter) WriteSnapshot(w SnapshotWriter) error {
 	if err != nil {
 		return fmt.Errorf("get all nodes: %w", err)
 	}
-	
+
 	edges, err := a.engine.AllEdges()
 	if err != nil {
 		return fmt.Errorf("get all edges: %w", err)
@@ -235,7 +236,7 @@ func (a *StorageAdapter) RestoreSnapshot(r SnapshotReader) error {
 
 	// Restore nodes
 	for _, node := range snapshot.Nodes {
-		if err := a.engine.CreateNode(node); err != nil {
+		if _, err := a.engine.CreateNode(node); err != nil {
 			return fmt.Errorf("restore node: %w", err)
 		}
 	}

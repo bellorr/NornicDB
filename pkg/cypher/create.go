@@ -101,9 +101,11 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 			Properties: nodePattern.properties,
 		}
 
-		if err := e.storage.CreateNode(node); err != nil {
+		actualID, err := e.storage.CreateNode(node)
+		if err != nil {
 			return nil, fmt.Errorf("failed to create node: %w", err)
 		}
+		node.ID = actualID
 		e.notifyNodeCreated(string(node.ID))
 
 		result.Stats.NodesCreated++
@@ -147,9 +149,11 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 					Labels:     sourcePattern.labels,
 					Properties: sourcePattern.properties,
 				}
-				if err := e.storage.CreateNode(sourceNode); err != nil {
+				actualID, err := e.storage.CreateNode(sourceNode)
+				if err != nil {
 					return nil, fmt.Errorf("failed to create source node: %w", err)
 				}
+				sourceNode.ID = actualID
 				e.notifyNodeCreated(string(sourceNode.ID))
 				result.Stats.NodesCreated++
 				if sourcePattern.variable != "" {
@@ -171,9 +175,11 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 					Labels:     targetPattern.labels,
 					Properties: targetPattern.properties,
 				}
-				if err := e.storage.CreateNode(targetNode); err != nil {
+				actualID, err := e.storage.CreateNode(targetNode)
+				if err != nil {
 					return nil, fmt.Errorf("failed to create target node: %w", err)
 				}
+				targetNode.ID = actualID
 				e.notifyNodeCreated(string(targetNode.ID))
 				result.Stats.NodesCreated++
 				if targetPattern.variable != "" {
@@ -316,9 +322,11 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 			Properties: nodePattern.properties,
 		}
 
-		if err := e.storage.CreateNode(node); err != nil {
+		actualID, err := e.storage.CreateNode(node)
+		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to create node: %w", err)
 		}
+		node.ID = actualID
 		e.notifyNodeCreated(string(node.ID))
 
 		result.Stats.NodesCreated++
@@ -361,9 +369,11 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 					Labels:     sourcePattern.labels,
 					Properties: sourcePattern.properties,
 				}
-				if err := e.storage.CreateNode(sourceNode); err != nil {
+				actualID, err := e.storage.CreateNode(sourceNode)
+				if err != nil {
 					return nil, nil, nil, fmt.Errorf("failed to create source node: %w", err)
 				}
+				sourceNode.ID = actualID
 				e.notifyNodeCreated(string(sourceNode.ID))
 				result.Stats.NodesCreated++
 				if sourcePattern.variable != "" {
@@ -384,9 +394,11 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 					Labels:     targetPattern.labels,
 					Properties: targetPattern.properties,
 				}
-				if err := e.storage.CreateNode(targetNode); err != nil {
+				actualID, err := e.storage.CreateNode(targetNode)
+				if err != nil {
 					return nil, nil, nil, fmt.Errorf("failed to create target node: %w", err)
 				}
+				targetNode.ID = actualID
 				e.notifyNodeCreated(string(targetNode.ID))
 				result.Stats.NodesCreated++
 				if targetPattern.variable != "" {
@@ -1362,9 +1374,11 @@ func (e *StorageExecutor) processCreateNode(pattern string, nodeVars map[string]
 		Properties: nodeInfo.properties,
 	}
 
-	if err := e.storage.CreateNode(node); err != nil {
+	actualID, err := e.storage.CreateNode(node)
+	if err != nil {
 		return fmt.Errorf("failed to create node: %w", err)
 	}
+	node.ID = actualID
 	e.notifyNodeCreated(string(node.ID))
 
 	result.Stats.NodesCreated++
@@ -1490,9 +1504,11 @@ func (e *StorageExecutor) resolveOrCreateNode(content string, nodeVars map[strin
 		Properties: nodeInfo.properties,
 	}
 
-	if err := e.storage.CreateNode(node); err != nil {
+	actualID, err := e.storage.CreateNode(node)
+	if err != nil {
 		return nil, fmt.Errorf("failed to create node: %w", err)
 	}
+	node.ID = actualID
 	e.notifyNodeCreated(string(node.ID))
 
 	result.Stats.NodesCreated++
@@ -2067,17 +2083,13 @@ func (e *StorageExecutor) executeCreateNodeSegment(ctx context.Context, createSt
 		Properties: nodePattern.properties,
 	}
 
-	if err := e.storage.CreateNode(node); err != nil {
+	actualID, err := e.storage.CreateNode(node)
+	if err != nil {
 		return nil, "", fmt.Errorf("failed to create node: %w", err)
 	}
 
-	// If using a namespaced engine, the ID might have been prefixed
-	// We need to get the actual ID that was used. Since CreateNode doesn't return it,
-	// we'll try to retrieve the node by its properties to get the prefixed ID.
-	// However, for now, we'll assume the ID is correct and update it if needed.
-	// Actually, NamespacedEngine creates a copy, so the original node ID is unchanged.
-	// We need to manually prefix it if we're using a namespaced engine.
-	// For now, let's check if we can get the node back or if we need to handle this differently.
+	// Update node ID with the actual stored ID (may be prefixed for namespaced/composite engines)
+	node.ID = actualID
 
 	e.notifyNodeCreated(string(node.ID))
 

@@ -40,7 +40,7 @@ func TestAsyncEngine_CreateNode(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]any{"name": "Alice"},
 	}
-	err := async.CreateNode(node)
+	_, err := async.CreateNode(node)
 	require.NoError(t, err)
 
 	// Should be readable immediately from cache
@@ -65,7 +65,7 @@ func TestAsyncEngine_Flush(t *testing.T) {
 
 	// Create nodes
 	for i := 0; i < 10; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -114,7 +114,7 @@ func TestAsyncEngine_NodeCount_RaceCondition(t *testing.T) {
 
 	// Create nodes
 	for i := 0; i < numNodes; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -205,7 +205,7 @@ func TestAsyncEngine_EdgeCount_RaceCondition(t *testing.T) {
 
 	// Create nodes first
 	for i := 0; i < numNodes; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -281,7 +281,7 @@ func TestAsyncEngine_DeleteNode(t *testing.T) {
 
 	// Create and flush nodes
 	for i := 0; i < 10; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -324,7 +324,7 @@ func TestAsyncEngine_StreamNodes(t *testing.T) {
 
 	// Create 100 nodes
 	for i := 0; i < 100; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -370,7 +370,7 @@ func TestAsyncEngine_StreamNodes(t *testing.T) {
 	t.Run("StreamWithCacheAndEngine", func(t *testing.T) {
 		// Add more nodes to cache (not flushed yet)
 		for i := 100; i < 150; i++ {
-			err := async.CreateNode(&Node{
+			_, err := async.CreateNode(&Node{
 				ID:     NodeID(fmt.Sprintf("node-%d", i)),
 				Labels: []string{"Test"},
 			})
@@ -416,7 +416,7 @@ func TestAsyncEngine_StreamEdges(t *testing.T) {
 
 	// Create nodes first
 	for i := 0; i < 10; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -474,7 +474,7 @@ func TestAsyncEngine_StreamNodeChunks(t *testing.T) {
 
 	// Create 100 nodes
 	for i := 0; i < 100; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})

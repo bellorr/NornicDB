@@ -422,7 +422,7 @@ Improvement: 100x faster!
 // BEFORE: Individual creates
 func importNodes(nodes []*Node) error {
     for _, node := range nodes {
-        if err := engine.CreateNode(node); err != nil {
+        if _, err := engine.CreateNode(node); err != nil {
             return err
         }
     }

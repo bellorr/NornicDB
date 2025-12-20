@@ -39,7 +39,7 @@ func TestYieldReturnIntegration(t *testing.T) {
 	}
 
 	for _, n := range testNodes {
-		err := store.CreateNode(&storage.Node{
+		_, err := store.CreateNode(&storage.Node{
 			ID:         storage.NodeID(n.id),
 			Labels:     n.labels,
 			Properties: n.props,

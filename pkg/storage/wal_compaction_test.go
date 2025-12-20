@@ -63,7 +63,7 @@ func TestWALTruncateAfterSnapshot(t *testing.T) {
 		// Create 100 nodes
 		for i := 1; i <= 100; i++ {
 			node := &Node{ID: NodeID(fmt.Sprintf("n%d", i)), Labels: []string{"Test"}}
-			err := walEngine.CreateNode(node)
+			_, err := walEngine.CreateNode(node)
 			require.NoError(t, err)
 		}
 
@@ -377,7 +377,7 @@ func TestWALCompactionUnderLoad(t *testing.T) {
 				for i := 0; i < writeCount; i++ {
 					nodeID := fmt.Sprintf("w%d_n%d", writerID, i)
 					node := &Node{ID: NodeID(nodeID), Labels: []string{"Test"}}
-					err := walEngine.CreateNode(node)
+					_, err := walEngine.CreateNode(node)
 					if err != nil {
 						t.Errorf("Writer %d failed to create node %d: %v", writerID, i, err)
 					}

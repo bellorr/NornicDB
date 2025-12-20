@@ -118,7 +118,7 @@ func TestKalmanSearchAdapter_ApplyRankingStability(t *testing.T) {
 func TestKalmanSearchAdapter_RecordRanking(t *testing.T) {
 	engine := storage.NewMemoryEngine()
 	service := NewService(engine)
-	
+
 	cfg := DefaultKalmanSearchConfig()
 	cfg.StabilityWindow = 3
 	adapter := NewKalmanSearchAdapter(service, cfg)
@@ -358,7 +358,7 @@ func TestKalmanSearchAdapter_Search_Integration(t *testing.T) {
 		for j := range embedding {
 			embedding[j] = float32(i*j) / 1024.0
 		}
-		_ = engine.CreateNode(&storage.Node{
+		_, _ = engine.CreateNode(&storage.Node{
 			Labels:     []string{"Document"},
 			Properties: map[string]interface{}{"title": "Doc " + string(rune('A'+i))},
 			Embedding:  embedding,

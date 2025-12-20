@@ -1324,7 +1324,8 @@ func ReplayWALEntry(engine Engine, entry WALEntry) error {
 		if err := json.Unmarshal(entry.Data, &data); err != nil {
 			return fmt.Errorf("wal: failed to unmarshal node: %w", err)
 		}
-		return engine.CreateNode(data.Node)
+		_, err := engine.CreateNode(data.Node)
+		return err
 
 	case OpUpdateNode:
 		var data WALNodeData
@@ -1449,7 +1450,8 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		if data.OldNode == nil {
 			return ErrNoUndoData
 		}
-		return engine.CreateNode(data.OldNode)
+		_, err := engine.CreateNode(data.OldNode)
+		return err
 
 	case OpCreateEdge:
 		// Undo create = delete
@@ -1873,6 +1875,7 @@ type WALEngine struct {
 	snapshotMu       sync.RWMutex // Protects snapshotTicker and stopSnapshot
 	snapshotTicker   *time.Ticker
 	stopSnapshot     chan struct{}
+	snapshotWg       sync.WaitGroup // Waits for auto-compaction goroutine to finish
 	lastSnapshotTime atomic.Int64
 	totalSnapshots   atomic.Int64
 }
@@ -1923,28 +1926,38 @@ func (w *WALEngine) EnableAutoCompaction(snapshotDir string) error {
 	w.stopSnapshot = make(chan struct{})
 
 	// Now start goroutine - ticker is already initialized and protected by lock
+	w.snapshotWg.Add(1)
 	go w.autoSnapshotLoop()
 
 	return nil
 }
 
 // DisableAutoCompaction stops automatic snapshot creation and WAL truncation.
+// Waits for the auto-compaction goroutine to finish before returning to prevent
+// race conditions when the engine is closed.
 func (w *WALEngine) DisableAutoCompaction() {
 	w.snapshotMu.Lock()
-	defer w.snapshotMu.Unlock()
-
+	shouldWait := false
 	if w.stopSnapshot != nil {
 		close(w.stopSnapshot)
 		w.stopSnapshot = nil
+		shouldWait = true
 	}
 	if w.snapshotTicker != nil {
 		w.snapshotTicker.Stop()
 		w.snapshotTicker = nil
 	}
+	w.snapshotMu.Unlock()
+
+	// Wait for goroutine to finish (outside lock to avoid deadlock)
+	if shouldWait {
+		w.snapshotWg.Wait()
+	}
 }
 
 // autoSnapshotLoop runs in background, creating periodic snapshots and truncating WAL.
 func (w *WALEngine) autoSnapshotLoop() {
+	defer w.snapshotWg.Done()
 	for {
 		// Get local copies of channels under lock to avoid races
 		w.snapshotMu.RLock()
@@ -2016,10 +2029,10 @@ func (w *WALEngine) GetSnapshotStats() (totalSnapshots int64, lastSnapshotTime t
 }
 
 // CreateNode logs then executes node creation.
-func (w *WALEngine) CreateNode(node *Node) error {
+func (w *WALEngine) CreateNode(node *Node) (NodeID, error) {
 	if config.IsWALEnabled() {
 		if err := w.wal.Append(OpCreateNode, WALNodeData{Node: node}); err != nil {
-			return fmt.Errorf("wal: failed to log create_node: %w", err)
+			return "", fmt.Errorf("wal: failed to log create_node: %w", err)
 		}
 	}
 	return w.engine.CreateNode(node)

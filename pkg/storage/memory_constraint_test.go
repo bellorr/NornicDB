@@ -23,7 +23,7 @@ func TestBulkCreateNodesConstraintEnforcement(t *testing.T) {
 			Labels:     []string{"User"},
 			Properties: map[string]interface{}{"email": "alice@example.com", "name": "Alice"},
 		}
-		err := engine.CreateNode(node1)
+		_, err := engine.CreateNode(node1)
 		if err != nil {
 			t.Fatalf("Failed to create first node: %v", err)
 		}
@@ -94,7 +94,7 @@ func TestBulkCreateNodesConstraintEnforcement(t *testing.T) {
 			Properties: map[string]interface{}{"email": "a@test.com"},
 		}
 
-		err = engine2.CreateNode(node)
+		_, err = engine2.CreateNode(node)
 		if err == nil {
 			t.Fatal("Expected constraint violation error when creating duplicate after bulk create")
 		}

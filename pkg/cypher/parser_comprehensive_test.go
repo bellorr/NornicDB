@@ -27,7 +27,8 @@ func TestParseNodePatterns(t *testing.T) {
 		{ID: "n4", Labels: []string{"Person", "Employee"}, Properties: map[string]interface{}{"name": "Carol"}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -143,7 +144,8 @@ func TestParseRelationshipPatterns(t *testing.T) {
 		{ID: "c1", Labels: []string{"Company"}, Properties: map[string]interface{}{"name": "Acme"}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -269,7 +271,8 @@ func TestParseVariableLengthPaths(t *testing.T) {
 		{ID: "n4", Labels: []string{"Node"}, Properties: map[string]interface{}{"level": int64(4)}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -372,7 +375,8 @@ func TestParseWhereOperators(t *testing.T) {
 		}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -566,7 +570,8 @@ func TestParseReturnClause(t *testing.T) {
 		{ID: "n3", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Carol", "age": int64(25)}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -748,7 +753,8 @@ func TestParseWithClause(t *testing.T) {
 		{ID: "n4", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Dave", "dept": "Sales", "salary": int64(85000)}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -850,7 +856,8 @@ func TestParseOrderBySkipLimit(t *testing.T) {
 		{ID: "n4", Labels: []string{"Item"}, Properties: map[string]interface{}{"name": "D", "value": int64(40)}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -1387,7 +1394,8 @@ func TestParseSpecialCharacters(t *testing.T) {
 		{ID: "sp9", Labels: []string{"Special"}, Properties: map[string]interface{}{"name": "Emoji 🎉 Test"}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -1490,7 +1498,8 @@ func TestParseMultipleMatchPatterns(t *testing.T) {
 		{ID: "skill-1", Labels: []string{"Skill"}, Properties: map[string]interface{}{"name": "Go"}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -1596,7 +1605,8 @@ func TestParseOptionalMatch(t *testing.T) {
 		{ID: "addr1", Labels: []string{"Address"}, Properties: map[string]interface{}{"city": "NYC"}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -1731,7 +1741,8 @@ func TestParseParameters(t *testing.T) {
 		{ID: "n2", Labels: []string{"Param"}, Properties: map[string]interface{}{"name": "Test2", "value": int64(200)}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -1814,7 +1825,8 @@ func TestParseCaseExpressions(t *testing.T) {
 		{ID: "n3", Labels: []string{"Score"}, Properties: map[string]interface{}{"value": int64(50)}},
 	}
 	for _, n := range nodes {
-		require.NoError(t, store.CreateNode(n))
+		_, err := store.CreateNode(n)
+	require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -1893,7 +1905,8 @@ func TestParseStringFunctions(t *testing.T) {
 			"name": "Alice",
 		},
 	}
-	require.NoError(t, store.CreateNode(node))
+	_, err := store.CreateNode(node)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name        string

@@ -32,9 +32,12 @@ func TestMatchRelationshipWithWhereIdFunction(t *testing.T) {
 		Labels:     []string{"Company"},
 		Properties: map[string]interface{}{"name": "TechCorp"},
 	}
-	require.NoError(t, store.CreateNode(n1))
-	require.NoError(t, store.CreateNode(n2))
-	require.NoError(t, store.CreateNode(n3))
+	_, err := store.CreateNode(n1)
+	require.NoError(t, err)
+	_, err = store.CreateNode(n2)
+	require.NoError(t, err)
+	_, err = store.CreateNode(n3)
+	require.NoError(t, err)
 
 	// Create relationships
 	edge1 := &storage.Edge{

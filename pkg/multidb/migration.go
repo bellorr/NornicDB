@@ -126,7 +126,8 @@ func (m *DatabaseManager) markMigrationComplete() error {
 	// Try update first, then create
 	err := systemEngine.UpdateNode(node)
 	if err == storage.ErrNotFound {
-		return systemEngine.CreateNode(node)
+		_, err := systemEngine.CreateNode(node)
+		return err
 	}
 	return err
 }
@@ -252,7 +253,7 @@ func (m *DatabaseManager) performMigration(engine storage.Engine) error {
 		}
 
 		// Create new node (this will create all indexes)
-		if err := engine.CreateNode(newNode); err != nil {
+		if _, err := engine.CreateNode(newNode); err != nil {
 			// If node already exists (shouldn't happen), skip
 			if err == storage.ErrAlreadyExists {
 				continue

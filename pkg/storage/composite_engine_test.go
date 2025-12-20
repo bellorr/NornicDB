@@ -33,7 +33,7 @@ func TestCompositeEngine_CreateNode(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 
 	// Node should be in one of the constituents
@@ -248,7 +248,7 @@ func TestCompositeEngine_ReadOnlyConstituent(t *testing.T) {
 
 	// Cannot write to read-only constituent - should route to writable one
 	newNode := &Node{ID: NodeID("node2"), Labels: []string{"Person"}}
-	err = composite.CreateNode(newNode)
+	_, err = composite.CreateNode(newNode)
 	require.NoError(t, err)
 
 	// New node should be in writable constituent
@@ -1097,7 +1097,7 @@ func TestCompositeEngine_routeWrite_PropertyBased(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"tenant_id": "tenant_a"},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 
 	// Node should be in one of the constituents
@@ -1138,7 +1138,7 @@ func TestCompositeEngine_routeWrite_LabelBased(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 
 	// Node should be in one of the constituents
@@ -1179,7 +1179,7 @@ func TestCompositeEngine_routeWrite_PropertyBased_Int64(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"tenant_id": int64(123)},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -1209,7 +1209,7 @@ func TestCompositeEngine_routeWrite_PropertyBased_Int(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"tenant_id": 456},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -1239,7 +1239,7 @@ func TestCompositeEngine_routeWrite_PropertyBased_NegativeHash(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"tenant_id": int64(-123)},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -1269,7 +1269,7 @@ func TestCompositeEngine_routeWrite_PropertyBased_NegativeInt(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"tenant_id": -456},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -1300,7 +1300,7 @@ func TestCompositeEngine_routeWrite_LabelBased_NegativeHash(t *testing.T) {
 		Labels:     []string{"Z"}, // Single char that might produce negative hash
 		Properties: map[string]interface{}{},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -1330,7 +1330,7 @@ func TestCompositeEngine_routeWrite_NoLabelsNoProperties(t *testing.T) {
 		Labels:     []string{},
 		Properties: nil,
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -1360,7 +1360,7 @@ func TestCompositeEngine_routeWrite_PropertiesWithoutTenantID(t *testing.T) {
 		Labels:     []string{},
 		Properties: map[string]interface{}{"name": "Alice"},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -1390,7 +1390,7 @@ func TestCompositeEngine_CreateNode_NoWritableConstituents(t *testing.T) {
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{},
 	}
-	err := composite.CreateNode(node)
+	_, err := composite.CreateNode(node)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "no writable constituents")
 }

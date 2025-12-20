@@ -186,7 +186,7 @@ func TestEmbedWorkerRecentlyProcessed(t *testing.T) {
 		worker.mu.Unlock()
 
 		// Create a node to trigger cleanup (cleanup happens during processing)
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "trigger-node",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
@@ -226,7 +226,7 @@ func TestEmbedWorkerPersistence(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create a node without embedding
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "persist-test",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
@@ -284,7 +284,7 @@ func TestEmbedWorkerPersistence(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create a node
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "no-reprocess-test",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
@@ -345,7 +345,7 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create node without embedding
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "needs-embed",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
@@ -368,7 +368,7 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create node WITH embedding
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:        "has-embed",
 			Labels:    []string{"Memory"},
 			Embedding: make([]float32, 1024), // Pre-existing embedding
@@ -391,7 +391,7 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create internal node (starts with _)
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "internal-node",
 			Labels: []string{"_Internal"},
 			Properties: map[string]any{
@@ -747,7 +747,7 @@ func TestLargeContentEmbedding(t *testing.T) {
 		// Create a node with large content (like a source file)
 		largeContent := strings.Repeat("This is line of code with various tokens and symbols. ", 100)
 
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "large-file-node",
 			Labels: []string{"File"},
 			Properties: map[string]any{
@@ -827,7 +827,7 @@ func TestEmbedWorkerConcurrency(t *testing.T) {
 
 		// Create multiple nodes
 		for i := 0; i < 10; i++ {
-			err := engine.CreateNode(&storage.Node{
+			_, err := engine.CreateNode(&storage.Node{
 				ID:     storage.NodeID("node-" + string(rune('0'+i))),
 				Labels: []string{"Memory"},
 				Properties: map[string]any{
@@ -877,7 +877,7 @@ func TestRecentlyProcessedOnlyLogsOnce(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create a node that will be marked as recently processed but still found
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "test-skip-logs",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
@@ -936,7 +936,7 @@ func TestNoContentNodeDoesNotCauseInfiniteLoop(t *testing.T) {
 		// Create a node with NO labels and ONLY metadata fields (all skipped by buildEmbeddingText)
 		// This is a truly empty node - no labels, no embeddable properties
 		// Don't set has_embedding as that would prevent node discovery
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "no-content-node",
 			Labels: []string{}, // No labels - truly empty
 			Properties: map[string]any{
@@ -1009,7 +1009,7 @@ func TestAsyncEngineCacheIntegration(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create a node
-		err := asyncEngine.CreateNode(&storage.Node{
+		_, err := asyncEngine.CreateNode(&storage.Node{
 			ID:     "async-test",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
@@ -1071,7 +1071,7 @@ func TestEmbeddingPersistenceVerification(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create a node
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "verify-persist",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
@@ -1119,7 +1119,7 @@ func TestEmbeddingPersistenceVerification(t *testing.T) {
 		engine := storage.NewMemoryEngine()
 
 		// Create a node
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "manual-embed",
 			Labels: []string{"Test"},
 			Properties: map[string]any{
@@ -1157,7 +1157,7 @@ func TestRaceConditionPrevention(t *testing.T) {
 		embedder := newMockEmbedder()
 
 		// Create a node
-		err := engine.CreateNode(&storage.Node{
+		_, err := engine.CreateNode(&storage.Node{
 			ID:     "race-test",
 			Labels: []string{"Memory"},
 			Properties: map[string]any{

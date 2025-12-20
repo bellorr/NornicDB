@@ -351,6 +351,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	dbConfig.EmbeddingModel = embeddingModel
 	dbConfig.EmbeddingDimensions = embeddingDim
 	dbConfig.SearchMinSimilarity = cfg.Memory.SearchMinSimilarity
+	dbConfig.EmbedWorkerNumWorkers = cfg.EmbeddingWorker.NumWorkers
 	dbConfig.ParallelEnabled = parallelEnabled
 	dbConfig.ParallelMaxWorkers = parallelWorkers
 	dbConfig.ParallelMinBatchSize = parallelBatchSize

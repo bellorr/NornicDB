@@ -160,7 +160,7 @@ func TestDatabaseManager_DropDatabase(t *testing.T) {
 			"name": "test",
 		},
 	}
-	err = store.CreateNode(node)
+	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 
 	// Drop database
@@ -266,7 +266,7 @@ func TestDatabaseManager_DropDatabase_DeletesNodesAndEdges(t *testing.T) {
 			"age":  30,
 		},
 	}
-	err = store.CreateNode(node1)
+	_, err = store.CreateNode(node1)
 	require.NoError(t, err)
 
 	node2 := &storage.Node{
@@ -277,7 +277,7 @@ func TestDatabaseManager_DropDatabase_DeletesNodesAndEdges(t *testing.T) {
 			"age":  25,
 		},
 	}
-	err = store.CreateNode(node2)
+	_, err = store.CreateNode(node2)
 	require.NoError(t, err)
 
 	node3 := &storage.Node{
@@ -287,7 +287,7 @@ func TestDatabaseManager_DropDatabase_DeletesNodesAndEdges(t *testing.T) {
 			"name": "Acme Corp",
 		},
 	}
-	err = store.CreateNode(node3)
+	_, err = store.CreateNode(node3)
 	require.NoError(t, err)
 
 	// Create edges between nodes
@@ -436,7 +436,7 @@ func TestDatabaseManager_NodeNamespacePrefix(t *testing.T) {
 			"name": "Test Person",
 		},
 	}
-	err = store.CreateNode(node)
+	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 
 	// Verify the node exists in the namespaced storage
@@ -505,7 +505,7 @@ func TestDatabaseManager_GetStorage(t *testing.T) {
 			"name": "test",
 		},
 	}
-	err = store.CreateNode(node)
+	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 
 	// Get the same storage again (should be cached)
@@ -555,7 +555,7 @@ func TestDatabaseManager_GetStorage_Isolation(t *testing.T) {
 			"tenant": "a",
 		},
 	}
-	err = storeA.CreateNode(nodeA)
+	_, err = storeA.CreateNode(nodeA)
 	require.NoError(t, err)
 
 	// Create node in tenant_b
@@ -566,7 +566,7 @@ func TestDatabaseManager_GetStorage_Isolation(t *testing.T) {
 			"tenant": "b",
 		},
 	}
-	err = storeB.CreateNode(nodeB)
+	_, err = storeB.CreateNode(nodeB)
 	require.NoError(t, err)
 
 	// Verify isolation: tenant_a should only see its node
@@ -729,7 +729,7 @@ func TestDatabaseManager_BackwardsCompatibility(t *testing.T) {
 			"name": "legacy",
 		},
 	}
-	err = store.CreateNode(node)
+	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 
 	// Can query nodes

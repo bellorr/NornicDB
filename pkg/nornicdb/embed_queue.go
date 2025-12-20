@@ -57,6 +57,7 @@ type EmbedWorker struct {
 // EmbedWorkerConfig holds configuration for the embedding worker.
 type EmbedWorkerConfig struct {
 	// Worker settings
+	NumWorkers   int           // Number of concurrent workers (default: 1, use more for network/parallel processing)
 	ScanInterval time.Duration // How often to scan for nodes without embeddings (default: 5s)
 	BatchDelay   time.Duration // Delay between processing nodes (default: 500ms)
 	MaxRetries   int           // Max retry attempts per node (default: 3)
@@ -73,6 +74,7 @@ type EmbedWorkerConfig struct {
 // DefaultEmbedWorkerConfig returns sensible defaults.
 func DefaultEmbedWorkerConfig() *EmbedWorkerConfig {
 	return &EmbedWorkerConfig{
+		NumWorkers:           1,                      // Single worker by default
 		ScanInterval:         15 * time.Minute,       // Scan for missed nodes every 15 minutes
 		BatchDelay:           500 * time.Millisecond, // Delay between processing nodes
 		MaxRetries:           3,
@@ -83,11 +85,19 @@ func DefaultEmbedWorkerConfig() *EmbedWorkerConfig {
 	}
 }
 
-// NewEmbedWorker creates a new async embedding worker.
+// NewEmbedWorker creates a new async embedding worker pool.
 // If embedder is nil, the worker will wait for SetEmbedder() to be called.
+// NumWorkers controls how many concurrent workers process embeddings in parallel.
+// Use more workers for network-based embedders (OpenAI, etc.) or when you have
+// multiple GPUs/CPUs available for local embedding generation.
 func NewEmbedWorker(embedder embed.Embedder, storage storage.Engine, config *EmbedWorkerConfig) *EmbedWorker {
 	if config == nil {
 		config = DefaultEmbedWorkerConfig()
+	}
+
+	// Ensure at least 1 worker
+	if config.NumWorkers < 1 {
+		config.NumWorkers = 1
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -103,9 +113,16 @@ func NewEmbedWorker(embedder embed.Embedder, storage storage.Engine, config *Emb
 		loggedSkip:        make(map[string]bool),
 	}
 
-	// Start worker
-	ew.wg.Add(1)
-	go ew.worker()
+	// Start N workers for parallel processing
+	numWorkers := config.NumWorkers
+	for i := 0; i < numWorkers; i++ {
+		ew.wg.Add(1)
+		go ew.worker()
+	}
+
+	if numWorkers > 1 {
+		fmt.Printf("🧠 Started %d embedding workers for parallel processing\n", numWorkers)
+	}
 
 	return ew
 }
@@ -930,7 +947,7 @@ func (ew *EmbedWorker) createFileChunksWithEmbeddings(parentFile *storage.Node, 
 		}
 
 		// Create the chunk node (MERGE behavior - create or update)
-		if err := ew.storage.CreateNode(chunkNode); err != nil {
+		if _, err := ew.storage.CreateNode(chunkNode); err != nil {
 			// If already exists, update it (like MERGE does)
 			if err := ew.storage.UpdateNode(chunkNode); err != nil {
 				return fmt.Errorf("failed to create/update chunk %d: %w", i, err)

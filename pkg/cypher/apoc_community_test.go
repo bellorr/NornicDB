@@ -14,14 +14,20 @@ func createCommunityTestGraph(t *testing.T, engine storage.Engine) {
 	// With a weak link between C and D
 
 	// Community 1: A-B-C (triangle)
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "A"}}))
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "B"}}))
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "C"}}))
+	_, err := engine.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "A"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "B"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "C"}})
+	require.NoError(t, err)
 
 	// Community 2: D-E-F (triangle)
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "d", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "D"}}))
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "e", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "E"}}))
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "f", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "F"}}))
+	_, err = engine.CreateNode(&storage.Node{ID: "d", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "D"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "e", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "E"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "f", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "F"}})
+	require.NoError(t, err)
 
 	// Dense connections within community 1
 	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "e1", StartNode: "a", EndNode: "b", Type: "CONNECTS"}))
@@ -102,9 +108,12 @@ func TestApocAlgoWCC(t *testing.T) {
 	ctx := context.Background()
 
 	// Create disconnected components
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "x", Labels: []string{"Node"}}))
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "y", Labels: []string{"Node"}}))
-	require.NoError(t, engine.CreateNode(&storage.Node{ID: "z", Labels: []string{"Node"}}))
+	_, err := engine.CreateNode(&storage.Node{ID: "x", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "y", Labels: []string{"Node"}})
+	require.NoError(t, err)
+	_, err = engine.CreateNode(&storage.Node{ID: "z", Labels: []string{"Node"}})
+	require.NoError(t, err)
 	require.NoError(t, engine.CreateEdge(&storage.Edge{ID: "xy", StartNode: "x", EndNode: "y", Type: "CONNECTS"}))
 	// z is isolated
 

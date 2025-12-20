@@ -33,7 +33,7 @@ func TestBackwardsCompatibility_ExistingCode(t *testing.T) {
 			"created_by": "old-code",
 		},
 	}
-	err = store.CreateNode(node)
+	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 
 	// Old code: query nodes
@@ -47,7 +47,7 @@ func TestBackwardsCompatibility_ExistingCode(t *testing.T) {
 		ID:     storage.NodeID("legacy-node-2"),
 		Labels: []string{"Legacy"},
 	}
-	err = store.CreateNode(node2)
+	_, err = store.CreateNode(node2)
 	require.NoError(t, err)
 
 	edge := &storage.Edge{
@@ -89,7 +89,7 @@ func TestBackwardsCompatibility_LegacyDatabaseName(t *testing.T) {
 		ID:     storage.NodeID("legacy"),
 		Labels: []string{"Test"},
 	}
-	err = store.CreateNode(node)
+	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 }
 
@@ -112,7 +112,7 @@ func TestBackwardsCompatibility_NoBreakingChanges(t *testing.T) {
 	}
 
 	// CreateNode - should work
-	err := namespaced.CreateNode(node)
+	_, err := namespaced.CreateNode(node)
 	require.NoError(t, err)
 
 	// GetNode - should work
@@ -154,4 +154,3 @@ func TestBackwardsCompatibility_ConfigurationPrecedence(t *testing.T) {
 	// The actual env var parsing is in pkg/config, but we verify
 	// that NewConfigFromDefaultDatabase accepts the value correctly
 }
-

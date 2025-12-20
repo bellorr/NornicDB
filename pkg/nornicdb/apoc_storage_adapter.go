@@ -39,7 +39,7 @@ func (a *APOCStorageAdapter) CreateNode(labels []string, properties map[string]i
 		Labels:     labels,
 		Properties: properties,
 	}
-	err := a.engine.CreateNode(node)
+	_, err := a.engine.CreateNode(node)
 	if err != nil {
 		return nil, err
 	}

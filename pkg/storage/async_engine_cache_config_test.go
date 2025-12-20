@@ -71,7 +71,7 @@ func TestAsyncEngine_NodeCacheLimit_TriggersFlush(t *testing.T) {
 
 	// Create 15 nodes - should trigger at least one flush
 	for i := 0; i < 15; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -99,7 +99,7 @@ func TestAsyncEngine_EdgeCacheLimit_TriggersFlush(t *testing.T) {
 
 	// Create source and target nodes first
 	for i := 0; i < 20; i++ {
-		err := engine.CreateNode(&Node{
+		_, err := engine.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -158,7 +158,7 @@ func TestAsyncEngine_ZeroCacheSize_NoAutoFlush(t *testing.T) {
 
 	// Create 100 nodes - should NOT trigger any flush
 	for i := 0; i < 100; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -202,7 +202,7 @@ func TestAsyncEngine_CacheLimit_ConcurrentWrites(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < nodesPerGoroutine; i++ {
 				nodeID := fmt.Sprintf("node-%d-%d", goroutineID, i)
-				err := async.CreateNode(&Node{
+				_, err := async.CreateNode(&Node{
 					ID:     NodeID(nodeID),
 					Labels: []string{"Test"},
 				})
@@ -246,7 +246,7 @@ func TestAsyncEngine_FlushInterval_Configurable(t *testing.T) {
 	defer async.Close()
 
 	// Create a node
-	err := async.CreateNode(&Node{
+	_, err := async.CreateNode(&Node{
 		ID:     NodeID("test-node"),
 		Labels: []string{"Test"},
 	})
@@ -283,7 +283,7 @@ func TestAsyncEngine_CacheLimit_ExactBoundary(t *testing.T) {
 
 	// Create exactly cacheLimit nodes - should NOT trigger flush yet
 	for i := 0; i < cacheLimit; i++ {
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})
@@ -297,7 +297,7 @@ func TestAsyncEngine_CacheLimit_ExactBoundary(t *testing.T) {
 	assert.Equal(t, cacheLimit, cacheSize, "cache should be at exact limit")
 
 	// One more node should trigger flush
-	err := async.CreateNode(&Node{
+	_, err := async.CreateNode(&Node{
 		ID:     NodeID("node-trigger"),
 		Labels: []string{"Test"},
 	})
@@ -336,7 +336,7 @@ func TestAsyncEngine_MultipleFlushes_CacheLimit(t *testing.T) {
 		beforeSize := len(async.nodeCache)
 		async.mu.RUnlock()
 
-		err := async.CreateNode(&Node{
+		_, err := async.CreateNode(&Node{
 			ID:     NodeID(fmt.Sprintf("node-%d", i)),
 			Labels: []string{"Test"},
 		})

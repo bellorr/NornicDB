@@ -51,7 +51,8 @@ func TestBadgerEngine_Backup(t *testing.T) {
 				Labels:     []string{"TestNode"},
 				Properties: map[string]interface{}{"index": i, "name": "test"},
 			}
-			require.NoError(t, engine.CreateNode(node))
+			_, err := engine.CreateNode(node)
+			require.NoError(t, err)
 		}
 
 		// Add test edges

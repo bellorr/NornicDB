@@ -2582,7 +2582,7 @@ func TestDeleteNode_RemovesFromSearchIndex(t *testing.T) {
 
 		// Create nodes via storage (this triggers OnNodeCreated callback)
 		for _, node := range nodes {
-			err := db.storage.CreateNode(node)
+			_, err := db.storage.CreateNode(node)
 			require.NoError(t, err)
 		}
 

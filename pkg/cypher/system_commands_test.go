@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -18,6 +19,7 @@ import (
 // mockDatabaseManager implements DatabaseManagerInterface for testing.
 type mockDatabaseManager struct {
 	databases map[string]*mockDatabaseInfo
+	limits    map[string]interface{} // Store limits per database
 	defaultDB string
 }
 
@@ -37,6 +39,7 @@ func (m *mockDatabaseInfo) CreatedAt() time.Time { return time.Now() }
 func newMockDatabaseManager() *mockDatabaseManager {
 	return &mockDatabaseManager{
 		databases: make(map[string]*mockDatabaseInfo),
+		limits:    make(map[string]interface{}),
 		defaultDB: "nornic",
 	}
 }
@@ -95,11 +98,22 @@ func (m *mockDatabaseManager) ResolveDatabase(nameOrAlias string) (string, error
 }
 
 func (m *mockDatabaseManager) SetDatabaseLimits(databaseName string, limits interface{}) error {
-	return fmt.Errorf("not implemented in mock")
+	if _, exists := m.databases[databaseName]; !exists {
+		return fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+	m.limits[databaseName] = limits
+	return nil
 }
 
 func (m *mockDatabaseManager) GetDatabaseLimits(databaseName string) (interface{}, error) {
-	return nil, fmt.Errorf("not implemented in mock")
+	if _, exists := m.databases[databaseName]; !exists {
+		return nil, fmt.Errorf("database '%s' does not exist", databaseName)
+	}
+	limits, exists := m.limits[databaseName]
+	if !exists {
+		return nil, nil // No limits set
+	}
+	return limits, nil
 }
 
 func (m *mockDatabaseManager) CreateCompositeDatabase(name string, constituents []interface{}) error {
@@ -379,5 +393,201 @@ func TestSystemCommands_Integration(t *testing.T) {
 		_, err = exec.Execute(ctx, "DROP DATABASE test_db", nil)
 		require.NoError(t, err)
 		assert.False(t, mockDBM.Exists("test_db"))
+	})
+}
+
+func TestSystemCommands_AlterDatabaseSetLimit(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Set up mock database manager
+	mockDBM := newMockDatabaseManager()
+	mockDBM.CreateDatabase("nornic")
+	mockDBM.CreateDatabase("test_db")
+	exec.SetDatabaseManager(mockDBM)
+
+	t.Run("set max_nodes limit", func(t *testing.T) {
+		result, err := exec.Execute(ctx, "ALTER DATABASE test_db SET LIMIT max_nodes = 1000000", nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"database"}, result.Columns)
+		assert.Len(t, result.Rows, 1)
+		assert.Equal(t, "test_db", result.Rows[0][0])
+
+		// Verify limit was set
+		limitsInterface, err := mockDBM.GetDatabaseLimits("test_db")
+		require.NoError(t, err)
+		require.NotNil(t, limitsInterface)
+		limits := limitsInterface.(*multidb.Limits)
+		assert.Equal(t, int64(1000000), limits.Storage.MaxNodes)
+	})
+
+	t.Run("set multiple limits", func(t *testing.T) {
+		result, err := exec.Execute(ctx, "ALTER DATABASE test_db SET LIMIT max_nodes = 2000000, max_edges = 5000000", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test_db", result.Rows[0][0])
+
+		// Verify both limits were set
+		limitsInterface, err := mockDBM.GetDatabaseLimits("test_db")
+		require.NoError(t, err)
+		limits := limitsInterface.(*multidb.Limits)
+		assert.Equal(t, int64(2000000), limits.Storage.MaxNodes)
+		assert.Equal(t, int64(5000000), limits.Storage.MaxEdges)
+	})
+
+	t.Run("set max_query_time limit", func(t *testing.T) {
+		result, err := exec.Execute(ctx, "ALTER DATABASE test_db SET LIMIT max_query_time = 60s", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test_db", result.Rows[0][0])
+
+		// Verify limit was set
+		limitsInterface, err := mockDBM.GetDatabaseLimits("test_db")
+		require.NoError(t, err)
+		limits := limitsInterface.(*multidb.Limits)
+		assert.Equal(t, 60*time.Second, limits.Query.MaxQueryTime)
+	})
+
+	t.Run("set rate limits", func(t *testing.T) {
+		result, err := exec.Execute(ctx, "ALTER DATABASE test_db SET LIMIT max_queries_per_second = 100, max_writes_per_second = 50", nil)
+		require.NoError(t, err)
+		assert.Equal(t, "test_db", result.Rows[0][0])
+
+		// Verify limits were set
+		limitsInterface, err := mockDBM.GetDatabaseLimits("test_db")
+		require.NoError(t, err)
+		limits := limitsInterface.(*multidb.Limits)
+		assert.Equal(t, 100, limits.Rate.MaxQueriesPerSecond)
+		assert.Equal(t, 50, limits.Rate.MaxWritesPerSecond)
+	})
+
+	t.Run("error on non-existent database", func(t *testing.T) {
+		_, err := exec.Execute(ctx, "ALTER DATABASE nonexistent SET LIMIT max_nodes = 1000", nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("error on invalid limit name", func(t *testing.T) {
+		_, err := exec.Execute(ctx, "ALTER DATABASE test_db SET LIMIT invalid_limit = 1000", nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "unknown limit name")
+	})
+
+	t.Run("error on invalid syntax", func(t *testing.T) {
+		_, err := exec.Execute(ctx, "ALTER DATABASE test_db SET LIMIT", nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "limit assignment expected")
+	})
+}
+
+func TestSystemCommands_ShowLimits(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("show limits for database with no limits", func(t *testing.T) {
+		// Fresh setup for each subtest to avoid state leakage
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+		exec := NewStorageExecutor(store)
+		mockDBM := newMockDatabaseManager()
+		mockDBM.CreateDatabase("nornic")
+		mockDBM.CreateDatabase("test_db")
+		exec.SetDatabaseManager(mockDBM)
+
+		result, err := exec.Execute(ctx, "SHOW LIMITS FOR DATABASE test_db", nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"database", "limit", "value", "description"}, result.Columns)
+		assert.Len(t, result.Rows, 1)
+		assert.Equal(t, "test_db", result.Rows[0][0])
+		assert.Equal(t, "unlimited", result.Rows[0][1])
+		assert.Nil(t, result.Rows[0][2])
+	})
+
+	t.Run("show limits for database with limits set", func(t *testing.T) {
+		// Fresh setup for each subtest to avoid state leakage
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+		exec := NewStorageExecutor(store)
+		mockDBM := newMockDatabaseManager()
+		mockDBM.CreateDatabase("nornic")
+		mockDBM.CreateDatabase("test_db")
+		exec.SetDatabaseManager(mockDBM)
+
+		// Set some limits first
+		limits := &multidb.Limits{
+			Storage: multidb.StorageLimits{
+				MaxNodes: 1000000,
+				MaxEdges: 5000000,
+			},
+			Query: multidb.QueryLimits{
+				MaxQueryTime:         60 * time.Second,
+				MaxConcurrentQueries: 10,
+			},
+			Rate: multidb.RateLimits{
+				MaxQueriesPerSecond: 100,
+			},
+		}
+		err := mockDBM.SetDatabaseLimits("test_db", limits)
+		require.NoError(t, err)
+
+		result, err := exec.Execute(ctx, "SHOW LIMITS FOR DATABASE test_db", nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"database", "limit", "value", "description"}, result.Columns)
+		assert.GreaterOrEqual(t, len(result.Rows), 5) // At least 5 limits set
+
+		// Verify specific limits are present
+		limitMap := make(map[string]interface{})
+		for _, row := range result.Rows {
+			if limitName, ok := row[1].(string); ok {
+				limitMap[limitName] = row[2]
+			}
+		}
+
+		assert.Equal(t, int64(1000000), limitMap["max_nodes"])
+		assert.Equal(t, int64(5000000), limitMap["max_edges"])
+		// Duration.String() returns "1m0s" for 60 seconds, which is valid
+		durationStr, ok := limitMap["max_query_time"].(string)
+		require.True(t, ok, "max_query_time should be a string")
+		assert.Contains(t, []string{"60s", "1m0s"}, durationStr, "duration should be 60s or 1m0s")
+		assert.Equal(t, 10, limitMap["max_concurrent_queries"])
+		assert.Equal(t, 100, limitMap["max_queries_per_second"])
+	})
+
+	t.Run("error on non-existent database", func(t *testing.T) {
+		// Fresh setup for each subtest to avoid state leakage
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+		exec := NewStorageExecutor(store)
+		mockDBM := newMockDatabaseManager()
+		mockDBM.CreateDatabase("nornic")
+		exec.SetDatabaseManager(mockDBM)
+
+		_, err := exec.Execute(ctx, "SHOW LIMITS FOR DATABASE nonexistent", nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "not found")
+	})
+
+	t.Run("error on invalid syntax", func(t *testing.T) {
+		// Fresh setup for each subtest to avoid state leakage
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+		exec := NewStorageExecutor(store)
+		mockDBM := newMockDatabaseManager()
+		mockDBM.CreateDatabase("nornic")
+		exec.SetDatabaseManager(mockDBM)
+
+		_, err := exec.Execute(ctx, "SHOW LIMITS", nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "FOR DATABASE clause expected")
+	})
+
+	t.Run("error without database manager", func(t *testing.T) {
+		// Fresh setup for each subtest to avoid state leakage
+		store := storage.NewMemoryEngine()
+		defer store.Close()
+		execNoDBM := NewStorageExecutor(store)
+		// Intentionally don't set database manager
+
+		_, err := execNoDBM.Execute(ctx, "SHOW LIMITS FOR DATABASE test_db", nil)
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "database manager not available")
 	})
 }

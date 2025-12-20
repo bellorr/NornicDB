@@ -107,8 +107,8 @@ func TestUnionClause(t *testing.T) {
 	// Create test nodes
 	node1 := &storage.Node{ID: "n1", Labels: []string{"A"}, Properties: map[string]interface{}{"val": int64(1)}}
 	node2 := &storage.Node{ID: "n2", Labels: []string{"B"}, Properties: map[string]interface{}{"val": int64(2)}}
-	store.CreateNode(node1)
-	store.CreateNode(node2)
+	_, _ = store.CreateNode(node1)
+	_, _ = store.CreateNode(node2)
 
 	tests := []struct {
 		name    string
@@ -148,7 +148,7 @@ func TestOptionalMatch(t *testing.T) {
 
 	// Create a node without relationships
 	node := &storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}}
-	store.CreateNode(node)
+	_, _ = store.CreateNode(node)
 
 	result, err := e.Execute(ctx, "OPTIONAL MATCH (n:Person) RETURN n.name", nil)
 	if err != nil {
@@ -174,7 +174,7 @@ func TestForeachClause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("executeForeach failed: %v", err)
 	}
-	
+
 	// FOREACH should return a result
 	if result == nil {
 		t.Error("FOREACH should return a result")
@@ -191,9 +191,9 @@ func TestCallDbLabels(t *testing.T) {
 	ctx := context.Background()
 
 	// Create nodes with labels
-	store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
-	store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Company"}})
-	store.CreateNode(&storage.Node{ID: "n3", Labels: []string{"Person", "Employee"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Company"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n3", Labels: []string{"Person", "Employee"}})
 
 	result, err := e.Execute(ctx, "CALL db.labels()", nil)
 	if err != nil {
@@ -216,8 +216,8 @@ func TestCallDbRelationshipTypes(t *testing.T) {
 	ctx := context.Background()
 
 	// Create relationships
-	store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
-	store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}})
 	store.CreateEdge(&storage.Edge{ID: "r1", Type: "KNOWS", StartNode: "n1", EndNode: "n2"})
 	store.CreateEdge(&storage.Edge{ID: "r2", Type: "WORKS_WITH", StartNode: "n1", EndNode: "n2"})
 
@@ -267,8 +267,8 @@ func TestCallDbPropertyKeys(t *testing.T) {
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	store.CreateNode(&storage.Node{ID: "n1", Properties: map[string]interface{}{"name": "Alice", "age": 30}})
-	store.CreateNode(&storage.Node{ID: "n2", Properties: map[string]interface{}{"title": "Engineer"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1", Properties: map[string]interface{}{"name": "Alice", "age": 30}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n2", Properties: map[string]interface{}{"title": "Engineer"}})
 
 	result, err := e.Execute(ctx, "CALL db.propertyKeys()", nil)
 	if err != nil {
@@ -380,8 +380,8 @@ func TestCallNornicDbStats(t *testing.T) {
 	ctx := context.Background()
 
 	// Create some data
-	store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
-	store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Person"}})
 	store.CreateEdge(&storage.Edge{ID: "r1", Type: "KNOWS", StartNode: "n1", EndNode: "n2"})
 
 	result, err := e.Execute(ctx, "CALL nornicdb.stats()", nil)
@@ -423,8 +423,8 @@ func TestCallDbSchemaVisualization(t *testing.T) {
 	ctx := context.Background()
 
 	// Create schema
-	store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
-	store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Company"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Company"}})
 	store.CreateEdge(&storage.Edge{ID: "r1", Type: "WORKS_AT", StartNode: "n1", EndNode: "n2"})
 
 	result, err := e.Execute(ctx, "CALL db.schema.visualization()", nil)
@@ -442,7 +442,7 @@ func TestCallDbSchemaNodeProperties(t *testing.T) {
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice", "age": 30}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice", "age": 30}})
 
 	result, err := e.Execute(ctx, "CALL db.schema.nodeProperties()", nil)
 	if err != nil {
@@ -463,8 +463,8 @@ func TestCallDbSchemaRelProperties(t *testing.T) {
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	store.CreateNode(&storage.Node{ID: "n1"})
-	store.CreateNode(&storage.Node{ID: "n2"})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1"})
+	_, _ = store.CreateNode(&storage.Node{ID: "n2"})
 	store.CreateEdge(&storage.Edge{ID: "r1", Type: "KNOWS", StartNode: "n1", EndNode: "n2", Properties: map[string]interface{}{"since": 2020}})
 
 	result, err := e.Execute(ctx, "CALL db.schema.relProperties()", nil)
@@ -670,7 +670,7 @@ func TestCallDbIndexVectorQueryNodes(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a node with an embedding
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:        "vec-node-1",
 		Labels:    []string{"Test"},
 		Embedding: []float32{0.1, 0.2, 0.3},
@@ -705,7 +705,7 @@ func TestCallDbIndexFulltextQueryNodes(t *testing.T) {
 	}
 
 	// Create nodes with searchable content
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:     "doc-1",
 		Labels: []string{"Document"},
 		Properties: map[string]interface{}{
@@ -713,7 +713,7 @@ func TestCallDbIndexFulltextQueryNodes(t *testing.T) {
 			"content": "This is searchable content about vectors",
 		},
 	})
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:     "doc-2",
 		Labels: []string{"Document"},
 		Properties: map[string]interface{}{
@@ -746,7 +746,7 @@ func TestCallDbIndexFulltextQueryNoMatch(t *testing.T) {
 		t.Fatalf("Failed to create fulltext index: %v", err)
 	}
 
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:         "doc-1",
 		Labels:     []string{"Document"},
 		Properties: map[string]interface{}{"content": "hello world"},
@@ -772,9 +772,9 @@ func TestCallApocPathSubgraphNodes(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a small graph: Alice -> Bob -> Carol
-	store.CreateNode(&storage.Node{ID: "alice", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
-	store.CreateNode(&storage.Node{ID: "bob", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
-	store.CreateNode(&storage.Node{ID: "carol", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Carol"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "alice", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Alice"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "bob", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Bob"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "carol", Labels: []string{"Person"}, Properties: map[string]interface{}{"name": "Carol"}})
 	store.CreateEdge(&storage.Edge{ID: "e1", Type: "KNOWS", StartNode: "alice", EndNode: "bob"})
 	store.CreateEdge(&storage.Edge{ID: "e2", Type: "KNOWS", StartNode: "bob", EndNode: "carol"})
 
@@ -798,8 +798,8 @@ func TestCallApocPathExpand(t *testing.T) {
 	ctx := context.Background()
 
 	// Create nodes
-	store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Node"}})
-	store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Node"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n1", Labels: []string{"Node"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "n2", Labels: []string{"Node"}})
 	store.CreateEdge(&storage.Edge{ID: "e1", Type: "LINK", StartNode: "n1", EndNode: "n2"})
 
 	// Call path expand procedure
@@ -866,9 +866,9 @@ func TestExistsSubquery(t *testing.T) {
 	ctx := context.Background()
 
 	// Create nodes with relationships
-	store.CreateNode(&storage.Node{ID: "watched-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/watched/file.txt"}})
-	store.CreateNode(&storage.Node{ID: "orphan-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/orphan/file.txt"}})
-	store.CreateNode(&storage.Node{ID: "watcher", Labels: []string{"WatchConfig"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "watched-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/watched/file.txt"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "orphan-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/orphan/file.txt"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "watcher", Labels: []string{"WatchConfig"}})
 	store.CreateEdge(&storage.Edge{ID: "e1", Type: "WATCHES", StartNode: "watcher", EndNode: "watched-file"})
 
 	// Query files that have a WATCHES relationship
@@ -894,9 +894,9 @@ func TestNotExistsSubquery(t *testing.T) {
 	ctx := context.Background()
 
 	// Create nodes with relationships
-	store.CreateNode(&storage.Node{ID: "watched-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/watched/file.txt"}})
-	store.CreateNode(&storage.Node{ID: "orphan-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/orphan/file.txt"}})
-	store.CreateNode(&storage.Node{ID: "watcher", Labels: []string{"WatchConfig"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "watched-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/watched/file.txt"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "orphan-file", Labels: []string{"File"}, Properties: map[string]interface{}{"path": "/orphan/file.txt"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "watcher", Labels: []string{"WatchConfig"}})
 	store.CreateEdge(&storage.Edge{ID: "e1", Type: "WATCHES", StartNode: "watcher", EndNode: "watched-file"})
 
 	// Query files that don't have a WATCHES relationship
@@ -926,7 +926,7 @@ func TestSetPlusMerge(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a node with some properties
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:     "test-node",
 		Labels: []string{"MergeTest"},
 		Properties: map[string]interface{}{
@@ -953,7 +953,7 @@ func TestSetPlusMerge(t *testing.T) {
 		t.Fatalf("Failed to get node: %v", err)
 	}
 	t.Logf("Node properties: %+v", node.Properties)
-	
+
 	if node.Properties["name"] != "Original" {
 		t.Errorf("Original property was lost, got: %v", node.Properties["name"])
 	}
@@ -981,7 +981,7 @@ func TestRemoveProperty(t *testing.T) {
 			"temp":      "to-be-removed",
 		},
 	}
-	if err := store.CreateNode(node); err != nil {
+	if _, err := store.CreateNode(node); err != nil {
 		t.Fatalf("Failed to create node: %v", err)
 	}
 
@@ -1016,7 +1016,7 @@ func TestRemoveMultipleProperties(t *testing.T) {
 			"lockExpires": "2024-01-02",
 		},
 	}
-	if err := store.CreateNode(node); err != nil {
+	if _, err := store.CreateNode(node); err != nil {
 		t.Fatalf("Failed to create node: %v", err)
 	}
 
@@ -1051,7 +1051,7 @@ func TestRemoveWithReturn(t *testing.T) {
 			"temp": "value",
 		},
 	}
-	if err := store.CreateNode(node); err != nil {
+	if _, err := store.CreateNode(node); err != nil {
 		t.Fatalf("Failed to create node: %v", err)
 	}
 
@@ -1077,8 +1077,8 @@ func TestUnionAll(t *testing.T) {
 	ctx := context.Background()
 
 	// Create test data
-	store.CreateNode(&storage.Node{ID: "a1", Labels: []string{"TypeA"}, Properties: map[string]interface{}{"name": "A1"}})
-	store.CreateNode(&storage.Node{ID: "b1", Labels: []string{"TypeB"}, Properties: map[string]interface{}{"name": "B1"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "a1", Labels: []string{"TypeA"}, Properties: map[string]interface{}{"name": "A1"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "b1", Labels: []string{"TypeB"}, Properties: map[string]interface{}{"name": "B1"}})
 
 	result, err := e.Execute(ctx, `MATCH (a:TypeA) RETURN a.name AS name UNION ALL MATCH (b:TypeB) RETURN b.name AS name`, nil)
 	if err != nil {
@@ -1093,8 +1093,8 @@ func TestUnionDistinct(t *testing.T) {
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	store.CreateNode(&storage.Node{ID: "u1", Labels: []string{"Union1"}, Properties: map[string]interface{}{"val": 1}})
-	store.CreateNode(&storage.Node{ID: "u2", Labels: []string{"Union2"}, Properties: map[string]interface{}{"val": 1}})
+	_, _ = store.CreateNode(&storage.Node{ID: "u1", Labels: []string{"Union1"}, Properties: map[string]interface{}{"val": 1}})
+	_, _ = store.CreateNode(&storage.Node{ID: "u2", Labels: []string{"Union2"}, Properties: map[string]interface{}{"val": 1}})
 
 	result, err := e.Execute(ctx, `
 		MATCH (a:Union1) RETURN a.val AS val
@@ -1117,7 +1117,7 @@ func TestOptionalMatchWithNoResult(t *testing.T) {
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	store.CreateNode(&storage.Node{ID: "opt1", Labels: []string{"Orphan"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "opt1", Labels: []string{"Orphan"}})
 
 	result, err := e.Execute(ctx, `
 		OPTIONAL MATCH (n:NonExistent)
@@ -1351,8 +1351,8 @@ func TestGetRelType(t *testing.T) {
 	e := NewStorageExecutor(store)
 
 	// Create edge
-	store.CreateNode(&storage.Node{ID: "s1", Labels: []string{"Start"}})
-	store.CreateNode(&storage.Node{ID: "e1", Labels: []string{"End"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "s1", Labels: []string{"Start"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "e1", Labels: []string{"End"}})
 	store.CreateEdge(&storage.Edge{ID: "r1", Type: "KNOWS", StartNode: "s1", EndNode: "e1"})
 
 	relType := e.getRelType("r1")
@@ -1373,10 +1373,10 @@ func TestTraverseGraphDeeper(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a deeper graph: A -> B -> C -> D
-	store.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "A"}})
-	store.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "B"}})
-	store.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "C"}})
-	store.CreateNode(&storage.Node{ID: "d", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "D"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "A"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "B"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "C"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "d", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "D"}})
 	store.CreateEdge(&storage.Edge{ID: "e1", Type: "LINK", StartNode: "a", EndNode: "b"})
 	store.CreateEdge(&storage.Edge{ID: "e2", Type: "LINK", StartNode: "b", EndNode: "c"})
 	store.CreateEdge(&storage.Edge{ID: "e3", Type: "LINK", StartNode: "c", EndNode: "d"})
@@ -1394,10 +1394,10 @@ func TestAllShortestPathsMultiple(t *testing.T) {
 	e := NewStorageExecutor(store)
 
 	// Create a diamond graph: A -> B -> D, A -> C -> D (two equal paths)
-	store.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "A"}})
-	store.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "B"}})
-	store.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "C"}})
-	store.CreateNode(&storage.Node{ID: "d", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "D"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "a", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "A"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "b", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "B"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "c", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "C"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "d", Labels: []string{"Node"}, Properties: map[string]interface{}{"name": "D"}})
 	store.CreateEdge(&storage.Edge{ID: "e1", Type: "LINK", StartNode: "a", EndNode: "b"})
 	store.CreateEdge(&storage.Edge{ID: "e2", Type: "LINK", StartNode: "a", EndNode: "c"})
 	store.CreateEdge(&storage.Edge{ID: "e3", Type: "LINK", StartNode: "b", EndNode: "d"})
@@ -1423,9 +1423,9 @@ func TestCompoundMatchMerge(t *testing.T) {
 	ctx := context.Background()
 
 	// Create initial data
-	store.CreateNode(&storage.Node{
-		ID:     "person1",
-		Labels: []string{"Person"},
+	_, _ = store.CreateNode(&storage.Node{
+		ID:         "person1",
+		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice"},
 	})
 
@@ -1441,7 +1441,7 @@ func TestCompoundMatchMerge(t *testing.T) {
 	t.Logf("Compound result: %d rows, %d cols", len(result.Rows), len(result.Columns))
 }
 
-// ========================================  
+// ========================================
 // Edge Case Tests
 // ========================================
 
@@ -1465,7 +1465,7 @@ func TestWhereWithExists(t *testing.T) {
 	e := NewStorageExecutor(store)
 	ctx := context.Background()
 
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:     "exist-test",
 		Labels: []string{"ExistsTest"},
 		Properties: map[string]interface{}{
@@ -1490,8 +1490,8 @@ func TestCheckSubqueryMatchOutgoing(t *testing.T) {
 	ctx := context.Background()
 
 	// Create nodes with outgoing relationship
-	store.CreateNode(&storage.Node{ID: "parent", Labels: []string{"Parent"}})
-	store.CreateNode(&storage.Node{ID: "child", Labels: []string{"Child"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "parent", Labels: []string{"Parent"}})
+	_, _ = store.CreateNode(&storage.Node{ID: "child", Labels: []string{"Child"}})
 	store.CreateEdge(&storage.Edge{ID: "e1", Type: "HAS_CHILD", StartNode: "parent", EndNode: "child"})
 
 	// Query with EXISTS checking outgoing relationship
@@ -1523,32 +1523,32 @@ func TestFindKeywordIndex(t *testing.T) {
 		{name: "RETURN at start", input: "RETURN n", keyword: "RETURN", expected: 0},
 		{name: "RETURN in middle", input: "MATCH (n) RETURN n", keyword: "RETURN", expected: 10},
 		{name: "RETURN case insensitive", input: "match (n) return n", keyword: "RETURN", expected: 10},
-		
+
 		// Avoiding substring matches - this is the key fix!
 		{name: "RemoveReturn label", input: "MATCH (n:RemoveReturn) RETURN n", keyword: "RETURN", expected: 23},
 		{name: "Return label", input: "MATCH (n:Return) RETURN n.name", keyword: "RETURN", expected: 17},
 		{name: "ReturnValue label", input: "MATCH (n:ReturnValue) RETURN n", keyword: "RETURN", expected: 22},
-		
+
 		// WHERE keyword
 		{name: "WHERE normal", input: "MATCH (n) WHERE n.age > 10 RETURN n", keyword: "WHERE", expected: 10},
 		{name: "Somewhere label", input: "MATCH (n:Somewhere) WHERE n.age > 10", keyword: "WHERE", expected: 20},
-		
+
 		// MATCH keyword
 		{name: "MATCH at start", input: "MATCH (n) RETURN n", keyword: "MATCH", expected: 0},
 		{name: "ReMatch label", input: "MATCH (n:ReMatch) RETURN n", keyword: "MATCH", expected: 0},
-		
-		// MERGE keyword  
+
+		// MERGE keyword
 		{name: "MERGE normal", input: "MERGE (n:Person)", keyword: "MERGE", expected: 0},
 		{name: "SubMerge label", input: "MATCH (n:SubMerge) MERGE (m:Person)", keyword: "MERGE", expected: 19},
-		
+
 		// Multi-word keywords
 		{name: "ON CREATE SET", input: "MERGE (n) ON CREATE SET n.created = true", keyword: "ON CREATE SET", expected: 10},
 		{name: "ON MATCH SET", input: "MERGE (n) ON MATCH SET n.updated = true", keyword: "ON MATCH SET", expected: 10},
-		
+
 		// Not found
 		{name: "keyword not present", input: "MATCH (n) WHERE n.age > 10", keyword: "RETURN", expected: -1},
 		{name: "only in label", input: "MATCH (n:RemoveReturn)", keyword: "RETURN", expected: -1},
-		
+
 		// Edge cases
 		{name: "keyword at end", input: "MATCH (n) WHERE", keyword: "WHERE", expected: 10},
 		{name: "keyword with newline", input: "MATCH (n)\nRETURN n", keyword: "RETURN", expected: 10},
@@ -1571,7 +1571,7 @@ func TestMatchWithLabelsContainingKeywords(t *testing.T) {
 	ctx := context.Background()
 
 	labels := []string{"RemoveReturn", "Return", "Where", "Match", "Merge", "Set"}
-	
+
 	for _, label := range labels {
 		t.Run("label_"+label, func(t *testing.T) {
 			// Create fresh store for each test
@@ -1581,12 +1581,12 @@ func TestMatchWithLabelsContainingKeywords(t *testing.T) {
 				Labels:     []string{label},
 				Properties: map[string]interface{}{"name": label},
 			}
-			if err := store.CreateNode(node); err != nil {
+			if _, err := store.CreateNode(node); err != nil {
 				t.Fatalf("Failed to create node: %v", err)
 			}
 
 			e := NewStorageExecutor(store)
-			
+
 			// Test that MATCH with this label works
 			query := "MATCH (n:" + label + ") RETURN n.name"
 			result, err := e.Execute(ctx, query, nil)
@@ -1610,17 +1610,17 @@ func TestExecuteUnionDirect(t *testing.T) {
 	defer store.Close()
 
 	// Create test data
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:         "alice",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice", "age": int64(30)},
 	})
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:         "bob",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Bob", "age": int64(25)},
 	})
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:         "charlie",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Charlie", "age": int64(25)},
@@ -1679,7 +1679,7 @@ func TestExecuteCompoundMatchMergeDirect(t *testing.T) {
 		defer store.Close()
 
 		// Create source node
-		store.CreateNode(&storage.Node{
+		_, _ = store.CreateNode(&storage.Node{
 			ID:         "source-1",
 			Labels:     []string{"Source"},
 			Properties: map[string]interface{}{"name": "SourceNode", "value": "test"},
@@ -1744,17 +1744,17 @@ func TestExecuteMatchForContextDirect(t *testing.T) {
 	defer store.Close()
 
 	// Create test nodes
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:         "p1",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Alice", "age": int64(30)},
 	})
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:         "p2",
 		Labels:     []string{"Person"},
 		Properties: map[string]interface{}{"name": "Bob", "age": int64(25)},
 	})
-	store.CreateNode(&storage.Node{
+	_, _ = store.CreateNode(&storage.Node{
 		ID:         "c1",
 		Labels:     []string{"Company"},
 		Properties: map[string]interface{}{"name": "Acme"},
@@ -1829,7 +1829,7 @@ func TestExecuteMergeWithContextDirect(t *testing.T) {
 			Labels:     []string{"Source"},
 			Properties: map[string]interface{}{"name": "Alice", "data": "important"},
 		}
-		store.CreateNode(sourceNode)
+		_, _ = store.CreateNode(sourceNode)
 
 		e := NewStorageExecutor(store)
 
