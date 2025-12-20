@@ -2506,3 +2506,77 @@ func TestMetricsEndpointWithAuth(t *testing.T) {
 		t.Errorf("expected status 200 for /metrics with auth, got %d", resp.Code)
 	}
 }
+
+// TestStripCypherComments tests the stripCypherComments function.
+func TestStripCypherComments(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{
+			name:     "no comments",
+			input:    "MATCH (n) RETURN n",
+			expected: "MATCH (n) RETURN n",
+		},
+		{
+			name:     "single-line comment at end",
+			input:    "MATCH (n) RETURN n // comment",
+			expected: "MATCH (n) RETURN n ",
+		},
+		{
+			name:     "single-line comment on own line",
+			input:    "MATCH (n)\n// comment\nRETURN n",
+			expected: "MATCH (n)\n\nRETURN n",
+		},
+		{
+			name:     "multi-line comment inline",
+			input:    "MATCH (n) /* comment */ RETURN n",
+			expected: "MATCH (n)  RETURN n",
+		},
+		{
+			name:     "multi-line comment spanning lines",
+			input:    "MATCH (n)\n/* comment\n   more comment */\nRETURN n",
+			expected: "MATCH (n)\n\nRETURN n",
+		},
+		{
+			name:     "multiple single-line comments",
+			input:    "MATCH (n) // first\nWHERE n.age > 25 // second\nRETURN n // third",
+			expected: "MATCH (n) \nWHERE n.age > 25 \nRETURN n ",
+		},
+		{
+			name:     "comment only line",
+			input:    "// comment only\nMATCH (n) RETURN n",
+			expected: "\nMATCH (n) RETURN n",
+		},
+		{
+			name:     "mixed comments",
+			input:    "MATCH (n) /* multi */ // single\nRETURN n",
+			expected: "MATCH (n)  \nRETURN n",
+		},
+		{
+			name:     "empty query",
+			input:    "",
+			expected: "",
+		},
+		{
+			name:     "only comments",
+			input:    "// comment\n/* another */",
+			expected: "\n",
+		},
+		{
+			name:     "comment with :USE command",
+			input:    ":USE test_db\n// comment\nMATCH (n) RETURN n",
+			expected: ":USE test_db\n\nMATCH (n) RETURN n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := stripCypherComments(tt.input)
+			if result != tt.expected {
+				t.Errorf("stripCypherComments(%q) = %q, want %q", tt.input, result, tt.expected)
+			}
+		})
+	}
+}
