@@ -127,9 +127,11 @@ import (
 	"io"
 	"math"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -210,6 +212,11 @@ type Server struct {
 	// Database manager for multi-database support (optional)
 	// If set, queries are routed to the correct database based on HELLO message
 	dbManager DatabaseManagerInterface
+
+	// Transaction sequence tracking for causal consistency
+	// Tracks the highest committed transaction sequence number across all sessions
+	txSequence   int64        // Monotonically increasing transaction sequence number
+	txSequenceMu sync.RWMutex // Protects txSequence
 }
 
 // DatabaseManagerInterface provides database management without importing multidb.
@@ -844,8 +851,12 @@ type Session struct {
 	pendingFlush bool
 
 	// Query metadata for Neo4j driver compatibility
-	queryId          int64 // Query ID counter for qid field
-	lastQueryIsWrite bool  // Was last query a write operation
+	queryId          int64          // Query ID counter for qid field
+	lastQueryIsWrite bool           // Was last query a write operation
+	lastRunMetadata  map[string]any // Metadata from last RUN message (bookmarks, tx_timeout, etc.)
+
+	// Transaction sequence for this session's last committed transaction
+	lastTxSequence int64 // Sequence number of last committed transaction in this session
 
 	// Reusable buffers to reduce allocations
 	headerBuf  [2]byte // For reading chunk headers
@@ -1245,10 +1256,31 @@ func (s *Session) handleRun(data []byte) error {
 		return s.sendFailure("Neo.ClientError.Security.Unauthorized", "Not authenticated")
 	}
 
-	// Parse PackStream to extract query and params
-	query, params, err := s.parseRunMessage(data)
+	// Parse PackStream to extract query, params, and metadata
+	query, params, metadata, err := s.parseRunMessage(data)
 	if err != nil {
 		return s.sendFailure("Neo.ClientError.Request.Invalid", fmt.Sprintf("Failed to parse RUN message: %v", err))
+	}
+
+	// Store metadata for potential use (bookmarks, tx_timeout, etc.)
+	s.lastRunMetadata = metadata
+
+	// Validate bookmarks if present (for causal consistency)
+	if bookmarks, ok := metadata["bookmarks"].([]any); ok && len(bookmarks) > 0 {
+		if err := s.validateBookmarks(bookmarks); err != nil {
+			return s.sendFailure("Neo.ClientError.Transaction.BookmarkValidationFailed",
+				fmt.Sprintf("Bookmark validation failed: %v", err))
+		}
+	}
+
+	// Create context with timeout if tx_timeout is specified
+	ctx := context.Background()
+	if txTimeout, ok := metadata["tx_timeout"].(int64); ok && txTimeout > 0 {
+		// tx_timeout is in milliseconds, convert to time.Duration
+		timeout := time.Duration(txTimeout) * time.Millisecond
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel() // Ensure context is cancelled when function returns
 	}
 
 	// Classify query type once (used for auth and deferred flush)
@@ -1307,8 +1339,7 @@ func (s *Session) handleRun(data []byte) error {
 		executor = dbExecutor
 	}
 
-	// Execute query
-	ctx := context.Background()
+	// Execute query (ctx may have timeout from tx_timeout metadata)
 	result, err := executor.Execute(ctx, query, params)
 	if err != nil {
 		if s.server != nil && s.server.config.LogQueries {
@@ -1352,11 +1383,12 @@ func truncateQuery(q string, maxLen int) string {
 	return q[:maxLen] + "..."
 }
 
-// parseRunMessage parses a RUN message to extract query and parameters.
+// parseRunMessage parses a RUN message to extract query, parameters, and metadata.
 // Bolt v4+ RUN message format: [query: String, parameters: Map, extra: Map]
-func (s *Session) parseRunMessage(data []byte) (string, map[string]any, error) {
+// Returns: query, parameters, metadata, error
+func (s *Session) parseRunMessage(data []byte) (string, map[string]any, map[string]any, error) {
 	if len(data) == 0 {
-		return "", nil, fmt.Errorf("empty RUN message")
+		return "", nil, nil, fmt.Errorf("empty RUN message")
 	}
 
 	offset := 0
@@ -1364,7 +1396,7 @@ func (s *Session) parseRunMessage(data []byte) (string, map[string]any, error) {
 	// Parse query string
 	query, n, err := decodePackStreamString(data, offset)
 	if err != nil {
-		return "", nil, fmt.Errorf("failed to parse query: %w", err)
+		return "", nil, nil, fmt.Errorf("failed to parse query: %w", err)
 	}
 	offset += n
 
@@ -1382,10 +1414,18 @@ func (s *Session) parseRunMessage(data []byte) (string, map[string]any, error) {
 	}
 
 	// Bolt v4+ has an extra metadata map after params (for bookmarks, tx_timeout, etc.)
-	// We can ignore it for now, but we should parse it to avoid issues
-	// offset is now pointing to the extra map if present
+	// Parse metadata if present
+	metadata := make(map[string]any)
+	if offset < len(data) {
+		m, consumed, err := decodePackStreamMap(data, offset)
+		if err == nil {
+			metadata = m
+			offset += consumed
+		}
+		// If parsing fails, continue with empty metadata (non-fatal)
+	}
 
-	return query, params, nil
+	return query, params, metadata, nil
 }
 
 // handlePull handles the PULL message.
@@ -1566,10 +1606,91 @@ func (s *Session) handleCommit(data []byte) error {
 	s.inTransaction = false
 	s.txMetadata = nil
 
+	// Generate and store new bookmark for causal consistency
+	// This increments the server's transaction sequence and creates a bookmark
+	bookmark := s.generateBookmark()
+
 	// Return bookmark for client tracking
 	return s.sendSuccess(map[string]any{
-		"bookmark": "nornicdb:bookmark:1",
+		"bookmark": bookmark,
 	})
+}
+
+// generateBookmark generates a unique bookmark for causal consistency tracking.
+// Format: "nornicdb:bookmark:<sequence>"
+// The sequence number represents the transaction order for causal consistency.
+func (s *Session) generateBookmark() string {
+	if s.server == nil {
+		panic("cannot generate bookmark: session has no server reference")
+	}
+
+	// Get next transaction sequence number from server
+	s.server.txSequenceMu.Lock()
+	s.server.txSequence++
+	seqNum := s.server.txSequence
+	s.server.txSequenceMu.Unlock()
+
+	// Store sequence in session
+	s.lastTxSequence = seqNum
+
+	return fmt.Sprintf("nornicdb:bookmark:%d", seqNum)
+}
+
+// validateBookmarks validates bookmarks for causal consistency.
+// Ensures that all transactions up to the bookmark's sequence number have been committed.
+// This provides causal consistency: reads will see all writes that committed before the bookmark.
+func (s *Session) validateBookmarks(bookmarks []any) error {
+	if len(bookmarks) == 0 {
+		return nil // No bookmarks to validate
+	}
+
+	if s.server == nil {
+		return fmt.Errorf("cannot validate bookmarks: session has no server reference")
+	}
+
+	// Get current transaction sequence from server
+	s.server.txSequenceMu.RLock()
+	currentSequence := s.server.txSequence
+	s.server.txSequenceMu.RUnlock()
+
+	// Validate each bookmark
+	for _, bookmarkAny := range bookmarks {
+		bookmark, ok := bookmarkAny.(string)
+		if !ok {
+			return fmt.Errorf("invalid bookmark type: expected string, got %T", bookmarkAny)
+		}
+
+		// Only accept NornicDB bookmark format: "nornicdb:bookmark:<sequence>"
+		if !strings.HasPrefix(bookmark, "nornicdb:bookmark:") {
+			return fmt.Errorf("invalid bookmark format: expected 'nornicdb:bookmark:<sequence>', got %q", bookmark)
+		}
+
+		// Parse sequence number from bookmark
+		seqStr := strings.TrimPrefix(bookmark, "nornicdb:bookmark:")
+		if seqStr == "" {
+			return fmt.Errorf("invalid bookmark format: missing sequence number in %q", bookmark)
+		}
+
+		bookmarkSeq, err := strconv.ParseInt(seqStr, 10, 64)
+		if err != nil {
+			return fmt.Errorf("invalid bookmark format: cannot parse sequence number from %q: %w", bookmark, err)
+		}
+
+		// Validate sequence number is non-negative
+		if bookmarkSeq < 0 {
+			return fmt.Errorf("invalid bookmark: sequence number must be non-negative, got %d", bookmarkSeq)
+		}
+
+		// Causal consistency check: bookmark sequence must be <= current sequence
+		// This ensures all transactions up to the bookmark have been committed
+		if bookmarkSeq > currentSequence {
+			return fmt.Errorf("bookmark sequence %d is from the future (current: %d)", bookmarkSeq, currentSequence)
+		}
+
+		// Bookmark is valid - all transactions up to this sequence have been committed
+	}
+
+	return nil
 }
 
 // handleRollback handles the ROLLBACK message.

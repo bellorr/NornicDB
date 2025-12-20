@@ -169,12 +169,18 @@ func (m *mockConn) SetReadDeadline(t time.Time) error  { return nil }
 func (m *mockConn) SetWriteDeadline(t time.Time) error { return nil }
 
 // newTestSession creates a properly initialized Session for testing.
-// This ensures reader and writer are set up correctly.
+// This ensures reader and writer are set up correctly, and includes a server reference
+// for bookmark generation and validation.
 func newTestSession(conn net.Conn, executor QueryExecutor) *Session {
+	server := &Server{
+		txSequence: 0,               // Initialize transaction sequence
+		config:     DefaultConfig(), // Initialize with default config
+	}
 	return &Session{
 		conn:       conn,
 		reader:     bufio.NewReaderSize(conn, 8192),
 		writer:     bufio.NewWriterSize(conn, 8192),
+		server:     server,
 		executor:   executor,
 		messageBuf: make([]byte, 0, 4096),
 	}
@@ -1416,7 +1422,7 @@ func TestParseRunMessage(t *testing.T) {
 		}
 
 		session := &Session{}
-		query, params, err := session.parseRunMessage(data)
+		query, params, metadata, err := session.parseRunMessage(data)
 
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -1426,6 +1432,12 @@ func TestParseRunMessage(t *testing.T) {
 		}
 		if len(params) != 0 {
 			t.Errorf("params should be empty, got %v", params)
+		}
+		if metadata == nil {
+			t.Error("metadata should not be nil")
+		}
+		if len(metadata) != 0 {
+			t.Errorf("metadata should be empty, got %v", metadata)
 		}
 	})
 
@@ -1440,7 +1452,7 @@ func TestParseRunMessage(t *testing.T) {
 		}
 
 		session := &Session{}
-		_, params, err := session.parseRunMessage(data)
+		_, params, metadata, err := session.parseRunMessage(data)
 
 		if err != nil {
 			t.Errorf("unexpected error: %v", err)
@@ -1448,14 +1460,127 @@ func TestParseRunMessage(t *testing.T) {
 		if params["name"] != "Alice" {
 			t.Errorf("params[name]: got %v, want Alice", params["name"])
 		}
+		if metadata == nil {
+			t.Error("metadata should not be nil")
+		}
 	})
 
 	t.Run("empty data", func(t *testing.T) {
 		session := &Session{}
-		_, _, err := session.parseRunMessage([]byte{})
+		_, _, _, err := session.parseRunMessage([]byte{})
 
 		if err == nil {
 			t.Error("expected error for empty data")
+		}
+	})
+
+	t.Run("query with params and metadata", func(t *testing.T) {
+		// Query: "MATCH (n) RETURN n", params: {name: "Alice"}, metadata: {bookmarks: ["bookmark1"], tx_timeout: 30000}
+		queryBytes := encodePackStreamString("MATCH (n) RETURN n")
+		paramsBytes := encodePackStreamMap(map[string]any{
+			"name": "Alice",
+		})
+		metadataBytes := encodePackStreamMap(map[string]any{
+			"bookmarks":  []any{"bookmark1"},
+			"tx_timeout": int64(30000),
+		})
+
+		data := append(append(queryBytes, paramsBytes...), metadataBytes...)
+
+		session := &Session{}
+		query, params, metadata, err := session.parseRunMessage(data)
+
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if query != "MATCH (n) RETURN n" {
+			t.Errorf("query: got %q, want %q", query, "MATCH (n) RETURN n")
+		}
+		if params["name"] != "Alice" {
+			t.Errorf("params[name]: got %v, want Alice", params["name"])
+		}
+		if metadata == nil {
+			t.Error("metadata should not be nil")
+		}
+		bookmarks, ok := metadata["bookmarks"].([]any)
+		if !ok || len(bookmarks) == 0 {
+			t.Error("metadata should contain bookmarks")
+		}
+		txTimeout, ok := metadata["tx_timeout"].(int64)
+		if !ok || txTimeout != 30000 {
+			t.Errorf("metadata[tx_timeout]: got %v, want 30000", txTimeout)
+		}
+	})
+
+	t.Run("bookmark validation", func(t *testing.T) {
+		// Create a server and session for proper bookmark validation
+		server := &Server{
+			txSequence: 100, // Set current sequence to 100
+		}
+		session := &Session{
+			server: server,
+		}
+
+		// Valid bookmark format (sequence <= current)
+		validBookmarks := []any{"nornicdb:bookmark:50"}
+		err := session.validateBookmarks(validBookmarks)
+		if err != nil {
+			t.Errorf("valid bookmark should pass validation: %v", err)
+		}
+
+		// Bookmark from the future (sequence > current) - should fail
+		futureBookmarks := []any{"nornicdb:bookmark:200"}
+		err = session.validateBookmarks(futureBookmarks)
+		if err == nil {
+			t.Error("bookmark from the future should fail validation")
+		}
+
+		// Invalid bookmark format (cannot parse sequence)
+		invalidFormatBookmarks := []any{"nornicdb:bookmark:invalid"}
+		err = session.validateBookmarks(invalidFormatBookmarks)
+		if err == nil {
+			t.Error("invalid bookmark format should fail validation")
+		}
+
+		// Invalid bookmark type
+		invalidBookmarks := []any{123}
+		err = session.validateBookmarks(invalidBookmarks)
+		if err == nil {
+			t.Error("invalid bookmark type should fail validation")
+		}
+
+		// Empty bookmarks (should pass)
+		err = session.validateBookmarks([]any{})
+		if err != nil {
+			t.Errorf("empty bookmarks should pass validation: %v", err)
+		}
+
+		// Valid bookmark at current sequence (should pass)
+		currentBookmarks := []any{"nornicdb:bookmark:100"}
+		err = session.validateBookmarks(currentBookmarks)
+		if err != nil {
+			t.Errorf("bookmark at current sequence should pass validation: %v", err)
+		}
+
+		// Unknown bookmark format (not nornicdb:bookmark:*) - should fail
+		unknownFormatBookmarks := []any{"neo4j:bookmark:123"}
+		err = session.validateBookmarks(unknownFormatBookmarks)
+		if err == nil {
+			t.Error("unknown bookmark format should fail validation")
+		}
+
+		// Missing sequence number - should fail
+		missingSeqBookmarks := []any{"nornicdb:bookmark:"}
+		err = session.validateBookmarks(missingSeqBookmarks)
+		if err == nil {
+			t.Error("bookmark with missing sequence number should fail validation")
+		}
+
+		// Negative sequence number - should fail
+		negativeSeqBookmarks := []any{"nornicdb:bookmark:-1"}
+		err = session.validateBookmarks(negativeSeqBookmarks)
+		if err == nil {
+			t.Error("bookmark with negative sequence number should fail validation")
 		}
 	})
 }
