@@ -2673,6 +2673,12 @@ func (s *Server) handleDiscovery(w http.ResponseWriter, r *http.Request) {
 		"neo4j_edition": "community",
 	}
 
+	// Add default database name for UI compatibility (NornicDB extension)
+	// This allows clients to know which database to use by default
+	if s.dbManager != nil {
+		response["default_database"] = s.dbManager.DefaultDatabaseName()
+	}
+
 	s.writeJSON(w, http.StatusOK, response)
 }
 

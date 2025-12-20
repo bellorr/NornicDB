@@ -54,7 +54,42 @@ export interface CypherResponse {
   }>;
 }
 
+interface DiscoveryResponse {
+  bolt_direct: string;
+  bolt_routing: string;
+  transaction: string;
+  neo4j_version: string;
+  neo4j_edition: string;
+  default_database?: string; // NornicDB extension
+}
+
 class NornicDBClient {
+  private defaultDatabase: string | null = null;
+
+  // Get default database name from discovery endpoint
+  private async getDefaultDatabase(): Promise<string> {
+    // Return cached value if available
+    if (this.defaultDatabase) {
+      return this.defaultDatabase;
+    }
+
+    try {
+      const res = await fetch(`${BASE_PATH}/`, { credentials: 'include' });
+      if (res.ok) {
+        const discovery: DiscoveryResponse = await res.json();
+        // Cache the default database name
+        this.defaultDatabase = discovery.default_database || 'nornic';
+        return this.defaultDatabase;
+      }
+    } catch {
+      // Fallback to default if discovery fails
+    }
+
+    // Fallback to NornicDB's default
+    this.defaultDatabase = 'nornic';
+    return this.defaultDatabase;
+  }
+
   async getAuthConfig(): Promise<AuthConfig> {
     try {
       const res = await fetch(`${BASE_PATH}/auth/config`, { credentials: 'include' });
@@ -148,7 +183,9 @@ class NornicDBClient {
   }
 
   async executeCypher(statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
-    const res = await fetch(`${BASE_PATH}/db/neo4j/tx/commit`, {
+    // Get default database name (will fetch from discovery endpoint if not cached)
+    const dbName = await this.getDefaultDatabase();
+    const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',

@@ -230,6 +230,19 @@ func TestHandleDiscovery(t *testing.T) {
 			t.Errorf("missing required field: %s", field)
 		}
 	}
+
+	// Check NornicDB extension: default_database field
+	if defaultDB, ok := discovery["default_database"]; !ok {
+		t.Error("missing NornicDB extension field: default_database")
+	} else {
+		// Verify it's a string and matches expected default
+		defaultDBStr, ok := defaultDB.(string)
+		if !ok {
+			t.Errorf("default_database should be a string, got %T", defaultDB)
+		} else if defaultDBStr != "nornic" {
+			t.Errorf("expected default_database to be 'nornic', got '%s'", defaultDBStr)
+		}
+	}
 }
 
 // =============================================================================

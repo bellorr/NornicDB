@@ -84,6 +84,28 @@ const driver = neo4j.driver(
 POST /db/tenant_a/tx/commit
 ```
 
+### Discovery Endpoint
+
+The discovery endpoint (`GET /`) returns information about the server, including the default database name:
+
+```bash
+curl http://localhost:7474/
+```
+
+**Response:**
+```json
+{
+  "bolt_direct": "bolt://localhost:7687",
+  "bolt_routing": "neo4j://localhost:7687",
+  "transaction": "http://localhost:7474/db/{databaseName}/tx",
+  "neo4j_version": "5.0.0",
+  "neo4j_edition": "community",
+  "default_database": "nornic"
+}
+```
+
+**Note:** The `default_database` field is a NornicDB extension that helps clients automatically determine which database to use by default. This is particularly useful for UI clients and automated tools that need to connect without hardcoding database names.
+
 ## Data Isolation
 
 Each database is completely isolated:

@@ -604,7 +604,8 @@ func (e *StorageExecutor) executeAggregation(nodes []*storage.Node, variable str
 
 	for i, item := range items {
 		// Use whitespace-tolerant function check
-		if isAggregateFunc(item.expr) {
+		// Also check for expressions that contain aggregates (e.g., SUM(a) + SUM(b))
+		if isAggregateFunc(item.expr) || containsAggregateFunc(item.expr) {
 			colInfos[i] = colInfo{isAggregation: true}
 		} else {
 			// Non-aggregation - this becomes an implicit GROUP BY key
@@ -617,9 +618,11 @@ func (e *StorageExecutor) executeAggregation(nodes []*storage.Node, variable str
 	}
 
 	// Check if there are any grouping columns
+	// A non-aggregation column is a grouping column, even if propName is empty
+	// (e.g., labels(n)[0] is a grouping key even though it's not a simple property)
 	hasGrouping := false
 	for _, ci := range colInfos {
-		if !ci.isAggregation && ci.propName != "" {
+		if !ci.isAggregation {
 			hasGrouping = true
 			break
 		}
