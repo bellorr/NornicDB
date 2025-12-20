@@ -68,6 +68,13 @@ type DatabaseInfo struct {
 	Aliases      []string         `json:"aliases,omitempty"`      // Database aliases (Neo4j-compatible)
 	Limits       *Limits          `json:"limits,omitempty"`       // Resource limits
 	Constituents []ConstituentRef `json:"constituents,omitempty"` // Constituent databases (for composite type)
+
+	// Size tracking (incremental, not recalculated)
+	totalSize       int64        // Total storage size in bytes
+	nodeSize        int64        // Total size of all nodes in bytes
+	edgeSize        int64        // Total size of all edges in bytes
+	sizeInitialized bool         // Whether size has been calculated at least once
+	sizeMu          sync.RWMutex // Protects size tracking
 }
 
 // Config holds DatabaseManager configuration.
@@ -594,4 +601,120 @@ func (m *DatabaseManager) validateAliasName(alias string) error {
 	}
 
 	return nil
+}
+
+// IncrementStorageSize increments the tracked storage size for a database.
+//
+// This should be called after successful node/edge creation to maintain accurate
+// size tracking for MaxBytes limit enforcement. The sizes should be calculated
+// using the same gob encoding used by the storage engine.
+//
+// Parameters:
+//   - databaseName: The database to update
+//   - nodeSize: Size in bytes of the node that was created (0 if no node created)
+//   - edgeSize: Size in bytes of the edge that was created (0 if no edge created)
+//
+// Example:
+//
+//	// After successfully creating a node
+//	nodeSize, _ := calculateNodeSize(node)
+//	manager.IncrementStorageSize("tenant_a", nodeSize, 0)
+//
+//	// After successfully creating an edge
+//	edgeSize, _ := calculateEdgeSize(edge)
+//	manager.IncrementStorageSize("tenant_a", 0, edgeSize)
+//
+// Thread-safe: This method is safe to call from multiple goroutines.
+func (m *DatabaseManager) IncrementStorageSize(databaseName string, nodeSize, edgeSize int64) {
+	m.mu.RLock()
+	info, exists := m.databases[databaseName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	info.sizeMu.Lock()
+	info.totalSize += nodeSize + edgeSize
+	info.nodeSize += nodeSize
+	info.edgeSize += edgeSize
+	info.sizeMu.Unlock()
+}
+
+// DecrementStorageSize decrements the tracked storage size for a database.
+//
+// This should be called after successful node/edge deletion to maintain accurate
+// size tracking for MaxBytes limit enforcement. The sizes should be the same
+// values that were used when the entities were created.
+//
+// Parameters:
+//   - databaseName: The database to update
+//   - nodeSize: Size in bytes of the node that was deleted (0 if no node deleted)
+//   - edgeSize: Size in bytes of the edge that was deleted (0 if no edge deleted)
+//
+// Example:
+//
+//	// After successfully deleting a node (size known from creation)
+//	manager.DecrementStorageSize("tenant_a", nodeSize, 0)
+//
+//	// After successfully deleting an edge (size known from creation)
+//	manager.DecrementStorageSize("tenant_a", 0, edgeSize)
+//
+// Thread-safe: This method is safe to call from multiple goroutines.
+// Defensive: Size is prevented from going negative (resets to 0 if underflow).
+func (m *DatabaseManager) DecrementStorageSize(databaseName string, nodeSize, edgeSize int64) {
+	m.mu.RLock()
+	info, exists := m.databases[databaseName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	info.sizeMu.Lock()
+	info.totalSize -= nodeSize + edgeSize
+	info.nodeSize -= nodeSize
+	info.edgeSize -= edgeSize
+	// Ensure size doesn't go negative (defensive)
+	if info.totalSize < 0 {
+		info.totalSize = 0
+	}
+	if info.nodeSize < 0 {
+		info.nodeSize = 0
+	}
+	if info.edgeSize < 0 {
+		info.edgeSize = 0
+	}
+	info.sizeMu.Unlock()
+}
+
+// GetStorageSize returns the current tracked storage size for a database.
+//
+// Returns:
+//   - totalSize: Total storage size in bytes (sum of all nodes and edges)
+//   - nodeSize: Total size of all nodes in bytes
+//   - edgeSize: Total size of all edges in bytes
+//
+// The size is tracked incrementally and initialized lazily on first access.
+// This provides O(1) access for limit checking without recalculating from all entities.
+//
+// Example:
+//
+//	totalSize, nodeSize, edgeSize := manager.GetStorageSize("tenant_a")
+//	fmt.Printf("Database uses %d bytes (%d from nodes, %d from edges)\n",
+//		totalSize, nodeSize, edgeSize)
+//
+// Thread-safe: This method is safe to call from multiple goroutines.
+func (m *DatabaseManager) GetStorageSize(databaseName string) (int64, int64, int64) {
+	m.mu.RLock()
+	info, exists := m.databases[databaseName]
+	m.mu.RUnlock()
+
+	if !exists {
+		return 0, 0, 0
+	}
+
+	info.sizeMu.RLock()
+	defer info.sizeMu.RUnlock()
+	return info.totalSize, info.nodeSize, info.edgeSize
 }

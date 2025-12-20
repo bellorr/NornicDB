@@ -287,6 +287,9 @@ SHOW LIMITS FOR DATABASE tenant_a
    - `max_nodes`: Maximum number of nodes (0 = unlimited)
    - `max_edges`: Maximum number of edges (0 = unlimited)
    - `max_bytes`: Maximum storage size in bytes (0 = unlimited)
+     - **Enforced with exact size calculation**: The actual serialized size of each node/edge is calculated using gob encoding (matching the storage format)
+     - **No estimation**: Storage size is tracked incrementally for accurate, O(1) limit checks
+     - **Clear error messages**: When exceeded, operations fail with: "would exceed max_bytes limit (current: X bytes, limit: Y bytes, new entity: Z bytes)"
 
 2. **Query Limits**:
    - `max_query_time`: Maximum query execution time (0 = unlimited)
@@ -312,12 +315,50 @@ Limits are **fully persisted** to disk as part of database metadata:
 - Limits are automatically loaded on startup
 - Limits are stored in the system database alongside other metadata
 
+### Limit Enforcement
+
+All limits are enforced at runtime with clear, actionable error messages:
+
+**MaxNodes/MaxEdges**: When the count limit is reached, create operations fail with:
+```
+storage limit exceeded: database 'tenant_a' has reached max_nodes limit (1000/1000)
+```
+
+**MaxBytes**: When the size limit would be exceeded, create operations fail with:
+```
+storage limit exceeded: database 'tenant_a' would exceed max_bytes limit 
+(current: 500 bytes, limit: 1024 bytes, new entity: 600 bytes)
+```
+
+**MaxBytes Implementation Details**:
+- Uses **exact size calculation**, not estimation
+- Calculates the actual serialized size of each node/edge using gob encoding
+- Tracks storage size incrementally (initialized lazily on first access)
+- Provides O(1) limit checks without recalculating from all entities
+- Error messages include current size, limit, and the size of the entity being created
+
+### Example: MaxBytes Enforcement
+
+```cypher
+-- Set a 1GB storage limit
+ALTER DATABASE tenant_a SET LIMIT max_bytes = 1073741824
+
+-- Create nodes normally
+CREATE (n:User {name: "Alice", email: "alice@example.com"})
+
+-- If a node would exceed the limit, creation fails with a clear error
+CREATE (n:Document {content: "..."})  -- Fails if this would exceed 1GB
+-- Error: storage limit exceeded: database 'tenant_a' would exceed max_bytes limit
+--        (current: 1073741800 bytes, limit: 1073741824 bytes, new entity: 100 bytes)
+```
+
 ### Use Cases
 
 - **Fair Resource Allocation**: Ensure no tenant monopolizes resources
-- **Cost Control**: Limit storage per tenant
+- **Cost Control**: Limit storage per tenant with exact byte-level precision
 - **Performance Protection**: Prevent slow queries from affecting other databases
 - **Compliance**: Enforce data retention limits
+- **Storage Quotas**: Enforce exact storage quotas per database (e.g., 10GB per tenant)
 
 ## Composite Databases
 

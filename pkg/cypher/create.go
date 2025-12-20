@@ -2088,7 +2088,12 @@ func (e *StorageExecutor) executeCreateNodeSegment(ctx context.Context, createSt
 		return nil, "", fmt.Errorf("failed to create node: %w", err)
 	}
 
-	// Update node ID with the actual stored ID (may be prefixed for namespaced/composite engines)
+	// CRITICAL: Update node ID with the actual stored ID returned from storage.
+	// For namespaced/composite engines:
+	//   - NamespacedEngine.CreateNode returns unprefixed ID (user-facing API)
+	//   - CompositeEngine.CreateNode returns unprefixed ID (user-facing API)
+	//   - The node.ID must match what storage returns for correct edge creation
+	// This ensures node IDs are consistent when used in subsequent operations (edge creation, etc.)
 	node.ID = actualID
 
 	e.notifyNodeCreated(string(node.ID))

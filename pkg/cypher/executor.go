@@ -3151,7 +3151,16 @@ func (e *StorageExecutor) evaluateInnerWhere(node *storage.Node, variable, where
 	}
 
 	if op == "" {
-		return true // No valid operator found, include all
+		// No valid operator found - check if clause is empty/whitespace
+		trimmed := strings.TrimSpace(whereClause)
+		if trimmed == "" {
+			// Empty WHERE clause means no filter - include all
+			return true
+		}
+		// Non-empty clause with no recognized operator - cannot evaluate properly
+		// Return false (exclude) rather than true (include all) for safety
+		// This prevents incorrect results from malformed or unsupported WHERE clauses
+		return false
 	}
 
 	left := strings.TrimSpace(whereClause[:opIdx])

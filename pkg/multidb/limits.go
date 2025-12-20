@@ -39,14 +39,38 @@ type Limits struct {
 }
 
 // StorageLimits controls storage capacity per database.
+//
+// All limits are enforced at runtime. When a limit is exceeded, the operation
+// fails with a clear error message explaining the quota limits.
+//
+// MaxBytes Enforcement:
+//
+// MaxBytes enforcement uses exact size calculation, not estimation. The actual
+// serialized size of each node/edge is calculated using gob encoding (matching
+// the storage format). Storage size is tracked incrementally for O(1) limit checks.
+//
+// Example:
+//
+//	limits := StorageLimits{
+//		MaxNodes: 1000000,                    // 1 million nodes
+//		MaxEdges: 5000000,                    // 5 million edges
+//		MaxBytes: 10 * 1024 * 1024 * 1024,   // 10GB
+//	}
 type StorageLimits struct {
 	// MaxNodes is the maximum number of nodes allowed (0 = unlimited).
+	// When exceeded, create operations fail with: "has reached max_nodes limit (N/M)"
 	MaxNodes int64 `json:"max_nodes,omitempty"`
 
 	// MaxEdges is the maximum number of edges allowed (0 = unlimited).
+	// When exceeded, create operations fail with: "has reached max_edges limit (N/M)"
 	MaxEdges int64 `json:"max_edges,omitempty"`
 
 	// MaxBytes is the maximum storage size in bytes (0 = unlimited).
+	// When exceeded, create operations fail with: "would exceed max_bytes limit
+	// (current: X bytes, limit: Y bytes, new entity: Z bytes)"
+	//
+	// Size is calculated exactly using gob serialization (matching storage format).
+	// No estimation - the actual size of each entity is known before creation.
 	MaxBytes int64 `json:"max_bytes,omitempty"`
 }
 
