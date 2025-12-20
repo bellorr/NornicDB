@@ -1182,3 +1182,213 @@ RETURN charlie, diana, order`},
 	}, "Bearer "+token)
 	require.Equal(t, http.StatusOK, resp.Code)
 }
+
+// TestExactUserScenario reproduces the exact user scenario to verify property access
+func TestExactUserScenario(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	// Create test_db_b database
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "CREATE DATABASE test_db_b"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	// Exact CREATE query from user
+	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": `:USE test_db_b
+CREATE (charlie:Person {name: "Charlie", id: "b1", db: "test_db_b"})
+CREATE (diana:Person {name: "Diana", id: "b2", db: "test_db_b"})
+CREATE (order:Order {order_id: "ORD-001", amount: 1000, db: "test_db_b"})
+CREATE (charlie)-[:PLACED]->(order)
+CREATE (diana)-[:PLACED]->(order)
+RETURN charlie, diana, order`},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	var result TransactionResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Len(t, result.Results, 1)
+	if len(result.Errors) > 0 {
+		t.Fatalf("CREATE query failed: %v", result.Errors)
+	}
+
+	// Exact MATCH query from user
+	resp = makeRequest(t, server, "POST", "/db/test_db_b/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": `MATCH (n)
+RETURN n.name as name, n.order_id as order_id, labels(n) as labels, n.db as db
+ORDER BY n.name`},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Len(t, result.Results, 1)
+	if len(result.Errors) > 0 {
+		t.Fatalf("MATCH query failed: %v", result.Errors)
+	}
+
+	// Verify results - should have 3 nodes (Charlie, Diana, Order)
+	require.GreaterOrEqual(t, len(result.Results[0].Data), 3, "should have at least 3 nodes")
+
+	// Check that properties are correctly returned (not null when they should have values)
+	foundCharlie := false
+	foundDiana := false
+	foundOrder := false
+
+	for _, row := range result.Results[0].Data {
+		name := row.Row[0]
+		orderID := row.Row[1]
+		db := row.Row[3]
+
+		// Verify db property is set
+		if dbVal, ok := db.(string); ok {
+			assert.Equal(t, "test_db_b", dbVal, "db property should be test_db_b")
+		} else {
+			t.Errorf("db property should be a string, got %T: %v", db, db)
+		}
+
+		// Check Person nodes - should have name, null for order_id
+		if nameVal, ok := name.(string); ok && nameVal == "Charlie" {
+			foundCharlie = true
+			// Person nodes don't have order_id, so null is correct
+			assert.Nil(t, orderID, "Charlie (Person) should not have order_id property")
+		} else if nameVal, ok := name.(string); ok && nameVal == "Diana" {
+			foundDiana = true
+			// Person nodes don't have order_id, so null is correct
+			assert.Nil(t, orderID, "Diana (Person) should not have order_id property")
+		}
+
+		// Check Order node - should have order_id, null for name
+		if orderIDVal, ok := orderID.(string); ok && orderIDVal == "ORD-001" {
+			foundOrder = true
+			// Order nodes don't have name, so null is correct
+			assert.Nil(t, name, "Order should not have name property")
+		}
+	}
+
+	assert.True(t, foundCharlie, "should find Charlie node with name property")
+	assert.True(t, foundDiana, "should find Diana node with name property")
+	assert.True(t, foundOrder, "should find Order node with order_id property")
+
+	// Cleanup
+	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "DROP DATABASE test_db_b"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+}
+
+// TestDatabaseIsolation_DefaultDatabase verifies that nodes from other databases are NOT visible in default database
+func TestDatabaseIsolation_DefaultDatabase(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	// Create test databases
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "CREATE DATABASE test_db_a"},
+			{"statement": "CREATE DATABASE test_db_b"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	// Create nodes in test_db_a
+	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": `:USE test_db_a
+CREATE (alice:Person {name: "Alice", id: "a1", db: "test_db_a"})
+CREATE (bob:Person {name: "Bob", id: "a2", db: "test_db_a"})`},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	// Create nodes in test_db_b
+	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": `:USE test_db_b
+CREATE (charlie:Person {name: "Charlie", id: "b1", db: "test_db_b"})
+CREATE (diana:Person {name: "Diana", id: "b2", db: "test_db_b"})
+CREATE (order:Order {order_id: "ORD-001", amount: 1000, db: "test_db_b"})`},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	// Query default database - should NOT see nodes from test_db_a or test_db_b
+	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": `MATCH (n)
+WHERE n.db IN ["test_db_a", "test_db_b"]
+RETURN count(n) as test_db_nodes`},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+
+	var result TransactionResponse
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Len(t, result.Results, 1)
+	if len(result.Errors) > 0 {
+		t.Fatalf("Query failed: %v", result.Errors)
+	}
+
+	// Should return 0 - nodes from test_db_a and test_db_b should NOT be visible in default database
+	require.GreaterOrEqual(t, len(result.Results[0].Data), 1, "should have at least one row")
+	if len(result.Results[0].Data) > 0 {
+		count := result.Results[0].Data[0].Row[0]
+		if countVal, ok := count.(float64); ok {
+			assert.Equal(t, float64(0), countVal, "default database should NOT see nodes from test_db_a or test_db_b")
+		} else if countVal, ok := count.(int64); ok {
+			assert.Equal(t, int64(0), countVal, "default database should NOT see nodes from test_db_a or test_db_b")
+		} else {
+			t.Errorf("count should be a number, got %T: %v", count, count)
+		}
+	}
+
+	// Verify nodes ARE visible in their respective databases
+	resp = makeRequest(t, server, "POST", "/db/test_db_a/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n) RETURN count(n) as count"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	if len(result.Results[0].Data) > 0 {
+		count := result.Results[0].Data[0].Row[0]
+		if countVal, ok := count.(float64); ok {
+			assert.Equal(t, float64(2), countVal, "test_db_a should have 2 nodes")
+		} else if countVal, ok := count.(int64); ok {
+			assert.Equal(t, int64(2), countVal, "test_db_a should have 2 nodes")
+		}
+	}
+
+	resp = makeRequest(t, server, "POST", "/db/test_db_b/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n) RETURN count(n) as count"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	if len(result.Results[0].Data) > 0 {
+		count := result.Results[0].Data[0].Row[0]
+		if countVal, ok := count.(float64); ok {
+			assert.Equal(t, float64(3), countVal, "test_db_b should have 3 nodes")
+		} else if countVal, ok := count.(int64); ok {
+			assert.Equal(t, int64(3), countVal, "test_db_b should have 3 nodes")
+		}
+	}
+
+	// Cleanup
+	resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "DROP DATABASE test_db_a"},
+			{"statement": "DROP DATABASE test_db_b"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code)
+}

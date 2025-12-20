@@ -5158,3 +5158,67 @@ func TestPropertyAccessInMatch(t *testing.T) {
 		assert.Equal(t, int64(1000), amountInt, "amount should be 1000")
 	}
 }
+
+// TestMultipleCreatesPropertyAccess verifies that properties are correctly accessible after multiple CREATE statements
+func TestMultipleCreatesPropertyAccess(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	defer store.Close()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create nodes with multiple CREATE statements (like user's query)
+	_, err := exec.Execute(ctx, `
+		CREATE (charlie:Person {name: "Charlie", id: "b1", db: "test_db_b"})
+		CREATE (diana:Person {name: "Diana", id: "b2", db: "test_db_b"})
+		CREATE (order:Order {order_id: "ORD-001", amount: 1000, db: "test_db_b"})
+		RETURN charlie, diana, order
+	`, nil)
+	require.NoError(t, err)
+
+	// Query nodes and verify properties are accessible
+	result, err := exec.Execute(ctx, `
+		MATCH (n)
+		RETURN n.name as name, n.order_id as order_id, labels(n) as labels, n.db as db
+		ORDER BY n.name
+	`, nil)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.Len(t, result.Rows, 3, "should have 3 nodes")
+
+	// Verify properties are set correctly
+	foundCharlie := false
+	foundDiana := false
+	foundOrder := false
+
+	for _, row := range result.Rows {
+		require.Len(t, row, 4, "each row should have 4 columns: name, order_id, labels, db")
+
+		name := row[0]
+		orderID := row[1]
+		db := row[3]
+
+		// Check db property
+		if dbVal, ok := db.(string); ok {
+			assert.Equal(t, "test_db_b", dbVal, "db property should be test_db_b")
+		}
+
+		// Check Person nodes
+		if nameVal, ok := name.(string); ok && nameVal == "Charlie" {
+			foundCharlie = true
+			assert.Nil(t, orderID, "Charlie should not have order_id property")
+		} else if nameVal, ok := name.(string); ok && nameVal == "Diana" {
+			foundDiana = true
+			assert.Nil(t, orderID, "Diana should not have order_id property")
+		}
+
+		// Check Order node
+		if orderIDVal, ok := orderID.(string); ok && orderIDVal == "ORD-001" {
+			foundOrder = true
+			assert.Nil(t, name, "Order should not have name property")
+		}
+	}
+
+	assert.True(t, foundCharlie, "should find Charlie node")
+	assert.True(t, foundDiana, "should find Diana node")
+	assert.True(t, foundOrder, "should find Order node")
+}

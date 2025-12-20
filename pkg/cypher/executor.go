@@ -2621,8 +2621,8 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 	// Handle property access: variable.property
 	if strings.Contains(expr, ".") {
 		parts := strings.SplitN(expr, ".", 2)
-		varName := parts[0]
-		propName := parts[1]
+		varName := strings.TrimSpace(parts[0])
+		propName := strings.TrimSpace(parts[1])
 
 		// Check if variable matches
 		if varName != variable {

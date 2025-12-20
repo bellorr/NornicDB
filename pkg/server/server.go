@@ -1949,31 +1949,9 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 	claims := getClaims(r)
 	hasError := false
 
-	// Extract :USE command from first statement if present
-	// This allows multi-statement queries like:
-	//   :USE test_db_b
-	//   CREATE (n:Person {name: "Alice"})
-	//   CREATE (m:Person {name: "Bob"})
-	// All statements will use the database specified in :USE
-	actualDbName := dbName
-	useDbName := ""
-	if len(req.Statements) > 0 {
-		firstStmt := strings.TrimSpace(req.Statements[0].Statement)
-		if strings.HasPrefix(firstStmt, ":USE") || strings.HasPrefix(firstStmt, ":use") {
-			lines := strings.Split(req.Statements[0].Statement, "\n")
-			for _, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, ":USE") || strings.HasPrefix(trimmed, ":use") {
-					parts := strings.Fields(trimmed)
-					if len(parts) >= 2 {
-						useDbName = parts[1]
-						actualDbName = useDbName
-					}
-					break
-				}
-			}
-		}
-	}
+	// Default to database from URL path
+	// Each statement can override this with its own :USE command
+	defaultDbName := dbName
 
 	for _, stmt := range req.Statements {
 		if hasError {
@@ -1993,8 +1971,36 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			}
 		}
 
-		// Use the database from :USE if it was specified, otherwise use dbName from URL
-		effectiveDbName := actualDbName
+		// Extract :USE command from this statement if present
+		// Each statement can have its own :USE command to switch databases
+		effectiveDbName := defaultDbName
+		queryStatement := stmt.Statement
+
+		// Check if statement starts with :USE
+		trimmedStmt := strings.TrimSpace(stmt.Statement)
+		if strings.HasPrefix(trimmedStmt, ":USE") || strings.HasPrefix(trimmedStmt, ":use") {
+			lines := strings.Split(stmt.Statement, "\n")
+			var remainingLines []string
+			foundUse := false
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if !foundUse && (strings.HasPrefix(trimmed, ":USE") || strings.HasPrefix(trimmed, ":use")) {
+					// Extract database name from :USE command
+					parts := strings.Fields(trimmed)
+					if len(parts) >= 2 {
+						effectiveDbName = parts[1]
+					}
+					foundUse = true
+					// Skip :USE line
+					continue
+				}
+				remainingLines = append(remainingLines, line)
+			}
+			if foundUse {
+				queryStatement = strings.Join(remainingLines, "\n")
+				queryStatement = strings.TrimSpace(queryStatement)
+			}
+		}
 
 		// Check if database exists before attempting to get executor
 		if !s.dbManager.Exists(effectiveDbName) {
@@ -2004,23 +2010,6 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			})
 			hasError = true
 			continue
-		}
-
-		// Strip :USE command from statement if present (only needed for first statement)
-		queryStatement := stmt.Statement
-		if useDbName != "" && (strings.HasPrefix(strings.TrimSpace(stmt.Statement), ":USE") || strings.HasPrefix(strings.TrimSpace(stmt.Statement), ":use")) {
-			lines := strings.Split(stmt.Statement, "\n")
-			var remainingLines []string
-			for _, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, ":USE") || strings.HasPrefix(trimmed, ":use") {
-					// Skip :USE line
-					continue
-				}
-				remainingLines = append(remainingLines, line)
-			}
-			queryStatement = strings.Join(remainingLines, "\n")
-			queryStatement = strings.TrimSpace(queryStatement)
 		}
 
 		// Get executor for the specified database (or the one from :USE command)

@@ -318,6 +318,7 @@ ORDER BY label
 -- Note: In Cypher Shell, use :USE test_db_a
 
 -- Query test_db_a - should NOT see test_db_b data
+:USE test_db_a
 MATCH (n)
 RETURN n.name as name, n.order_id as order_id, labels(n) as labels, n.db as db
 ORDER BY n.name
@@ -330,6 +331,7 @@ ORDER BY n.name
 
 ```cypher
 -- Verify no Order nodes in test_db_a
+:USE test_db_a
 MATCH (o:Order)
 RETURN count(o) as order_count
 ```
@@ -342,6 +344,7 @@ RETURN count(o) as order_count
 -- Note: In Cypher Shell, use :USE test_db_b
 
 -- Query test_db_b - should NOT see test_db_a data
+:USE test_db_b
 MATCH (n)
 RETURN n.name as name, labels(n) as labels, n.db as db
 ORDER BY n.name
@@ -354,6 +357,7 @@ ORDER BY n.name
 
 ```cypher
 -- Verify no Company nodes in test_db_b
+:USE test_db_b
 MATCH (c:Company)
 RETURN count(c) as company_count
 ```
@@ -366,6 +370,7 @@ RETURN count(c) as company_count
 -- Note: In Cypher Shell, use :USE nornic
 
 -- Verify default database still has original data
+:USE nornic
 MATCH (n)
 RETURN count(n) as node_count
 ```
@@ -376,6 +381,7 @@ RETURN count(n) as node_count
 
 ```cypher
 -- Verify default database doesn't see test databases' data
+:USE nornic
 MATCH (n)
 WHERE n.db IN ["test_db_a", "test_db_b"]
 RETURN count(n) as test_db_nodes
