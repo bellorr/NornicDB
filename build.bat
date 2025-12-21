@@ -8,6 +8,7 @@ REM   cpu-localllm     CPU with llama.cpp embeddings (BYOM)
 REM   cpu-bge          CPU with llama.cpp + BGE model embedded
 REM   cuda             CUDA with llama.cpp embeddings (BYOM)
 REM   cuda-bge         CUDA with llama.cpp + BGE model embedded
+REM   vulkan           Vulkan GPU acceleration (cross-platform)
 REM
 REM Usage:
 REM   build.bat cpu              Build CPU-only (no embeddings)
@@ -49,6 +50,7 @@ if "%VARIANT%"=="cpu-localllm" goto :build_cpu_localllm
 if "%VARIANT%"=="cpu-bge" goto :build_cpu_bge
 if "%VARIANT%"=="cuda" goto :build_cuda
 if "%VARIANT%"=="cuda-bge" goto :build_cuda_bge
+if "%VARIANT%"=="vulkan" goto :build_vulkan
 
 echo ERROR: Unknown variant '%VARIANT%'
 echo Run 'build.bat help' for usage
@@ -198,6 +200,42 @@ if defined HEADLESS (
     go build -tags="%BUILD_TAGS%" -ldflags="-s -w" -o "%BIN_DIR%\nornicdb-cuda-bge.exe" .\cmd\nornicdb
 )
 if errorlevel 1 goto :build_failed
+
+REM Copy model alongside binary
+copy "%MODELS_DIR%\bge-m3.gguf" "%BIN_DIR%\" >nul 2>&1
+echo.
+echo ✓ Build successful!
+echo   Model embedded: %BIN_DIR%\bge-m3.gguf
+echo   Ready to run - GPU-accelerated embeddings!
+goto :eof
+
+:build_vulkan
+echo ===============================================================
+echo  Building: NornicDB Vulkan GPU (cross-platform)
+echo  Output:   %BIN_DIR%\nornicdb-vulkan.exe
+echo ===============================================================
+call :check_go
+if not exist "%BIN_DIR%" mkdir "%BIN_DIR%"
+
+set "BUILD_TAGS=vulkan"
+if defined HEADLESS set "BUILD_TAGS=vulkan noui"
+
+set CGO_ENABLED=1
+set GOOS=windows
+set GOARCH=amd64
+
+if defined HEADLESS (
+    go build -tags="%BUILD_TAGS%" -ldflags="-s -w" -o "%BIN_DIR%\nornicdb-vulkan-headless.exe" .\cmd\nornicdb
+) else (
+    go build -tags="%BUILD_TAGS%" -ldflags="-s -w" -o "%BIN_DIR%\nornicdb-vulkan.exe" .\cmd\nornicdb
+)
+if errorlevel 1 goto :build_failed
+echo.
+echo ✓ Build successful!
+echo   Vulkan GPU acceleration enabled
+echo   Works with NVIDIA, AMD, Intel GPUs
+echo   Requires Vulkan SDK: https://vulkan.lunarg.com/
+echo   Set VULKAN_SDK environment variable if needed
 
 REM Copy model alongside binary
 copy "%MODELS_DIR%\bge-m3.gguf" "%BIN_DIR%\" >nul 2>&1
@@ -377,6 +415,10 @@ echo                    GPU-accelerated, requires NVIDIA GPU + CUDA
 echo.
 echo   cuda-bge         CUDA + llama.cpp + BGE model (~430MB)
 echo                    GPU-accelerated with embedded model
+echo.
+echo   vulkan           Vulkan GPU acceleration (~20MB)
+echo                    Works with NVIDIA, AMD, Intel GPUs
+echo                    Requires Vulkan SDK from LunarG
 echo.
 echo OPTIONS:
 echo   headless         Build without web UI (add as second argument)
