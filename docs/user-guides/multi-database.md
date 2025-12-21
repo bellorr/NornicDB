@@ -74,7 +74,7 @@ driver = GraphDatabase.driver(
 # JavaScript
 const driver = neo4j.driver(
     "bolt://localhost:7687",
-    neo4j.auth.basic("neo4j", "password"),
+    neo4j.auth.basic("admin", "password"),
     { database: "tenant_a" }
 )
 ```

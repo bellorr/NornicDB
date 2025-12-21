@@ -558,7 +558,7 @@ func parseThresholds(s string) eval.Thresholds {
 
 func createSampleData(serverURL string) error {
 	// Construct full URL safely using url.JoinPath to prevent path traversal
-	targetURL, err := url.JoinPath(serverURL, "db", "neo4j", "tx", "commit")
+	targetURL, err := url.JoinPath(serverURL, "db", "nornic", "tx", "commit")
 	if err != nil {
 		return fmt.Errorf("failed to construct request URL: %w", err)
 	}

@@ -482,7 +482,7 @@ func (m *DatabaseManager) DropDatabase(name string) error {
     m.mu.Lock()
     defer m.mu.Unlock()
     
-    if name == "system" || name == "neo4j" {
+    if name == "system" || name == "nornic" {
         return ErrCannotDropSystemDB
     }
     

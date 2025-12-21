@@ -1510,7 +1510,7 @@ func (s *Session) handlePull(data []byte) error {
 			"bookmark": "nornicdb:tx:auto",
 			"type":     queryType,
 			"t_last":   int64(0), // Streaming time
-			"db":       "neo4j",  // Default database name
+			"db":       "nornic", // Default database name
 		}
 
 		// Note: Neo4j does NOT send has_more when it's false

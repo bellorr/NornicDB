@@ -181,7 +181,7 @@ from neo4j import GraphDatabase
 
 driver = GraphDatabase.driver(
     "bolt://localhost:7687",
-    auth=("neo4j", "password"),
+    auth=("admin", "password"),
     database="tenant_a"  # Specify database
 )
 
@@ -193,7 +193,7 @@ result = session.run("MATCH (n) RETURN count(n)")
 // JavaScript
 const driver = neo4j.driver(
     "bolt://localhost:7687",
-    neo4j.auth.basic("neo4j", "password"),
+    neo4j.auth.basic("admin", "password"),
     { database: "tenant_a" }  // Specify database
 );
 
@@ -354,7 +354,7 @@ Neo4j 4.x compatible database selection:
 HELLO {
   "user_agent": "neo4j-python/5.0",
   "scheme": "basic",
-  "principal": "neo4j",
+  "principal": "admin",
   "credentials": "password",
   "db": "tenant_a"           // Database selection
 }

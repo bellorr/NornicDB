@@ -50,7 +50,7 @@ type NamespacedEngine struct {
 //
 // Parameters:
 //   - inner: The underlying storage engine (shared across all namespaces)
-//   - namespace: The database name (e.g., "tenant_a", "neo4j")
+//   - namespace: The database name (e.g., "tenant_a", "nornic")
 //
 // The namespace is used as a key prefix for all operations.
 func NewNamespacedEngine(inner Engine, namespace string) *NamespacedEngine {

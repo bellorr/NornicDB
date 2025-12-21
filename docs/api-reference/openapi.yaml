@@ -435,7 +435,7 @@ paths:
           required: true
           schema:
             type: string
-          example: "neo4j"
+          example: "nornic"
       requestBody:
         required: true
         content:
@@ -487,7 +487,7 @@ paths:
                 database:
                   type: string
                   description: Database name (defaults to default database)
-                  example: "neo4j"
+                  example: "nornic"
                 query:
                   type: string
                   description: Search query text
@@ -537,7 +537,7 @@ paths:
                 database:
                   type: string
                   description: Database name (defaults to default database)
-                  example: "neo4j"
+                  example: "nornic"
                 node_id:
                   type: string
                   description: ID of the node to find similar nodes for
@@ -677,7 +677,7 @@ paths:
                 database:
                   type: string
                   description: Database name (defaults to default database)
-                  example: "neo4j"
+                  example: "nornic"
       responses:
         '200':
           description: Indexes rebuilt
