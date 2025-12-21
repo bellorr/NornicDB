@@ -17,10 +17,13 @@
 - **[GPU Acceleration](gpu-acceleration.md)** - 10-100x speedup
 - **[Auto-TLP](auto-tlp.md)** - Automatic relationship inference
 
+### APIs & Interfaces
+- **[GraphQL API](../user-guides/graphql.md)** - GraphQL queries, mutations, and real-time subscriptions
+- **[APOC Functions](apoc-functions.md)** - 983 Neo4j-compatible functions
+
 ### Configuration & Extensibility
 - **[Feature Flags](feature-flags.md)** - Runtime configuration
 - **[Plugin System](plugin-system.md)** - Extensible architecture with function & Heimdall plugins
-- **[APOC Functions](apoc-functions.md)** - 983 Neo4j-compatible functions
 
 ## 📚 Feature Categories
 

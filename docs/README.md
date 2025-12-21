@@ -83,6 +83,13 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 - Standard Neo4j drivers work out-of-the-box
 - Easy migration from Neo4j
 
+### 📡 GraphQL API
+
+- Full GraphQL API with queries and mutations
+- Real-time subscriptions for live updates
+- Schema introspection and auto-complete
+- GraphQL Playground for interactive exploration
+
 ### 🔐 Enterprise-Ready
 
 - **High Availability** - Hot Standby, Raft consensus, Multi-Region
@@ -107,6 +114,7 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 - [WAL Compaction Guide](operations/wal-compaction.md) ⭐ **NEW**
 - [Durability Configuration](operations/durability.md) ⭐ **NEW**
 - [Clustering & High Availability](user-guides/clustering.md)
+- [GraphQL API Guide](user-guides/graphql.md) ⭐ **NEW**
 - [Vector Search Guide](user-guides/vector-search.md)
 - [Hybrid Search (RRF)](user-guides/hybrid-search.md)
 - [GPU Acceleration](features/gpu-acceleration.md)

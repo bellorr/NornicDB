@@ -21,6 +21,12 @@
 - **[Search Endpoints](http-api.md#search)** - Vector and hybrid search
 - **[Admin Endpoints](http-api.md#admin)** - System management
 
+### GraphQL API
+
+- **[GraphQL Guide](../user-guides/graphql.md)** - Complete GraphQL API guide
+- **[Subscriptions](../user-guides/graphql.md#real-time-subscriptions)** - Real-time subscriptions
+- **[Queries & Mutations](../user-guides/graphql.md)** - Query and mutation examples
+
 ### Protocols
 
 - **[Bolt Protocol](bolt-protocol.md)** - Binary protocol specification

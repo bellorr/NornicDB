@@ -1829,7 +1829,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 
 	// Check for property merge operator: n += $properties
 	if strings.Contains(setPart, "+=") {
-		return e.executeSetMerge(matchResult, setPart, result, cypher, returnIdx)
+		return e.executeSetMerge(ctx, matchResult, setPart, result, cypher, returnIdx)
 	}
 
 	// Split SET clause into individual assignments, respecting brackets
@@ -1951,8 +1951,17 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	return result, nil
 }
 
-// executeSetMerge handles SET n += $properties for property merging
-func (e *StorageExecutor) executeSetMerge(matchResult *ExecuteResult, setPart string, result *ExecuteResult, cypher string, returnIdx int) (*ExecuteResult, error) {
+// executeSetMerge handles SET n += $properties for property merging.
+// This implements the Cypher property merge operator which merges properties from a map
+// or parameter into existing node properties.
+//
+// Example:
+//
+//	MATCH (n:Person) SET n += {age: 30, city: 'NYC'}  // Inline map
+//	MATCH (n:Person) SET n += $props                  // Parameter map
+//
+// Parameters are retrieved from context (stored during query execution).
+func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *ExecuteResult, setPart string, result *ExecuteResult, cypher string, returnIdx int) (*ExecuteResult, error) {
 	// Parse: n += $properties or n += {key: value}
 	plusEqIdx := strings.Index(setPart, "+=")
 	if plusEqIdx == -1 {
@@ -1969,11 +1978,46 @@ func (e *StorageExecutor) executeSetMerge(matchResult *ExecuteResult, setPart st
 		// Inline properties: {key: value, ...}
 		propsToMerge = e.parseProperties(right)
 	} else if strings.HasPrefix(right, "$") {
-		// Parameter reference - for now, just skip since params are substituted earlier
-		// In a full implementation, we'd look up the param value
-		propsToMerge = make(map[string]interface{})
+		// Parameter reference: $properties
+		// Extract parameter name (remove $ prefix)
+		paramName := strings.TrimSpace(right[1:])
+		if paramName == "" {
+			return nil, fmt.Errorf("SET += requires a valid parameter name after $")
+		}
+
+		// Retrieve parameters from context
+		params := getParamsFromContext(ctx)
+		if params == nil {
+			return nil, fmt.Errorf("SET += parameter $%s requires parameters to be provided", paramName)
+		}
+
+		// Look up the parameter value
+		paramValue, exists := params[paramName]
+		if !exists {
+			return nil, fmt.Errorf("SET += parameter $%s not found in provided parameters", paramName)
+		}
+
+		// Validate that the parameter value is a map
+		propsMap, ok := paramValue.(map[string]interface{})
+		if !ok {
+			// Try to convert from map[interface{}]interface{} (common when parsing JSON)
+			if genericMap, ok := paramValue.(map[interface{}]interface{}); ok {
+				propsMap = make(map[string]interface{})
+				for k, v := range genericMap {
+					keyStr, ok := k.(string)
+					if !ok {
+						return nil, fmt.Errorf("SET += parameter $%s must be a map with string keys, got key type %T", paramName, k)
+					}
+					propsMap[keyStr] = v
+				}
+			} else {
+				return nil, fmt.Errorf("SET += parameter $%s must be a map, got type %T", paramName, paramValue)
+			}
+		}
+
+		propsToMerge = propsMap
 	} else {
-		return nil, fmt.Errorf("SET += requires a map or parameter")
+		return nil, fmt.Errorf("SET += requires a map or parameter (got: %q)", right)
 	}
 
 	// Collect updated nodes for RETURN

@@ -962,6 +962,62 @@ func TestSetPlusMerge(t *testing.T) {
 	}
 }
 
+func TestSetPlusMergeWithParameter(t *testing.T) {
+	store := storage.NewMemoryEngine()
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create a node with some properties
+	_, _ = store.CreateNode(&storage.Node{
+		ID:     "test-node-param",
+		Labels: []string{"MergeTest"},
+		Properties: map[string]interface{}{
+			"name":    "Original",
+			"version": 1,
+		},
+	})
+
+	// Use SET += with parameter
+	params := map[string]interface{}{
+		"props": map[string]interface{}{
+			"version": 2,
+			"status":  "updated",
+			"count":   int64(42),
+		},
+	}
+
+	result, err := e.Execute(ctx, `
+		MATCH (n:MergeTest {name: 'Original'})
+		SET n += $props
+	`, params)
+
+	if err != nil {
+		t.Fatalf("SET += with parameter failed: %v", err)
+	}
+
+	t.Logf("Stats: %+v", result.Stats)
+
+	// Verify properties were merged - get fresh copy
+	node, err := store.GetNode("test-node-param")
+	if err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+	t.Logf("Node properties: %+v", node.Properties)
+
+	if node.Properties["name"] != "Original" {
+		t.Errorf("Original property was lost, got: %v", node.Properties["name"])
+	}
+	if node.Properties["status"] != "updated" {
+		t.Errorf("New property from parameter not added, got: %v", node.Properties["status"])
+	}
+	if node.Properties["version"] != int64(2) {
+		t.Errorf("Property from parameter not updated, got: %v", node.Properties["version"])
+	}
+	if node.Properties["count"] != int64(42) {
+		t.Errorf("Numeric property from parameter not added, got: %v", node.Properties["count"])
+	}
+}
+
 // ========================================
 // REMOVE Property Tests
 // ========================================

@@ -2,6 +2,7 @@ package resolvers
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/cypher"
@@ -22,6 +23,9 @@ type Resolver struct {
 	DB        *nornicdb.DB
 	dbManager *multidb.DatabaseManager // Required: provides namespaced storage for all operations
 	StartTime time.Time
+
+	// EventBroker manages GraphQL subscriptions
+	EventBroker *EventBroker
 }
 
 // NewResolver creates a new resolver that uses the default database's
@@ -35,11 +39,99 @@ func NewResolver(db *nornicdb.DB, dbManager *multidb.DatabaseManager) *Resolver 
 	if dbManager == nil {
 		panic("dbManager is required for GraphQL resolver")
 	}
-	return &Resolver{
-		DB:        db,
-		dbManager: dbManager,
-		StartTime: time.Now(),
+
+	// Create event broker for GraphQL subscriptions
+	broker := NewEventBroker()
+
+	resolver := &Resolver{
+		DB:          db,
+		dbManager:   dbManager,
+		StartTime:   time.Now(),
+		EventBroker: broker,
 	}
+
+	// Wire up storage event callbacks to event broker
+	// This enables GraphQL subscriptions to receive real-time updates
+	// Get the underlying storage engine and unwrap layers (WALEngine, AsyncEngine)
+	// to reach the BadgerEngine that implements StorageEventNotifier
+	// Note: Events from all namespaces will be published. Namespace filtering
+	// can be added later if needed by checking node/edge ID prefixes.
+	if db != nil {
+		underlyingEngine := db.GetStorage()
+		
+		// Unwrap WALEngine if present
+		if walEngine, ok := underlyingEngine.(interface{ GetEngine() storage.Engine }); ok {
+			underlyingEngine = walEngine.GetEngine()
+		}
+		
+		// Unwrap AsyncEngine if present
+		if asyncEngine, ok := underlyingEngine.(interface{ GetEngine() storage.Engine }); ok {
+			underlyingEngine = asyncEngine.GetEngine()
+		}
+		
+		if notifier, ok := underlyingEngine.(storage.StorageEventNotifier); ok {
+			// Get default database name for namespace prefix removal
+			defaultDBName := dbManager.DefaultDatabaseName()
+			namespacePrefix := defaultDBName + ":"
+			
+			// Helper to unprefix node ID
+			unprefixNodeID := func(id storage.NodeID) storage.NodeID {
+				idStr := string(id)
+				if strings.HasPrefix(idStr, namespacePrefix) {
+					return storage.NodeID(idStr[len(namespacePrefix):])
+				}
+				return id
+			}
+			
+			// Helper to unprefix edge ID
+			unprefixEdgeID := func(id storage.EdgeID) storage.EdgeID {
+				idStr := string(id)
+				if strings.HasPrefix(idStr, namespacePrefix) {
+					return storage.EdgeID(idStr[len(namespacePrefix):])
+				}
+				return id
+			}
+			
+			// Node events
+			notifier.OnNodeCreated(func(node *storage.Node) {
+				// Create a copy with unprefixed ID for GraphQL
+				unprefixedNode := *node
+				unprefixedNode.ID = unprefixNodeID(node.ID)
+				broker.PublishNodeCreated(storageNodeToModel(&unprefixedNode))
+			})
+			notifier.OnNodeUpdated(func(node *storage.Node) {
+				unprefixedNode := *node
+				unprefixedNode.ID = unprefixNodeID(node.ID)
+				broker.PublishNodeUpdated(storageNodeToModel(&unprefixedNode))
+			})
+			notifier.OnNodeDeleted(func(nodeID storage.NodeID) {
+				unprefixedID := unprefixNodeID(nodeID)
+				broker.PublishNodeDeleted(string(unprefixedID))
+			})
+
+			// Relationship (edge) events
+			notifier.OnEdgeCreated(func(edge *storage.Edge) {
+				unprefixedEdge := *edge
+				unprefixedEdge.ID = unprefixEdgeID(edge.ID)
+				unprefixedEdge.StartNode = unprefixNodeID(edge.StartNode)
+				unprefixedEdge.EndNode = unprefixNodeID(edge.EndNode)
+				broker.PublishRelationshipCreated(storageEdgeToModel(&unprefixedEdge))
+			})
+			notifier.OnEdgeUpdated(func(edge *storage.Edge) {
+				unprefixedEdge := *edge
+				unprefixedEdge.ID = unprefixEdgeID(edge.ID)
+				unprefixedEdge.StartNode = unprefixNodeID(edge.StartNode)
+				unprefixedEdge.EndNode = unprefixNodeID(edge.EndNode)
+				broker.PublishRelationshipUpdated(storageEdgeToModel(&unprefixedEdge))
+			})
+			notifier.OnEdgeDeleted(func(edgeID storage.EdgeID) {
+				unprefixedID := unprefixEdgeID(edgeID)
+				broker.PublishRelationshipDeleted(string(unprefixedID))
+			})
+		}
+	}
+
+	return resolver
 }
 
 // getCypherExecutor returns the Cypher executor using the default database's namespaced storage.

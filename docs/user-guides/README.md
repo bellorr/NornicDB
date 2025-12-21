@@ -14,6 +14,7 @@
 - **[Complete Examples](complete-examples.md)** - Full application examples
 
 ### Query & Data Management
+- **[GraphQL API](graphql.md)** - GraphQL queries, mutations, and real-time subscriptions
 - **[Cypher Queries](cypher-queries.md)** - Complete Cypher language guide
 - **[Graph Traversal](graph-traversal.md)** - Path queries and pattern matching
 - **[Data Import/Export](data-import-export.md)** - Neo4j compatibility
@@ -32,6 +33,9 @@
 
 **Get the best search results**
 → [Hybrid Search (RRF)](hybrid-search.md)
+
+**Use GraphQL API with real-time subscriptions**
+→ [GraphQL Guide](graphql.md)
 
 **Learn Cypher query language**
 → [Cypher Queries Guide](cypher-queries.md)
@@ -86,10 +90,11 @@ See [Heimdall Plugins Guide](heimdall-plugins.md) for complete documentation.
 4. [Complete Examples](complete-examples.md)
 
 ### Intermediate
-1. [Vector Search](vector-search.md)
-2. [Graph Traversal](graph-traversal.md)
-3. [Transactions](transactions.md)
-4. [Data Import/Export](data-import-export.md)
+1. [GraphQL API](graphql.md)
+2. [Vector Search](vector-search.md)
+3. [Graph Traversal](graph-traversal.md)
+4. [Transactions](transactions.md)
+5. [Data Import/Export](data-import-export.md)
 
 ### Advanced
 1. [Hybrid Search](hybrid-search.md)

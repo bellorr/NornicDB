@@ -488,9 +488,11 @@ go tool cover -html=coverage.out
 3. **Field Selection**: Only request fields you need to minimize data transfer
 4. **Cypher Fallback**: For complex queries, use the Cypher pass-through for optimal performance
 
-## Subscriptions (Coming Soon)
+## Subscriptions
 
-Subscriptions are defined in the schema but not yet implemented:
+✅ **Real-time subscriptions are now fully implemented!**
+
+Subscribe to live updates when nodes and relationships are created, updated, or deleted:
 
 ```graphql
 type Subscription {
@@ -498,8 +500,12 @@ type Subscription {
   nodeUpdated(id: ID, labels: [String!]): Node!
   nodeDeleted(labels: [String!]): ID!
   relationshipCreated(types: [String!]): Relationship!
+  relationshipUpdated(id: ID, types: [String!]): Relationship!
+  relationshipDeleted(types: [String!]): ID!
 }
 ```
+
+See the [GraphQL User Guide](../../docs/user-guides/graphql.md#real-time-subscriptions) for complete subscription documentation and examples.
 
 ## Related Documentation
 
