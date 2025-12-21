@@ -17,6 +17,8 @@
 ### HTTP API
 
 - **[REST Endpoints](http-api.md)** - HTTP API documentation
+- **[OpenAPI/Swagger Spec](openapi.yaml)** - Interactive API documentation
+- **[OpenAPI Guide](OPENAPI.md)** - How to use the OpenAPI specification
 - **[Transaction API](http-api.md#transactions)** - ACID transactions
 - **[Search Endpoints](http-api.md#search)** - Vector and hybrid search
 - **[Admin Endpoints](http-api.md#admin)** - System management
@@ -139,18 +141,59 @@ DELETE /db/{name}/tx/{id}       - Rollback transaction
 
 ### NornicDB Extensions
 
+#### Authentication
 ```
 POST /auth/token                - Get JWT token
+POST /auth/logout               - Logout
 GET  /auth/me                   - Current user info
-POST  /nornicdb/search           - Hybrid search
-POST  /nornicdb/similar          - Vector similarity
-GET  /admin/stats               - System statistics
-GET  /admin/gpu                 - GPU status
-POST /gdpr/export               - GDPR data export
-POST /gdpr/delete               - GDPR erasure
+POST /auth/api-token             - Generate API token (admin)
+GET  /auth/oauth/redirect       - OAuth redirect
+GET  /auth/oauth/callback        - OAuth callback
+GET  /auth/users                 - List users (admin)
+POST /auth/users                 - Create user (admin)
+GET  /auth/users/{username}      - Get user (admin)
+PUT  /auth/users/{username}      - Update user (admin)
+DELETE /auth/users/{username}    - Delete user (admin)
 ```
 
-[See complete HTTP API documentation →](http-api.md)
+#### Search & Embeddings
+```
+POST /nornicdb/search            - Hybrid search (vector + BM25)
+POST /nornicdb/similar           - Vector similarity search
+GET  /nornicdb/decay             - Memory decay statistics
+POST /nornicdb/embed/trigger     - Trigger embedding generation
+GET  /nornicdb/embed/stats       - Embedding statistics
+POST /nornicdb/embed/clear       - Clear all embeddings (admin)
+POST /nornicdb/search/rebuild    - Rebuild search indexes
+```
+
+#### Admin & System
+```
+GET  /admin/stats                - System statistics (admin)
+GET  /admin/config               - Server configuration (admin)
+POST /admin/backup               - Create backup (admin)
+GET  /admin/gpu/status           - GPU status (admin)
+POST /admin/gpu/enable           - Enable GPU (admin)
+POST /admin/gpu/disable          - Disable GPU (admin)
+POST /admin/gpu/test             - Test GPU (admin)
+```
+
+#### GDPR Compliance
+```
+GET  /gdpr/export                - GDPR data export
+POST /gdpr/delete                - GDPR erasure request
+```
+
+#### GraphQL & AI
+```
+POST /graphql                    - GraphQL endpoint
+GET  /graphql/playground         - GraphQL Playground
+POST /mcp                        - MCP server endpoint
+POST /api/bifrost/chat/completions - Heimdall AI chat
+```
+
+[See complete HTTP API documentation →](http-api.md)  
+[OpenAPI/Swagger Specification →](openapi.yaml)
 
 ## 🔌 Client Drivers
 
@@ -219,9 +262,48 @@ Looking for a specific function or endpoint?
 
 - **[Cypher Functions Index](cypher-functions/)** - Searchable function list
 - **[HTTP API Reference](http-api.md)** - All endpoints
+- **[OpenAPI/Swagger Spec](openapi.yaml)** - Interactive API documentation
 - **[Bolt Protocol Spec](bolt-protocol.md)** - Protocol details
+
+## 📋 OpenAPI/Swagger Specification
+
+We provide a complete OpenAPI 3.0 specification for all REST API endpoints:
+
+- **[openapi.yaml](openapi.yaml)** - Complete OpenAPI specification
+
+### Using the OpenAPI Spec
+
+You can use the OpenAPI specification with tools like:
+
+- **Swagger UI**: Interactive API documentation and testing
+- **Postman**: Import the spec to test endpoints
+- **Insomnia**: Import for API testing
+- **Code Generation**: Generate client libraries in various languages
+
+### Quick Start with Swagger UI
+
+1. Download the OpenAPI spec: `docs/api-reference/openapi.yaml`
+2. Visit [Swagger Editor](https://editor.swagger.io/)
+3. Import the `openapi.yaml` file
+4. Test endpoints directly from the browser
+
+### Example: Testing with curl
+
+```bash
+# Get authentication token
+curl -X POST http://localhost:7474/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"username": "admin", "password": "password123"}'
+
+# Use token for authenticated requests
+curl -X POST http://localhost:7474/nornicdb/search \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "machine learning", "limit": 10}'
+```
 
 ---
 
 **Ready to start?** → **[Cypher Functions](cypher-functions/)**  
-**Need examples?** → **[User Guides](../user-guides/)**
+**Need examples?** → **[User Guides](../user-guides/)**  
+**Test the API?** → **[OpenAPI Spec](openapi.yaml)**

@@ -90,6 +90,13 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 - Schema introspection and auto-complete
 - GraphQL Playground for interactive exploration
 
+### 📋 OpenAPI/Swagger Specification
+
+- Complete OpenAPI 3.0 specification for all REST endpoints
+- Interactive API documentation with Swagger UI
+- Easy integration with API testing tools (Postman, Insomnia)
+- Client library generation support
+
 ### 🔐 Enterprise-Ready
 
 - **High Availability** - Hot Standby, Raft consensus, Multi-Region

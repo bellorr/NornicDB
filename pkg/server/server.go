@@ -81,13 +81,48 @@
 //
 // NornicDB Extension Endpoints:
 //
-//	POST /auth/token                - OAuth 2.0 token endpoint
-//	GET  /auth/me                   - Current user info
-//	GET  /nornicdb/search           - Hybrid search (vector + BM25)
-//	GET  /nornicdb/similar          - Vector similarity search
-//	GET  /admin/stats               - System statistics
-//	GET  /gdpr/export               - GDPR data export
-//	POST /gdpr/delete               - GDPR erasure request
+//	Authentication:
+//	  POST /auth/token                - Get JWT token
+//	  POST /auth/logout               - Logout
+//	  GET  /auth/me                   - Current user info
+//	  POST /auth/api-token            - Generate API token (admin)
+//	  GET  /auth/oauth/redirect       - OAuth redirect
+//	  GET  /auth/oauth/callback        - OAuth callback
+//	  GET  /auth/users                 - List users (admin)
+//	  POST /auth/users                 - Create user (admin)
+//	  GET  /auth/users/{username}      - Get user (admin)
+//	  PUT  /auth/users/{username}      - Update user (admin)
+//	  DELETE /auth/users/{username}    - Delete user (admin)
+//
+//	Search & Embeddings:
+//	  POST /nornicdb/search           - Hybrid search (vector + BM25)
+//	  POST /nornicdb/similar           - Vector similarity search
+//	  GET  /nornicdb/decay             - Memory decay statistics
+//	  POST /nornicdb/embed/trigger     - Trigger embedding generation
+//	  GET  /nornicdb/embed/stats       - Embedding statistics
+//	  POST /nornicdb/embed/clear       - Clear all embeddings (admin)
+//	  POST /nornicdb/search/rebuild    - Rebuild search indexes
+//
+//	Admin & System:
+//	  GET  /admin/stats               - System statistics (admin)
+//	  GET  /admin/config               - Server configuration (admin)
+//	  POST /admin/backup               - Create backup (admin)
+//	  GET  /admin/gpu/status           - GPU status (admin)
+//	  POST /admin/gpu/enable           - Enable GPU (admin)
+//	  POST /admin/gpu/disable          - Disable GPU (admin)
+//	  POST /admin/gpu/test              - Test GPU (admin)
+//
+//	GDPR Compliance:
+//	  GET  /gdpr/export                - GDPR data export
+//	  POST /gdpr/delete                - GDPR erasure request
+//
+//	GraphQL & AI:
+//	  POST /graphql                    - GraphQL endpoint
+//	  GET  /graphql/playground         - GraphQL Playground
+//	  POST /mcp                        - MCP server endpoint
+//	  POST /api/bifrost/chat/completions - Heimdall AI chat
+//
+// For complete API documentation, see: docs/api-reference/openapi.yaml
 //
 // Security Features:
 //
@@ -451,6 +486,9 @@ type Server struct {
 
 	// Rate limiter for DoS protection
 	rateLimiter *IPRateLimiter
+
+	// OAuth manager for OAuth 2.0 authentication
+	oauthManager *auth.OAuthManager
 
 	mu      sync.RWMutex
 	closed  atomic.Bool
@@ -844,6 +882,11 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		rateLimiter:     rateLimiter,
 	}
 
+	// Initialize OAuth manager if authenticator is available
+	if authenticator != nil {
+		s.oauthManager = auth.NewOAuthManager(authenticator)
+	}
+
 	// Initialize slow query logger if file specified
 	if config.SlowQueryEnabled && config.SlowQueryLogFile != "" {
 		file, err := os.OpenFile(config.SlowQueryLogFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
@@ -1078,6 +1121,10 @@ func (s *Server) buildRouter() http.Handler {
 	mux.HandleFunc("/auth/logout", s.handleLogout)
 	mux.HandleFunc("/auth/me", s.withAuth(s.handleMe, auth.PermRead))
 	mux.HandleFunc("/auth/api-token", s.withAuth(s.handleGenerateAPIToken, auth.PermAdmin)) // Admin only - generate API tokens
+
+	// OAuth endpoints
+	mux.HandleFunc("/auth/oauth/redirect", s.handleOAuthRedirect)
+	mux.HandleFunc("/auth/oauth/callback", s.handleOAuthCallback)
 
 	// User management (admin only)
 	mux.HandleFunc("/auth/users", s.withAuth(s.handleUsers, auth.PermUserManage))
@@ -3248,7 +3295,138 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 		}{},
 	}
 
+	// Check if OAuth is configured
+	authProvider := os.Getenv("NORNICDB_AUTH_PROVIDER")
+	if authProvider == "oauth" {
+		issuer := os.Getenv("NORNICDB_OAUTH_ISSUER")
+		if issuer != "" {
+			// Add OAuth provider to the list
+			config.OAuthProviders = append(config.OAuthProviders, struct {
+				Name        string `json:"name"`
+				URL         string `json:"url"`
+				DisplayName string `json:"displayName"`
+			}{
+				Name:        "oauth",
+				URL:         fmt.Sprintf("%s/auth/oauth/redirect", s.getBaseURL(r)),
+				DisplayName: "OAuth",
+			})
+		}
+	}
+
 	s.writeJSON(w, http.StatusOK, config)
+}
+
+// getBaseURL returns the base URL for the server from the request
+func (s *Server) getBaseURL(r *http.Request) string {
+	scheme := "http"
+	if r.TLS != nil {
+		scheme = "https"
+	} else if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
+		scheme = forwardedProto
+	}
+
+	host := r.Host
+	if host == "" {
+		host = fmt.Sprintf("%s:%d", s.config.Address, s.config.Port)
+	}
+
+	basePath := s.config.BasePath
+	if basePath == "" {
+		basePath = r.Header.Get("X-Base-Path")
+	}
+	if basePath != "" && !strings.HasPrefix(basePath, "/") {
+		basePath = "/" + basePath
+	}
+
+	return fmt.Sprintf("%s://%s%s", scheme, host, basePath)
+}
+
+// handleOAuthRedirect initiates the OAuth 2.0 authorization flow
+// GET /auth/oauth/redirect
+func (s *Server) handleOAuthRedirect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed", ErrMethodNotAllowed)
+		return
+	}
+
+	if s.oauthManager == nil {
+		s.writeError(w, http.StatusBadRequest, "OAuth not configured", ErrBadRequest)
+		return
+	}
+
+	baseURL := s.getBaseURL(r)
+	state, authURL, err := s.oauthManager.GenerateAuthURL(baseURL)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
+		return
+	}
+
+	log.Printf("OAuth redirect: Stored state in memory: %s (expires in 10 minutes)", state[:16]+"...")
+
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
+// handleOAuthCallback handles the OAuth 2.0 callback and exchanges code for token
+// GET /auth/oauth/callback
+func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed", ErrMethodNotAllowed)
+		return
+	}
+
+	if s.oauthManager == nil {
+		s.writeError(w, http.StatusBadRequest, "OAuth not configured", ErrBadRequest)
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	state := r.URL.Query().Get("state") // Go automatically URL-decodes query parameters
+	errorParam := r.URL.Query().Get("error")
+
+	if errorParam != "" {
+		errorDesc := r.URL.Query().Get("error_description")
+		s.writeError(w, http.StatusBadRequest, fmt.Sprintf("OAuth error: %s - %s", errorParam, errorDesc), ErrBadRequest)
+		return
+	}
+
+	if code == "" {
+		s.writeError(w, http.StatusBadRequest, "missing authorization code", ErrBadRequest)
+		return
+	}
+
+	if state == "" {
+		s.writeError(w, http.StatusBadRequest, "missing state parameter", ErrBadRequest)
+		return
+	}
+
+	// Handle callback using OAuth manager
+	user, token, _, err := s.oauthManager.HandleCallback(code, state)
+	if err != nil {
+		log.Printf("OAuth callback error: %v", err)
+		s.writeError(w, http.StatusBadRequest, err.Error(), ErrBadRequest)
+		return
+	}
+
+	tokenResponse := &auth.TokenResponse{
+		AccessToken: token,
+		TokenType:   "Bearer",
+	}
+
+	// Set HTTP-only cookie for browser sessions
+	http.SetCookie(w, &http.Cookie{
+		Name:     "nornicdb_token",
+		Value:    tokenResponse.AccessToken,
+		Path:     "/",
+		HttpOnly: true,
+		Secure:   r.TLS != nil,
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   86400 * 7, // 7 days
+	})
+
+	log.Printf("OAuth callback: authenticated user %s", user.Username)
+
+	// Redirect to UI
+	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
@@ -3280,7 +3458,50 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, user)
+	// Enhance response with authentication method info
+	response := map[string]interface{}{
+		"id":         user.ID,
+		"username":   user.Username,
+		"email":      user.Email,
+		"roles":      user.Roles,
+		"created_at": user.CreatedAt,
+		"updated_at": user.UpdatedAt,
+		"last_login": user.LastLogin,
+		"disabled":   user.Disabled,
+		"metadata":   user.Metadata,
+	}
+
+	// Determine authentication method
+	// Check metadata first, then infer from OAuth configuration
+	authMethod := "password" // default
+	if user.Metadata != nil {
+		if method, ok := user.Metadata["auth_method"]; ok {
+			authMethod = method
+		}
+	}
+
+	// If OAuth is configured and user metadata indicates OAuth, or if we can't determine,
+	// check if OAuth is the current auth provider
+	if authMethod == "oauth" || (authMethod == "password" && os.Getenv("NORNICDB_AUTH_PROVIDER") == "oauth") {
+		// If user has metadata indicating OAuth, or if OAuth is the only auth method configured,
+		// mark as OAuth (this is a heuristic - in production you'd store this properly)
+		if user.Metadata != nil && user.Metadata["auth_method"] == "oauth" {
+			authMethod = "oauth"
+		} else if os.Getenv("NORNICDB_AUTH_PROVIDER") == "oauth" {
+			// If OAuth is the only auth provider, user is likely OAuth-authenticated
+			// (This is a simplification - in practice you'd track this properly)
+			authMethod = "oauth"
+		}
+	}
+
+	response["auth_method"] = authMethod
+	if authMethod == "oauth" {
+		if issuer := os.Getenv("NORNICDB_OAUTH_ISSUER"); issuer != "" {
+			response["oauth_provider"] = issuer
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {

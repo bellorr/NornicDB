@@ -1,0 +1,1143 @@
+openapi: 3.0.3
+info:
+  title: NornicDB REST API
+  description: |
+    Complete REST API documentation for NornicDB - A production-ready graph database with GPU acceleration, Neo4j compatibility, and advanced AI integration.
+    
+    ## Authentication
+    
+    NornicDB supports multiple authentication methods:
+    
+    - **Basic Auth** (Neo4j compatible): `Authorization: Basic base64(username:password)`
+    - **Bearer Token** (JWT): `Authorization: Bearer <token>`
+    - **Cookie**: `Cookie: nornicdb_token=<token>`
+    - **Query Parameter**: `?token=<token>`
+    
+    ## Base URL
+    
+    Default: `http://localhost:7474`
+    
+    ## Neo4j Compatibility
+    
+    All Neo4j HTTP API endpoints are supported for full compatibility.
+  version: 1.0.0
+  contact:
+    name: NornicDB Support
+    url: https://github.com/orneryd/nornicdb
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:7474
+    description: Local development server
+  - url: https://api.example.com
+    description: Production server (example)
+
+tags:
+  - name: Health
+    description: Health check and status endpoints
+  - name: Authentication
+    description: Authentication and user management
+  - name: Neo4j Compatible
+    description: Neo4j-compatible endpoints for database operations
+  - name: Search
+    description: Vector and hybrid search endpoints
+  - name: Embeddings
+    description: Embedding generation and management
+  - name: Admin
+    description: Administrative endpoints (admin only)
+  - name: GPU
+    description: GPU acceleration control
+  - name: GDPR
+    description: GDPR compliance endpoints
+  - name: GraphQL
+    description: GraphQL API endpoints
+  - name: MCP
+    description: Model Context Protocol endpoints
+  - name: Heimdall
+    description: Heimdall AI Assistant endpoints
+
+paths:
+  /health:
+    get:
+      tags:
+        - Health
+      summary: Health check
+      description: Public health check endpoint (no authentication required)
+      operationId: healthCheck
+      responses:
+        '200':
+          description: Server is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  uptime:
+                    type: string
+                    example: "2h30m15s"
+
+  /status:
+    get:
+      tags:
+        - Health
+      summary: Server status
+      description: Get detailed server status (requires authentication)
+      operationId: getStatus
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Server status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node_count:
+                    type: integer
+                  edge_count:
+                    type: integer
+                  uptime:
+                    type: string
+                  version:
+                    type: string
+
+  /metrics:
+    get:
+      tags:
+        - Health
+      summary: Prometheus metrics
+      description: Prometheus-compatible metrics endpoint
+      operationId: getMetrics
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Prometheus metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /auth/token:
+    post:
+      tags:
+        - Authentication
+      summary: Get authentication token
+      description: Authenticate with username/password and receive a JWT token
+      operationId: getToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                  example: "admin"
+                password:
+                  type: string
+                  format: password
+                  example: "password123"
+                grant_type:
+                  type: string
+                  example: "password"
+      responses:
+        '200':
+          description: Authentication successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/logout:
+    post:
+      tags:
+        - Authentication
+      summary: Logout
+      description: Invalidate current session
+      operationId: logout
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Logout successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Logged out successfully"
+
+  /auth/me:
+    get:
+      tags:
+        - Authentication
+      summary: Get current user info
+      description: Get information about the currently authenticated user
+      operationId: getCurrentUser
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserInfo'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /auth/api-token:
+    post:
+      tags:
+        - Authentication
+      summary: Generate API token
+      description: Generate a new API token for programmatic access (admin only)
+      operationId: generateAPIToken
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                expiry:
+                  type: string
+                  description: Token expiry duration (e.g., "24h", "7d")
+                  example: "7d"
+      responses:
+        '200':
+          description: API token generated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /auth/oauth/redirect:
+    get:
+      tags:
+        - Authentication
+      summary: OAuth redirect
+      description: Initiate OAuth 2.0 authorization flow
+      operationId: oauthRedirect
+      responses:
+        '302':
+          description: Redirect to OAuth provider
+          headers:
+            Location:
+              schema:
+                type: string
+                description: OAuth authorization URL
+
+  /auth/oauth/callback:
+    get:
+      tags:
+        - Authentication
+      summary: OAuth callback
+      description: Handle OAuth 2.0 callback and exchange code for token
+      operationId: oauthCallback
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: state
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to UI after successful authentication
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /auth/users:
+    get:
+      tags:
+        - Authentication
+      summary: List users
+      description: List all users (admin only)
+      operationId: listUsers
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/User'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Authentication
+      summary: Create user
+      description: Create a new user (admin only)
+      operationId: createUser
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - username
+                - password
+              properties:
+                username:
+                  type: string
+                password:
+                  type: string
+                  format: password
+                roles:
+                  type: array
+                  items:
+                    type: string
+                    enum: [admin, editor, viewer]
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /auth/users/{username}:
+    get:
+      tags:
+        - Authentication
+      summary: Get user
+      description: Get user by username (admin only)
+      operationId: getUser
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - Authentication
+      summary: Update user
+      description: Update user roles or status (admin only)
+      operationId: updateUser
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                roles:
+                  type: array
+                  items:
+                    type: string
+                disabled:
+                  type: boolean
+      responses:
+        '200':
+          description: User updated
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags:
+        - Authentication
+      summary: Delete user
+      description: Delete a user (admin only)
+      operationId: deleteUser
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      parameters:
+        - name: username
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User deleted
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /db/{database}/tx/commit:
+    post:
+      tags:
+        - Neo4j Compatible
+      summary: Execute Cypher query
+      description: Execute a Cypher query in an implicit transaction (Neo4j compatible)
+      operationId: executeCypher
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      parameters:
+        - name: database
+          in: path
+          required: true
+          schema:
+            type: string
+          example: "neo4j"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - statements
+              properties:
+                statements:
+                  type: array
+                  items:
+                    type: object
+                    required:
+                      - statement
+                    properties:
+                      statement:
+                        type: string
+                        example: "MATCH (n:Person) RETURN n LIMIT 10"
+                      parameters:
+                        type: object
+      responses:
+        '200':
+          description: Query executed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CypherResponse'
+
+  /nornicdb/search:
+    post:
+      tags:
+        - Search
+      summary: Hybrid search
+      description: Perform hybrid search (vector + BM25) across nodes
+      operationId: hybridSearch
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                database:
+                  type: string
+                  description: Database name (defaults to default database)
+                  example: "neo4j"
+                query:
+                  type: string
+                  description: Search query text
+                  example: "machine learning"
+                labels:
+                  type: array
+                  items:
+                    type: string
+                  description: Filter by node labels
+                  example: ["Article", "Post"]
+                limit:
+                  type: integer
+                  description: Maximum number of results
+                  default: 10
+                  example: 10
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SearchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /nornicdb/similar:
+    post:
+      tags:
+        - Search
+      summary: Vector similarity search
+      description: Find nodes similar to a given node using vector embeddings
+      operationId: similarSearch
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - node_id
+              properties:
+                database:
+                  type: string
+                  description: Database name (defaults to default database)
+                  example: "neo4j"
+                node_id:
+                  type: string
+                  description: ID of the node to find similar nodes for
+                  example: "n1"
+                limit:
+                  type: integer
+                  description: Maximum number of results
+                  default: 10
+                  example: 10
+      responses:
+        '200':
+          description: Similar nodes
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/SearchResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /nornicdb/decay:
+    get:
+      tags:
+        - Search
+      summary: Memory decay information
+      description: Get memory decay statistics for nodes
+      operationId: getDecay
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Decay statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_nodes:
+                    type: integer
+                  decayed_nodes:
+                    type: integer
+                  decay_rate:
+                    type: number
+
+  /nornicdb/embed/trigger:
+    post:
+      tags:
+        - Embeddings
+      summary: Trigger embedding generation
+      description: Trigger the embedding worker to process nodes without embeddings
+      operationId: triggerEmbeddings
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Embedding generation triggered
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Embedding generation triggered"
+
+  /nornicdb/embed/stats:
+    get:
+      tags:
+        - Embeddings
+      summary: Embedding statistics
+      description: Get embedding worker statistics
+      operationId: getEmbedStats
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Embedding statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  total_nodes:
+                    type: integer
+                  nodes_with_embeddings:
+                    type: integer
+                  nodes_without_embeddings:
+                    type: integer
+                  processing_queue:
+                    type: integer
+
+  /nornicdb/embed/clear:
+    post:
+      tags:
+        - Embeddings
+      summary: Clear all embeddings
+      description: Clear all embeddings from nodes (admin only)
+      operationId: clearEmbeddings
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Embeddings cleared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "All embeddings cleared"
+
+  /nornicdb/search/rebuild:
+    post:
+      tags:
+        - Search
+      summary: Rebuild search indexes
+      description: Rebuild search indexes from all nodes in the specified database
+      operationId: rebuildSearchIndexes
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                database:
+                  type: string
+                  description: Database name (defaults to default database)
+                  example: "neo4j"
+      responses:
+        '200':
+          description: Indexes rebuilt
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: "Search indexes rebuilt"
+
+  /admin/stats:
+    get:
+      tags:
+        - Admin
+      summary: System statistics
+      description: Get detailed system statistics (admin only)
+      operationId: getAdminStats
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: System statistics
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  node_count:
+                    type: integer
+                  edge_count:
+                    type: integer
+                  database_count:
+                    type: integer
+                  uptime:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/config:
+    get:
+      tags:
+        - Admin
+      summary: Get configuration
+      description: Get current server configuration (admin only)
+      operationId: getAdminConfig
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Configuration
+          content:
+            application/json:
+              schema:
+                type: object
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/backup:
+    post:
+      tags:
+        - Admin
+      summary: Create backup
+      description: Create a database backup (admin only)
+      operationId: createBackup
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: Backup created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  backup_path:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/gpu/status:
+    get:
+      tags:
+        - GPU
+      summary: GPU status
+      description: Get GPU acceleration status (admin only)
+      operationId: getGPUStatus
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: GPU status
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  enabled:
+                    type: boolean
+                  available:
+                    type: boolean
+                  device_name:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/gpu/enable:
+    post:
+      tags:
+        - GPU
+      summary: Enable GPU acceleration
+      description: Enable GPU acceleration (admin only)
+      operationId: enableGPU
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: GPU enabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/gpu/disable:
+    post:
+      tags:
+        - GPU
+      summary: Disable GPU acceleration
+      description: Disable GPU acceleration (admin only)
+      operationId: disableGPU
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: GPU disabled
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /admin/gpu/test:
+    post:
+      tags:
+        - GPU
+      summary: Test GPU
+      description: Test GPU acceleration (admin only)
+      operationId: testGPU
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: GPU test results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                  performance:
+                    type: number
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /gdpr/export:
+    get:
+      tags:
+        - GDPR
+      summary: GDPR data export
+      description: Export all user data (GDPR Art.15 - Right of access)
+      operationId: gdprExport
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: User data export
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_data:
+                    type: object
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /gdpr/delete:
+    post:
+      tags:
+        - GDPR
+      summary: GDPR data deletion
+      description: Delete all user data (GDPR Art.17 - Right to erasure)
+      operationId: gdprDelete
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: User data deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /graphql:
+    post:
+      tags:
+        - GraphQL
+      summary: GraphQL endpoint
+      description: Execute GraphQL queries and mutations
+      operationId: graphqlQuery
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - query
+              properties:
+                query:
+                  type: string
+                  example: "query { nodes { id labels properties } }"
+                variables:
+                  type: object
+      responses:
+        '200':
+          description: GraphQL response
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                  errors:
+                    type: array
+                    items:
+                      type: object
+
+  /graphql/playground:
+    get:
+      tags:
+        - GraphQL
+      summary: GraphQL Playground
+      description: Interactive GraphQL IDE
+      operationId: graphqlPlayground
+      security:
+        - bearerAuth: []
+        - basicAuth: []
+      responses:
+        '200':
+          description: GraphQL Playground HTML
+          content:
+            text/html:
+              schema:
+                type: string
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT token authentication
+    basicAuth:
+      type: http
+      scheme: basic
+      description: Basic authentication (Neo4j compatible)
+
+  schemas:
+    TokenResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access token
+        token_type:
+          type: string
+          example: "Bearer"
+        expires_in:
+          type: integer
+          description: Token expiry in seconds
+
+    UserInfo:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        auth_method:
+          type: string
+          enum: [oauth, password]
+        oauth_provider:
+          type: string
+          description: OAuth provider URL (if auth_method is oauth)
+
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        username:
+          type: string
+        email:
+          type: string
+        roles:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        disabled:
+          type: boolean
+
+    SearchResult:
+      type: object
+      properties:
+        node:
+          type: object
+          properties:
+            id:
+              type: string
+            labels:
+              type: array
+              items:
+                type: string
+            properties:
+              type: object
+        score:
+          type: number
+          description: Combined RRF score
+        rrf_score:
+          type: number
+          description: Reciprocal Rank Fusion score
+        vector_rank:
+          type: integer
+          description: Rank in vector search results
+        bm25_rank:
+          type: integer
+          description: Rank in BM25 search results
+
+    CypherResponse:
+      type: object
+      properties:
+        results:
+          type: array
+          items:
+            type: object
+            properties:
+              columns:
+                type: array
+                items:
+                  type: string
+              data:
+                type: array
+                items:
+                  type: object
+                  properties:
+                    row:
+                      type: array
+                    meta:
+                      type: array
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+
+    Unauthorized:
+      description: Unauthorized
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+
+    Forbidden:
+      description: Forbidden (insufficient permissions)
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: string
+              message:
+                type: string
+

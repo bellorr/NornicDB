@@ -12,6 +12,15 @@ interface GeneratedToken {
   roles: string[];
 }
 
+interface UserInfo {
+  id: string;
+  username: string;
+  email?: string;
+  roles: string[];
+  auth_method?: string;
+  oauth_provider?: string;
+}
+
 export function Security() {
   const navigate = useNavigate();
   const [subject, setSubject] = useState('');
@@ -23,9 +32,10 @@ export function Security() {
   const [copied, setCopied] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [checkingAuth, setCheckingAuth] = useState(true);
+  const [userInfo, setUserInfo] = useState<UserInfo | null>(null);
 
   useEffect(() => {
-    // Check if user is admin
+    // Check if user is admin and get user info
     fetch(`${BASE_PATH}/auth/me`, {
       credentials: 'include'
     })
@@ -33,6 +43,7 @@ export function Security() {
       .then(data => {
         const roles = data.roles || [];
         setIsAdmin(roles.includes('admin'));
+        setUserInfo(data);
         setCheckingAuth(false);
       })
       .catch(() => {
@@ -132,6 +143,33 @@ export function Security() {
 
       {/* Main Content */}
       <main className="max-w-4xl mx-auto p-6">
+        {/* Authentication Info */}
+        {userInfo && (
+          <div className="bg-slate-800 rounded-lg p-4 mb-6">
+            <h2 className="text-sm font-semibold text-slate-400 mb-2">Authentication Method</h2>
+            <div className="flex items-center gap-2">
+              {userInfo.auth_method === 'oauth' ? (
+                <>
+                  <span className="text-green-400">🔐 OAuth</span>
+                  {userInfo.oauth_provider && (
+                    <span className="text-slate-500 text-sm">({userInfo.oauth_provider})</span>
+                  )}
+                  <span className="text-slate-500 text-sm ml-auto">
+                    Your account is managed by the OAuth provider. You can generate NornicDB API tokens below for programmatic access.
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span className="text-blue-400">🔑 Password</span>
+                  <span className="text-slate-500 text-sm ml-auto">
+                    Your account uses password authentication. You can generate API tokens for programmatic access.
+                  </span>
+                </>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Info Banner */}
         <div className="bg-blue-900/30 border border-blue-700/50 rounded-lg p-4 mb-8">
           <div className="flex gap-3">
