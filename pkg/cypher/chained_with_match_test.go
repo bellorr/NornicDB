@@ -354,12 +354,9 @@ func TestOptionalMatchInChain(t *testing.T) {
 			)
 			RETURN e.id
 		`, nil)
+		require.NoError(t, err)
 		// Note: This is the CORRECT way to handle optional relationships
 		// The query should return 1 row and create REL_A and REL_C but not REL_B
-		if err != nil {
-			t.Logf("OPTIONAL MATCH + FOREACH pattern error: %v", err)
-			t.Skip("OPTIONAL MATCH + FOREACH pattern may not be fully supported")
-		}
 		t.Logf("OPTIONAL MATCH result rows: %d", len(result.Rows))
 	})
 }

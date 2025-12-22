@@ -43,7 +43,7 @@ func TestEmbedThenFindNext(t *testing.T) {
 	t.Logf("First node found: %s", first.ID)
 
 	// Simulate embedding it - set embedding directly
-	first.Embedding = []float32{0.1, 0.2, 0.3}
+	first.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
 	first.Properties["has_embedding"] = true
 	first.Properties["embedding"] = true
 	err = async.UpdateNode(first)
@@ -57,7 +57,7 @@ func TestEmbedThenFindNext(t *testing.T) {
 	assert.NotEqual(t, first.ID, second.ID, "Second node should be different from first!")
 
 	// Keep going - embed second, find third
-	second.Embedding = []float32{0.1, 0.2, 0.3}
+	second.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
 	second.Properties["has_embedding"] = true
 	err = async.UpdateNode(second)
 	require.NoError(t, err)
@@ -114,7 +114,7 @@ func TestEmbedThenFindNextWithFlush(t *testing.T) {
 	t.Logf("First node found: %s", first.ID)
 
 	// Simulate embedding it
-	first.Embedding = []float32{0.1, 0.2, 0.3}
+	first.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
 	first.Properties["has_embedding"] = true
 	first.Properties["embedding"] = true
 	err = async.UpdateNode(first)
@@ -192,7 +192,7 @@ func TestProductionScenario(t *testing.T) {
 		embedded[node.ID] = true
 
 		// Embed it
-		node.Embedding = []float32{0.1, 0.2, 0.3}
+		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
 		node.Properties["has_embedding"] = true
 		node.Properties["embedding"] = true
 		err = async.UpdateNode(node)

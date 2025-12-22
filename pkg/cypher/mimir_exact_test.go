@@ -177,7 +177,7 @@ func TestMimirExactQueriesWithEmbeddings(t *testing.T) {
 
 	// Set embedding on first 2 nodes
 	for i := 0; i < 2; i++ {
-		nodes[i].Embedding = []float32{0.1, 0.2, 0.3}
+		nodes[i].ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
 		nodes[i].Properties["has_embedding"] = true
 		nodes[i].Properties["embedding"] = true // Marker for IS NOT NULL check
 		err = store.UpdateNode(nodes[i])
@@ -409,7 +409,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 		}
 		// Store embedding as []interface{} property (like Mimir/Neo4j does)
 		embeddingArray := []interface{}{0.1, 0.2, 0.3, 0.4}
-		node.Embedding = []float32{0.1, 0.2, 0.3, 0.4} // Also native field
+		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3, 0.4}} // Also native field
 		node.Properties["embedding"] = embeddingArray  // Property like Mimir!
 		node.Properties["embedding_dimensions"] = 4
 		node.Properties["embedding_model"] = "test-model"
@@ -427,7 +427,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 		}
 		// Store embedding as []interface{} property (like Mimir does)
 		embeddingArray := []interface{}{0.5, 0.6, 0.7, 0.8}
-		node.Embedding = []float32{0.5, 0.6, 0.7, 0.8} // Also native field
+		node.ChunkEmbeddings = [][]float32{{0.5, 0.6, 0.7, 0.8}} // Also native field
 		node.Properties["embedding"] = embeddingArray  // Property like Mimir!
 		node.Properties["embedding_dimensions"] = 4
 		node.Properties["embedding_model"] = "test-model"
@@ -552,7 +552,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 
 		var filesWithEmbed, chunksWithEmbed int
 		badger.IterateNodes(func(n *storage.Node) bool {
-			if len(n.Embedding) > 0 {
+			if len(n.ChunkEmbeddings) > 0 && len(n.ChunkEmbeddings[0]) > 0 {
 				if hasLabel(n.Labels, "File") {
 					filesWithEmbed++
 				}

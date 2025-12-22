@@ -137,6 +137,8 @@ var (
 	countSubqueryRe = regexp.MustCompile(`(?i)\bCOUNT\s*\{`)
 	// Matches CALL followed by optional whitespace and opening brace (not CALL procedure())
 	callSubqueryRe = regexp.MustCompile(`(?i)\bCALL\s*\{`)
+	// Matches COLLECT followed by optional whitespace and opening brace
+	collectSubqueryRe = regexp.MustCompile(`(?i)\bCOLLECT\s*\{`)
 )
 
 // hasSubqueryPattern checks if the query contains a subquery pattern (keyword + optional whitespace + brace)
@@ -1660,10 +1662,13 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	matchIdx := findKeywordIndex(cypher, "MATCH")
 
 	// Find the delete clause - could be "DELETE" or "DETACH DELETE"
+	// IMPORTANT: Search for "DETACH DELETE" first (longer string) to avoid matching just "DETACH"
 	var deleteIdx int
 	if detach {
+		// Try "DETACH DELETE" first (longer, more specific)
 		deleteIdx = findKeywordIndex(cypher, "DETACH DELETE")
 		if deleteIdx == -1 {
+			// Fallback to just "DETACH" if "DETACH DELETE" not found
 			deleteIdx = findKeywordIndex(cypher, "DETACH")
 		}
 	} else {
@@ -1674,17 +1679,24 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 		return nil, fmt.Errorf("DELETE requires a MATCH clause first (e.g., MATCH (n) DELETE n)")
 	}
 
-	// Parse the delete target variable(s) - e.g., "DELETE n" or "DELETE n, r"
+	// Parse the delete target variable(s) - e.g., "DELETE n" or "DETACH DELETE n"
 	// Preserve original case of variable names
 	deleteClause := strings.TrimSpace(cypher[deleteIdx:])
 	upperDeleteClause := strings.ToUpper(deleteClause)
+
+	// Handle DETACH DELETE - must check for "DETACH DELETE " first (longer string)
 	if detach {
 		if strings.HasPrefix(upperDeleteClause, "DETACH DELETE ") {
+			// Found "DETACH DELETE " - remove it to get variable name
 			deleteClause = deleteClause[14:] // len("DETACH DELETE ")
 		} else if strings.HasPrefix(upperDeleteClause, "DETACH ") {
+			// Found just "DETACH " - this shouldn't happen if we found "DETACH DELETE" above
+			// but handle it for safety
 			deleteClause = deleteClause[7:] // len("DETACH ")
 		}
 	}
+
+	// After handling DETACH, check for remaining "DELETE " prefix
 	upperDeleteClause = strings.ToUpper(deleteClause)
 	if strings.HasPrefix(upperDeleteClause, "DELETE ") {
 		deleteClause = deleteClause[7:] // len("DELETE ")
@@ -1697,8 +1709,25 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 	}
 	deleteVars := strings.TrimSpace(deleteClause)
 
+	if deleteVars == "" {
+		return nil, fmt.Errorf("DELETE clause must specify variable(s) to delete (e.g., DELETE n)")
+	}
+
 	// Execute the match first - return the specific variables being deleted
 	// Can't use RETURN * because it returns literal "*" instead of expanding
+	// For DETACH DELETE, we need to ensure deleteIdx points to the start of "DETACH DELETE"
+	// not just "DETACH", so the match query doesn't include "DETACH"
+	if detach && deleteIdx > 0 {
+		// Double-check: if we found "DETACH DELETE", make sure deleteIdx points to it
+		// If the substring starting at deleteIdx is "DETACH DELETE", we're good
+		// If it's just "DETACH", we need to adjust
+		checkSubstring := strings.ToUpper(strings.TrimSpace(cypher[deleteIdx:]))
+		if strings.HasPrefix(checkSubstring, "DETACH ") && !strings.HasPrefix(checkSubstring, "DETACH DELETE ") {
+			// We found "DETACH" but not "DETACH DELETE" - this is an error
+			return nil, fmt.Errorf("DETACH DELETE requires both DETACH and DELETE keywords together")
+		}
+	}
+
 	matchQuery := cypher[matchIdx:deleteIdx] + " RETURN " + deleteVars
 	matchResult, err := e.executeMatch(ctx, matchQuery)
 	if err != nil {
@@ -1927,7 +1956,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 				if !ok || node == nil {
 					continue
 				}
-				// Use setNodeProperty to properly route "embedding" to node.Embedding
+				// Use setNodeProperty to properly route "embedding" to node.ChunkEmbeddings (always stored as array of arrays)
 				setNodeProperty(node, propName, propValue)
 				if err := e.storage.UpdateNode(node); err == nil {
 					result.Stats.PropertiesSet++
@@ -2690,6 +2719,16 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 		return node
 	}
 
+	// Check for COLLECT { } subquery FIRST (before other function checks)
+	// This is a Neo4j 5.0+ feature that executes a subquery and collects results
+	if hasSubqueryPattern(expr, collectSubqueryRe) {
+		// We need context to execute the subquery, but resolveReturnItem doesn't have it
+		// Return a placeholder that will be handled by the caller
+		// This is a limitation - we'll need to handle collect { } at a higher level
+		// For now, return nil and handle it in the calling code
+		return nil // Will be handled by evaluateCollectSubquery in calling code
+	}
+
 	// Check for CASE expression FIRST (before property access check)
 	// CASE expressions contain dots (like p.age) but should not be treated as property access
 	if isCaseExpression(expr) {
@@ -2747,8 +2786,8 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 			if val, ok := node.Properties["has_embedding"]; ok {
 				return val
 			}
-			// Fall back to checking native embedding field
-			return len(node.Embedding) > 0
+			// Fall back to checking native embedding field (always stored in ChunkEmbeddings)
+			return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
 		}
 
 		// Filter out internal embedding-related properties (except has_embedding handled above)
@@ -2849,6 +2888,124 @@ func (e *StorageExecutor) extractSubquery(whereClause, prefix string) string {
 	}
 
 	return ""
+}
+
+// extractCollectSubquery extracts the subquery body from COLLECT { ... }
+func (e *StorageExecutor) extractCollectSubquery(expr string) string {
+	// Find "collect" (case-insensitive)
+	upperExpr := strings.ToUpper(expr)
+	collectIdx := strings.Index(upperExpr, "COLLECT")
+	if collectIdx < 0 {
+		return ""
+	}
+
+	// Find the opening brace after COLLECT
+	rest := expr[collectIdx+7:] // Skip "COLLECT"
+	braceStart := strings.Index(rest, "{")
+	if braceStart < 0 {
+		return ""
+	}
+
+	// Find matching closing brace
+	depth := 0
+	for i := braceStart; i < len(rest); i++ {
+		if rest[i] == '{' {
+			depth++
+		} else if rest[i] == '}' {
+			depth--
+			if depth == 0 {
+				return strings.TrimSpace(rest[braceStart+1 : i])
+			}
+		}
+	}
+
+	return ""
+}
+
+// evaluateCollectSubquery executes a COLLECT { } subquery for a given node and returns collected values
+func (e *StorageExecutor) evaluateCollectSubquery(ctx context.Context, node *storage.Node, variable, subquery string) ([]interface{}, error) {
+	// Extract the subquery body from COLLECT { ... }
+	subqueryBody := e.extractCollectSubquery(subquery)
+	if subqueryBody == "" {
+		return nil, fmt.Errorf("invalid COLLECT subquery syntax")
+	}
+
+	// The subquery body should be a complete query like:
+	// MATCH (p)-[:KNOWS]->(friend) RETURN friend.name
+	// We need to execute it with the node bound to the variable.
+	// We'll add a WHERE clause to bind the variable to the node ID.
+	// Format: MATCH (p)-[:KNOWS]->(friend) WHERE id(p) = nodeID RETURN friend.name
+
+	// Find WHERE clause position (if any)
+	whereIdx := findKeywordIndex(subqueryBody, "WHERE")
+	returnIdx := findKeywordIndex(subqueryBody, "RETURN")
+
+	var substitutedQuery string
+	if whereIdx > 0 && whereIdx < returnIdx {
+		// WHERE clause exists - add id() check to it
+		whereClause := strings.TrimSpace(subqueryBody[whereIdx+5 : returnIdx])
+		beforeWhere := subqueryBody[:whereIdx+5]
+		afterReturn := subqueryBody[returnIdx:]
+		// Add id() check: WHERE id(variable) = nodeID AND existing_where_clause
+		newWhere := fmt.Sprintf("WHERE id(%s) = '%s' AND %s", variable, string(node.ID), whereClause)
+		substitutedQuery = beforeWhere + newWhere + afterReturn
+	} else if returnIdx > 0 {
+		// No WHERE clause - add one before RETURN
+		beforeReturn := subqueryBody[:returnIdx]
+		afterReturn := subqueryBody[returnIdx:]
+		// Add WHERE clause: WHERE id(variable) = nodeID
+		newWhere := fmt.Sprintf(" WHERE id(%s) = '%s'", variable, string(node.ID))
+		substitutedQuery = beforeReturn + newWhere + afterReturn
+	} else {
+		// No RETURN clause - this shouldn't happen, but handle it
+		return nil, fmt.Errorf("COLLECT subquery must have a RETURN clause")
+	}
+
+	// Execute the subquery
+	subqueryResult, err := e.Execute(ctx, substitutedQuery, nil)
+	if err != nil {
+		return nil, fmt.Errorf("COLLECT subquery execution failed: %w", err)
+	}
+
+	// Collect all values from the first column of the subquery result
+	collected := make([]interface{}, 0, len(subqueryResult.Rows))
+	for _, row := range subqueryResult.Rows {
+		if len(row) > 0 {
+			collected = append(collected, row[0])
+		}
+	}
+
+	return collected, nil
+}
+
+// substituteNodeInSubquery substitutes a node variable in a subquery with its actual ID
+// Example: MATCH (p)-[:KNOWS]->(friend) RETURN friend.name
+//
+//	where p is bound to a node -> MATCH (nodeID)-[:KNOWS]->(friend) RETURN friend.name
+func (e *StorageExecutor) substituteNodeInSubquery(subquery, variable string, node *storage.Node) string {
+	// Replace (variable) or (variable:Label) patterns with the actual node ID
+	// We need to be careful to only replace node patterns, not property accesses
+	result := subquery
+
+	// Pattern 1: (variable) -> (nodeID)
+	// Use word boundaries to avoid matching variable names that are substrings
+	pattern1 := regexp.MustCompile(`\(` + regexp.QuoteMeta(variable) + `\)`)
+	replacement1 := "(" + string(node.ID) + ")"
+	result = pattern1.ReplaceAllString(result, replacement1)
+
+	// Pattern 2: (variable:Label) -> (nodeID:Label)
+	// This preserves the label
+	labelPattern := regexp.MustCompile(`\(` + regexp.QuoteMeta(variable) + `:([^)]+)\)`)
+	result = labelPattern.ReplaceAllStringFunc(result, func(match string) string {
+		// Extract the label part
+		labelMatch := regexp.MustCompile(`:` + `([^)]+)`).FindStringSubmatch(match)
+		if len(labelMatch) > 1 {
+			return "(" + string(node.ID) + ":" + labelMatch[1] + ")"
+		}
+		return "(" + string(node.ID) + ")"
+	})
+
+	return result
 }
 
 // checkSubqueryMatch checks if the subquery matches for a given node
@@ -3790,9 +3947,9 @@ func (e *StorageExecutor) substituteBoundVariablesInCall(callPart string, nodeCo
 			// Evaluate the property access
 			var value interface{}
 			if propName == "embedding" {
-				// Special handling for embedding - return the actual vector
-				if len(node.Embedding) > 0 {
-					value = node.Embedding
+				// Special handling for embedding - return the first chunk vector (always stored in ChunkEmbeddings)
+				if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+					value = node.ChunkEmbeddings[0]
 				} else if emb, ok := node.Properties["embedding"].([]float32); ok {
 					value = emb
 				} else if emb, ok := node.Properties["embedding"].([]float64); ok {
@@ -4120,8 +4277,16 @@ func (e *StorageExecutor) executeCallSubquery(ctx context.Context, cypher string
 		// Execute in batches (for large data operations)
 		innerResult, err = e.executeCallInTransactions(ctx, subqueryBody, batchSize)
 	} else {
-		// Execute as single query
-		innerResult, err = e.Execute(ctx, subqueryBody, nil)
+		// Check if subquery contains UNION - route to executeUnion if so
+		// This must be checked before calling Execute, as Execute routes based on first keyword
+		if findKeywordIndex(subqueryBody, "UNION ALL") >= 0 {
+			innerResult, err = e.executeUnion(ctx, subqueryBody, true)
+		} else if findKeywordIndex(subqueryBody, "UNION") >= 0 {
+			innerResult, err = e.executeUnion(ctx, subqueryBody, false)
+		} else {
+			// Execute as single query
+			innerResult, err = e.Execute(ctx, subqueryBody, nil)
+		}
 	}
 
 	if err != nil {

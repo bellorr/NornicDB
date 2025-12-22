@@ -1525,7 +1525,6 @@ func TestExecuteMultipleMatchCreateBlocks(t *testing.T) {
 // SKIP: This test relies on MATCH property filtering ({supplierID: 1}) which is currently broken
 // TODO: Re-enable once MATCH property filtering is fixed
 func TestExecuteMultipleMatchCreateBlocksWithDifferentCategories(t *testing.T) {
-	t.Skip("MATCH property filtering ({prop: value}) is not fully implemented - see QUICK_WINS_ROADMAP.md")
 	store := storage.NewMemoryEngine()
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -4559,9 +4558,9 @@ func TestNodeToMapFiltersEmbeddings(t *testing.T) {
 	exec := NewStorageExecutor(store)
 
 	node := &storage.Node{
-		ID:        "embed-filter-1",
-		Labels:    []string{"Document"},
-		Embedding: []float32{0.1, 0.2, 0.3, 0.4, 0.5}, // Actual embedding in storage
+		ID:              "embed-filter-1",
+		Labels:          []string{"Document"},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3, 0.4, 0.5}}, // Actual embedding in storage
 		Properties: map[string]interface{}{
 			"name":                 "Test Doc",
 			"content":              "Hello world",

@@ -258,11 +258,120 @@ func TestCallSubqueryWithOuterMatch(t *testing.T) {
 }
 
 // TestCallSubqueryUnion tests CALL {} with UNION inside
-// NOTE: This test is currently limited due to UNION parsing issues (pre-existing)
 func TestCallSubqueryUnion(t *testing.T) {
-	t.Skip("Skipping UNION test - UNION has pre-existing parsing issues with column names")
-	// The issue is that UNION doesn't properly parse column aliases
-	// This is unrelated to CALL {} support
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create test data with different node types
+	_, err := exec.Execute(ctx, `
+		CREATE (a:Person {name: 'Alice', type: 'person'}),
+		       (b:Company {name: 'Acme Corp', type: 'company'}),
+		       (c:Person {name: 'Bob', type: 'person'}),
+		       (d:Company {name: 'Tech Inc', type: 'company'})
+	`, nil)
+	require.NoError(t, err)
+
+	// Verify test data was created
+	personResult, err := exec.Execute(ctx, `MATCH (p:Person) RETURN p.name AS name`, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(personResult.Rows), "Should have 2 Person nodes")
+
+	companyResult, err := exec.Execute(ctx, `MATCH (c:Company) RETURN c.name AS name`, nil)
+	require.NoError(t, err)
+	require.Equal(t, 2, len(companyResult.Rows), "Should have 2 Company nodes")
+
+	t.Run("basic_union_in_call", func(t *testing.T) {
+		// UNION inside CALL {} - combine Person and Company names
+		result, err := exec.Execute(ctx, `
+			CALL {
+				MATCH (p:Person)
+				RETURN p.name AS name, p.type AS type
+				UNION
+				MATCH (c:Company)
+				RETURN c.name AS name, c.type AS type
+			}
+			RETURN name, type
+			ORDER BY name
+		`, nil)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(result.Rows), 4, "Should return all Person and Company names")
+		require.Equal(t, []string{"name", "type"}, result.Columns, "Should have correct column names")
+	})
+
+	t.Run("union_all_in_call", func(t *testing.T) {
+		// UNION ALL inside CALL {} - includes duplicates
+		result, err := exec.Execute(ctx, `
+			CALL {
+				MATCH (p:Person)
+				RETURN p.type AS type
+				UNION ALL
+				MATCH (c:Company)
+				RETURN c.type AS type
+			}
+			RETURN type
+		`, nil)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(result.Rows), 4, "UNION ALL should return all rows including duplicates")
+		require.Equal(t, []string{"type"}, result.Columns, "Should have correct column names")
+	})
+
+	t.Run("union_with_different_aliases", func(t *testing.T) {
+		// Test that UNION handles matching column names correctly
+		// Both queries return 'name' but from different sources
+		result, err := exec.Execute(ctx, `
+			CALL {
+				MATCH (p:Person)
+				RETURN p.name AS name
+				UNION
+				MATCH (c:Company)
+				RETURN c.name AS name
+			}
+			RETURN name
+			ORDER BY name
+		`, nil)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(result.Rows), 4, "Should return all names")
+		require.Equal(t, []string{"name"}, result.Columns, "Should have correct column name")
+	})
+
+	t.Run("union_in_call_with_outer_return", func(t *testing.T) {
+		// UNION inside CALL {} with outer RETURN that renames columns
+		result, err := exec.Execute(ctx, `
+			CALL {
+				MATCH (p:Person)
+				RETURN p.name AS name
+				UNION
+				MATCH (c:Company)
+				RETURN c.name AS name
+			}
+			RETURN name AS entityName
+			ORDER BY entityName
+		`, nil)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(result.Rows), 4, "Should return all names")
+		require.Equal(t, []string{"entityName"}, result.Columns, "Should have renamed column")
+	})
+
+	t.Run("nested_union_in_call", func(t *testing.T) {
+		// Multiple UNIONs inside CALL {}
+		result, err := exec.Execute(ctx, `
+			CALL {
+				MATCH (p:Person)
+				RETURN p.name AS name
+				UNION
+				MATCH (c:Company)
+				RETURN c.name AS name
+				UNION
+				RETURN 'Other' AS name
+			}
+			RETURN name
+			ORDER BY name
+		`, nil)
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, len(result.Rows), 4, "Should return all names plus 'Other'")
+		require.Equal(t, []string{"name"}, result.Columns, "Should have correct column name")
+	})
 }
 
 // TestCallSubqueryNested tests nested CALL {} subqueries
@@ -1402,6 +1511,7 @@ func TestNotExistsSubqueryWithNewlines(t *testing.T) {
 
 // TestCollectSubquery tests COLLECT { } subquery for collecting values
 func TestCollectSubquery(t *testing.T) {
+
 	store := storage.NewMemoryEngine()
 	exec := NewStorageExecutor(store)
 	ctx := context.Background()
@@ -1426,9 +1536,12 @@ func TestCollectSubquery(t *testing.T) {
 		} AS friends
 	`, nil)
 
-	// If COLLECT {} is not implemented, this will fail gracefully
 	if err != nil {
-		t.Skipf("COLLECT {} subquery not yet implemented: %v", err)
+		t.Fatalf("COLLECT subquery failed: %v", err)
+	}
+
+	if result == nil {
+		t.Fatal("Result is nil")
 	}
 
 	if len(result.Rows) < 1 {
@@ -1791,11 +1904,6 @@ func TestNestedExistsSubquery(t *testing.T) {
 		}
 		RETURN m.name
 	`, nil)
-	// This tests nested subquery - may not be fully implemented
-	if err != nil {
-		t.Skipf("Nested EXISTS not fully implemented: %v", err)
-	}
-
 	// Alice manages Bob who knows Charlie
 	// Dave manages Eve but Eve doesn't know anyone, so Dave should NOT be included
 	if len(result.Rows) != 1 {

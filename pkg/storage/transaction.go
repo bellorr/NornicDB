@@ -113,9 +113,12 @@ func copyNode(node *Node) *Node {
 		}
 	}
 
-	if node.Embedding != nil {
-		nodeCopy.Embedding = make([]float32, len(node.Embedding))
-		copy(nodeCopy.Embedding, node.Embedding)
+	if len(node.ChunkEmbeddings) > 0 {
+		nodeCopy.ChunkEmbeddings = make([][]float32, len(node.ChunkEmbeddings))
+		for i, emb := range node.ChunkEmbeddings {
+			nodeCopy.ChunkEmbeddings[i] = make([]float32, len(emb))
+			copy(nodeCopy.ChunkEmbeddings[i], emb)
+		}
 	}
 
 	return nodeCopy

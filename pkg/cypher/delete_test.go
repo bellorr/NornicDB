@@ -100,6 +100,40 @@ func TestDeleteWithFilter(t *testing.T) {
 	assert.Equal(t, int64(1), count, "Should have 1 Animal node")
 }
 
+// TestDetachDeleteParsing tests that DETACH DELETE is parsed correctly
+// This fixes the issue where "MATCH (n) DETACH DELETE n" wasn't working
+func TestDetachDeleteParsing(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	executor := NewStorageExecutor(engine)
+	ctx := context.Background()
+
+	// Create nodes with relationships
+	_, err := executor.Execute(ctx, `
+		CREATE (a:Test {id: 'a'})
+		CREATE (b:Test {id: 'b'})
+		CREATE (a)-[:REL]->(b)
+	`, nil)
+	require.NoError(t, err)
+
+	// Verify nodes exist
+	countResult, err := executor.Execute(ctx, `MATCH (n) RETURN count(n)`, nil)
+	require.NoError(t, err)
+	count := countResult.Rows[0][0].(int64)
+	assert.Equal(t, int64(2), count, "Should have 2 nodes")
+
+	// DETACH DELETE should work (this was failing before the fix)
+	deleteResult, err := executor.Execute(ctx, `MATCH (n) DETACH DELETE n`, nil)
+	require.NoError(t, err, "DETACH DELETE should work")
+	assert.Equal(t, 2, deleteResult.Stats.NodesDeleted, "Should delete 2 nodes")
+	assert.GreaterOrEqual(t, deleteResult.Stats.RelationshipsDeleted, 1, "Should delete relationships")
+
+	// Verify all nodes are gone
+	countResult, err = executor.Execute(ctx, `MATCH (n) RETURN count(n)`, nil)
+	require.NoError(t, err)
+	count = countResult.Rows[0][0].(int64)
+	assert.Equal(t, int64(0), count, "Should have 0 nodes after DETACH DELETE")
+}
+
 func TestDeleteWithWhereClause(t *testing.T) {
 	engine := storage.NewMemoryEngine()
 	executor := NewStorageExecutor(engine)

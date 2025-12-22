@@ -91,17 +91,17 @@ func TestCopyNodeForEmbedding(t *testing.T) {
 
 	t.Run("copies_embedding", func(t *testing.T) {
 		original := &storage.Node{
-			ID:        "test-node",
-			Embedding: []float32{0.1, 0.2, 0.3},
+			ID:              "test-node",
+			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 		}
 
 		copy := copyNodeForEmbedding(original)
 
 		// Modify the copy's embedding
-		copy.Embedding[0] = 999.0
+		copy.ChunkEmbeddings[0][0] = 999.0
 
 		// Original should be unchanged
-		assert.Equal(t, float32(0.1), original.Embedding[0])
+		assert.Equal(t, float32(0.1), original.ChunkEmbeddings[0][0]) // Use first chunk, first element
 	})
 
 	t.Run("copies_labels", func(t *testing.T) {
@@ -238,7 +238,7 @@ func TestEmbedWorkerPersistence(t *testing.T) {
 		// Verify node has no embedding initially
 		node, err := engine.GetNode("persist-test")
 		require.NoError(t, err)
-		assert.Empty(t, node.Embedding, "Node should have no embedding initially")
+		assert.Empty(t, node.ChunkEmbeddings, "Node should have no embeddings initially")
 
 		// Create worker and process
 		config := &EmbedWorkerConfig{
@@ -275,8 +275,8 @@ func TestEmbedWorkerPersistence(t *testing.T) {
 		node, err = engine.GetNode("persist-test")
 		require.NoError(t, err)
 
-		assert.NotEmpty(t, node.Embedding, "Node should have embedding after processing")
-		assert.Equal(t, 1024, len(node.Embedding), "Embedding should have correct dimensions")
+		assert.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings after processing")
+		assert.Equal(t, 1024, len(node.ChunkEmbeddings[0]), "Embedding should have correct dimensions")
 	})
 
 	t.Run("node_not_reprocessed_after_embedding", func(t *testing.T) {
@@ -369,9 +369,9 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 
 		// Create node WITH embedding
 		_, err := engine.CreateNode(&storage.Node{
-			ID:        "has-embed",
-			Labels:    []string{"Memory"},
-			Embedding: make([]float32, 1024), // Pre-existing embedding
+			ID:              "has-embed",
+			Labels:          []string{"Memory"},
+			ChunkEmbeddings: [][]float32{make([]float32, 1024)}, // Pre-existing embedding
 			Properties: map[string]any{
 				"content": "Already embedded content",
 			},
@@ -406,6 +406,45 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 		node := worker.findNodeWithoutEmbedding()
 
 		assert.Nil(t, node, "Should skip internal nodes")
+	})
+
+	t.Run("skips_deleted_nodes", func(t *testing.T) {
+		engine := storage.NewMemoryEngine()
+		embedder := newMockEmbedder()
+
+		// Create node without embedding
+		_, err := engine.CreateNode(&storage.Node{
+			ID:     "to-delete",
+			Labels: []string{"Test"},
+			Properties: map[string]any{
+				"content": "Content to delete",
+			},
+		})
+		require.NoError(t, err)
+
+		worker := NewEmbedWorker(embedder, engine, nil)
+		defer worker.Close()
+
+		// Node should be found initially
+		node := worker.findNodeWithoutEmbedding()
+		require.NotNil(t, node, "Should find node before deletion")
+		assert.Equal(t, storage.NodeID("to-delete"), node.ID)
+
+		// Delete the node
+		err = engine.DeleteNode(storage.NodeID("to-delete"))
+		require.NoError(t, err)
+
+		// processNextBatch should skip the deleted node
+		// It will find the node from the index, but then check if it exists
+		// and skip it if it's been deleted
+		didWork := worker.processNextBatch()
+
+		// Should return false (no work done) because node was deleted
+		// The node was found in the index but doesn't exist, so it's skipped
+		assert.False(t, didWork, "Should skip deleted node and return false")
+
+		// Verify node was not embedded (embedder should not have been called)
+		assert.Equal(t, 0, embedder.embedCount, "Should not embed deleted node")
 	})
 }
 
@@ -787,30 +826,36 @@ func TestLargeContentEmbedding(t *testing.T) {
 		node, err := engine.GetNode("large-file-node")
 		require.NoError(t, err)
 
-		// Large files create FileChunk nodes, NOT a single embedding on parent
-		// The parent File node has has_chunks=true and chunk_count=N
-		// Each FileChunk has its own embedding
-		assert.True(t, node.Properties["has_chunks"].(bool), "Parent should have has_chunks=true")
-		chunkCount := node.Properties["chunk_count"].(int)
+		// Large content gets chunked and all chunk embeddings stored on the same node
+		// The node has chunk_count=N property if there are multiple chunks
+		// All chunk embeddings are stored in ChunkEmbeddings (opaque to users)
+		assert.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings")
+		assert.Greater(t, len(node.ChunkEmbeddings), 1, "Large content should create multiple chunks")
+
+		// Verify chunk_count property is set for multiple chunks
+		chunkCountProp, hasChunkCount := node.Properties["chunk_count"]
+		assert.True(t, hasChunkCount, "Should have chunk_count property for multiple chunks")
+		chunkCount := chunkCountProp.(int)
+		assert.Equal(t, len(node.ChunkEmbeddings), chunkCount, "chunk_count should match number of chunks")
 		assert.Greater(t, chunkCount, 1, "Large content should create multiple chunks")
-		t.Logf("Created %d FileChunk nodes", chunkCount)
+		t.Logf("Created %d chunk embeddings on the same node", chunkCount)
 
-		// Parent File does NOT have an embedding - the chunks do
-		assert.Empty(t, node.Embedding, "Parent File should NOT have embedding (chunks have them)")
+		// Verify all chunks have correct dimensions
+		for i, chunk := range node.ChunkEmbeddings {
+			assert.Equal(t, 1024, len(chunk), "Chunk %d should have correct dimensions", i)
+		}
 
-		// Verify FileChunk nodes were created with embeddings
+		// Verify NO separate FileChunk nodes were created (new architecture stores all on same node)
 		allNodes := engine.GetAllNodes()
 		chunkNodes := 0
 		for _, n := range allNodes {
 			for _, label := range n.Labels {
 				if label == "FileChunk" {
 					chunkNodes++
-					assert.NotEmpty(t, n.Embedding, "FileChunk should have embedding")
-					assert.Equal(t, 1024, len(n.Embedding), "FileChunk embedding should have correct dims")
 				}
 			}
 		}
-		assert.Equal(t, chunkCount, chunkNodes, "Should have created correct number of FileChunk nodes")
+		assert.Equal(t, 0, chunkNodes, "Should NOT create separate FileChunk nodes (all chunks on same node)")
 
 		// Verify embedder was called multiple times (once per chunk)
 		embedCount := embedder.GetEmbedCount()
@@ -985,7 +1030,7 @@ func TestNoContentNodeDoesNotCauseInfiniteLoop(t *testing.T) {
 		node, err := engine.GetNode("no-content-node")
 		require.NoError(t, err)
 		// With new behavior, empty nodes get embedded with "node" fallback
-		assert.NotEmpty(t, node.Embedding, "Node should have embedding (even empty nodes get embedded)")
+		assert.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings (even empty nodes get embedded)")
 		assert.Nil(t, node.Properties["embedding_skipped"], "Node should not be marked as skipped (it was embedded)")
 
 		t.Log("✓ No infinite loop with no-content node")
@@ -1105,7 +1150,7 @@ func TestEmbeddingPersistenceVerification(t *testing.T) {
 		// Verify embedding is readable from storage
 		node, err := engine.GetNode("verify-persist")
 		require.NoError(t, err)
-		require.NotEmpty(t, node.Embedding, "Embedding should be persisted and readable")
+		require.NotEmpty(t, node.ChunkEmbeddings, "Chunk embeddings should be persisted and readable")
 
 		// Verify findNodeWithoutEmbedding doesn't find it anymore
 		worker2 := NewEmbedWorker(embedder, engine, config)
@@ -1132,9 +1177,9 @@ func TestEmbeddingPersistenceVerification(t *testing.T) {
 		node, err := engine.GetNode("manual-embed")
 		require.NoError(t, err)
 
-		node.Embedding = make([]float32, 1024)
-		for i := range node.Embedding {
-			node.Embedding[i] = float32(i) * 0.001
+		node.ChunkEmbeddings = [][]float32{make([]float32, 1024)}
+		for i := range node.ChunkEmbeddings[0] {
+			node.ChunkEmbeddings[0][i] = float32(i) * 0.001
 		}
 
 		err = engine.UpdateNode(node)
@@ -1144,8 +1189,8 @@ func TestEmbeddingPersistenceVerification(t *testing.T) {
 		node2, err := engine.GetNode("manual-embed")
 		require.NoError(t, err)
 
-		assert.Equal(t, 1024, len(node2.Embedding), "Embedding should have correct dimensions")
-		assert.Equal(t, float32(0.001), node2.Embedding[1], "Embedding values should be preserved")
+		assert.Equal(t, 1024, len(node2.ChunkEmbeddings[0]), "Embedding should have correct dimensions")
+		assert.Equal(t, float32(0.001), node2.ChunkEmbeddings[0][1], "Embedding values should be preserved")
 	})
 }
 
@@ -1231,8 +1276,8 @@ func TestRaceConditionPrevention(t *testing.T) {
 		// Verify embedding was stored correctly
 		node, err := engine.GetNode("race-test")
 		require.NoError(t, err)
-		assert.NotEmpty(t, node.Embedding, "Node should have embedding")
-		assert.Equal(t, 1024, len(node.Embedding), "Embedding should have correct dimensions")
+		assert.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings")
+		assert.Equal(t, 1024, len(node.ChunkEmbeddings[0]), "Embedding should have correct dimensions")
 
 		t.Log("✓ No race condition detected during concurrent node access")
 	})

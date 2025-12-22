@@ -467,8 +467,9 @@ func TestMultiLineSetWithArray(t *testing.T) {
 	node := nodes[0]
 
 	// Check embedding was set (routed to node.Embedding)
-	assert.Equal(t, 4, len(node.Embedding), "Embedding should have 4 dimensions")
-	assert.InDelta(t, 0.7, node.Embedding[0], 0.01, "First embedding value")
+	assert.Equal(t, 1, len(node.ChunkEmbeddings), "Should have 1 chunk embedding")
+	assert.Equal(t, 4, len(node.ChunkEmbeddings[0]), "Embedding should have 4 dimensions")
+	assert.InDelta(t, 0.7, node.ChunkEmbeddings[0][0], 0.01, "First embedding value")
 
 	// Check other properties were set - integers stored as int64 (Neo4j compatible)
 	assert.Equal(t, int64(4), node.Properties["embedding_dimensions"])

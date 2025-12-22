@@ -233,9 +233,10 @@ func TestLoadMimirEmbeddings(t *testing.T) {
 	// Verify embedding was loaded
 	node, err := engine.GetNode("4:abc:1")
 	require.NoError(t, err)
-	assert.Len(t, node.Embedding, 4)
-	assert.InDelta(t, 0.1, float64(node.Embedding[0]), 0.001)
-	assert.InDelta(t, 0.4, float64(node.Embedding[3]), 0.001)
+	assert.Len(t, node.ChunkEmbeddings, 1)
+	assert.Len(t, node.ChunkEmbeddings[0], 4)
+	assert.InDelta(t, 0.1, float64(node.ChunkEmbeddings[0][0]), 0.001)
+	assert.InDelta(t, 0.4, float64(node.ChunkEmbeddings[0][3]), 0.001)
 }
 
 // TestStreamLoadMimirNodes tests streaming load for large files.

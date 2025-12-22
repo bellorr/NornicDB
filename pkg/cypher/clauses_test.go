@@ -660,7 +660,7 @@ func TestCallDbIndexVectorQueryNodes(t *testing.T) {
 	_, _ = store.CreateNode(&storage.Node{
 		ID:        "vec-node-1",
 		Labels:    []string{"Test"},
-		Embedding: []float32{0.1, 0.2, 0.3},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 	})
 
 	// Call the vector query procedure

@@ -16,7 +16,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 			ID:         "test-1",
 			Labels:     []string{"Person"},
 			Properties: map[string]interface{}{"name": "Alice"},
-			Embedding:  []float32{0.1, 0.2, 0.3},
+			ChunkEmbeddings:  [][]float32{{0.1, 0.2, 0.3}},
 		}
 		assert.False(t, NodeNeedsEmbedding(node))
 	})
@@ -26,7 +26,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 			ID:         "test-2",
 			Labels:     []string{"Person"},
 			Properties: map[string]interface{}{"name": "Bob"},
-			Embedding:  nil,
+			ChunkEmbeddings:  nil,
 		}
 		assert.True(t, NodeNeedsEmbedding(node))
 	})
@@ -36,7 +36,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 			ID:         "test-3",
 			Labels:     []string{"Person"},
 			Properties: map[string]interface{}{"name": "Charlie"},
-			Embedding:  []float32{},
+			ChunkEmbeddings:  [][]float32{},
 		}
 		assert.True(t, NodeNeedsEmbedding(node))
 	})
@@ -46,7 +46,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 			ID:         "test-4",
 			Labels:     []string{"_Internal"},
 			Properties: map[string]interface{}{"data": "internal"},
-			Embedding:  nil,
+			ChunkEmbeddings:  nil,
 		}
 		assert.False(t, NodeNeedsEmbedding(node))
 	})
@@ -58,7 +58,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 			Properties: map[string]interface{}{
 				"embedding_skipped": "no content",
 			},
-			Embedding: nil,
+			ChunkEmbeddings: nil,
 		}
 		assert.False(t, NodeNeedsEmbedding(node))
 	})
@@ -75,7 +75,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 				"name":          "test.txt",
 				"has_embedding": true, // Property says true, but no actual embedding
 			},
-			Embedding: nil, // No actual embedding array
+			ChunkEmbeddings: nil, // No actual embedding array
 		}
 		// Should return true because we need to generate the embedding
 		assert.True(t, NodeNeedsEmbedding(node), "node with has_embedding=true but no embedding array should need embedding")
@@ -91,7 +91,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 				"content":       "Some content to embed",
 				"has_embedding": false,
 			},
-			Embedding: nil,
+			ChunkEmbeddings: nil,
 		}
 		// Should return true - has_embedding property is ignored
 		assert.True(t, NodeNeedsEmbedding(node), "node with has_embedding=false should still need embedding if no embedding_skipped")
@@ -108,7 +108,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 				"has_chunks": true,
 				// Note: no has_embedding property - chunking was interrupted
 			},
-			Embedding: nil,
+			ChunkEmbeddings: nil,
 		}
 		// Should return true - needs to complete the chunking process
 		assert.True(t, NodeNeedsEmbedding(node), "node with has_chunks=true but incomplete processing should need embedding")
@@ -122,7 +122,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 				"content":   "This is a memory that needs embedding",
 				"createdAt": "2024-01-01",
 			},
-			Embedding: nil,
+			ChunkEmbeddings: nil,
 		}
 		assert.True(t, NodeNeedsEmbedding(node))
 	})
@@ -136,7 +136,7 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 				"chunk_index": 0,
 				"parent_file": "file-123",
 			},
-			Embedding: nil,
+			ChunkEmbeddings: nil,
 		}
 		assert.True(t, NodeNeedsEmbedding(node))
 	})
@@ -156,12 +156,12 @@ func TestNodeNeedsEmbedding_ClearedEmbeddings(t *testing.T) {
 				"embedding_dimensions": 512,
 				"embedded_at":          "2024-01-01",
 			},
-			Embedding: []float32{0.1, 0.2, 0.3},
+			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 		}
 		assert.False(t, NodeNeedsEmbedding(node), "node with embedding should not need embedding")
 
 		// Clear the embedding (simulating ClearAllEmbeddings)
-		node.Embedding = nil
+		node.ChunkEmbeddings = nil
 
 		// Now it should need embedding again, regardless of has_embedding property
 		assert.True(t, NodeNeedsEmbedding(node), "node with cleared embedding should need embedding")
@@ -179,7 +179,7 @@ func TestNodeNeedsEmbedding_ClearedEmbeddings(t *testing.T) {
 				"has_embedding": true,
 				"embedded_at":   "2024-01-01",
 			},
-			Embedding: nil, // File nodes don't have embeddings, their chunks do
+			ChunkEmbeddings: nil, // File nodes don't have embeddings, their chunks do
 		}
 
 		// This is tricky - File nodes with has_chunks=true don't have their own embedding

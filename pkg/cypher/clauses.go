@@ -7,6 +7,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -793,60 +794,118 @@ func (e *StorageExecutor) executeDoubleUnwind(ctx context.Context, cypher string
 // ========================================
 
 // executeUnion handles UNION / UNION ALL
+// Supports both single UNION (query1 UNION query2) and chained UNIONs (query1 UNION query2 UNION query3 ...)
+// Handles UNION with flexible whitespace (spaces, newlines, tabs)
 func (e *StorageExecutor) executeUnion(ctx context.Context, cypher string, unionAll bool) (*ExecuteResult, error) {
-	upper := strings.ToUpper(cypher)
+	// Normalize whitespace for easier parsing (preserve structure but make UNION detection easier)
+	// Replace newlines/tabs with spaces, then normalize multiple spaces to single space
+	normalized := regexp.MustCompile(`\s+`).ReplaceAllString(cypher, " ")
+	upper := strings.ToUpper(normalized)
 
-	var separator string
+	var separatorPattern *regexp.Regexp
 	if unionAll {
-		separator = " UNION ALL "
+		// Match "UNION ALL" with flexible whitespace
+		separatorPattern = regexp.MustCompile(`(?i)\s+UNION\s+ALL\s+`)
 	} else {
-		separator = " UNION "
+		// Match "UNION" with flexible whitespace (but not "UNION ALL")
+		// We'll check manually to avoid matching "UNION ALL"
+		separatorPattern = regexp.MustCompile(`(?i)\s+UNION\s+`)
 	}
 
-	idx := strings.Index(upper, separator)
-	if idx == -1 {
+	// Find all UNION occurrences (handle chained UNIONs)
+	var queries []string
+	remaining := normalized
+	lastIndex := 0
+
+	for {
+		matches := separatorPattern.FindStringIndex(upper[lastIndex:])
+		if matches == nil {
+			// No more UNIONs - add remaining query
+			if strings.TrimSpace(remaining[lastIndex:]) != "" {
+				queries = append(queries, strings.TrimSpace(remaining[lastIndex:]))
+			}
+			break
+		}
+
+		// Extract query before UNION
+		unionStart := lastIndex + matches[0]
+		unionEnd := lastIndex + matches[1]
+
+		// For UNION (not UNION ALL), check if this is actually "UNION ALL"
+		if !unionAll {
+			// Check if the next characters after "UNION" are "ALL"
+			if unionEnd < len(upper) {
+				afterUnion := strings.TrimSpace(upper[unionEnd:])
+				if strings.HasPrefix(afterUnion, "ALL") {
+					// This is "UNION ALL", skip it (we're looking for plain UNION)
+					// Find the end of "ALL"
+					allEnd := unionEnd
+					for allEnd < len(upper) && (upper[allEnd] == ' ' || upper[allEnd] == 'A' || upper[allEnd] == 'L') {
+						if allEnd+1 < len(upper) && upper[allEnd] == 'L' && upper[allEnd+1] == 'L' {
+							allEnd += 2
+							break
+						}
+						allEnd++
+					}
+					lastIndex = allEnd
+					continue
+				}
+			}
+		}
+		query := strings.TrimSpace(remaining[lastIndex:unionStart])
+		if query != "" {
+			queries = append(queries, query)
+		}
+
+		// Move past this UNION
+		lastIndex = unionEnd
+	}
+
+	if len(queries) < 2 {
 		return nil, fmt.Errorf("UNION clause not found in query: %q", truncateQuery(cypher, 80))
 	}
 
-	query1 := strings.TrimSpace(cypher[:idx])
-	query2 := strings.TrimSpace(cypher[idx+len(separator):])
+	// Execute all queries and combine results
+	var combinedResult *ExecuteResult
+	seen := make(map[string]bool) // For UNION (distinct) deduplication
 
-	result1, err := e.Execute(ctx, query1, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error in first UNION query (%q): %w", truncateQuery(query1, 50), err)
-	}
-
-	result2, err := e.Execute(ctx, query2, nil)
-	if err != nil {
-		return nil, fmt.Errorf("error in second UNION query (%q): %w", truncateQuery(query2, 50), err)
-	}
-
-	if len(result1.Columns) != len(result2.Columns) {
-		return nil, fmt.Errorf("UNION queries must return the same number of columns (got %d and %d)", len(result1.Columns), len(result2.Columns))
-	}
-
-	combinedResult := &ExecuteResult{
-		Columns: result1.Columns,
-		Rows:    make([][]interface{}, 0, len(result1.Rows)+len(result2.Rows)),
-	}
-
-	combinedResult.Rows = append(combinedResult.Rows, result1.Rows...)
-
-	if unionAll {
-		combinedResult.Rows = append(combinedResult.Rows, result2.Rows...)
-	} else {
-		seen := make(map[string]bool)
-		for _, row := range result1.Rows {
-			key := fmt.Sprintf("%v", row)
-			seen[key] = true
+	for i, query := range queries {
+		result, err := e.Execute(ctx, query, nil)
+		if err != nil {
+			return nil, fmt.Errorf("error in UNION query %d (%q): %w", i+1, truncateQuery(query, 50), err)
 		}
-		for _, row := range result2.Rows {
-			key := fmt.Sprintf("%v", row)
-			if !seen[key] {
-				combinedResult.Rows = append(combinedResult.Rows, row)
-				seen[key] = true
+
+		if combinedResult == nil {
+			// First query - initialize result
+			combinedResult = &ExecuteResult{
+				Columns: result.Columns,
+				Rows:    make([][]interface{}, 0),
+			}
+		} else {
+			// Validate column count matches
+			if len(combinedResult.Columns) != len(result.Columns) {
+				return nil, fmt.Errorf("UNION queries must return the same number of columns (got %d and %d)", len(combinedResult.Columns), len(result.Columns))
 			}
 		}
+
+		// Add rows from this query
+		if unionAll {
+			// UNION ALL - include all rows
+			combinedResult.Rows = append(combinedResult.Rows, result.Rows...)
+		} else {
+			// UNION (distinct) - deduplicate rows
+			for _, row := range result.Rows {
+				key := fmt.Sprintf("%v", row)
+				if !seen[key] {
+					combinedResult.Rows = append(combinedResult.Rows, row)
+					seen[key] = true
+				}
+			}
+		}
+	}
+
+	if combinedResult == nil {
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
 	return combinedResult, nil

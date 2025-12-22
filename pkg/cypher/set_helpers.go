@@ -92,7 +92,7 @@ func (e *StorageExecutor) applySetToNode(node *storage.Node, varName string, set
 
 // setNodeProperty sets a property on a node.
 //
-// Special handling for "embedding" property which goes to node.Embedding
+// Special handling for "embedding" property which goes to node.ChunkEmbeddings (always stored as array of arrays)
 // instead of node.Properties.
 //
 // # Parameters
@@ -102,7 +102,10 @@ func (e *StorageExecutor) applySetToNode(node *storage.Node, varName string, set
 //   - value: The value to set
 func setNodeProperty(node *storage.Node, propName string, value interface{}) {
 	if propName == "embedding" {
-		node.Embedding = toFloat32Slice(value)
+		// Store as ChunkEmbeddings (always array of arrays, even single chunk = array of 1)
+		if floatSlice := toFloat32Slice(value); len(floatSlice) > 0 {
+			node.ChunkEmbeddings = [][]float32{floatSlice}
+		}
 		return
 	}
 	if node.Properties == nil {

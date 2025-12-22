@@ -1031,7 +1031,7 @@ func TestMemoryEngine_copyNode(t *testing.T) {
 		ID:           "test",
 		Labels:       []string{"A", "B"},
 		Properties:   map[string]any{"key": "value"},
-		Embedding:    []float32{0.1, 0.2, 0.3},
+		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 		DecayScore:   0.5,
 		AccessCount:  10,
 		CreatedAt:    time.Now(),
@@ -1045,16 +1045,16 @@ func TestMemoryEngine_copyNode(t *testing.T) {
 	assert.Equal(t, original.ID, copied.ID)
 	assert.Equal(t, original.Labels, copied.Labels)
 	assert.Equal(t, original.Properties["key"], copied.Properties["key"])
-	assert.Equal(t, original.Embedding, copied.Embedding)
+	assert.Equal(t, original.ChunkEmbeddings, copied.ChunkEmbeddings)
 
 	// Verify independent copies
 	original.Labels[0] = "X"
 	original.Properties["key"] = "modified"
-	original.Embedding[0] = 9.9
+	original.ChunkEmbeddings[0][0] = 9.9
 
 	assert.Equal(t, "A", copied.Labels[0])
 	assert.Equal(t, "value", copied.Properties["key"])
-	assert.Equal(t, float32(0.1), copied.Embedding[0])
+	assert.Equal(t, float32(0.1), copied.ChunkEmbeddings[0][0])
 }
 
 func TestMemoryEngine_copyEdge(t *testing.T) {

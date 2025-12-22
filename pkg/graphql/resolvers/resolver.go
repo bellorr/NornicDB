@@ -2,6 +2,7 @@ package resolvers
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"time"
 
@@ -134,14 +135,27 @@ func NewResolver(db *nornicdb.DB, dbManager *multidb.DatabaseManager) *Resolver 
 	return resolver
 }
 
-// getCypherExecutor returns the Cypher executor using the default database's namespaced storage.
-func (r *Resolver) getCypherExecutor(ctx context.Context) (*cypher.StorageExecutor, error) {
-	// Use default database's namespaced storage
-	defaultStorage, err := r.dbManager.GetDefaultStorage()
-	if err != nil {
-		return nil, err
+// getCypherExecutor returns the Cypher executor using the specified database's namespaced storage.
+// If database is empty, uses "nornic" as the default database (NornicDB's standard default).
+func (r *Resolver) getCypherExecutor(ctx context.Context, database string) (*cypher.StorageExecutor, error) {
+	var storage storage.Engine
+	var err error
+	
+	if database != "" {
+		// Use specified database
+		storage, err = r.dbManager.GetStorage(database)
+		if err != nil {
+			return nil, fmt.Errorf("database '%s' not found: %w", database, err)
+		}
+	} else {
+		// Always default to "nornic" if not specified (NornicDB's standard default database)
+		storage, err = r.dbManager.GetStorage("nornic")
+		if err != nil {
+			return nil, fmt.Errorf("default database 'nornic' not found: %w", err)
+		}
 	}
-	executor := cypher.NewStorageExecutor(defaultStorage)
+	
+	executor := cypher.NewStorageExecutor(storage)
 
 	// Copy configuration from base DB's executor if available
 	if r.DB != nil {
@@ -166,9 +180,10 @@ func (r *Resolver) getCypherExecutor(ctx context.Context) (*cypher.StorageExecut
 	return executor, nil
 }
 
-// executeCypher executes a Cypher query using the default database's namespaced storage.
-func (r *Resolver) executeCypher(ctx context.Context, query string, params map[string]interface{}) (*nornicdb.CypherResult, error) {
-	executor, err := r.getCypherExecutor(ctx)
+// executeCypher executes a Cypher query using the specified database's namespaced storage.
+// If database is empty, uses the default database.
+func (r *Resolver) executeCypher(ctx context.Context, query string, params map[string]interface{}, database string) (*nornicdb.CypherResult, error) {
+	executor, err := r.getCypherExecutor(ctx, database)
 	if err != nil {
 		return nil, err
 	}

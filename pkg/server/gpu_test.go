@@ -144,10 +144,10 @@ func TestHandleGPUTest(t *testing.T) {
 	// Create a test node with embedding
 	mem := &nornicdb.Memory{
 		Content:   "Test memory for vector search",
-		Embedding: make([]float32, 1024),
+		ChunkEmbeddings: [][]float32{make([]float32, 1024)},
 	}
-	for i := range mem.Embedding {
-		mem.Embedding[i] = float32(i) / 1024.0
+	for i := range mem.ChunkEmbeddings[0] {
+		mem.ChunkEmbeddings[0][i] = float32(i) / 1024.0
 	}
 	ctx := context.Background()
 	stored, err := server.db.Store(ctx, mem)

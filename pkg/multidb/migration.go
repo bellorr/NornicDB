@@ -249,7 +249,7 @@ func (m *DatabaseManager) performMigration(engine storage.Engine) error {
 			DecayScore:   node.DecayScore,
 			LastAccessed: node.LastAccessed,
 			AccessCount:  node.AccessCount,
-			Embedding:    node.Embedding,
+			ChunkEmbeddings: node.ChunkEmbeddings,
 		}
 
 		// Create new node (this will create all indexes)

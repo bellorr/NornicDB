@@ -37,9 +37,9 @@ func TestRRFHybridSearch_UsesClusteringWhenEnabled(t *testing.T) {
 	embedding[0] = 1.0
 
 	nodes := []*storage.Node{
-		{ID: "doc1", Labels: []string{"Node"}, Embedding: embedding, Properties: map[string]any{"title": "Machine Learning", "content": "ML algorithms"}},
-		{ID: "doc2", Labels: []string{"Node"}, Embedding: embedding, Properties: map[string]any{"title": "Deep Learning", "content": "Neural networks"}},
-		{ID: "doc3", Labels: []string{"Node"}, Embedding: embedding, Properties: map[string]any{"title": "Database Systems", "content": "SQL queries"}},
+		{ID: "doc1", Labels: []string{"Node"}, ChunkEmbeddings: [][]float32{embedding}, Properties: map[string]any{"title": "Machine Learning", "content": "ML algorithms"}},
+		{ID: "doc2", Labels: []string{"Node"}, ChunkEmbeddings: [][]float32{embedding}, Properties: map[string]any{"title": "Deep Learning", "content": "Neural networks"}},
+		{ID: "doc3", Labels: []string{"Node"}, ChunkEmbeddings: [][]float32{embedding}, Properties: map[string]any{"title": "Database Systems", "content": "SQL queries"}},
 	}
 	err := engine.BulkCreateNodes(nodes)
 	require.NoError(t, err)
@@ -76,8 +76,8 @@ func TestRRFHybridSearch_FallsBackToVectorOnClusterError(t *testing.T) {
 	embedding[0] = 1.0
 
 	nodes := []*storage.Node{
-		{ID: "doc1", Labels: []string{"Node"}, Embedding: embedding, Properties: map[string]any{"title": "Test Doc 1"}},
-		{ID: "doc2", Labels: []string{"Node"}, Embedding: embedding, Properties: map[string]any{"title": "Test Doc 2"}},
+		{ID: "doc1", Labels: []string{"Node"}, ChunkEmbeddings: [][]float32{embedding}, Properties: map[string]any{"title": "Test Doc 1"}},
+		{ID: "doc2", Labels: []string{"Node"}, ChunkEmbeddings: [][]float32{embedding}, Properties: map[string]any{"title": "Test Doc 2"}},
 	}
 	err := engine.BulkCreateNodes(nodes)
 	require.NoError(t, err)
@@ -199,7 +199,7 @@ func TestRRFHybridSearch_SearchMethodIndicatesClusteredSearch(t *testing.T) {
 			node := &storage.Node{
 				ID:        "doc1",
 				Labels:    []string{"Node"},
-				Embedding: embedding,
+				ChunkEmbeddings: [][]float32{embedding},
 				Properties: map[string]any{
 					"title":   "Test Document",
 					"content": "Test content for search",
@@ -261,7 +261,7 @@ func TestRRFHybridSearch_WithClusterIndex(t *testing.T) {
 		nodes[i] = &storage.Node{
 			ID:        storage.NodeID(string(rune('a'+i)) + "-doc"),
 			Labels:    []string{"Node"},
-			Embedding: emb,
+			ChunkEmbeddings: [][]float32{emb},
 			Properties: map[string]any{
 				"title":   "Document " + string(rune('A'+i)),
 				"content": "Test content",
@@ -327,7 +327,7 @@ func TestVectorSearchOnly_UsesClusterWhenAvailable(t *testing.T) {
 	node := &storage.Node{
 		ID:        "doc1",
 		Labels:    []string{"Node"},
-		Embedding: embedding,
+		ChunkEmbeddings: [][]float32{embedding},
 		Properties: map[string]any{
 			"title": "Test Document",
 		},
@@ -367,7 +367,7 @@ func TestIndexNode_AddsToClusterIndex(t *testing.T) {
 	node := &storage.Node{
 		ID:        "doc1",
 		Labels:    []string{"Node"},
-		Embedding: embedding,
+		ChunkEmbeddings: [][]float32{embedding},
 		Properties: map[string]any{
 			"title": "Test",
 		},
@@ -397,7 +397,7 @@ func TestRRFHybridSearch_MinEmbeddingsThreshold(t *testing.T) {
 		node := &storage.Node{
 			ID:        storage.NodeID("doc" + string(rune('0'+i))),
 			Labels:    []string{"Node"},
-			Embedding: embedding,
+			ChunkEmbeddings: [][]float32{embedding},
 			Properties: map[string]any{
 				"title":   "Document",
 				"content": "Test content for searching",
@@ -454,7 +454,7 @@ func TestBug_RRFHybridSearchUsedBruteForceOnly(t *testing.T) {
 		node := &storage.Node{
 			ID:        storage.NodeID(string(rune('a'+i%26)) + string(rune('0'+i/26))),
 			Labels:    []string{"Node"},
-			Embedding: emb,
+			ChunkEmbeddings: [][]float32{emb},
 			Properties: map[string]any{
 				"title":   "Document",
 				"content": "Search content",
@@ -507,7 +507,7 @@ func TestSearchPathIntegrity(t *testing.T) {
 	node := &storage.Node{
 		ID:        "doc1",
 		Labels:    []string{"Node"},
-		Embedding: embedding,
+		ChunkEmbeddings: [][]float32{embedding},
 		Properties: map[string]any{
 			"title":   "Test Document",
 			"content": "Content for testing search paths",

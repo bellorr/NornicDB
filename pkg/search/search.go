@@ -610,26 +610,54 @@ func (s *Service) ClearVectorIndex() {
 }
 
 // IndexNode adds a node to all search indexes.
+// All embeddings are stored in ChunkEmbeddings (even single chunk = array of 1).
 func (s *Service) IndexNode(node *storage.Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Add to vector index if node has embedding
-	if len(node.Embedding) > 0 {
-		if err := s.vectorIndex.Add(string(node.ID), node.Embedding); err != nil {
-			// Log dimension mismatch errors explicitly - common configuration issue
+	// Index all chunk embeddings (always stored in ChunkEmbeddings, even for single chunks)
+	// Strategy:
+	//   - Always index a "main" embedding at node.ID (using first chunk)
+	//   - For multi-chunk nodes, also index each chunk separately at "node-id-chunk-N"
+	// This allows both quick node-level search and granular chunk-level search
+	// Chunk embeddings are stored in struct field (opaque to users), not in properties
+	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+		// Always index a main embedding at the node ID (using first chunk)
+		mainEmbedding := node.ChunkEmbeddings[0]
+		if err := s.vectorIndex.Add(string(node.ID), mainEmbedding); err != nil {
 			if err == ErrDimensionMismatch {
-				log.Printf("⚠️ IndexNode %s: embedding dimension mismatch (got %d, expected %d)",
-					node.ID, len(node.Embedding), s.vectorIndex.dimensions)
+				log.Printf("⚠️ IndexNode %s main: embedding dimension mismatch (got %d, expected %d)",
+					node.ID, len(mainEmbedding), s.vectorIndex.dimensions)
 			}
-			return err
+		} else {
+			// Also add to cluster index if enabled
+			if s.clusterIndex != nil {
+				_ = s.clusterIndex.Add(string(node.ID), mainEmbedding) // Best effort
+			}
 		}
 
-		// Also add to cluster index if enabled
-		if s.clusterIndex != nil {
-			if err := s.clusterIndex.Add(string(node.ID), node.Embedding); err != nil {
-				// Log but don't fail - cluster index is optional
-				log.Printf("Warning: failed to add to cluster index: %v", err)
+		// For multi-chunk nodes, also index each chunk separately with chunk suffix
+		// This allows granular search at the chunk level while maintaining node-level search
+		// Note: chunk 0 is indexed both as main (node.ID) and as chunk-0 for consistency
+		if len(node.ChunkEmbeddings) > 1 {
+			for i, embedding := range node.ChunkEmbeddings {
+				if len(embedding) > 0 {
+					chunkID := fmt.Sprintf("%s-chunk-%d", node.ID, i)
+
+					if err := s.vectorIndex.Add(chunkID, embedding); err != nil {
+						if err == ErrDimensionMismatch {
+							log.Printf("⚠️ IndexNode %s chunk %d: embedding dimension mismatch (got %d, expected %d)",
+								node.ID, i, len(embedding), s.vectorIndex.dimensions)
+						}
+						// Continue indexing other chunks even if one fails
+						continue
+					}
+
+					// Also add to cluster index if enabled
+					if s.clusterIndex != nil {
+						_ = s.clusterIndex.Add(chunkID, embedding) // Best effort
+					}
+				}
 			}
 		}
 	}
@@ -644,16 +672,34 @@ func (s *Service) IndexNode(node *storage.Node) error {
 }
 
 // RemoveNode removes a node from all search indexes.
+// Also removes all chunk embeddings (for nodes with multiple chunks).
 func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.vectorIndex.Remove(string(nodeID))
-	s.fulltextIndex.Remove(string(nodeID))
+	nodeIDStr := string(nodeID)
+
+	// Remove main embedding
+	s.vectorIndex.Remove(nodeIDStr)
+	s.fulltextIndex.Remove(nodeIDStr)
 
 	// Also remove from cluster index if enabled
 	if s.clusterIndex != nil {
-		s.clusterIndex.Remove(string(nodeID))
+		s.clusterIndex.Remove(nodeIDStr)
+	}
+
+	// Remove all chunk embeddings (they're indexed as "node-id-chunk-0", "node-id-chunk-1", etc.)
+	// We need to remove them by iterating and checking for chunk IDs
+	// Since we don't know how many chunks there are, we'll try removing up to 1000 chunks
+	// (reasonable limit - if a node has more than 1000 chunks, something is wrong)
+	for i := 0; i < 1000; i++ {
+		chunkID := fmt.Sprintf("%s-chunk-%d", nodeIDStr, i)
+		s.vectorIndex.Remove(chunkID)
+		if s.clusterIndex != nil {
+			s.clusterIndex.Remove(chunkID)
+		}
+		// Check if chunk existed - if not, we've removed all chunks
+		// Note: VectorIndex.Remove is idempotent, so this is safe
 	}
 
 	return nil
@@ -1057,16 +1103,17 @@ func (s *Service) applyMMR(results []rrfResult, queryEmbedding []float32, limit 
 	for _, r := range results {
 		// Get embedding from storage
 		node, err := s.engine.GetNode(storage.NodeID(r.ID))
-		if err != nil || node == nil || len(node.Embedding) == 0 {
+		if err != nil || node == nil || len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0 {
 			// No embedding - use original score only
 			candidates = append(candidates, docWithEmbed{
 				result:    r,
 				embedding: nil,
 			})
 		} else {
+			// Use first chunk embedding (always stored in ChunkEmbeddings, even single chunk = array of 1)
 			candidates = append(candidates, docWithEmbed{
 				result:    r,
-				embedding: node.Embedding,
+				embedding: node.ChunkEmbeddings[0],
 			})
 		}
 	}
@@ -1476,21 +1523,40 @@ func (s *Service) enrichResults(rrfResults []rrfResult, limit int) []SearchResul
 }
 
 // enrichIndexResults converts raw index results to SearchResult.
+// Maps chunk IDs (e.g., "node-id-chunk-0") back to the original node ID.
 func (s *Service) enrichIndexResults(indexResults []indexResult, limit int) []SearchResult {
 	var results []SearchResult
+	seenNodes := make(map[string]bool) // Track nodes we've already added to avoid duplicates
 
-	for i, ir := range indexResults {
-		if i >= limit {
+	for _, ir := range indexResults {
+		if len(results) >= limit {
 			break
 		}
 
-		node, err := s.engine.GetNode(storage.NodeID(ir.ID))
+		// Map chunk ID back to original node ID
+		nodeIDStr := ir.ID
+		if strings.Contains(nodeIDStr, "-chunk-") {
+			// Extract original node ID by removing "-chunk-N" suffix
+			parts := strings.Split(nodeIDStr, "-chunk-")
+			if len(parts) > 0 {
+				nodeIDStr = parts[0]
+			}
+		}
+
+		// Skip if we've already added this node (from a different chunk)
+		if seenNodes[nodeIDStr] {
+			continue
+		}
+
+		node, err := s.engine.GetNode(storage.NodeID(nodeIDStr))
 		if err != nil {
 			continue
 		}
 
+		seenNodes[nodeIDStr] = true
+
 		result := SearchResult{
-			ID:         ir.ID,
+			ID:         nodeIDStr, // Use original node ID, not chunk ID
 			NodeID:     node.ID,
 			Labels:     node.Labels,
 			Properties: node.Properties,

@@ -171,12 +171,12 @@ func TestStore(t *testing.T) {
 		defer db.Close()
 
 		mem := &Memory{
-			Content:   "Memory with embedding",
-			Embedding: []float32{1.0, 0.0, 0.0},
+			Content:        "Memory with embedding",
+			ChunkEmbeddings: [][]float32{{1.0, 0.0, 0.0}},
 		}
 		stored, err := db.Store(ctx, mem)
 		require.NoError(t, err)
-		assert.Equal(t, []float32{1.0, 0.0, 0.0}, stored.Embedding)
+		assert.Equal(t, [][]float32{{1.0, 0.0, 0.0}}, stored.ChunkEmbeddings)
 	})
 }
 
@@ -262,15 +262,15 @@ func TestRemember(t *testing.T) {
 		// Store memories with embeddings
 		mem1 := &Memory{
 			Content:   "Dog running in park",
-			Embedding: []float32{1.0, 0.0, 0.0, 0.0},
+			ChunkEmbeddings: [][]float32{{1.0, 0.0, 0.0, 0.0}},
 		}
 		mem2 := &Memory{
 			Content:   "Cat sleeping on couch",
-			Embedding: []float32{0.0, 1.0, 0.0, 0.0},
+			ChunkEmbeddings: [][]float32{{0.0, 1.0, 0.0, 0.0}},
 		}
 		mem3 := &Memory{
 			Content:   "Puppy playing fetch",
-			Embedding: []float32{0.9, 0.1, 0.0, 0.0},
+			ChunkEmbeddings: [][]float32{{0.9, 0.1, 0.0, 0.0}},
 		}
 
 		_, err = db.Store(ctx, mem1)
@@ -304,7 +304,7 @@ func TestRemember(t *testing.T) {
 		for i := 0; i < 5; i++ {
 			mem := &Memory{
 				Content:   "Memory content",
-				Embedding: []float32{0.5, 0.5, 0.0, 0.0},
+				ChunkEmbeddings: [][]float32{{0.5, 0.5, 0.0, 0.0}},
 			}
 			_, err = db.Store(ctx, mem)
 			require.NoError(t, err)
@@ -698,7 +698,7 @@ func TestMemoryToNode(t *testing.T) {
 		CreatedAt:    time.Now(),
 		LastAccessed: time.Now(),
 		AccessCount:  5,
-		Embedding:    []float32{1.0, 2.0, 3.0},
+		ChunkEmbeddings: [][]float32{{1.0, 2.0, 3.0}},
 		Tags:         []string{"tag1", "tag2"},
 		Source:       "test-source",
 		Properties:   map[string]any{"custom": "value"},
@@ -711,7 +711,7 @@ func TestMemoryToNode(t *testing.T) {
 	assert.Equal(t, "Test content", node.Properties["content"])
 	assert.Equal(t, "Test Title", node.Properties["title"])
 	assert.Equal(t, "PROCEDURAL", node.Properties["tier"])
-	assert.Equal(t, []float32{1.0, 2.0, 3.0}, node.Embedding)
+	assert.Equal(t, [][]float32{{1.0, 2.0, 3.0}}, node.ChunkEmbeddings)
 	assert.Equal(t, "test-source", node.Properties["source"])
 	assert.Equal(t, "value", node.Properties["custom"])
 }
@@ -722,7 +722,7 @@ func TestNodeToMemory(t *testing.T) {
 		ID:        "node-123",
 		Labels:    []string{"Memory"},
 		CreatedAt: now,
-		Embedding: []float32{1.0, 2.0},
+		ChunkEmbeddings: [][]float32{{1.0, 2.0}},
 		Properties: map[string]any{
 			"content":       "Node content",
 			"title":         "Node Title",
@@ -743,7 +743,7 @@ func TestNodeToMemory(t *testing.T) {
 	assert.Equal(t, "Node Title", mem.Title)
 	assert.Equal(t, TierEpisodic, mem.Tier)
 	assert.Equal(t, 0.7, mem.DecayScore)
-	assert.Equal(t, []float32{1.0, 2.0}, mem.Embedding)
+	assert.Equal(t, [][]float32{{1.0, 2.0}}, mem.ChunkEmbeddings)
 	assert.Equal(t, "node-source", mem.Source)
 	assert.Equal(t, []string{"a", "b"}, mem.Tags)
 	assert.Equal(t, "custom_value", mem.Properties["custom_prop"])
@@ -1440,11 +1440,11 @@ func TestFindSimilar(t *testing.T) {
 		// Create nodes with embeddings via Store
 		mem1, _ := db.Store(ctx, &Memory{
 			Content:   "similar test memory 1",
-			Embedding: []float32{1.0, 0.0, 0.0},
+			ChunkEmbeddings: [][]float32{{1.0, 0.0, 0.0}},
 		})
 		db.Store(ctx, &Memory{
 			Content:   "similar test memory 2",
-			Embedding: []float32{0.9, 0.1, 0.0}, // Similar
+			ChunkEmbeddings: [][]float32{{0.9, 0.1, 0.0}}, // Similar
 		})
 
 		results, err := db.FindSimilar(ctx, mem1.ID, 10)
@@ -2386,7 +2386,7 @@ func TestClearAllEmbeddings_UnwrapsStorageLayers(t *testing.T) {
 		ctx := context.Background()
 		mem := &Memory{
 			Content:   "Test content",
-			Embedding: []float32{1.0, 0.0, 0.0, 0.0},
+			ChunkEmbeddings: [][]float32{{1.0, 0.0, 0.0, 0.0}},
 		}
 		_, err = db.Store(ctx, mem)
 		require.NoError(t, err)
@@ -2556,26 +2556,26 @@ func TestDeleteNode_RemovesFromSearchIndex(t *testing.T) {
 				ID:         "embed-callback-test-1",
 				Labels:     []string{"TestNode"},
 				Properties: map[string]any{"name": "Test Node 1"},
-				Embedding:  make([]float32, 1024), // Match default dimension
+				ChunkEmbeddings: [][]float32{make([]float32, 1024)}, // Match default dimension
 			},
 			{
 				ID:         "embed-callback-test-2",
 				Labels:     []string{"TestNode"},
 				Properties: map[string]any{"name": "Test Node 2"},
-				Embedding:  make([]float32, 1024),
+				ChunkEmbeddings: [][]float32{make([]float32, 1024)},
 			},
 			{
 				ID:         "embed-callback-test-3",
 				Labels:     []string{"TestNode"},
 				Properties: map[string]any{"name": "Test Node 3"},
-				Embedding:  make([]float32, 1024),
+				ChunkEmbeddings: [][]float32{make([]float32, 1024)},
 			},
 		}
 
 		// Set distinct embedding values
-		nodes[0].Embedding[0] = 1.0
-		nodes[1].Embedding[1] = 1.0
-		nodes[2].Embedding[2] = 1.0
+		nodes[0].ChunkEmbeddings[0][0] = 1.0
+		nodes[1].ChunkEmbeddings[0][1] = 1.0
+		nodes[2].ChunkEmbeddings[0][2] = 1.0
 
 		// Get initial embedding count
 		initialCount := db.EmbeddingCount()

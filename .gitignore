@@ -62,3 +62,4 @@ macos/build
 data.old/
 swagger-ui
 copilot-data/
+kmeans-test-data

@@ -172,17 +172,19 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 		Stats:   &QueryStats{},
 	}
 
-	// Check for multiple MATCH clauses (excluding OPTIONAL MATCH, UNION, EXISTS)
+	// Check for multiple MATCH clauses (excluding OPTIONAL MATCH, UNION, EXISTS, COLLECT subqueries)
 	// This handles: MATCH (a)-[:REL]->(b) MATCH (c)-[:REL]->(b) WHERE a <> c RETURN a, b, c
 	// And also: MATCH (a)-[:REL]->(b) MATCH (a)-[:REL2]->(c) RETURN count(a), b.name (with aggregation)
 	// But NOT: MATCH (a) RETURN a UNION MATCH (b) RETURN b
 	// And NOT: MATCH (n) WHERE EXISTS { MATCH (m) ... } RETURN n
+	// And NOT: MATCH (p) RETURN p.name, collect { MATCH (p)-[:KNOWS]->(friend) RETURN friend.name }
 	hasUnion := strings.Contains(upper, "UNION")
 	hasExists := hasSubqueryPattern(cypher, existsSubqueryRe)
 	hasCountSubquery := hasSubqueryPattern(cypher, countSubqueryRe)
+	hasCollectSubquery := hasSubqueryPattern(cypher, collectSubqueryRe)
 	hasWith := findKeywordIndex(cypher, "WITH") > 0
 
-	if !hasUnion && !hasExists && !hasCountSubquery && !hasWith {
+	if !hasUnion && !hasExists && !hasCountSubquery && !hasCollectSubquery && !hasWith {
 		matchCount := countKeywordOccurrences(upper, "MATCH")
 		optionalMatchCount := countKeywordOccurrences(upper, "OPTIONAL MATCH")
 		if matchCount-optionalMatchCount > 1 {
@@ -564,7 +566,17 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 
 		row := make([]interface{}, len(returnItems))
 		for j, item := range returnItems {
-			row[j] = e.resolveReturnItem(item, nodePattern.variable, node)
+			// Check for COLLECT { } subquery
+			if hasSubqueryPattern(item.expr, collectSubqueryRe) {
+				// Execute the subquery with the current node as context
+				collected, err := e.evaluateCollectSubquery(ctx, node, nodePattern.variable, item.expr)
+				if err != nil {
+					return nil, fmt.Errorf("COLLECT subquery failed: %w", err)
+				}
+				row[j] = collected
+			} else {
+				row[j] = e.resolveReturnItem(item, nodePattern.variable, node)
+			}
 		}
 
 		// Handle DISTINCT

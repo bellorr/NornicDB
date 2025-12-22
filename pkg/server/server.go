@@ -502,6 +502,10 @@ type Server struct {
 	// Slow query logging
 	slowQueryLogger *log.Logger
 	slowQueryCount  atomic.Int64
+
+	// Cached search services per database (namespace-aware indexes)
+	searchServicesMu sync.RWMutex
+	searchServices   map[string]*search.Service
 }
 
 // IPRateLimiter provides IP-based rate limiting to prevent DoS attacks.
@@ -887,6 +891,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		heimdallHandler: heimdallHandler,
 		graphqlHandler:  graphql.NewHandler(db, dbManager),
 		rateLimiter:     rateLimiter,
+		searchServices:  make(map[string]*search.Service),
 	}
 
 	// Initialize OAuth manager if authenticator is available
@@ -2883,15 +2888,23 @@ func (s *Server) handleSearchRebuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create a search service for this database's namespaced storage
-	searchSvc := search.NewServiceWithDimensions(storageEngine, s.db.VectorIndexDimensions())
+	// Invalidate cache and rebuild from scratch
+	s.searchServicesMu.Lock()
+	delete(s.searchServices, dbName)
+	s.searchServicesMu.Unlock()
 
-	// Build indexes from all nodes in this database
+	// Create fresh service and build indexes
+	searchSvc := search.NewServiceWithDimensions(storageEngine, s.db.VectorIndexDimensions())
 	err = searchSvc.BuildIndexes(r.Context())
 	if err != nil {
 		s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.DatabaseError.General.UnknownError", err.Error())
 		return
 	}
+
+	// Cache the rebuilt service
+	s.searchServicesMu.Lock()
+	s.searchServices[dbName] = searchSvc
+	s.searchServicesMu.Unlock()
 
 	response := map[string]interface{}{
 		"success":  true,
@@ -2899,6 +2912,32 @@ func (s *Server) handleSearchRebuild(w http.ResponseWriter, r *http.Request) {
 		"message":  fmt.Sprintf("Search indexes rebuilt for database '%s'", dbName),
 	}
 	s.writeJSON(w, http.StatusOK, response)
+}
+
+// getOrCreateSearchService returns a cached search service for the database,
+// creating and caching it if it doesn't exist. Search services are namespace-aware
+// because they're built from NamespacedEngine which automatically filters nodes.
+func (s *Server) getOrCreateSearchService(dbName string, storageEngine storage.Engine) *search.Service {
+	s.searchServicesMu.RLock()
+	if svc, exists := s.searchServices[dbName]; exists {
+		s.searchServicesMu.RUnlock()
+		return svc
+	}
+	s.searchServicesMu.RUnlock()
+
+	// Create new service (double-checked locking pattern)
+	s.searchServicesMu.Lock()
+	defer s.searchServicesMu.Unlock()
+
+	// Check again in case another goroutine created it
+	if svc, exists := s.searchServices[dbName]; exists {
+		return svc
+	}
+
+	// Create and cache new service
+	svc := search.NewServiceWithDimensions(storageEngine, s.db.VectorIndexDimensions())
+	s.searchServices[dbName] = svc
+	return svc
 }
 
 // =============================================================================
@@ -2947,13 +2986,33 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	stats := s.Stats()
-	dbStats := s.db.Stats()
 
-	// Get database count (all databases across the system)
+	// Calculate stats across all user databases (excluding system)
+	// This matches the logic in handleAdminStats for consistency
+	var totalNodeCount, totalEdgeCount int64
 	databaseCount := 0
 	if s.dbManager != nil {
 		databases := s.dbManager.ListDatabases()
 		databaseCount = len(databases)
+
+		for _, dbInfo := range databases {
+			dbName := dbInfo.Name
+			// Skip system database from totals (it contains metadata)
+			if dbName == "system" {
+				continue
+			}
+
+			storage, err := s.dbManager.GetStorage(dbName)
+			if err != nil {
+				continue
+			}
+
+			nodeCount, _ := storage.NodeCount()
+			edgeCount, _ := storage.EdgeCount()
+
+			totalNodeCount += nodeCount
+			totalEdgeCount += edgeCount
+		}
 	}
 
 	// Build embedding info
@@ -2982,9 +3041,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"active":         stats.ActiveRequests,
 		},
 		"database": map[string]interface{}{
-			"nodes":     dbStats.NodeCount, // Global count across all databases
-			"edges":     dbStats.EdgeCount, // Global count across all databases
-			"databases": databaseCount,     // Number of databases
+			"nodes":     totalNodeCount, // Sum of all user databases (excluding system)
+			"edges":     totalEdgeCount, // Sum of all user databases (excluding system)
+			"databases": databaseCount,  // Number of databases
 		},
 		"embeddings": embedInfo,
 	}
@@ -3766,15 +3825,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		log.Printf("⚠️ Query embedding failed: %v", embedErr)
 	}
 
-	// Create a search service for this database's namespaced storage
-	// Note: This creates a new service each time. For better performance, consider
-	// caching search services per database if this endpoint is called frequently.
-	searchSvc := search.NewServiceWithDimensions(storageEngine, s.db.VectorIndexDimensions())
-
-	// Build indexes if needed - the service starts with empty indexes
-	// Only build if indexes are empty to avoid rebuilding on every request
-	// For production, indexes should be built on startup or via /nornicdb/search/rebuild
+	// Get or create search service for this database
+	// Search services are cached per database since indexes are namespace-aware
+	// (the storage engine already filters to the correct namespace)
 	ctx := r.Context()
+	searchSvc := s.getOrCreateSearchService(dbName, storageEngine)
+
+	// Build indexes if needed (only on first use or after rebuild)
 	if searchSvc.EmbeddingCount() == 0 {
 		// Indexes are empty, build them from existing nodes
 		if err := searchSvc.BuildIndexes(ctx); err != nil {
@@ -3782,7 +3839,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			// Continue anyway - search will work with whatever is indexed
 		}
 	}
-	
+
 	opts := search.DefaultSearchOptions()
 	opts.Limit = req.Limit
 	if len(req.Labels) > 0 {
@@ -3864,7 +3921,7 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(targetNode.Embedding) == 0 {
+	if len(targetNode.ChunkEmbeddings) == 0 || len(targetNode.ChunkEmbeddings[0]) == 0 {
 		s.writeError(w, http.StatusBadRequest, "Node has no embedding", ErrBadRequest)
 		return
 	}
@@ -3879,11 +3936,19 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	err = storage.StreamNodesWithFallback(ctx, storageEngine, 1000, func(n *storage.Node) error {
 		// Skip self and nodes without embeddings
-		if string(n.ID) == req.NodeID || len(n.Embedding) == 0 {
+		if string(n.ID) == req.NodeID || len(n.ChunkEmbeddings) == 0 || len(n.ChunkEmbeddings[0]) == 0 {
 			return nil
 		}
 
-		sim := vector.CosineSimilarity(targetNode.Embedding, n.Embedding)
+		// Use first chunk embedding for similarity (always stored in ChunkEmbeddings, even single chunk = array of 1)
+		var targetEmb, nEmb []float32
+		if len(targetNode.ChunkEmbeddings) > 0 && len(targetNode.ChunkEmbeddings[0]) > 0 {
+			targetEmb = targetNode.ChunkEmbeddings[0]
+		}
+		if len(n.ChunkEmbeddings) > 0 && len(n.ChunkEmbeddings[0]) > 0 {
+			nEmb = n.ChunkEmbeddings[0]
+		}
+		sim := vector.CosineSimilarity(targetEmb, nEmb)
 
 		// Maintain top-k results
 		if len(results) < req.Limit {
@@ -3935,7 +4000,43 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAdminStats(w http.ResponseWriter, r *http.Request) {
 	serverStats := s.Stats()
-	dbStats := s.db.Stats()
+
+	// Calculate stats across all user databases (excluding system)
+	// This provides accurate counts in a multi-database setup
+	var totalNodeCount, totalEdgeCount int64
+	databases := s.dbManager.ListDatabases()
+	perDatabaseStats := make(map[string]map[string]int64)
+
+	for _, dbInfo := range databases {
+		dbName := dbInfo.Name
+		// Skip system database from totals (it contains metadata)
+		if dbName == "system" {
+			continue
+		}
+
+		storage, err := s.dbManager.GetStorage(dbName)
+		if err != nil {
+			continue
+		}
+
+		nodeCount, _ := storage.NodeCount()
+		edgeCount, _ := storage.EdgeCount()
+
+		totalNodeCount += nodeCount
+		totalEdgeCount += edgeCount
+
+		perDatabaseStats[dbName] = map[string]int64{
+			"node_count": nodeCount,
+			"edge_count": edgeCount,
+		}
+	}
+
+	dbStats := map[string]interface{}{
+		"node_count":   totalNodeCount,
+		"edge_count":   totalEdgeCount,
+		"databases":    len(databases),
+		"per_database": perDatabaseStats,
+	}
 
 	response := map[string]interface{}{
 		"server":   serverStats,

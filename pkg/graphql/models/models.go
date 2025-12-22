@@ -446,9 +446,10 @@ type CypherStats struct {
 
 // CypherInput represents input for Cypher execution.
 type CypherInput struct {
-	Statement  string `json:"statement"`
-	Parameters JSON   `json:"parameters,omitempty"`
-	TimeoutMs  *int   `json:"timeoutMs,omitempty"`
+	Statement  string  `json:"statement"`
+	Parameters JSON    `json:"parameters,omitempty"`
+	TimeoutMs  *int    `json:"timeoutMs,omitempty"`
+	Database   *string `json:"database,omitempty"`
 }
 
 // =============================================================================

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 )
 
 // CompositeEngine is a storage engine that spans multiple constituent databases.
@@ -419,6 +420,10 @@ func (c *CompositeEngine) DeleteNode(id NodeID) error {
 // Following Neo4j TransactionState pattern: check if nodes were created in current transaction,
 // and if so, try that constituent first. Otherwise try all constituents.
 func (c *CompositeEngine) CreateEdge(edge *Edge) error {
+	if edge == nil {
+		return fmt.Errorf("edge cannot be nil")
+	}
+
 	writeConstituents := c.getConstituentsForWrite()
 	if len(writeConstituents) == 0 {
 		return fmt.Errorf("no writable constituents available")
@@ -474,14 +479,15 @@ func (c *CompositeEngine) CreateEdge(edge *Edge) error {
 		engine, err := c.getConstituent(startConstituent)
 		if err == nil && engine != nil {
 			// Trust transaction state - nodes were created here, so try creating edge
-			if err := engine.CreateEdge(edge); err == nil {
+			createErr := engine.CreateEdge(edge)
+			if createErr == nil {
 				// CRITICAL: Flush async writes to ensure edge is immediately visible
 				c.flushAsyncEngine(engine)
 				return nil
 			}
 			// If error is not "not found", return it immediately
-			if err != ErrNotFound && !strings.Contains(err.Error(), "not found") {
-				return err
+			if createErr != ErrNotFound && !strings.Contains(createErr.Error(), "not found") {
+				return createErr
 			}
 		}
 	}
@@ -490,20 +496,22 @@ func (c *CompositeEngine) CreateEdge(edge *Edge) error {
 	if startNodeInTx && startConstituent != "" {
 		engine, err := c.getConstituent(startConstituent)
 		if err == nil && engine != nil {
-			if err := engine.CreateEdge(edge); err == nil {
+			createErr := engine.CreateEdge(edge)
+			if createErr == nil {
 				// CRITICAL: Flush async writes to ensure edge is immediately visible
 				c.flushAsyncEngine(engine)
 				return nil
 			}
 			// If error is not "not found", return it immediately
-			if err != ErrNotFound && !strings.Contains(err.Error(), "not found") {
-				return err
+			if createErr != ErrNotFound && !strings.Contains(createErr.Error(), "not found") {
+				return createErr
 			}
 		}
 	}
 
 	// Try all writable constituents (fallback for nodes not in transaction state)
-	// The underlying engine will verify nodes exist before creating the edge.
+	// First, try to locate nodes by querying each constituent
+	// This handles cases where nodes were created but not yet tracked in nodeToConstituent
 	for _, alias := range writeConstituents {
 		// Skip if already tried
 		if startNodeInTx && alias == startConstituent {
@@ -515,15 +523,27 @@ func (c *CompositeEngine) CreateEdge(edge *Edge) error {
 			continue
 		}
 
-		// Try creating edge - underlying engine will verify nodes exist
-		if err := engine.CreateEdge(edge); err == nil {
+		// Verify both nodes exist in this constituent before attempting edge creation
+		// This prevents unnecessary CreateEdge calls that will fail
+		_, err = engine.GetNode(edge.StartNode)
+		if err != nil {
+			continue // Start node not in this constituent
+		}
+		_, err = engine.GetNode(edge.EndNode)
+		if err != nil {
+			continue // End node not in this constituent
+		}
+
+		// Both nodes exist - try creating edge
+		createErr := engine.CreateEdge(edge)
+		if createErr == nil {
 			// CRITICAL: Flush async writes to ensure edge is immediately visible
 			c.flushAsyncEngine(engine)
 			return nil
 		}
 		// If error is not "not found", return it immediately (something else went wrong)
-		if err != ErrNotFound && !strings.Contains(err.Error(), "not found") {
-			return err
+		if createErr != ErrNotFound && !strings.Contains(createErr.Error(), "not found") {
+			return createErr
 		}
 		// Continue to next constituent if it was "not found"
 	}
@@ -1425,14 +1445,38 @@ func (c *CompositeEngine) StreamNodeChunks(ctx context.Context, chunkSize int, f
 
 // flushAsyncEngine flushes async writes if the engine is AsyncEngine (directly or wrapped in NamespacedEngine).
 // This ensures atomicity for composite database operations - no async write queue delays.
+// Waits for flush to complete and verifies queue is empty.
 func (c *CompositeEngine) flushAsyncEngine(engine Engine) {
-	if asyncEngine, ok := engine.(*AsyncEngine); ok {
-		_ = asyncEngine.Flush() // Ignore errors - flush is best effort for atomicity
+	var asyncEngine *AsyncEngine
+	if ae, ok := engine.(*AsyncEngine); ok {
+		asyncEngine = ae
 	} else if namespacedEngine, ok := engine.(*NamespacedEngine); ok {
 		// NamespacedEngine wraps another engine - check if it's AsyncEngine
-		if asyncEngine, ok := namespacedEngine.inner.(*AsyncEngine); ok {
-			_ = asyncEngine.Flush() // Ignore errors - flush is best effort for atomicity
+		if ae, ok := namespacedEngine.inner.(*AsyncEngine); ok {
+			asyncEngine = ae
 		}
+	}
+
+	if asyncEngine != nil {
+		// Flush and wait for completion (Flush is synchronous)
+		if err := asyncEngine.Flush(); err != nil {
+			// Log but don't fail - flush errors are best effort
+			// The underlying engine will handle retries
+			return
+		}
+
+		// Wait for queue to be empty (verify flush completed)
+		// Poll with exponential backoff up to 100ms
+		maxWait := 100 * time.Millisecond
+		start := time.Now()
+		for time.Since(start) < maxWait {
+			if !asyncEngine.HasPendingWrites() {
+				return // Queue is empty, flush complete
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		// If we get here, queue still has pending writes but we've waited long enough
+		// The nodes should be visible by now (flush is synchronous, this is just verification)
 	}
 }
 

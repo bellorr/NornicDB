@@ -248,7 +248,7 @@ func TestSearchService_BuildIndexes(t *testing.T) {
 		{
 			ID:        "node1",
 			Labels:    []string{"Node"},
-			Embedding: embedding,
+			ChunkEmbeddings: [][]float32{embedding},
 			Properties: map[string]any{
 				"title":   "Test Node 1",
 				"content": "This is test content for searching",
@@ -257,7 +257,7 @@ func TestSearchService_BuildIndexes(t *testing.T) {
 		{
 			ID:        "node2",
 			Labels:    []string{"Node"},
-			Embedding: embedding,
+			ChunkEmbeddings: [][]float32{embedding},
 			Properties: map[string]any{
 				"title": "Test Node 2",
 				"text":  "Another searchable document",
@@ -400,8 +400,8 @@ func TestSearchService_RRFHybrid(t *testing.T) {
 	nodes, _ := engine.AllNodes()
 	var queryEmbedding []float32
 	for _, node := range nodes {
-		if len(node.Embedding) == 1024 {
-			queryEmbedding = node.Embedding
+		if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) == 1024 {
+			queryEmbedding = node.ChunkEmbeddings[0]
 			t.Logf("Using embedding from node: %s", node.ID)
 			break
 		}
@@ -705,19 +705,19 @@ func TestSearchService_RemoveNode_DecrementsEmbeddingCount(t *testing.T) {
 			ID:         "node1",
 			Labels:     []string{"Person"},
 			Properties: map[string]any{"name": "Alice"},
-			Embedding:  []float32{1, 0, 0, 0},
+			ChunkEmbeddings:  [][]float32{{1, 0, 0, 0}},
 		},
 		{
 			ID:         "node2",
 			Labels:     []string{"Person"},
 			Properties: map[string]any{"name": "Bob"},
-			Embedding:  []float32{0, 1, 0, 0},
+			ChunkEmbeddings:  [][]float32{{0, 1, 0, 0}},
 		},
 		{
 			ID:         "node3",
 			Labels:     []string{"Person"},
 			Properties: map[string]any{"name": "Charlie"},
-			Embedding:  []float32{0, 0, 1, 0},
+			ChunkEmbeddings:  [][]float32{{0, 0, 1, 0}},
 		},
 	}
 
@@ -761,19 +761,19 @@ func TestSearchService_RemoveNode_OnlyRemovesTargetNode(t *testing.T) {
 		ID:         "target-to-remove",
 		Labels:     []string{"Document"},
 		Properties: map[string]any{"content": "unique alpha content"},
-		Embedding:  []float32{1, 0, 0, 0},
+		ChunkEmbeddings:  [][]float32{{1, 0, 0, 0}},
 	}
 	node2 := &storage.Node{
 		ID:         "should-remain-1",
 		Labels:     []string{"Document"},
 		Properties: map[string]any{"content": "unique beta content"},
-		Embedding:  []float32{0, 1, 0, 0},
+		ChunkEmbeddings:  [][]float32{{0, 1, 0, 0}},
 	}
 	node3 := &storage.Node{
 		ID:         "should-remain-2",
 		Labels:     []string{"Document"},
 		Properties: map[string]any{"content": "unique gamma content"},
-		Embedding:  []float32{0, 0, 1, 0},
+		ChunkEmbeddings:  [][]float32{{0, 0, 1, 0}},
 	}
 
 	for _, node := range []*storage.Node{node1, node2, node3} {
@@ -880,17 +880,17 @@ func TestSearchService_VectorSearchOnly(t *testing.T) {
 		{
 			ID:        "vec1",
 			Labels:    []string{"Vector"},
-			Embedding: []float32{1, 0, 0, 0},
+			ChunkEmbeddings: [][]float32{{1, 0, 0, 0}},
 		},
 		{
 			ID:        "vec2",
 			Labels:    []string{"Vector"},
-			Embedding: []float32{0.9, 0.1, 0, 0},
+			ChunkEmbeddings: [][]float32{{0.9, 0.1, 0, 0}},
 		},
 		{
 			ID:        "vec3",
 			Labels:    []string{"Vector"},
-			Embedding: []float32{0, 1, 0, 0},
+			ChunkEmbeddings: [][]float32{{0, 1, 0, 0}},
 		},
 	}
 
@@ -1154,7 +1154,7 @@ func TestVectorSearchOnlyDirect(t *testing.T) {
 		_, _ = store.CreateNode(&storage.Node{
 			ID:        "node-1",
 			Labels:    []string{"Document"},
-			Embedding: embedding,
+			ChunkEmbeddings: [][]float32{embedding},
 			Properties: map[string]interface{}{
 				"title":   "Test Doc",
 				"content": "Test content",
@@ -1229,7 +1229,7 @@ func TestBuildIndexesDirect(t *testing.T) {
 		_, _ = store.CreateNode(&storage.Node{
 			ID:        "doc-1",
 			Labels:    []string{"Document"},
-			Embedding: embedding,
+			ChunkEmbeddings: [][]float32{embedding},
 			Properties: map[string]interface{}{
 				"content": "First document content",
 			},
@@ -1292,7 +1292,7 @@ func TestSearchServiceSearchDirect(t *testing.T) {
 		_, _ = store.CreateNode(&storage.Node{
 			ID:        "doc-1",
 			Labels:    []string{"Document"},
-			Embedding: embedding,
+			ChunkEmbeddings: [][]float32{embedding},
 			Properties: map[string]interface{}{
 				"content": "Machine learning tutorial",
 			},
@@ -1355,7 +1355,7 @@ func TestRRFHybridSearchDirect(t *testing.T) {
 		_, _ = store.CreateNode(&storage.Node{
 			ID:        "doc-1",
 			Labels:    []string{"Document"},
-			Embedding: embedding,
+			ChunkEmbeddings: [][]float32{embedding},
 			Properties: map[string]interface{}{
 				"content": "Machine learning tutorial content",
 			},
@@ -1400,7 +1400,7 @@ func TestMMRDiversification(t *testing.T) {
 			ID:         storage.NodeID(id),
 			Labels:     labels,
 			Properties: props,
-			Embedding:  embedding,
+			ChunkEmbeddings:  [][]float32{embedding},
 		}
 		_, _ = store.CreateNode(node)
 		service.IndexNode(node)
@@ -1487,11 +1487,11 @@ func TestSearchWithMMROption(t *testing.T) {
 				"title":   fmt.Sprintf("Document %d about AI", i),
 				"content": "This is content about artificial intelligence and machine learning",
 			},
-			Embedding: make([]float32, 1024),
+			ChunkEmbeddings: [][]float32{make([]float32, 1024)},
 		}
 		// Slightly different embeddings
-		for j := range node.Embedding {
-			node.Embedding[j] = float32(i)*0.01 + float32(j)*0.001
+		for j := range node.ChunkEmbeddings[0] {
+			node.ChunkEmbeddings[0][j] = float32(i)*0.01 + float32(j)*0.001
 		}
 		_, _ = store.CreateNode(node)
 		service.IndexNode(node)

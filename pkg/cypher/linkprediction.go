@@ -363,14 +363,14 @@ func (e *StorageExecutor) callGdsLinkPredictionPredict(cypher string) (*ExecuteR
 	// Set up semantic scorer using embeddings
 	scorer.SetSemanticScorer(func(ctx context.Context, source, target storage.NodeID) float64 {
 		sourceNode, err := e.storage.GetNode(source)
-		if err != nil || len(sourceNode.Embedding) == 0 {
+		if err != nil || len(sourceNode.ChunkEmbeddings) == 0 || len(sourceNode.ChunkEmbeddings[0]) == 0 {
 			return 0.0
 		}
 		targetNode, err := e.storage.GetNode(target)
-		if err != nil || len(targetNode.Embedding) == 0 {
+		if err != nil || len(targetNode.ChunkEmbeddings) == 0 || len(targetNode.ChunkEmbeddings[0]) == 0 {
 			return 0.0
 		}
-		return linkpredict.CosineSimilarity(sourceNode.Embedding, targetNode.Embedding)
+		return linkpredict.CosineSimilarity(sourceNode.ChunkEmbeddings[0], targetNode.ChunkEmbeddings[0])
 	})
 
 	// Get predictions

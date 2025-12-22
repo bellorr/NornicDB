@@ -115,15 +115,15 @@ func (n *NamespacedEngine) CreateNode(node *Node) (NodeID, error) {
 	// Create a copy with namespaced ID
 	namespacedID := n.prefixNodeID(node.ID)
 	namespacedNode := &Node{
-		ID:           namespacedID,
-		Labels:       node.Labels,
-		Properties:   node.Properties,
-		CreatedAt:    node.CreatedAt,
-		UpdatedAt:    node.UpdatedAt,
-		DecayScore:   node.DecayScore,
-		LastAccessed: node.LastAccessed,
-		AccessCount:  node.AccessCount,
-		Embedding:    node.Embedding,
+		ID:              namespacedID,
+		Labels:          node.Labels,
+		Properties:      node.Properties,
+		CreatedAt:       node.CreatedAt,
+		UpdatedAt:       node.UpdatedAt,
+		DecayScore:      node.DecayScore,
+		LastAccessed:    node.LastAccessed,
+		AccessCount:     node.AccessCount,
+		ChunkEmbeddings: node.ChunkEmbeddings,
 	}
 	actualID, err := n.inner.CreateNode(namespacedNode)
 	if err != nil {
@@ -163,21 +163,35 @@ func (n *NamespacedEngine) UpdateNode(node *Node) error {
 		namespacedID = n.prefixNodeID(node.ID)
 	}
 	namespacedNode := &Node{
-		ID:           namespacedID,
-		Labels:       node.Labels,
-		Properties:   node.Properties,
-		CreatedAt:    node.CreatedAt,
-		UpdatedAt:    node.UpdatedAt,
-		DecayScore:   node.DecayScore,
-		LastAccessed: node.LastAccessed,
-		AccessCount:  node.AccessCount,
-		Embedding:    node.Embedding,
+		ID:              namespacedID,
+		Labels:          node.Labels,
+		Properties:      node.Properties,
+		CreatedAt:       node.CreatedAt,
+		UpdatedAt:       node.UpdatedAt,
+		DecayScore:      node.DecayScore,
+		LastAccessed:    node.LastAccessed,
+		AccessCount:     node.AccessCount,
+		ChunkEmbeddings: node.ChunkEmbeddings,
 	}
 	return n.inner.UpdateNode(namespacedNode)
 }
 
 func (n *NamespacedEngine) DeleteNode(id NodeID) error {
-	return n.inner.DeleteNode(n.prefixNodeID(id))
+	prefixedID := n.prefixNodeID(id)
+
+	// Delete the node (this will remove it from pending embeddings index)
+	err := n.inner.DeleteNode(prefixedID)
+
+	// Also explicitly remove from pending embeddings index with both prefixed and unprefixed IDs
+	// This ensures cleanup even if the index has stale entries
+	if mgr, ok := n.inner.(interface{ MarkNodeEmbedded(NodeID) }); ok {
+		// Remove with prefixed ID (normal case)
+		mgr.MarkNodeEmbedded(prefixedID)
+		// Also try unprefixed ID (in case of stale entries)
+		mgr.MarkNodeEmbedded(id)
+	}
+
+	return err
 }
 
 // ============================================================================
@@ -573,7 +587,24 @@ func (n *NamespacedEngine) Close() error {
 // ============================================================================
 
 func (n *NamespacedEngine) NodeCount() (int64, error) {
-	// Count nodes in our namespace
+	// Optimized: Use streaming to count without loading all nodes into memory
+	// This is much more efficient for large databases
+	var count int64
+	if streamer, ok := n.inner.(StreamingEngine); ok {
+		// Use streaming for efficient counting
+		err := streamer.StreamNodes(context.Background(), func(node *Node) error {
+			if n.hasNodePrefix(node.ID) {
+				count++
+			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
+		}
+		return count, nil
+	}
+
+	// Fallback: Count nodes by loading them (less efficient but works for all engines)
 	nodes, err := n.AllNodes()
 	if err != nil {
 		return 0, err
@@ -582,7 +613,23 @@ func (n *NamespacedEngine) NodeCount() (int64, error) {
 }
 
 func (n *NamespacedEngine) EdgeCount() (int64, error) {
-	// Count edges in our namespace
+	// Optimized: Use streaming to count without loading all edges into memory
+	var count int64
+	if streamer, ok := n.inner.(StreamingEngine); ok {
+		// Use streaming for efficient counting
+		err := streamer.StreamEdges(context.Background(), func(edge *Edge) error {
+			if n.hasEdgePrefix(edge.ID) {
+				count++
+			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
+		}
+		return count, nil
+	}
+
+	// Fallback: Count edges by loading them (less efficient but works for all engines)
 	edges, err := n.AllEdges()
 	if err != nil {
 		return 0, err
@@ -685,6 +732,149 @@ func (n *NamespacedEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, ed
 	// The DatabaseManager should call DeleteByPrefix on the underlying engine
 	// with the full namespace prefix (e.g., "tenant_a:").
 	return 0, 0, fmt.Errorf("DeleteByPrefix not supported on NamespacedEngine - use underlying engine with namespace prefix")
+}
+
+// FindNodeNeedingEmbedding finds a node that needs embedding, but only from this namespace.
+// It skips nodes from other namespaces in the pending embeddings index.
+func (n *NamespacedEngine) FindNodeNeedingEmbedding() *Node {
+	// Get underlying engine's finder
+	finder, ok := n.inner.(interface{ FindNodeNeedingEmbedding() *Node })
+	if !ok {
+		return nil
+	}
+
+	// Get underlying engine's marker for skipping nodes
+	marker, hasMarker := n.inner.(interface{ MarkNodeEmbedded(NodeID) })
+
+	// Keep trying until we find a node in our namespace or run out of nodes
+	maxAttempts := 10000 // Prevent infinite loop (but allow scanning many nodes)
+	staleCount := 0
+	for i := 0; i < maxAttempts; i++ {
+		node := finder.FindNodeNeedingEmbedding()
+		if node == nil {
+			// No more nodes need embedding
+			if staleCount > 0 {
+				fmt.Printf("🧹 Skipped %d nodes from other namespaces while searching\n", staleCount)
+			}
+			return nil
+		}
+
+		// Check if this node belongs to our namespace
+		// The node ID from the underlying engine will have the namespace prefix
+		if n.hasNodePrefix(node.ID) {
+			// Verify the node actually exists before returning it
+			// This prevents returning nodes that were deleted but still in the index
+			_, err := n.inner.GetNode(node.ID)
+			if err != nil {
+				// Node doesn't exist - mark as embedded to remove from index and try next
+				if hasMarker {
+					marker.MarkNodeEmbedded(node.ID)
+				}
+				staleCount++
+				continue
+			}
+
+			// Remove namespace prefix before returning
+			node.ID = n.unprefixNodeID(node.ID)
+			if staleCount > 0 && staleCount%100 == 0 {
+				fmt.Printf("🧹 Skipped %d nodes from other namespaces while searching\n", staleCount)
+			}
+			return node
+		}
+
+		// Node is from a different namespace - mark it as embedded to skip it
+		// and try the next one
+		if hasMarker {
+			marker.MarkNodeEmbedded(node.ID)
+		}
+		staleCount++
+	}
+
+	// Too many attempts - likely many stale entries
+	if staleCount > 0 {
+		fmt.Printf("⚠️  FindNodeNeedingEmbedding: gave up after %d attempts, skipped %d nodes from other namespaces\n", maxAttempts, staleCount)
+	}
+	return nil
+}
+
+// RefreshPendingEmbeddingsIndex refreshes the pending embeddings index,
+// but only for nodes in this namespace.
+// Also cleans up stale entries from other namespaces in the underlying index.
+func (n *NamespacedEngine) RefreshPendingEmbeddingsIndex() int {
+	// First, call the underlying engine's RefreshPendingEmbeddingsIndex to clean up
+	// stale entries from ALL namespaces (including deleted nodes, nodes with embeddings, etc.)
+	// This is important because the underlying index contains entries from all namespaces
+	underlyingRemoved := 0
+	if underlyingMgr, ok := n.inner.(interface {
+		RefreshPendingEmbeddingsIndex() int
+	}); ok {
+		// This will clean up stale entries from all namespaces
+		underlyingRemoved = underlyingMgr.RefreshPendingEmbeddingsIndex()
+	}
+
+	// Get all nodes in this namespace
+	nodes, err := n.AllNodes()
+	if err != nil {
+		return underlyingRemoved
+	}
+
+	added := 0
+	removed := 0
+
+	// Get underlying engine's pending index manager
+	mgr, ok := n.inner.(interface {
+		AddToPendingEmbeddings(NodeID)
+		MarkNodeEmbedded(NodeID)
+		GetNode(NodeID) (*Node, error)
+	})
+	if !ok {
+		return underlyingRemoved
+	}
+
+	// Check each node in our namespace
+	for _, node := range nodes {
+		// Skip internal nodes
+		skip := false
+		for _, label := range node.Labels {
+			if len(label) > 0 && label[0] == '_' {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		// Check if node needs embedding
+		if (len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) && NodeNeedsEmbedding(node) {
+			// Add to pending index (with namespace prefix)
+			prefixedID := n.prefixNodeID(node.ID)
+			mgr.AddToPendingEmbeddings(prefixedID)
+			added++
+		} else if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+			// Node has embedding - remove from pending index if present
+			prefixedID := n.prefixNodeID(node.ID)
+			mgr.MarkNodeEmbedded(prefixedID)
+			removed++
+		}
+	}
+
+	totalRemoved := underlyingRemoved + removed
+	if added > 0 || totalRemoved > 0 {
+		fmt.Printf("📊 Pending embeddings index refreshed for namespace '%s': added %d nodes, removed %d stale entries (including %d from underlying cleanup)\n", n.namespace, added, totalRemoved, underlyingRemoved)
+	}
+
+	return totalRemoved
+}
+
+// MarkNodeEmbedded marks a node as embedded (removes from pending index).
+// The node ID should be unprefixed (without namespace).
+func (n *NamespacedEngine) MarkNodeEmbedded(nodeID NodeID) {
+	if mgr, ok := n.inner.(interface{ MarkNodeEmbedded(NodeID) }); ok {
+		// Add namespace prefix before marking
+		prefixedID := n.prefixNodeID(nodeID)
+		mgr.MarkNodeEmbedded(prefixedID)
+	}
 }
 
 // Ensure NamespacedEngine implements Engine interface

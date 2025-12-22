@@ -56,8 +56,13 @@ func storageNodeToModel(node *storage.Node) *models.Node {
 		DecayScore:          &decayScore,
 		LastAccessed:        lastAccessed,
 		AccessCount:         &accessCount,
-		HasEmbedding:        len(node.Embedding) > 0,
-		EmbeddingDimensions: len(node.Embedding),
+		HasEmbedding:        len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0,
+		EmbeddingDimensions: func() int {
+			if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+				return len(node.ChunkEmbeddings[0])
+			}
+			return 0
+		}(),
 	}
 }
 

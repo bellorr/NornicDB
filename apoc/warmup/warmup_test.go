@@ -11,9 +11,9 @@ func setupTestStorage() {
 	mockStore := storage.NewInMemoryStorage()
 
 	// Add test nodes using CreateNode
-	mockStore.CreateNode([]string{"Person"}, map[string]interface{}{"name": "Alice", "age": 30})  // ID 1
-	mockStore.CreateNode([]string{"Person"}, map[string]interface{}{"name": "Bob", "age": 25})    // ID 2
-	mockStore.CreateNode([]string{"Company"}, map[string]interface{}{"name": "Acme"})              // ID 3
+	mockStore.CreateNode([]string{"Person"}, map[string]interface{}{"name": "Alice", "age": 30}) // ID 1
+	mockStore.CreateNode([]string{"Person"}, map[string]interface{}{"name": "Bob", "age": 25})   // ID 2
+	mockStore.CreateNode([]string{"Company"}, map[string]interface{}{"name": "Acme"})            // ID 3
 
 	// Add test relationships using CreateRelationship
 	mockStore.CreateRelationship(1, 3, "WORKS_AT", map[string]interface{}{"since": 2020})
@@ -398,9 +398,6 @@ func TestSubgraph(t *testing.T) {
 
 	// Get a node from storage to use as start node
 	nodes, _ := Storage.AllNodes()
-	if len(nodes) == 0 {
-		t.Skip("No nodes in storage")
-	}
 
 	result := Subgraph(nodes[0], 2)
 

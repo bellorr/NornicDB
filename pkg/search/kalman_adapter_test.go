@@ -361,7 +361,7 @@ func TestKalmanSearchAdapter_Search_Integration(t *testing.T) {
 		_, _ = engine.CreateNode(&storage.Node{
 			Labels:     []string{"Document"},
 			Properties: map[string]interface{}{"title": "Doc " + string(rune('A'+i))},
-			Embedding:  embedding,
+			ChunkEmbeddings:  [][]float32{embedding},
 		})
 	}
 

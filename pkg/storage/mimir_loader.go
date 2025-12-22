@@ -240,11 +240,14 @@ func loadMimirEmbeddings(engine Engine, path string, result *MimirImportResult) 
 		}
 
 		// Convert float64 to float32 for storage efficiency
+		// Convert float64 to float32 for storage efficiency
+		// Mimir export format has single embedding, we store as ChunkEmbeddings (array of 1)
 		embedding := make([]float32, len(emb.Embedding))
 		for i, v := range emb.Embedding {
 			embedding[i] = float32(v)
 		}
-		node.Embedding = embedding
+		// Always store as ChunkEmbeddings (even single chunk = array of 1)
+		node.ChunkEmbeddings = [][]float32{embedding}
 
 		if err := engine.UpdateNode(node); err != nil {
 			result.Errors = append(result.Errors, fmt.Sprintf("updating node embedding: %v", err))

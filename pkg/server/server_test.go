@@ -19,6 +19,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -324,6 +325,27 @@ func TestHandleStatus(t *testing.T) {
 	if dbCount < 1 {
 		t.Errorf("expected at least 1 database (default + system), got %v", dbCount)
 	}
+
+	// Verify node and edge counts are numbers and >= 0
+	nodeCount, ok := dbStats["nodes"].(float64)
+	if !ok {
+		t.Errorf("'nodes' field should be a number, got %T", dbStats["nodes"])
+	}
+	if nodeCount < 0 {
+		t.Errorf("node count should be >= 0, got %v", nodeCount)
+	}
+
+	edgeCount, ok := dbStats["edges"].(float64)
+	if !ok {
+		t.Errorf("'edges' field should be a number, got %T", dbStats["edges"])
+	}
+	if edgeCount < 0 {
+		t.Errorf("edge count should be >= 0, got %v", edgeCount)
+	}
+
+	// Verify that system database nodes are NOT included in the count
+	// (system database has metadata nodes that shouldn't be counted)
+	// The count should only include user databases
 }
 
 // TestMetaField_NodeMetadata verifies that the meta field is properly populated
@@ -807,14 +829,81 @@ func TestHandleSearch(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
 
+	// Test search endpoint - should work even with empty database
 	resp := makeRequest(t, server, "POST", "/nornicdb/search", map[string]interface{}{
 		"query": "test query",
 		"limit": 10,
 	}, "Bearer "+token)
 
-	// May return 200 (success) or 500 (if search not fully implemented)
-	if resp.Code != http.StatusOK && resp.Code != http.StatusInternalServerError {
-		t.Errorf("unexpected status %d", resp.Code)
+	// Should return 200 (success) - search service caching and index building should handle empty database
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	// Verify response structure
+	var results []interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&results); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Results should be an array (may be empty if no data)
+	if results == nil {
+		t.Error("results should be an array, got nil")
+	}
+
+	// Test that search service is cached (second request should be faster)
+	resp2 := makeRequest(t, server, "POST", "/nornicdb/search", map[string]interface{}{
+		"query": "another query",
+		"limit": 5,
+	}, "Bearer "+token)
+
+	if resp2.Code != http.StatusOK {
+		t.Errorf("expected status 200 on second request, got %d: %s", resp2.Code, resp2.Body.String())
+	}
+}
+
+func TestHandleSearchRebuild(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	// Test search rebuild endpoint
+	resp := makeRequest(t, server, "POST", "/nornicdb/search/rebuild", map[string]interface{}{
+		"database": server.dbManager.DefaultDatabaseName(),
+	}, "Bearer "+token)
+
+	if resp.Code != http.StatusOK {
+		t.Errorf("expected status 200, got %d: %s", resp.Code, resp.Body.String())
+	}
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	// Verify response structure
+	if result["success"] == nil {
+		t.Error("missing 'success' field")
+	}
+	if result["database"] == nil {
+		t.Error("missing 'database' field")
+	}
+	if result["message"] == nil {
+		t.Error("missing 'message' field")
+	}
+
+	// Verify success is true
+	success, ok := result["success"].(bool)
+	if !ok {
+		t.Errorf("'success' should be a boolean, got %T", result["success"])
+	}
+	if !success {
+		t.Error("expected success to be true")
+	}
+
+	// Test rebuild without database parameter (should use default)
+	resp2 := makeRequest(t, server, "POST", "/nornicdb/search/rebuild", nil, "Bearer "+token)
+	if resp2.Code != http.StatusOK {
+		t.Errorf("expected status 200 without database param, got %d: %s", resp2.Code, resp2.Body.String())
 	}
 }
 
@@ -833,10 +922,10 @@ func TestHandleSimilar(t *testing.T) {
 		targetEmbedding[i] = float32(i) / 1024.0
 	}
 	targetNode := &storage.Node{
-		ID:         storage.NodeID("target-node"),
-		Labels:     []string{"Test"},
-		Properties: map[string]interface{}{"name": "Target Node"},
-		Embedding:  targetEmbedding,
+		ID:              storage.NodeID("target-node"),
+		Labels:          []string{"Test"},
+		Properties:      map[string]interface{}{"name": "Target Node"},
+		ChunkEmbeddings: [][]float32{targetEmbedding},
 	}
 	_, err = storageEngine.CreateNode(targetNode)
 	require.NoError(t, err, "should create target node")
@@ -847,10 +936,10 @@ func TestHandleSimilar(t *testing.T) {
 		similarEmbedding[i] = float32(i+1) / 1024.0 // Slight variation
 	}
 	similarNode := &storage.Node{
-		ID:         storage.NodeID("similar-node"),
-		Labels:     []string{"Test"},
-		Properties: map[string]interface{}{"name": "Similar Node"},
-		Embedding:  similarEmbedding,
+		ID:              storage.NodeID("similar-node"),
+		Labels:          []string{"Test"},
+		Properties:      map[string]interface{}{"name": "Similar Node"},
+		ChunkEmbeddings: [][]float32{similarEmbedding},
 	}
 	_, err = storageEngine.CreateNode(similarNode)
 	require.NoError(t, err, "should create similar node")
@@ -861,10 +950,10 @@ func TestHandleSimilar(t *testing.T) {
 		dissimilarEmbedding[i] = float32(1024-i) / 1024.0 // Very different
 	}
 	dissimilarNode := &storage.Node{
-		ID:         storage.NodeID("dissimilar-node"),
-		Labels:     []string{"Test"},
-		Properties: map[string]interface{}{"name": "Dissimilar Node"},
-		Embedding:  dissimilarEmbedding,
+		ID:              storage.NodeID("dissimilar-node"),
+		Labels:          []string{"Test"},
+		Properties:      map[string]interface{}{"name": "Dissimilar Node"},
+		ChunkEmbeddings: [][]float32{dissimilarEmbedding},
 	}
 	_, err = storageEngine.CreateNode(dissimilarNode)
 	require.NoError(t, err, "should create dissimilar node")
@@ -908,10 +997,10 @@ func TestHandleSimilar(t *testing.T) {
 
 	// Test with node without embedding (should return 400)
 	nodeWithoutEmbedding := &storage.Node{
-		ID:         storage.NodeID("no-embedding-node"),
-		Labels:     []string{"Test"},
-		Properties: map[string]interface{}{"name": "No Embedding"},
-		Embedding:  nil, // No embedding
+		ID:              storage.NodeID("no-embedding-node"),
+		Labels:          []string{"Test"},
+		Properties:      map[string]interface{}{"name": "No Embedding"},
+		ChunkEmbeddings: nil, // No embedding
 	}
 	_, err = storageEngine.CreateNode(nodeWithoutEmbedding)
 	require.NoError(t, err, "should create node without embedding")
@@ -979,6 +1068,61 @@ func TestHandleAdminStats(t *testing.T) {
 	}
 	if stats["database"] == nil {
 		t.Error("missing 'database' stats")
+	}
+
+	// Verify new database stats structure (multi-database aware)
+	dbStats, ok := stats["database"].(map[string]interface{})
+	if !ok {
+		t.Fatal("'database' field is not a map")
+	}
+
+	// Check for required fields
+	if dbStats["node_count"] == nil {
+		t.Error("missing 'node_count' field in database stats")
+	}
+	if dbStats["edge_count"] == nil {
+		t.Error("missing 'edge_count' field in database stats")
+	}
+	if dbStats["databases"] == nil {
+		t.Error("missing 'databases' field in database stats")
+	}
+	if dbStats["per_database"] == nil {
+		t.Error("missing 'per_database' field in database stats")
+	}
+
+	// Verify per_database is a map
+	perDB, ok := dbStats["per_database"].(map[string]interface{})
+	if !ok {
+		t.Fatal("'per_database' field is not a map")
+	}
+
+	// Verify system database is NOT included in per_database (it's excluded from totals)
+	if _, exists := perDB["system"]; exists {
+		t.Error("system database should not be included in per_database stats")
+	}
+
+	// Verify default database is included
+	defaultDB := server.dbManager.DefaultDatabaseName()
+	if _, exists := perDB[defaultDB]; !exists {
+		t.Errorf("default database '%s' should be included in per_database stats", defaultDB)
+	}
+
+	// Verify counts are numbers
+	nodeCount, ok := dbStats["node_count"].(float64)
+	if !ok {
+		t.Errorf("'node_count' should be a number, got %T", dbStats["node_count"])
+	}
+	edgeCount, ok := dbStats["edge_count"].(float64)
+	if !ok {
+		t.Errorf("'edge_count' should be a number, got %T", dbStats["edge_count"])
+	}
+
+	// Counts should be >= 0
+	if nodeCount < 0 {
+		t.Errorf("node_count should be >= 0, got %v", nodeCount)
+	}
+	if edgeCount < 0 {
+		t.Errorf("edge_count should be >= 0, got %v", edgeCount)
 	}
 }
 
@@ -1458,9 +1602,7 @@ func TestHandleUserByID(t *testing.T) {
 	var users []map[string]interface{}
 	json.NewDecoder(listResp.Body).Decode(&users)
 
-	if len(users) == 0 {
-		t.Skip("no users to test")
-	}
+	require.Greater(t, len(users), 0)
 
 	userID := users[0]["id"].(string)
 
@@ -1915,15 +2057,11 @@ func TestHandleUserByIDPut(t *testing.T) {
 	token := getAuthToken(t, auth, "admin")
 
 	// Create a user first
-	createResp := makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
+	_ = makeRequest(t, server, "POST", "/auth/users", map[string]interface{}{
 		"username": "updatetestuser",
 		"password": "password123",
 		"roles":    []string{"viewer"},
 	}, "Bearer "+token)
-
-	if createResp.Code != http.StatusCreated {
-		t.Skipf("failed to create user: %d", createResp.Code)
-	}
 
 	// Update the user
 	resp := makeRequest(t, server, "PUT", "/auth/users/updatetestuser", map[string]interface{}{
@@ -1946,9 +2084,7 @@ func TestHandleUserByIDPutDisable(t *testing.T) {
 		"roles":    []string{"viewer"},
 	}, "Bearer "+token)
 
-	if createResp.Code != http.StatusCreated {
-		t.Skipf("failed to create user: %d", createResp.Code)
-	}
+	assert.Equal(t, http.StatusCreated, createResp.Code)
 
 	// Disable the user
 	disabled := true
@@ -1972,10 +2108,7 @@ func TestHandleUserByIDPutEnable(t *testing.T) {
 		"roles":    []string{"viewer"},
 	}, "Bearer "+token)
 
-	if createResp.Code != http.StatusCreated {
-		t.Skipf("failed to create user: %d", createResp.Code)
-	}
-
+	assert.Equal(t, http.StatusCreated, createResp.Code)
 	// Enable the user
 	disabled := false
 	resp := makeRequest(t, server, "PUT", "/auth/users/enabletestuser", map[string]interface{}{
@@ -2014,9 +2147,7 @@ func TestHandleUserByIDDelete(t *testing.T) {
 		"roles":    []string{"viewer"},
 	}, "Bearer "+token)
 
-	if createResp.Code != http.StatusCreated {
-		t.Skipf("failed to create user: %d", createResp.Code)
-	}
+	assert.Equal(t, http.StatusCreated, createResp.Code)
 
 	// Delete the user
 	resp := makeRequest(t, server, "DELETE", "/auth/users/deletetestuser", nil, "Bearer "+token)

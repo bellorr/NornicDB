@@ -339,6 +339,7 @@ func (ew *EmbedWorker) worker() {
 	// Refresh the pending embeddings index on startup to catch any nodes
 	// that need embedding (e.g., after restart, bulk import, or cleared embeddings)
 	fmt.Println("🔍 Initial scan for nodes needing embeddings...")
+	// Refresh index to clean up stale entries from deleted nodes
 	ew.refreshEmbeddingIndex()
 
 	ew.processUntilEmpty()
@@ -367,6 +368,9 @@ func (ew *EmbedWorker) worker() {
 // When the queue becomes empty, it schedules a debounced k-means clustering trigger.
 func (ew *EmbedWorker) processUntilEmpty() {
 	batchProcessed := 0
+	consecutiveEmptyCount := 0
+	maxConsecutiveEmpty := 3 // Stop after 3 consecutive empty checks
+
 	for {
 		select {
 		case <-ew.ctx.Done():
@@ -376,19 +380,33 @@ func (ew *EmbedWorker) processUntilEmpty() {
 			// It returns false if there was nothing to process
 			didWork := ew.processNextBatch()
 			if !didWork {
-				// Queue appears empty - refresh index to catch any nodes added during processing
-				// This uses Badger's persistent index, so it's efficient (only adds missing nodes)
-				ew.refreshEmbeddingIndex()
-
-				// Queue is empty - schedule debounced k-means callback if we processed anything
-				if batchProcessed > 0 && ew.onQueueEmpty != nil {
-					ew.scheduleClusteringDebounced(batchProcessed)
+				consecutiveEmptyCount++
+				if consecutiveEmptyCount == 1 {
+					// First empty check - refresh index to catch any new nodes and clean up stale entries
+					removed := ew.refreshEmbeddingIndex()
+					if removed > 0 {
+						fmt.Printf("🧹 Cleaned up %d stale entries from pending embeddings index\n", removed)
+						// Reset counter since we found and cleaned stale entries - try again
+						consecutiveEmptyCount = 0
+						continue
+					}
+				} else if consecutiveEmptyCount >= maxConsecutiveEmpty {
+					// Multiple empty checks - we're done
+					// Queue is empty - schedule debounced k-means callback if we processed anything
+					if batchProcessed > 0 && ew.onQueueEmpty != nil {
+						ew.scheduleClusteringDebounced(batchProcessed)
+					}
+					return // No more nodes to process
 				}
-				return // No more nodes to process
+				// Small delay before next check
+				time.Sleep(100 * time.Millisecond)
+			} else {
+				// Successfully processed - reset counter
+				consecutiveEmptyCount = 0
+				batchProcessed++
+				// Small delay between batches to avoid CPU spin
+				time.Sleep(50 * time.Millisecond)
 			}
-			batchProcessed++
-			// Small delay between batches to avoid CPU spin
-			time.Sleep(50 * time.Millisecond)
 		}
 	}
 }
@@ -420,12 +438,42 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		return false // Nothing to process
 	}
 
+	// DEBUG: Log where this node came from
+	fmt.Printf("🔍 Found node %s from pending embeddings index\n", node.ID)
+
 	// Check for cancellation before processing
 	select {
 	case <-ew.ctx.Done():
 		return false
 	default:
 	}
+
+	// CRITICAL: Verify node still exists before processing
+	// Node might have been deleted between index lookup and now
+	// This prevents trying to embed deleted nodes
+	existingNode, err := ew.storage.GetNode(node.ID)
+	if err != nil {
+		// Node was deleted - remove from pending index and skip
+		// This is a stale entry - remove it immediately to prevent re-processing
+		fmt.Printf("⚠️  Node %s from pending index doesn't exist - removing stale entry\n", node.ID)
+		ew.markNodeEmbedded(node.ID)
+		// Also try with prefixed ID in case it's a namespace issue
+		if namespacedEngine, ok := ew.storage.(*storage.NamespacedEngine); ok {
+			prefixedID := namespacedEngine.Namespace() + ":" + string(node.ID)
+			ew.markNodeEmbedded(storage.NodeID(prefixedID))
+		}
+		return false // Skip this node, try next one
+	}
+
+	// DEBUG: Verify the node we found matches what's in storage
+	if existingNode == nil {
+		fmt.Printf("⚠️  Node %s from pending index is nil - removing stale entry\n", node.ID)
+		ew.markNodeEmbedded(node.ID)
+		return false
+	}
+
+	// Update node with latest data from storage
+	node = existingNode
 
 	// Check if this node was recently processed (prevents re-processing before DB commit is visible)
 	ew.mu.Lock()
@@ -465,65 +513,124 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// Chunk text if needed
 	chunks := chunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
 
-	// Check if this is a File node that needs FileChunk nodes (like Mimir does)
-	isFileNode := nodeHasLabel(node.Labels, "File")
-	needsChunkNodes := isFileNode && len(chunks) > 1
+	// Embed all chunks (all nodes are handled the same way - no special File handling)
+	embeddings, err := ew.embedder.EmbedBatch(ew.ctx, chunks)
+	if err != nil {
+		fmt.Printf("⚠️  Failed to embed node %s: %v\n", node.ID, err)
+		ew.mu.Lock()
+		ew.failed++
+		ew.mu.Unlock()
+		return true
+	}
 
-	if needsChunkNodes {
-		// =====================================================================
-		// CHUNKING:
-		// - Create separate FileChunk:Node for EACH chunk
-		// - Each chunk gets its OWN embedding (NO averaging!)
-		// - Create HAS_CHUNK relationships from File to each FileChunk
-		// - Search will scan ALL chunk embeddings
-		// =====================================================================
-		err := ew.createFileChunksWithEmbeddings(node, chunks)
-		if err != nil {
-			fmt.Printf("⚠️  Failed to create chunks for node %s: %v\n", node.ID, err)
-			ew.mu.Lock()
-			ew.failed++
-			ew.mu.Unlock()
-			return true
+	// Validate embeddings were generated
+	if len(embeddings) == 0 || embeddings[0] == nil || len(embeddings[0]) == 0 {
+		fmt.Printf("⚠️  Failed to generate embedding for node %s: empty embedding\n", node.ID)
+		ew.mu.Lock()
+		ew.failed++
+		ew.mu.Unlock()
+		return true // Failed but we tried - continue to next node
+	}
+
+	// Always store ALL embeddings in ChunkEmbeddings (even single chunk = array of 1)
+	// This simplifies logic - always iterate over ChunkEmbeddings, always count the same way
+	// Store as struct field, not in properties (so it's filtered out from user queries - opaque)
+	node.ChunkEmbeddings = embeddings
+	if len(embeddings) > 1 {
+		node.Properties["chunk_count"] = len(embeddings)
+	}
+
+	// Update node with embedding metadata
+	node.Properties["embedding_model"] = ew.embedder.Model()
+	node.Properties["embedding_dimensions"] = ew.embedder.Dimensions()
+	node.Properties["has_embedding"] = true
+	node.Properties["embedded_at"] = time.Now().Format(time.RFC3339)
+	node.Properties["embedding"] = true // Marker for IS NOT NULL check
+
+	// CRITICAL: Double-check node still exists before updating
+	// This prevents creating orphaned nodes if the node was deleted between
+	// the initial check and now. Reload from storage to get latest version.
+	// BUT: Preserve the embeddings we just generated!
+	chunkEmbeddingsToSave := node.ChunkEmbeddings // Save the chunk embeddings we just generated
+	embeddingProps := make(map[string]interface{})
+	if node.Properties != nil {
+		// Save embedding-related properties
+		if val, ok := node.Properties["embedding_model"]; ok {
+			embeddingProps["embedding_model"] = val
 		}
-
-		// Mark parent File node as having chunks
-		node.Properties["has_chunks"] = true
-		node.Properties["chunk_count"] = len(chunks)
-		node.Properties["has_embedding"] = true // Mimir sets this even when using chunks
-		node.Properties["embedding"] = true     // Marker for IS NOT NULL check
-		node.Properties["embedded_at"] = time.Now().Format(time.RFC3339)
-		// Parent File does NOT get an embedding - the chunks have them!
-	} else {
-		// Single chunk or non-File node: embed directly on the node
-		embeddings, err := ew.embedder.EmbedBatch(ew.ctx, chunks)
-		if err != nil {
-			fmt.Printf("⚠️  Failed to embed node %s: %v\n", node.ID, err)
-			ew.mu.Lock()
-			ew.failed++
-			ew.mu.Unlock()
-			return true
+		if val, ok := node.Properties["embedding_dimensions"]; ok {
+			embeddingProps["embedding_dimensions"] = val
 		}
+		if val, ok := node.Properties["has_embedding"]; ok {
+			embeddingProps["has_embedding"] = val
+		}
+		if val, ok := node.Properties["embedded_at"]; ok {
+			embeddingProps["embedded_at"] = val
+		}
+		if val, ok := node.Properties["embedding"]; ok {
+			embeddingProps["embedding"] = val
+		}
+		if val, ok := node.Properties["has_chunks"]; ok {
+			embeddingProps["has_chunks"] = val
+		}
+		if val, ok := node.Properties["chunk_count"]; ok {
+			embeddingProps["chunk_count"] = val
+		}
+	}
 
-		// For single chunk, use the embedding directly (no averaging needed)
-		embedding := embeddings[0]
+	// Preserve chunk embeddings from struct field (not properties - opaque to users)
+	// (chunkEmbeddingsToSave was already declared above)
+	chunkEmbeddingsToSave = node.ChunkEmbeddings
 
-		// Update node with embedding
-		node.Embedding = embedding
-		node.Properties["embedding_model"] = ew.embedder.Model()
-		node.Properties["embedding_dimensions"] = ew.embedder.Dimensions()
-		node.Properties["has_embedding"] = true
-		node.Properties["embedded_at"] = time.Now().Format(time.RFC3339)
-		node.Properties["embedding"] = true // Marker for IS NOT NULL check
+	existingNode, err = ew.storage.GetNode(node.ID)
+	if err != nil {
+		// Node was deleted - remove from pending index and skip
+		fmt.Printf("⚠️  Node %s was deleted before embedding could be saved - skipping\n", node.ID)
+		ew.markNodeEmbedded(node.ID)
+		return false // Skip this node, try next one
+	}
+
+	// CRITICAL: Preserve the embeddings we just generated!
+	// Don't overwrite node with existingNode - that would lose the embeddings
+	// Instead, update the existing node's embedding field while preserving other fields
+	node = existingNode                          // Get latest data from storage
+	node.ChunkEmbeddings = chunkEmbeddingsToSave // Restore chunk embeddings (struct field, opaque to users)
+	node.UpdatedAt = time.Now()                  // Update timestamp
+
+	// Restore embedding-related properties
+	if node.Properties == nil {
+		node.Properties = make(map[string]interface{})
+	}
+	for k, v := range embeddingProps {
+		node.Properties[k] = v
 	}
 
 	// Save the parent node (either with embedding for single chunk, or metadata for chunked files)
+	// CRITICAL: Use UpdateNodeEmbedding if available (only updates existing nodes, doesn't create)
+	// This prevents creating orphaned nodes when the pending index has stale entries
 	var updateErr error
 	if embedUpdater, ok := ew.storage.(interface{ UpdateNodeEmbedding(*storage.Node) error }); ok {
+		// UpdateNodeEmbedding only updates existing nodes - returns ErrNotFound if node doesn't exist
 		updateErr = embedUpdater.UpdateNodeEmbedding(node)
+		if updateErr == storage.ErrNotFound {
+			// Node was deleted - remove from pending index and skip
+			fmt.Printf("⚠️  Node %s was deleted - skipping update to prevent orphaned node\n", node.ID)
+			ew.markNodeEmbedded(node.ID)
+			return false
+		}
 	} else {
+		// Fallback: UpdateNode has upsert behavior which can create orphaned nodes
+		// This should only happen if the storage engine doesn't support UpdateNodeEmbedding
+		// For safety, we've already verified the node exists above
 		updateErr = ew.storage.UpdateNode(node)
 	}
 	if updateErr != nil {
+		// If update failed because node doesn't exist, skip it
+		if updateErr == storage.ErrNotFound {
+			fmt.Printf("⚠️  Node %s doesn't exist - skipping update to prevent orphaned node\n", node.ID)
+			ew.markNodeEmbedded(node.ID)
+			return false
+		}
 		fmt.Printf("⚠️  Failed to update node %s: %v\n", node.ID, updateErr)
 		ew.mu.Lock()
 		ew.failed++
@@ -546,10 +653,16 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	ew.mu.Unlock()
 
 	// Log success with appropriate message
-	if needsChunkNodes {
-		fmt.Printf("✅ Embedded %s with %d FileChunks\n", node.ID, len(chunks))
-	} else {
-		fmt.Printf("✅ Embedded %s (%d dims)\n", node.ID, len(node.Embedding))
+	if len(node.ChunkEmbeddings) > 0 {
+		dims := 0
+		if len(node.ChunkEmbeddings[0]) > 0 {
+			dims = len(node.ChunkEmbeddings[0])
+		}
+		if len(node.ChunkEmbeddings) > 1 {
+			fmt.Printf("✅ Embedded %s (%d dims, %d chunks)\n", node.ID, dims, len(node.ChunkEmbeddings))
+		} else {
+			fmt.Printf("✅ Embedded %s (%d dims)\n", node.ID, dims)
+		}
 	}
 
 	// Small delay before next
@@ -587,10 +700,12 @@ func (ew *EmbedWorker) findNodeWithoutEmbedding() *storage.Node {
 
 // refreshEmbeddingIndex refreshes the pending embeddings index
 // to catch any nodes that were added during processing.
-func (ew *EmbedWorker) refreshEmbeddingIndex() {
+// Returns the number of stale entries removed.
+func (ew *EmbedWorker) refreshEmbeddingIndex() int {
 	if mgr, ok := ew.storage.(EmbeddingIndexManager); ok {
-		mgr.RefreshPendingEmbeddingsIndex()
+		return mgr.RefreshPendingEmbeddingsIndex()
 	}
+	return 0
 }
 
 // markNodeEmbedded removes a node from the pending embeddings index.
@@ -822,10 +937,13 @@ func copyNodeForEmbedding(src *storage.Node) *storage.Node {
 	// Copy labels
 	copy(dst.Labels, src.Labels)
 
-	// Copy embedding if present
-	if len(src.Embedding) > 0 {
-		dst.Embedding = make([]float32, len(src.Embedding))
-		copy(dst.Embedding, src.Embedding)
+	// Copy chunk embeddings if present (always stored in ChunkEmbeddings, even single chunk = array of 1)
+	if len(src.ChunkEmbeddings) > 0 {
+		dst.ChunkEmbeddings = make([][]float32, len(src.ChunkEmbeddings))
+		for i, emb := range src.ChunkEmbeddings {
+			dst.ChunkEmbeddings[i] = make([]float32, len(emb))
+			copy(dst.ChunkEmbeddings[i], emb)
+		}
 	}
 
 	// Deep copy Properties map - this is the critical part to avoid race condition
@@ -850,133 +968,6 @@ func DefaultEmbedQueueConfig() *EmbedQueueConfig {
 
 func NewEmbedQueue(embedder embed.Embedder, storage storage.Engine, config *EmbedQueueConfig) *EmbedQueue {
 	return NewEmbedWorker(embedder, storage, config)
-}
-
-// nodeHasLabel checks if a node has a specific label
-func nodeHasLabel(labels []string, target string) bool {
-	for _, l := range labels {
-		if l == target {
-			return true
-		}
-	}
-	return false
-}
-
-// createFileChunksWithEmbeddings creates FileChunk:Node nodes for each chunk
-// with their own embeddings
-//
-// CRITICAL: Mimir stores embeddings as a PROPERTY called "embedding", not using
-// a native embedding field. The stats query uses `c.embedding IS NOT NULL`.
-//
-// Mimir's exact Cypher from FileIndexer.ts:
-//
-//	MATCH (f:File) WHERE id(f) = $fileNodeId
-//	MERGE (c:FileChunk:Node {id: $chunkId})
-//	SET
-//	    c.chunk_index = $chunkIndex,
-//	    c.text = $text,
-//	    c.start_offset = $startOffset,
-//	    c.end_offset = $endOffset,
-//	    c.embedding = $embedding,           <-- PROPERTY, not native field!
-//	    c.embedding_dimensions = $dimensions,
-//	    c.embedding_model = $model,
-//	    c.type = 'file_chunk',
-//	    c.indexed_date = datetime(),
-//	    c.filePath = f.path,
-//	    c.fileName = f.name,
-//	    c.parent_file_id = $parentFileId,
-//	    c.total_chunks = $totalChunks,
-//	    c.has_next = $hasNext,
-//	    c.has_prev = $hasPrev
-//	MERGE (f)-[:HAS_CHUNK {index: $chunkIndex}]->(c)
-func (ew *EmbedWorker) createFileChunksWithEmbeddings(parentFile *storage.Node, chunks []string) error {
-	// Get file metadata
-	filePath, _ := parentFile.Properties["path"].(string)
-	fileName, _ := parentFile.Properties["name"].(string)
-	parentFileID := string(parentFile.ID)
-
-	totalChunks := len(chunks)
-	fmt.Printf("📄 Creating %d FileChunk nodes for %s\n", totalChunks, filePath)
-
-	// Embed all chunks at once for efficiency
-	embeddings, err := ew.embedder.EmbedBatch(ew.ctx, chunks)
-	if err != nil {
-		return fmt.Errorf("failed to embed chunks: %w", err)
-	}
-
-	// Create a FileChunk node for each chunk
-	for i, chunkText := range chunks {
-		// Generate chunk ID like Mimir does (based on parent + index)
-		chunkID := storage.NodeID(fmt.Sprintf("%s-chunk-%d", parentFileID, i))
-
-		// Calculate offsets (Mimir tracks these for text highlighting)
-		startOffset := i * ew.config.ChunkSize
-		endOffset := startOffset + len(chunkText)
-
-		// Convert embedding to []interface{} for storage as property (like Mimir does)
-		embeddingAsInterface := make([]interface{}, len(embeddings[i]))
-		for j, v := range embeddings[i] {
-			embeddingAsInterface[j] = float64(v) // Store as float64 like Neo4j does
-		}
-
-		// Create FileChunk node with EXACT same properties as Mimir's FileIndexer.ts
-		chunkNode := &storage.Node{
-			ID:     chunkID,
-			Labels: []string{"FileChunk", "Node"}, // Exact same labels as Mimir
-			Properties: map[string]any{
-				// EXACT properties from Mimir's FileIndexer.ts SET clause:
-				"id":                   string(chunkID),
-				"chunk_index":          i,
-				"text":                 chunkText, // Mimir uses "text" NOT "content"
-				"start_offset":         startOffset,
-				"end_offset":           endOffset,
-				"embedding":            embeddingAsInterface, // PROPERTY like Mimir!
-				"embedding_dimensions": ew.embedder.Dimensions(),
-				"embedding_model":      ew.embedder.Model(),
-				"type":                 "file_chunk",
-				"indexed_date":         time.Now().Format(time.RFC3339),
-				"filePath":             filePath, // Mimir sets c.filePath = f.path
-				"fileName":             fileName, // Mimir sets c.fileName = f.name
-				"parent_file_id":       parentFileID,
-				"total_chunks":         totalChunks,
-				"has_next":             i < totalChunks-1,
-				"has_prev":             i > 0,
-			},
-			// Also store in native field for NornicDB's vector search
-			Embedding: embeddings[i],
-		}
-
-		// Create the chunk node (MERGE behavior - create or update)
-		if _, err := ew.storage.CreateNode(chunkNode); err != nil {
-			// If already exists, update it (like MERGE does)
-			if err := ew.storage.UpdateNode(chunkNode); err != nil {
-				return fmt.Errorf("failed to create/update chunk %d: %w", i, err)
-			}
-		}
-
-		// Create HAS_CHUNK relationship with index property
-		// Mimir: MERGE (f)-[:HAS_CHUNK {index: $chunkIndex}]->(c)
-		edge := &storage.Edge{
-			ID:        storage.EdgeID(fmt.Sprintf("%s-HAS_CHUNK-%d", parentFileID, i)),
-			Type:      "HAS_CHUNK",
-			StartNode: parentFile.ID,
-			EndNode:   chunkID,
-			Properties: map[string]any{
-				"index": i, // Mimir sets this property on the relationship
-			},
-		}
-		if err := ew.storage.CreateEdge(edge); err != nil {
-			// Edge might already exist from previous indexing, that's OK
-			fmt.Printf("   Note: HAS_CHUNK edge for chunk %d may already exist\n", i)
-		}
-
-		// Log progress every 10 chunks to reduce spam
-		if (i+1)%10 == 0 || i+1 == totalChunks {
-			fmt.Printf("   ✓ Created %d/%d FileChunks\n", i+1, totalChunks)
-		}
-	}
-
-	return nil
 }
 
 // Enqueue is now just a trigger - tells worker to check for work.

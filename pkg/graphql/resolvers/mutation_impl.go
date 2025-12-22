@@ -103,7 +103,7 @@ func (r *mutationResolver) mutationMergeNode(ctx context.Context, labels []strin
 	}
 
 	query := fmt.Sprintf("MATCH (n:%s) WHERE %s RETURN n LIMIT 1", label, whereClause)
-	result, err := r.executeCypher(ctx, query, params)
+	result, err := r.executeCypher(ctx, query, params, "")
 	if err == nil && len(result.Rows) > 0 {
 		// Update existing node - Rows is [][]interface{}
 		row := result.Rows[0]
@@ -261,7 +261,12 @@ func (r *mutationResolver) mutationExecuteCypher(ctx context.Context, input mode
 		params[k] = v
 	}
 
-	result, err := r.executeCypher(ctx, input.Statement, params)
+	database := ""
+	if input.Database != nil {
+		database = *input.Database
+	}
+
+	result, err := r.executeCypher(ctx, input.Statement, params, database)
 	if err != nil {
 		return nil, fmt.Errorf("cypher execution failed: %w", err)
 	}
@@ -339,7 +344,7 @@ func (r *mutationResolver) mutationClearAll(ctx context.Context, confirmPhrase s
 	}
 
 	// Clear all nodes and edges using Cypher
-	_, err := r.executeCypher(ctx, "MATCH (n) DETACH DELETE n", nil)
+	_, err := r.executeCypher(ctx, "MATCH (n) DETACH DELETE n", nil, "")
 	if err != nil {
 		return false, fmt.Errorf("failed to clear database: %w", err)
 	}

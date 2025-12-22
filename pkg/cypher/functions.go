@@ -4061,7 +4061,7 @@ skipArrayIndexing:
 				if val, ok := node.Properties["has_embedding"]; ok {
 					return val
 				}
-				return len(node.Embedding) > 0
+				return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
 			}
 			// Don't return internal properties like embeddings (except has_embedding handled above)
 			if e.isInternalProperty(propName) {

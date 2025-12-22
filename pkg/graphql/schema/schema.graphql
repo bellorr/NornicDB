@@ -801,6 +801,12 @@ input CypherInput {
   Timeout in milliseconds
   """
   timeoutMs: Int
+
+  """
+  Database name to execute the query against.
+  If not specified, uses the default database.
+  """
+  database: String
 }
 
 # =============================================================================

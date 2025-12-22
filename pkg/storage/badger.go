@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -29,7 +30,12 @@ const (
 	prefixIncomingIndex = byte(0x05) // incoming:nodeID:edgeID -> []byte{}
 	prefixEdgeTypeIndex = byte(0x06) // edgetype:type:edgeID -> []byte{} (for fast type lookups)
 	prefixPendingEmbed  = byte(0x07) // pending_embed:nodeID -> []byte{} (nodes needing embedding)
+	prefixEmbedding     = byte(0x08) // embedding:nodeID:chunkIndex -> []float32 (separate storage for large embeddings)
 )
+
+// maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
+// Nodes exceeding this will have embeddings stored separately
+const maxNodeSize = 50 * 1024 // 50KB
 
 // BadgerEngine provides persistent storage using BadgerDB.
 //
@@ -604,6 +610,28 @@ func pendingEmbedKey(nodeID NodeID) []byte {
 	return append([]byte{prefixPendingEmbed}, []byte(nodeID)...)
 }
 
+// embeddingKey creates a key for storing a chunk embedding separately.
+// Format: prefix + nodeID + 0x00 + chunkIndex (as bytes)
+func embeddingKey(nodeID NodeID, chunkIndex int) []byte {
+	key := make([]byte, 0, 1+len(nodeID)+1+4)
+	key = append(key, prefixEmbedding)
+	key = append(key, []byte(nodeID)...)
+	key = append(key, 0x00) // Separator
+	// Encode chunk index as 4 bytes (big-endian)
+	key = append(key, byte(chunkIndex>>24), byte(chunkIndex>>16), byte(chunkIndex>>8), byte(chunkIndex))
+	return key
+}
+
+// embeddingPrefix returns the prefix for scanning all embeddings for a node.
+// Format: prefix + nodeID + 0x00
+func embeddingPrefix(nodeID NodeID) []byte {
+	key := make([]byte, 0, 1+len(nodeID)+1)
+	key = append(key, prefixEmbedding)
+	key = append(key, []byte(nodeID)...)
+	key = append(key, 0x00)
+	return key
+}
+
 // extractEdgeIDFromIndexKey extracts the edgeID from an index key.
 // Format: prefix + nodeID + 0x00 + edgeID
 func extractEdgeIDFromIndexKey(key []byte) EdgeID {
@@ -632,21 +660,126 @@ func extractNodeIDFromLabelIndex(key []byte, labelLen int) NodeID {
 // ============================================================================
 
 // encodeNode serializes a Node using gob (preserves Go types like int64).
-func encodeNode(n *Node) ([]byte, error) {
+// If the node exceeds maxNodeSize, embeddings are stored separately and a flag is set.
+// Returns: (nodeData, embeddingsStoredSeparately, error)
+func encodeNode(n *Node) ([]byte, bool, error) {
+	// First, try encoding with embeddings
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(n); err != nil {
+		return nil, false, err
+	}
+
+	data := buf.Bytes()
+
+	// If size is acceptable, return as-is
+	if len(data) <= maxNodeSize {
+		return data, false, nil
+	}
+
+	// Node is too large - store embeddings separately
+	// Create a copy without embeddings for encoding
+	nodeCopy := *n
+	embeddingsToStore := nodeCopy.ChunkEmbeddings
+	nodeCopy.ChunkEmbeddings = nil // Remove embeddings for encoding
+
+	// Re-encode without embeddings
+	buf.Reset()
+	if err := gob.NewEncoder(&buf).Encode(&nodeCopy); err != nil {
+		return nil, false, err
+	}
+
+	// Set flag in properties to indicate embeddings are stored separately
+	if nodeCopy.Properties == nil {
+		nodeCopy.Properties = make(map[string]any)
+	}
+	nodeCopy.Properties["_embeddings_stored_separately"] = true
+	nodeCopy.Properties["_embedding_chunk_count"] = len(embeddingsToStore)
+
+	// Final encode with flag
+	buf.Reset()
+	if err := gob.NewEncoder(&buf).Encode(&nodeCopy); err != nil {
+		return nil, false, err
+	}
+
+	return buf.Bytes(), true, nil
+}
+
+// encodeEmbedding serializes a single embedding chunk.
+func encodeEmbedding(emb []float32) ([]byte, error) {
+	var buf bytes.Buffer
+	if err := gob.NewEncoder(&buf).Encode(emb); err != nil {
 		return nil, err
 	}
 	return buf.Bytes(), nil
 }
 
-// decodeNode deserializes a Node from gob.
+// decodeEmbedding deserializes a single embedding chunk.
+func decodeEmbedding(data []byte) ([]float32, error) {
+	var emb []float32
+	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&emb); err != nil {
+		return nil, err
+	}
+	return emb, nil
+}
+
+// decodeNode deserializes a Node from gob and loads embeddings separately if needed.
 func decodeNode(data []byte) (*Node, error) {
 	var node Node
 	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&node); err != nil {
 		return nil, err
 	}
 	return &node, nil
+}
+
+// decodeNodeWithEmbeddings deserializes a Node and loads separately stored embeddings from transaction.
+// Works in both View and Update transactions (only reads embeddings).
+func decodeNodeWithEmbeddings(txn *badger.Txn, data []byte, nodeID NodeID) (*Node, error) {
+	node, err := decodeNode(data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Check if embeddings are stored separately
+	if storedSeparately, ok := node.Properties["_embeddings_stored_separately"].(bool); ok && storedSeparately {
+		chunkCount, _ := node.Properties["_embedding_chunk_count"].(int)
+		if chunkCount > 0 {
+			node.ChunkEmbeddings = make([][]float32, 0, chunkCount)
+
+			// Load each chunk embedding
+			for i := 0; i < chunkCount; i++ {
+				embKey := embeddingKey(nodeID, i)
+				item, err := txn.Get(embKey)
+				if err != nil {
+					if err == badger.ErrKeyNotFound {
+						// Missing chunk - continue with what we have
+						continue
+					}
+					return nil, fmt.Errorf("failed to get embedding chunk %d: %w", i, err)
+				}
+
+				var embData []byte
+				if err := item.Value(func(val []byte) error {
+					embData = append([]byte(nil), val...)
+					return nil
+				}); err != nil {
+					return nil, fmt.Errorf("failed to read embedding chunk %d: %w", i, err)
+				}
+
+				emb, err := decodeEmbedding(embData)
+				if err != nil {
+					return nil, fmt.Errorf("failed to decode embedding chunk %d: %w", i, err)
+				}
+
+				node.ChunkEmbeddings = append(node.ChunkEmbeddings, emb)
+			}
+
+			// Remove internal flags from properties
+			delete(node.Properties, "_embeddings_stored_separately")
+			delete(node.Properties, "_embedding_chunk_count")
+		}
+	}
+
+	return node, nil
 }
 
 // encodeEdge serializes an Edge using gob (preserves Go types).
@@ -707,8 +840,8 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 			return err
 		}
 
-		// Serialize node
-		data, err := encodeNode(node)
+		// Serialize node (may store embeddings separately if too large)
+		data, embeddingsSeparate, err := encodeNode(node)
 		if err != nil {
 			return fmt.Errorf("failed to encode node: %w", err)
 		}
@@ -716,6 +849,20 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 		// Store node
 		if err := txn.Set(key, data); err != nil {
 			return err
+		}
+
+		// If embeddings are stored separately, store them now
+		if embeddingsSeparate {
+			for i, emb := range node.ChunkEmbeddings {
+				embKey := embeddingKey(node.ID, i)
+				embData, err := encodeEmbedding(emb)
+				if err != nil {
+					return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+				}
+				if err := txn.Set(embKey, embData); err != nil {
+					return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+				}
+			}
 		}
 
 		// Create label indexes
@@ -727,7 +874,7 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 		}
 
 		// Add to pending embeddings index if it needs embedding (atomic with node creation)
-		if len(node.Embedding) == 0 && NodeNeedsEmbedding(node) {
+		if (len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) && NodeNeedsEmbedding(node) {
 			if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 				return err
 			}
@@ -799,7 +946,7 @@ func (b *BadgerEngine) GetNode(id NodeID) (*Node, error) {
 
 		return item.Value(func(val []byte) error {
 			var decodeErr error
-			node, decodeErr = decodeNode(val)
+			node, decodeErr = decodeNodeWithEmbeddings(txn, val, id)
 			return decodeErr
 		})
 	})
@@ -845,12 +992,26 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		if err == badger.ErrKeyNotFound {
 			// Node doesn't exist - do an insert (upsert behavior)
 			wasInsert = true
-			data, err := encodeNode(node)
+			data, embeddingsSeparate, err := encodeNode(node)
 			if err != nil {
 				return fmt.Errorf("failed to encode node: %w", err)
 			}
 			if err := txn.Set(key, data); err != nil {
 				return err
+			}
+
+			// If embeddings are stored separately, store them now
+			if embeddingsSeparate {
+				for i, emb := range node.ChunkEmbeddings {
+					embKey := embeddingKey(node.ID, i)
+					embData, err := encodeEmbedding(emb)
+					if err != nil {
+						return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+					}
+					if err := txn.Set(embKey, embData); err != nil {
+						return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+					}
+				}
 			}
 			// Create label indexes
 			for _, label := range node.Labels {
@@ -859,7 +1020,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 				}
 			}
 			// Add to pending embeddings index if needed (same as CreateNode)
-			if len(node.Embedding) == 0 && NodeNeedsEmbedding(node) {
+			if (len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) && NodeNeedsEmbedding(node) {
 				if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 					return err
 				}
@@ -874,7 +1035,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		var existing *Node
 		if err := item.Value(func(val []byte) error {
 			var decodeErr error
-			existing, decodeErr = decodeNode(val)
+			existing, decodeErr = decodeNodeWithEmbeddings(txn, val, node.ID)
 			return decodeErr
 		}); err != nil {
 			return err
@@ -887,14 +1048,53 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			}
 		}
 
-		// Serialize and store updated node
-		data, err := encodeNode(node)
+		// Serialize and store updated node (may store embeddings separately if too large)
+		data, embeddingsSeparate, err := encodeNode(node)
 		if err != nil {
 			return fmt.Errorf("failed to encode node: %w", err)
 		}
 
 		if err := txn.Set(key, data); err != nil {
 			return err
+		}
+
+		// If embeddings are stored separately, update them
+		if embeddingsSeparate {
+			// Delete old embedding chunks (if any)
+			embPrefix := embeddingPrefix(node.ID)
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = embPrefix
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Rewind(); it.Valid(); it.Next() {
+				if err := txn.Delete(it.Item().Key()); err != nil {
+					return fmt.Errorf("failed to delete old embedding chunk: %w", err)
+				}
+			}
+
+			// Store new embedding chunks
+			for i, emb := range node.ChunkEmbeddings {
+				embKey := embeddingKey(node.ID, i)
+				embData, err := encodeEmbedding(emb)
+				if err != nil {
+					return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+				}
+				if err := txn.Set(embKey, embData); err != nil {
+					return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+				}
+			}
+		} else {
+			// Node fits inline - clean up any old separately stored embeddings
+			embPrefix := embeddingPrefix(node.ID)
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = embPrefix
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Rewind(); it.Valid(); it.Next() {
+				if err := txn.Delete(it.Item().Key()); err != nil {
+					return fmt.Errorf("failed to delete old embedding chunk: %w", err)
+				}
+			}
 		}
 
 		// Create new label indexes
@@ -905,7 +1105,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		}
 
 		// Manage pending embeddings index atomically
-		if len(node.Embedding) > 0 {
+		if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 			// Node has embedding - remove from pending index
 			txn.Delete(pendingEmbedKey(node.ID))
 		} else if NodeNeedsEmbedding(node) {
@@ -931,6 +1131,163 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			// Notify listeners to re-index the updated node
 			b.notifyNodeUpdated(node)
 		}
+	}
+
+	return err
+}
+
+// UpdateNodeEmbedding updates only the embedding field of an existing node.
+// Returns ErrNotFound if the node doesn't exist (does NOT create the node).
+// This is used by the embedding queue to prevent creating orphaned nodes.
+func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
+	if node == nil {
+		return ErrInvalidData
+	}
+	if node.ID == "" {
+		return ErrInvalidID
+	}
+
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	err := b.db.Update(func(txn *badger.Txn) error {
+		key := nodeKey(node.ID)
+
+		// Get existing node - MUST exist (no upsert)
+		item, err := txn.Get(key)
+		if err == badger.ErrKeyNotFound {
+			return ErrNotFound // Node doesn't exist - don't create it
+		}
+		if err != nil {
+			return err
+		}
+
+		// Decode existing node
+		var existing *Node
+		if err := item.Value(func(val []byte) error {
+			var decodeErr error
+			existing, decodeErr = decodeNodeWithEmbeddings(txn, val, node.ID)
+			return decodeErr
+		}); err != nil {
+			return err
+		}
+
+		// Update only the embedding and related properties (always stored in ChunkEmbeddings)
+		existing.ChunkEmbeddings = node.ChunkEmbeddings
+		if node.Properties != nil {
+			// Update embedding-related properties
+			if val, ok := node.Properties["embedding_model"]; ok {
+				if existing.Properties == nil {
+					existing.Properties = make(map[string]interface{})
+				}
+				existing.Properties["embedding_model"] = val
+			}
+			if val, ok := node.Properties["embedding_dimensions"]; ok {
+				if existing.Properties == nil {
+					existing.Properties = make(map[string]interface{})
+				}
+				existing.Properties["embedding_dimensions"] = val
+			}
+			if val, ok := node.Properties["has_embedding"]; ok {
+				if existing.Properties == nil {
+					existing.Properties = make(map[string]interface{})
+				}
+				existing.Properties["has_embedding"] = val
+			}
+			if val, ok := node.Properties["embedded_at"]; ok {
+				if existing.Properties == nil {
+					existing.Properties = make(map[string]interface{})
+				}
+				existing.Properties["embedded_at"] = val
+			}
+			if val, ok := node.Properties["embedding"]; ok {
+				if existing.Properties == nil {
+					existing.Properties = make(map[string]interface{})
+				}
+				existing.Properties["embedding"] = val
+			}
+			// Also copy other properties that might be set during embedding
+			for k, v := range node.Properties {
+				if k == "has_chunks" || k == "chunk_count" {
+					if existing.Properties == nil {
+						existing.Properties = make(map[string]interface{})
+					}
+					existing.Properties[k] = v
+				}
+			}
+			// Copy chunk embeddings from struct field (not properties - opaque to users)
+			existing.ChunkEmbeddings = node.ChunkEmbeddings
+		}
+		existing.UpdatedAt = time.Now() // Use time from encoding if available, otherwise current time
+
+		// Serialize and store updated node (may store embeddings separately if too large)
+		data, embeddingsSeparate, err := encodeNode(existing)
+		if err != nil {
+			return fmt.Errorf("failed to encode node: %w", err)
+		}
+
+		if err := txn.Set(key, data); err != nil {
+			return err
+		}
+
+		// If embeddings are stored separately, update them
+		if embeddingsSeparate {
+			// Delete old embedding chunks (if any)
+			embPrefix := embeddingPrefix(node.ID)
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = embPrefix
+			embIt := txn.NewIterator(opts)
+			defer embIt.Close()
+			for embIt.Rewind(); embIt.Valid(); embIt.Next() {
+				if err := txn.Delete(embIt.Item().Key()); err != nil {
+					return fmt.Errorf("failed to delete old embedding chunk: %w", err)
+				}
+			}
+
+			// Store new embedding chunks
+			for i, emb := range existing.ChunkEmbeddings {
+				embKey := embeddingKey(node.ID, i)
+				embData, err := encodeEmbedding(emb)
+				if err != nil {
+					return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+				}
+				if err := txn.Set(embKey, embData); err != nil {
+					return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+				}
+			}
+		} else {
+			// Node fits inline - clean up any old separately stored embeddings
+			embPrefix := embeddingPrefix(node.ID)
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = embPrefix
+			embIt := txn.NewIterator(opts)
+			defer embIt.Close()
+			for embIt.Rewind(); embIt.Valid(); embIt.Next() {
+				if err := txn.Delete(embIt.Item().Key()); err != nil {
+					return fmt.Errorf("failed to delete old embedding chunk: %w", err)
+				}
+			}
+		}
+
+		// Remove from pending embeddings index if node now has embeddings
+		if len(existing.ChunkEmbeddings) > 0 && len(existing.ChunkEmbeddings[0]) > 0 {
+			txn.Delete(pendingEmbedKey(node.ID))
+		}
+
+		return nil
+	})
+
+	// Update cache on successful operation
+	if err == nil {
+		b.nodeCacheMu.Lock()
+		b.nodeCache[node.ID] = node
+		b.nodeCacheMu.Unlock()
+		// Notify listeners to re-index the updated node
+		b.notifyNodeUpdated(node)
 	}
 
 	return err
@@ -968,10 +1325,22 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 		var node *Node
 		if err := item.Value(func(val []byte) error {
 			var decodeErr error
-			node, decodeErr = decodeNode(val)
+			node, decodeErr = decodeNodeWithEmbeddings(txn, val, id)
 			return decodeErr
 		}); err != nil {
 			return err
+		}
+
+		// Delete separately stored embeddings (if any)
+		embPrefix := embeddingPrefix(id)
+		opts := badger.DefaultIteratorOptions
+		opts.Prefix = embPrefix
+		it := txn.NewIterator(opts)
+		defer it.Close()
+		for it.Rewind(); it.Valid(); it.Next() {
+			if err := txn.Delete(it.Item().Key()); err != nil {
+				return fmt.Errorf("failed to delete embedding chunk: %w", err)
+			}
 		}
 
 		// Delete label indexes
@@ -1365,7 +1734,9 @@ func (b *BadgerEngine) deleteNodeInTxn(txn *badger.Txn, id NodeID) (edgesDeleted
 	var node *Node
 	if err := item.Value(func(val []byte) error {
 		var decodeErr error
-		node, decodeErr = decodeNode(val)
+		// Extract nodeID from key (skip prefix byte)
+		nodeID := NodeID(key[1:])
+		node, decodeErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 		return decodeErr
 	}); err != nil {
 		return 0, nil, err
@@ -1558,7 +1929,7 @@ func (b *BadgerEngine) GetFirstNodeByLabel(label string) (*Node, error) {
 
 			if err := item.Value(func(val []byte) error {
 				var decodeErr error
-				node, decodeErr = decodeNode(val)
+				node, decodeErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decodeErr
 			}); err != nil {
 				continue
@@ -1606,7 +1977,7 @@ func (b *BadgerEngine) GetNodesByLabel(label string) ([]*Node, error) {
 			var node *Node
 			if err := item.Value(func(val []byte) error {
 				var decodeErr error
-				node, decodeErr = decodeNode(val)
+				node, decodeErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decodeErr
 			}); err != nil {
 				continue
@@ -1646,10 +2017,17 @@ func (b *BadgerEngine) AllNodes() ([]*Node, error) {
 		defer it.Close()
 
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			// Extract nodeID from key (skip prefix byte)
+			key := it.Item().Key()
+			if len(key) <= 1 {
+				continue
+			}
+			nodeID := NodeID(key[1:])
+
 			var node *Node
 			if err := it.Item().Value(func(val []byte) error {
 				var decodeErr error
-				node, decodeErr = decodeNode(val)
+				node, decodeErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decodeErr
 			}); err != nil {
 				continue
@@ -1831,7 +2209,7 @@ func (b *BadgerEngine) BatchGetNodes(ids []NodeID) (map[NodeID]*Node, error) {
 			var node *Node
 			if err := item.Value(func(val []byte) error {
 				var decodeErr error
-				node, decodeErr = decodeNode(val)
+				node, decodeErr = decodeNodeWithEmbeddings(txn, val, id)
 				return decodeErr
 			}); err != nil {
 				continue
@@ -2051,13 +2429,27 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 
 		// Insert all nodes
 		for _, node := range nodes {
-			data, err := encodeNode(node)
+			data, embeddingsSeparate, err := encodeNode(node)
 			if err != nil {
 				return fmt.Errorf("failed to encode node: %w", err)
 			}
 
 			if err := txn.Set(nodeKey(node.ID), data); err != nil {
 				return err
+			}
+
+			// If embeddings are stored separately, store them now
+			if embeddingsSeparate {
+				for i, emb := range node.ChunkEmbeddings {
+					embKey := embeddingKey(node.ID, i)
+					embData, err := encodeEmbedding(emb)
+					if err != nil {
+						return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+					}
+					if err := txn.Set(embKey, embData); err != nil {
+						return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+					}
+				}
 			}
 
 			for _, label := range node.Labels {
@@ -2413,6 +2805,10 @@ func (b *BadgerEngine) Size() (lsm, vlog int64) {
 // - No in-memory index needed
 // - Persistent across restarts
 // - Atomic with node operations
+//
+// CRITICAL: This method aggressively cleans up stale entries to prevent
+// processing non-existent nodes. It will skip up to 100 stale entries
+// before giving up to prevent infinite loops.
 func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 	b.mu.RLock()
 	if b.closed {
@@ -2421,49 +2817,82 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 	}
 	b.mu.RUnlock()
 
-	var nodeID NodeID
+	maxAttempts := 100 // Prevent infinite loops from stale entries
+	attempts := 0
 
-	// Find first node in pending embeddings index - O(1)
-	b.db.View(func(txn *badger.Txn) error {
-		opts := badger.DefaultIteratorOptions
-		opts.PrefetchValues = false // Keys only
-		opts.PrefetchSize = 1
-		it := txn.NewIterator(opts)
-		defer it.Close()
+	for attempts < maxAttempts {
+		attempts++
+		var nodeID NodeID
 
-		prefix := []byte{prefixPendingEmbed}
-		it.Seek(prefix)
-		if it.ValidForPrefix(prefix) {
-			// Extract nodeID from key (skip prefix byte)
-			key := it.Item().Key()
-			if len(key) > 1 {
-				nodeID = NodeID(key[1:])
+		// Find first node in pending embeddings index - O(1)
+		b.db.View(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.PrefetchValues = false // Keys only
+			opts.PrefetchSize = 1
+			it := txn.NewIterator(opts)
+			defer it.Close()
+
+			prefix := []byte{prefixPendingEmbed}
+			it.Seek(prefix)
+			if it.ValidForPrefix(prefix) {
+				// Extract nodeID from key (skip prefix byte)
+				key := it.Item().Key()
+				if len(key) > 1 {
+					nodeID = NodeID(key[1:])
+				}
 			}
+			return nil
+		})
+
+		if nodeID == "" {
+			return nil // No nodes need embedding
 		}
-		return nil
-	})
 
-	if nodeID == "" {
-		return nil // No nodes need embedding
+		// Load the full node - CRITICAL: verify it actually exists
+		node, err := b.GetNode(nodeID)
+		if err != nil || node == nil {
+			// Node was deleted - remove from pending index immediately
+			// This is a stale entry that needs cleanup
+			fmt.Printf("🧹 Removing stale entry from pending embeddings index: %s (node doesn't exist)\n", nodeID)
+			b.MarkNodeEmbedded(nodeID)
+			// If nodeID looks like it might have a namespace prefix, also try removing unprefixed version
+			if strings.Contains(string(nodeID), ":") {
+				// Extract unprefixed ID (everything after last colon)
+				parts := strings.Split(string(nodeID), ":")
+				if len(parts) > 1 {
+					unprefixedID := NodeID(parts[len(parts)-1])
+					b.MarkNodeEmbedded(unprefixedID)
+				}
+			}
+			// Continue to next iteration to try next node
+			continue
+		}
+
+		// Double-check it still needs embedding (may have been updated externally)
+		if (len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0) || !NodeNeedsEmbedding(node) {
+			// Node already has embedding - remove from pending index
+			b.MarkNodeEmbedded(nodeID)
+			// If nodeID looks like it might have a namespace prefix, also try removing unprefixed version
+			if strings.Contains(string(nodeID), ":") {
+				parts := strings.Split(string(nodeID), ":")
+				if len(parts) > 1 {
+					unprefixedID := NodeID(parts[len(parts)-1])
+					b.MarkNodeEmbedded(unprefixedID)
+				}
+			}
+			// Continue to next iteration to try next node
+			continue
+		}
+
+		// Found a valid node that needs embedding
+		return node
 	}
 
-	// Load the full node
-	node, err := b.GetNode(nodeID)
-	if err != nil || node == nil {
-		// Node was deleted - remove from pending index
-		b.MarkNodeEmbedded(nodeID)
-		// Try again with next node
-		return b.FindNodeNeedingEmbedding()
+	// If we've tried too many times, log a warning and return nil
+	if attempts >= maxAttempts {
+		fmt.Printf("⚠️  FindNodeNeedingEmbedding: Skipped %d stale entries, giving up to prevent infinite loop\n", attempts)
 	}
-
-	// Double-check it still needs embedding (may have been updated externally)
-	if len(node.Embedding) > 0 || !NodeNeedsEmbedding(node) {
-		b.MarkNodeEmbedded(nodeID)
-		// Try again with next node
-		return b.FindNodeNeedingEmbedding()
-	}
-
-	return node
+	return nil
 }
 
 // MarkNodeEmbedded removes a node from the pending embeddings index.
@@ -2509,10 +2938,90 @@ func (b *BadgerEngine) InvalidatePendingEmbeddingsIndex() {
 
 // RefreshPendingEmbeddingsIndex rebuilds the pending embeddings index.
 // This scans all nodes and adds any missing ones to the index.
+// It also removes stale entries for nodes that no longer exist or already have embeddings.
 // Use this on startup or after bulk imports.
 func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 	added := 0
+	removed := 0
 
+	// First pass: Clean up stale entries in the pending index
+	// Remove entries for nodes that don't exist or already have embeddings
+	b.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false // Only need keys for cleanup
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		pendingPrefix := []byte{prefixPendingEmbed}
+		for it.Seek(pendingPrefix); it.ValidForPrefix(pendingPrefix); it.Next() {
+			key := it.Item().Key()
+			// Extract nodeID from key (skip prefix byte)
+			if len(key) <= 1 {
+				continue
+			}
+			nodeID := NodeID(key[1:])
+
+			// Check if node exists and still needs embedding
+			// Try both prefixed and unprefixed versions for namespace compatibility
+			keyToCheck := nodeKey(nodeID)
+			item, err := txn.Get(keyToCheck)
+
+			// If node not found and ID contains ":" (namespace prefix), try unprefixed version
+			if err == badger.ErrKeyNotFound && strings.Contains(string(nodeID), ":") {
+				// Extract unprefixed ID (everything after last colon)
+				parts := strings.Split(string(nodeID), ":")
+				if len(parts) > 1 {
+					unprefixedID := NodeID(parts[len(parts)-1])
+					unprefixedKeyToCheck := nodeKey(unprefixedID)
+					item, err = txn.Get(unprefixedKeyToCheck)
+				}
+			}
+
+			if err == badger.ErrKeyNotFound {
+				// Node doesn't exist - remove from pending index
+				// This is a stale entry - log it for debugging
+				if removed < 10 { // Only log first 10 to avoid spam
+					fmt.Printf("🧹 RefreshPendingEmbeddingsIndex: Removing stale entry %s (node doesn't exist)\n", nodeID)
+				}
+				txn.Delete(key)
+				removed++
+				continue
+			}
+			if err != nil {
+				// Error reading - mark as stale
+				if removed < 10 {
+					fmt.Printf("🧹 RefreshPendingEmbeddingsIndex: Removing corrupted entry %s (error: %v)\n", nodeID, err)
+				}
+				txn.Delete(key)
+				removed++
+				continue
+			}
+
+			// Check if node already has embedding
+			// nodeID is already extracted above from the pending embed key
+			// item already contains the node data from above
+			var node *Node
+			if err := item.Value(func(val []byte) error {
+				var decodeErr error
+				node, decodeErr = decodeNodeWithEmbeddings(txn, val, nodeID)
+				return decodeErr
+			}); err != nil {
+				// Can't decode - remove stale entry
+				txn.Delete(key)
+				removed++
+				continue
+			}
+
+			// Remove from index if node already has embedding or doesn't need one
+			if (len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0) || !NodeNeedsEmbedding(node) {
+				txn.Delete(key)
+				removed++
+			}
+		}
+		return nil
+	})
+
+	// Second pass: Add missing nodes to the index
 	b.db.Update(func(txn *badger.Txn) error {
 		opts := badger.DefaultIteratorOptions
 		opts.PrefetchValues = true
@@ -2523,8 +3032,15 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 		prefix := []byte{prefixNode}
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
+			// Extract nodeID from key (skip prefix byte)
+			key := item.Key()
+			if len(key) <= 1 {
+				continue
+			}
+			nodeID := NodeID(key[1:])
+
 			item.Value(func(val []byte) error {
-				node, err := decodeNode(val)
+				node, err := decodeNodeWithEmbeddings(txn, val, nodeID)
 				if err != nil {
 					return nil
 				}
@@ -2537,7 +3053,7 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 				}
 
 				// Check if needs embedding and not already in index
-				if len(node.Embedding) == 0 && NodeNeedsEmbedding(node) {
+				if (len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) && NodeNeedsEmbedding(node) {
 					// Check if already in pending index
 					_, err := txn.Get(pendingEmbedKey(node.ID))
 					if err == badger.ErrKeyNotFound {
@@ -2551,8 +3067,13 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 		return nil
 	})
 
-	if added > 0 {
-		fmt.Printf("📊 Pending embeddings index refreshed: added %d nodes\n", added)
+	// Always log if there were changes, or if we're cleaning up stale entries
+	if added > 0 || removed > 0 {
+		fmt.Printf("📊 Pending embeddings index refreshed: added %d nodes, removed %d stale entries\n", added, removed)
+	} else if removed == 0 && added == 0 {
+		// Log even if no changes, to confirm refresh ran (helps with debugging)
+		// But only in verbose mode - commented out to reduce noise
+		// fmt.Printf("📊 Pending embeddings index refreshed: no changes\n")
 	}
 	return added
 }
@@ -2577,10 +3098,17 @@ func (b *BadgerEngine) IterateNodes(fn func(*Node) bool) error {
 		prefix := []byte{prefixNode}
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
+			// Extract nodeID from key (skip prefix byte)
+			key := item.Key()
+			if len(key) <= 1 {
+				continue
+			}
+			nodeID := NodeID(key[1:])
+
 			var node *Node
 			err := item.Value(func(val []byte) error {
 				var decErr error
-				node, decErr = decodeNode(val)
+				node, decErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decErr
 			})
 			if err != nil {
@@ -2786,12 +3314,19 @@ func (b *BadgerEngine) ClearAllEmbeddings() (int, error) {
 		prefix := []byte{prefixNode}
 		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
 			item := it.Item()
+			// Extract nodeID from key (skip prefix byte)
+			key := item.Key()
+			if len(key) <= 1 {
+				continue
+			}
+			nodeID := NodeID(key[1:])
+
 			err := item.Value(func(val []byte) error {
-				node, err := decodeNode(val)
+				node, err := decodeNodeWithEmbeddings(txn, val, nodeID)
 				if err != nil {
 					return nil // Skip invalid nodes
 				}
-				if len(node.Embedding) > 0 {
+				if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 					nodeIDs = append(nodeIDs, node.ID)
 				}
 				return nil
@@ -2812,7 +3347,7 @@ func (b *BadgerEngine) ClearAllEmbeddings() (int, error) {
 		if err != nil {
 			continue // Skip if node no longer exists
 		}
-		node.Embedding = nil
+		node.ChunkEmbeddings = nil
 		if err := b.UpdateNode(node); err != nil {
 			log.Printf("Warning: failed to clear embedding for node %s: %v", id, err)
 			continue
@@ -2904,10 +3439,17 @@ func (b *BadgerEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesD
 		defer it.Close()
 
 		for it.Seek(nodePrefix); it.ValidForPrefix(nodePrefix); it.Next() {
+			// Extract nodeID from key (skip prefix byte)
+			key := it.Item().Key()
+			if len(key) <= 1 {
+				continue
+			}
+			nodeID := NodeID(key[1:])
+
 			var node *Node
 			if err := it.Item().Value(func(val []byte) error {
 				var decodeErr error
-				node, decodeErr = decodeNode(val)
+				node, decodeErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decodeErr
 			}); err != nil {
 				continue

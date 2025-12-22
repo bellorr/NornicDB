@@ -1152,10 +1152,10 @@ func TestSerialization(t *testing.T) {
 			DecayScore:   0.75,
 			LastAccessed: time.Now().Add(-time.Hour).Truncate(time.Second),
 			AccessCount:  100,
-			Embedding:    []float32{0.1, 0.2, 0.3},
+			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 		}
 
-		data, err := encodeNode(original)
+		data, _, err := encodeNode(original)
 		require.NoError(t, err)
 
 		decoded, err := decodeNode(data)
@@ -1166,7 +1166,7 @@ func TestSerialization(t *testing.T) {
 		assert.Equal(t, original.Properties["string"], decoded.Properties["string"])
 		assert.InDelta(t, original.DecayScore, decoded.DecayScore, 0.001)
 		assert.Equal(t, original.AccessCount, decoded.AccessCount)
-		assert.Equal(t, original.Embedding, decoded.Embedding)
+		assert.Equal(t, original.ChunkEmbeddings, decoded.ChunkEmbeddings)
 	})
 
 	t.Run("edge round-trip", func(t *testing.T) {

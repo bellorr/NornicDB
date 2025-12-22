@@ -724,7 +724,7 @@ func importToStorage(embeddings []TestEmbedding, dbDir string) error {
 					"generated":  true,
 					"created_at": time.Now().Unix(),
 				},
-				Embedding: emb.Embedding,
+				ChunkEmbeddings: [][]float32{emb.Embedding}, // Always store as ChunkEmbeddings (even single chunk = array of 1)
 			}
 
 			if _, err := engine.CreateNode(node); err != nil {

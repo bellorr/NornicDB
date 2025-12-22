@@ -208,18 +208,18 @@ const (
 //  4. LastAccessed updated on each access
 //  5. Archived when DecayScore < threshold
 type Memory struct {
-	ID           string         `json:"id"`
-	Content      string         `json:"content"`
-	Title        string         `json:"title,omitempty"`
-	Tier         MemoryTier     `json:"tier"`
-	DecayScore   float64        `json:"decay_score"`
-	CreatedAt    time.Time      `json:"created_at"`
-	LastAccessed time.Time      `json:"last_accessed"`
-	AccessCount  int64          `json:"access_count"`
-	Embedding    []float32      `json:"embedding,omitempty"`
-	Tags         []string       `json:"tags,omitempty"`
-	Source       string         `json:"source,omitempty"`
-	Properties   map[string]any `json:"properties,omitempty"`
+	ID              string         `json:"id"`
+	Content         string         `json:"content"`
+	Title           string         `json:"title,omitempty"`
+	Tier            MemoryTier     `json:"tier"`
+	DecayScore      float64        `json:"decay_score"`
+	CreatedAt       time.Time      `json:"created_at"`
+	LastAccessed    time.Time      `json:"last_accessed"`
+	AccessCount     int64          `json:"access_count"`
+	ChunkEmbeddings [][]float32    `json:"chunk_embeddings,omitempty"` // Always stored as array of arrays (even single chunk = array of 1)
+	Tags            []string       `json:"tags,omitempty"`
+	Source          string         `json:"source,omitempty"`
+	Properties      map[string]any `json:"properties,omitempty"`
 }
 
 // Edge represents a relationship between two memories in the knowledge graph.
@@ -1102,7 +1102,9 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 
 	// Create embed queue - worker will wait if embedder not ready yet
 	db.embedQueue = NewEmbedQueue(embedder, db.storage, db.embedWorkerConfig)
-	// Set callback to update search index after embedding
+	// Set callback to update search index after embedding.
+	// Note: IndexNode is idempotent (uses map keyed by node ID), so if the storage
+	// OnNodeUpdated callback also calls IndexNode, no double-counting occurs.
 	db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
 		if db.searchService != nil {
 			if err := db.searchService.IndexNode(node); err != nil {
@@ -1407,8 +1409,8 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 	}
 
 	// Run auto-relationship inference if enabled
-	if db.inference != nil && len(mem.Embedding) > 0 {
-		suggestions, err := db.inference.OnStore(ctx, mem.ID, mem.Embedding)
+	if db.inference != nil && len(mem.ChunkEmbeddings) > 0 && len(mem.ChunkEmbeddings[0]) > 0 {
+		suggestions, err := db.inference.OnStore(ctx, mem.ID, mem.ChunkEmbeddings[0]) // Use first chunk for inference
 		if err == nil {
 			for _, suggestion := range suggestions {
 				edge := &storage.Edge{
@@ -1460,8 +1462,8 @@ func (db *DB) Remember(ctx context.Context, embedding []float32, limit int) ([]*
 	var results []scored
 
 	err := storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(node *storage.Node) error {
-		// Skip nodes without embeddings
-		if len(node.Embedding) == 0 {
+		// Skip nodes without embeddings (always stored in ChunkEmbeddings, even single chunk = array of 1)
+		if len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0 {
 			return nil
 		}
 
@@ -1469,7 +1471,12 @@ func (db *DB) Remember(ctx context.Context, embedding []float32, limit int) ([]*
 		node.Properties = db.decryptProperties(node.Properties)
 
 		mem := nodeToMemory(node)
-		sim := vector.CosineSimilarity(embedding, mem.Embedding)
+		// Use first chunk embedding for similarity (always stored in ChunkEmbeddings, even single chunk = array of 1)
+		var memEmb []float32
+		if len(mem.ChunkEmbeddings) > 0 && len(mem.ChunkEmbeddings[0]) > 0 {
+			memEmb = mem.ChunkEmbeddings[0]
+		}
+		sim := vector.CosineSimilarity(embedding, memEmb)
 
 		// If we don't have enough results yet, just add
 		if len(results) < limit {
@@ -1827,11 +1834,11 @@ func memoryToNode(mem *Memory) *storage.Node {
 	}
 
 	return &storage.Node{
-		ID:         storage.NodeID(mem.ID),
-		Labels:     []string{"Memory"},
-		Properties: props,
-		Embedding:  mem.Embedding,
-		CreatedAt:  mem.CreatedAt,
+		ID:              storage.NodeID(mem.ID),
+		Labels:          []string{"Memory"},
+		Properties:      props,
+		ChunkEmbeddings: mem.ChunkEmbeddings,
+		CreatedAt:       mem.CreatedAt,
 	}
 }
 
@@ -1880,10 +1887,13 @@ func nodeToMemory(node *storage.Node) *Memory {
 		}
 	}
 
-	// Copy embedding directly (both are []float32)
-	if len(node.Embedding) > 0 {
-		mem.Embedding = make([]float32, len(node.Embedding))
-		copy(mem.Embedding, node.Embedding)
+	// Copy chunk embeddings (always stored as ChunkEmbeddings, even single chunk = array of 1)
+	if len(node.ChunkEmbeddings) > 0 {
+		mem.ChunkEmbeddings = make([][]float32, len(node.ChunkEmbeddings))
+		for i, emb := range node.ChunkEmbeddings {
+			mem.ChunkEmbeddings[i] = make([]float32, len(emb))
+			copy(mem.ChunkEmbeddings[i], emb)
+		}
 	}
 
 	// Store remaining properties
@@ -2835,7 +2845,7 @@ func (db *DB) FindSimilar(ctx context.Context, nodeID string, limit int) ([]*Sea
 		return nil, ErrNotFound
 	}
 
-	if len(target.Embedding) == 0 {
+	if len(target.ChunkEmbeddings) == 0 || len(target.ChunkEmbeddings[0]) == 0 {
 		return nil, fmt.Errorf("node has no embedding")
 	}
 
@@ -2848,11 +2858,12 @@ func (db *DB) FindSimilar(ctx context.Context, nodeID string, limit int) ([]*Sea
 
 	err = storage.StreamNodesWithFallback(ctx, db.storage, 1000, func(n *storage.Node) error {
 		// Skip self and nodes without embeddings
-		if string(n.ID) == nodeID || len(n.Embedding) == 0 {
+		if string(n.ID) == nodeID || len(n.ChunkEmbeddings) == 0 || len(n.ChunkEmbeddings[0]) == 0 {
 			return nil
 		}
 
-		sim := vector.CosineSimilarity(target.Embedding, n.Embedding)
+		// Use first chunk embedding for similarity (both nodes should have at least one chunk)
+		sim := vector.CosineSimilarity(target.ChunkEmbeddings[0], n.ChunkEmbeddings[0])
 
 		// Maintain top-k results
 		if len(results) < limit {
@@ -3321,7 +3332,13 @@ func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
 				DecayScore:   n.DecayScore,
 				LastAccessed: n.LastAccessed,
 				AccessCount:  n.AccessCount,
-				Embedding:    append([]float32(nil), n.Embedding...),
+				ChunkEmbeddings: func() [][]float32 {
+					chunks := make([][]float32, len(n.ChunkEmbeddings))
+					for i, emb := range n.ChunkEmbeddings {
+						chunks[i] = append([]float32(nil), emb...)
+					}
+					return chunks
+				}(),
 			}
 			for k, v := range n.Properties {
 				nodeCopy.Properties[k] = v

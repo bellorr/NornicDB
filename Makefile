@@ -862,6 +862,8 @@ plugins: plugin-check plugin-apoc plugin-heimdall-watcher
 	@echo "   NORNICDB_PLUGINS_DIR=$(PLUGINS_DIR) \\"
 	@echo "   NORNICDB_MODELS_DIR=$(MODELS_DIR) \\"
 	@echo "   NORNICDB_EMBEDDING_PROVIDER=local \\"
+	@echo "   NORNICDB_EMBEDDING_MODEL=bge-m3 \\"
+	@echo "   NORNICDB_EMBEDDING_DIMENSIONS=1024 \\"
 	@echo "   NORNICDB_DATA_DIR=./data/test \\"
 	@echo "   NORNICDB_KMEANS_CLUSTERING_ENABLED=true \\"
 	@echo "   NORNICDB_EMBEDDING_PROVIDER=local \\"

@@ -4,11 +4,14 @@ package embed
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/require"
 )
 
 // mockModel implements a test double for localllm.Model
@@ -429,13 +432,231 @@ func TestGPUErrorDetection(t *testing.T) {
 	}
 }
 
+// EmbedBatchWithMock overrides EmbedBatch to use the mock model
+func (t *testableEmbedder) EmbedBatchWithMock(ctx context.Context, texts []string) ([][]float32, error) {
+	results := make([][]float32, len(texts))
+	var firstErr error
+
+	for i, text := range texts {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		emb, err := t.embedWithMock(ctx, text)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("text %d: %w", i, err)
+			}
+			// Continue processing other texts even if one fails
+			continue
+		}
+		results[i] = emb
+	}
+
+	// Return first error if any, but still return partial results
+	return results, firstErr
+}
+
 func TestEmbedBatchPartialFailure(t *testing.T) {
 	embedder := newTestableEmbedder(1024)
 	defer embedder.Close()
 
-	// This tests the real EmbedBatch method's behavior with partial failures
-	// We need to use a real model for this, so we'll skip if not available
-	t.Skip("EmbedBatch integration test requires real model - skipping unit test")
+	t.Run("all_succeed", func(t *testing.T) {
+		// All embeddings should succeed
+		texts := []string{"text1", "text2", "text3"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.NoError(t, err, "Should not return error when all succeed")
+		require.Equal(t, len(texts), len(results), "Should return results for all texts")
+		
+		for i, result := range results {
+			require.NotNil(t, result, "Result %d should not be nil", i)
+			require.Equal(t, 1024, len(result), "Result %d should have 1024 dimensions", i)
+		}
+	})
+
+	t.Run("first_fails", func(t *testing.T) {
+		// First embedding fails, others succeed
+		callCount := 0
+		testErr := &testError{msg: "first embedding failed"}
+		embedder.mock.embedFunc = func(ctx context.Context, text string) ([]float32, error) {
+			callCount++
+			if callCount == 1 {
+				return nil, testErr
+			}
+			return make([]float32, 1024), nil
+		}
+
+		texts := []string{"text1", "text2", "text3"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.Error(t, err, "Should return error when first fails")
+		require.Contains(t, err.Error(), "text 0", "Error should mention failed text index")
+		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
+		
+		require.Nil(t, results[0], "First result should be nil (failed)")
+		require.NotNil(t, results[1], "Second result should not be nil")
+		require.NotNil(t, results[2], "Third result should not be nil")
+		require.Equal(t, 1024, len(results[1]), "Second result should have 1024 dimensions")
+		require.Equal(t, 1024, len(results[2]), "Third result should have 1024 dimensions")
+	})
+
+	t.Run("middle_fails", func(t *testing.T) {
+		// Middle embedding fails, others succeed
+		callCount := 0
+		testErr := &testError{msg: "middle embedding failed"}
+		embedder.mock.embedFunc = func(ctx context.Context, text string) ([]float32, error) {
+			callCount++
+			if callCount == 2 {
+				return nil, testErr
+			}
+			return make([]float32, 1024), nil
+		}
+
+		texts := []string{"text1", "text2", "text3"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.Error(t, err, "Should return error when middle fails")
+		require.Contains(t, err.Error(), "text 1", "Error should mention failed text index")
+		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
+		
+		require.NotNil(t, results[0], "First result should not be nil")
+		require.Nil(t, results[1], "Second result should be nil (failed)")
+		require.NotNil(t, results[2], "Third result should not be nil")
+		require.Equal(t, 1024, len(results[0]), "First result should have 1024 dimensions")
+		require.Equal(t, 1024, len(results[2]), "Third result should have 1024 dimensions")
+	})
+
+	t.Run("last_fails", func(t *testing.T) {
+		// Last embedding fails, others succeed
+		callCount := 0
+		testErr := &testError{msg: "last embedding failed"}
+		embedder.mock.embedFunc = func(ctx context.Context, text string) ([]float32, error) {
+			callCount++
+			if callCount == 3 {
+				return nil, testErr
+			}
+			return make([]float32, 1024), nil
+		}
+
+		texts := []string{"text1", "text2", "text3"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.Error(t, err, "Should return error when last fails")
+		require.Contains(t, err.Error(), "text 2", "Error should mention failed text index")
+		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
+		
+		require.NotNil(t, results[0], "First result should not be nil")
+		require.NotNil(t, results[1], "Second result should not be nil")
+		require.Nil(t, results[2], "Third result should be nil (failed)")
+		require.Equal(t, 1024, len(results[0]), "First result should have 1024 dimensions")
+		require.Equal(t, 1024, len(results[1]), "Second result should have 1024 dimensions")
+	})
+
+	t.Run("multiple_failures", func(t *testing.T) {
+		// Multiple embeddings fail, but processing continues
+		callCount := 0
+		testErr := &testError{msg: "embedding failed"}
+		embedder.mock.embedFunc = func(ctx context.Context, text string) ([]float32, error) {
+			callCount++
+			if callCount == 1 || callCount == 3 {
+				return nil, testErr
+			}
+			return make([]float32, 1024), nil
+		}
+
+		texts := []string{"text1", "text2", "text3", "text4"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.Error(t, err, "Should return error when some fail")
+		require.Contains(t, err.Error(), "text 0", "Error should mention first failed text index")
+		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
+		
+		require.Nil(t, results[0], "First result should be nil (failed)")
+		require.NotNil(t, results[1], "Second result should not be nil")
+		require.Nil(t, results[2], "Third result should be nil (failed)")
+		require.NotNil(t, results[3], "Fourth result should not be nil")
+		require.Equal(t, 1024, len(results[1]), "Second result should have 1024 dimensions")
+		require.Equal(t, 1024, len(results[3]), "Fourth result should have 1024 dimensions")
+	})
+
+	t.Run("all_fail", func(t *testing.T) {
+		// All embeddings fail
+		testErr := &testError{msg: "all embeddings failed"}
+		embedder.mock.embedFunc = func(ctx context.Context, text string) ([]float32, error) {
+			return nil, testErr
+		}
+
+		texts := []string{"text1", "text2", "text3"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.Error(t, err, "Should return error when all fail")
+		require.Contains(t, err.Error(), "text 0", "Error should mention first failed text index")
+		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
+		
+		require.Nil(t, results[0], "All results should be nil")
+		require.Nil(t, results[1], "All results should be nil")
+		require.Nil(t, results[2], "All results should be nil")
+	})
+
+	t.Run("panic_recovery", func(t *testing.T) {
+		// One embedding panics, others succeed
+		callCount := 0
+		embedder.mock.embedFunc = func(ctx context.Context, text string) ([]float32, error) {
+			callCount++
+			if callCount == 2 {
+				panic("simulated CGO crash")
+			}
+			return make([]float32, 1024), nil
+		}
+
+		texts := []string{"text1", "text2", "text3"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.Error(t, err, "Should return error when panic occurs")
+		require.Contains(t, err.Error(), "text 1", "Error should mention failed text index")
+		require.Equal(t, len(texts), len(results), "Should return results array for all texts")
+		
+		require.NotNil(t, results[0], "First result should not be nil")
+		require.Nil(t, results[1], "Second result should be nil (panic)")
+		require.NotNil(t, results[2], "Third result should not be nil")
+		require.Equal(t, 1, int(embedder.panicCount.Load()), "Panic count should be 1")
+	})
+
+	t.Run("context_cancellation", func(t *testing.T) {
+		// Context cancellation should stop processing
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel() // Cancel immediately
+
+		texts := []string{"text1", "text2", "text3"}
+		results, err := embedder.EmbedBatchWithMock(ctx, texts)
+		
+		require.Error(t, err, "Should return error on context cancellation")
+		require.Equal(t, context.Canceled, err, "Error should be context.Canceled")
+		require.Nil(t, results, "Results should be nil on context cancellation")
+	})
+
+	t.Run("empty_batch", func(t *testing.T) {
+		// Empty batch should return empty results
+		texts := []string{}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.NoError(t, err, "Should not return error for empty batch")
+		require.Equal(t, 0, len(results), "Should return empty results")
+	})
+
+	t.Run("single_text", func(t *testing.T) {
+		// Single text should work correctly
+		texts := []string{"single text"}
+		results, err := embedder.EmbedBatchWithMock(context.Background(), texts)
+		
+		require.NoError(t, err, "Should not return error for single text")
+		require.Equal(t, 1, len(results), "Should return one result")
+		require.NotNil(t, results[0], "Result should not be nil")
+		require.Equal(t, 1024, len(results[0]), "Result should have 1024 dimensions")
+	})
 }
 
 func TestWarmupSkipsRecentActivity(t *testing.T) {

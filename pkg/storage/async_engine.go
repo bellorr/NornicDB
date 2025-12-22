@@ -1220,7 +1220,7 @@ func (ae *AsyncEngine) FindNodeNeedingEmbedding() *Node {
 	// Build set of node IDs in cache that already have embeddings
 	cachedWithEmbedding := make(map[NodeID]bool)
 	for id, node := range ae.nodeCache {
-		if len(node.Embedding) > 0 {
+		if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 			cachedWithEmbedding[id] = true
 		}
 	}
@@ -1296,7 +1296,13 @@ func (ae *AsyncEngine) IterateNodes(fn func(*Node) bool) error {
 			DecayScore:   node.DecayScore,
 			LastAccessed: node.LastAccessed,
 			AccessCount:  node.AccessCount,
-			Embedding:    append([]float32(nil), node.Embedding...),
+			ChunkEmbeddings: func() [][]float32 {
+				chunks := make([][]float32, len(node.ChunkEmbeddings))
+				for i, emb := range node.ChunkEmbeddings {
+					chunks[i] = append([]float32(nil), emb...)
+				}
+				return chunks
+			}(),
 		}
 		for k, v := range node.Properties {
 			nodeCopy.Properties[k] = v

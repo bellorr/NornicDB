@@ -28,7 +28,7 @@ func TestParseNodePatterns(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -145,7 +145,7 @@ func TestParseRelationshipPatterns(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -272,7 +272,7 @@ func TestParseVariableLengthPaths(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -339,9 +339,7 @@ func TestParseVariableLengthPaths(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s", tt.description)
-				}
+
 				assert.GreaterOrEqual(t, len(result.Rows), tt.minRows,
 					"Expected at least %d rows for: %s", tt.minRows, tt.description)
 			}
@@ -376,7 +374,7 @@ func TestParseWhereOperators(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -542,10 +540,7 @@ func TestParseWhereOperators(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
+
 				assert.Equal(t, tt.expectRows, len(result.Rows),
 					"Expected %d rows for: %s\nQuery: %s", tt.expectRows, tt.description, tt.query)
 			}
@@ -571,7 +566,7 @@ func TestParseReturnClause(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -720,10 +715,7 @@ func TestParseReturnClause(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
+
 				assert.Equal(t, tt.expectRows, len(result.Rows),
 					"Expected %d rows for: %s", tt.expectRows, tt.description)
 				if len(result.Rows) > 0 {
@@ -754,7 +746,7 @@ func TestParseWithClause(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -827,10 +819,7 @@ func TestParseWithClause(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
+
 				assert.GreaterOrEqual(t, len(result.Rows), tt.minRows,
 					"Expected at least %d rows for: %s", tt.minRows, tt.description)
 			}
@@ -857,7 +846,7 @@ func TestParseOrderBySkipLimit(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -938,10 +927,7 @@ func TestParseOrderBySkipLimit(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
+
 				assert.Equal(t, tt.expectRows, len(result.Rows),
 					"Expected %d rows for: %s", tt.expectRows, tt.description)
 				if tt.firstValue != nil && len(result.Rows) > 0 {
@@ -1016,10 +1002,7 @@ func TestParseCreatePatterns(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
+
 				// Verify with check query
 				result, err := exec.Execute(ctx, tt.checkQuery, nil)
 				require.NoError(t, err)
@@ -1092,10 +1075,7 @@ func TestParseCreateRelationships(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
+
 				result, err := exec.Execute(ctx, tt.checkQuery, nil)
 				require.NoError(t, err)
 				assert.Equal(t, tt.expectRows, len(result.Rows),
@@ -1175,10 +1155,6 @@ func TestParseMergePatterns(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				result, err := exec.Execute(ctx, tt.checkQuery, nil)
 				require.NoError(t, err)
 				assert.Equal(t, tt.expectRows, len(result.Rows),
@@ -1278,10 +1254,6 @@ func TestParseSetRemove(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				if tt.checkQuery != "" {
 					result, err := exec.Execute(ctx, tt.checkQuery, nil)
 					require.NoError(t, err)
@@ -1358,10 +1330,6 @@ func TestParseDeletePatterns(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				result, err := exec.Execute(ctx, tt.checkQuery, nil)
 				require.NoError(t, err)
 				assert.Equal(t, tt.expectRows, len(result.Rows),
@@ -1395,7 +1363,7 @@ func TestParseSpecialCharacters(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -1469,10 +1437,6 @@ func TestParseSpecialCharacters(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				assert.Equal(t, tt.expectRows, len(result.Rows),
 					"Expected %d rows for: %s\nQuery: %s", tt.expectRows, tt.description, tt.query)
 			}
@@ -1499,7 +1463,7 @@ func TestParseMultipleMatchPatterns(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -1577,10 +1541,6 @@ func TestParseMultipleMatchPatterns(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				assert.GreaterOrEqual(t, len(result.Rows), tt.minRows,
 					"Expected at least %d rows for: %s", tt.minRows, tt.description)
 			}
@@ -1606,7 +1566,7 @@ func TestParseOptionalMatch(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	edges := []*storage.Edge{
@@ -1647,10 +1607,6 @@ func TestParseOptionalMatch(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				assert.Equal(t, tt.expectRows, len(result.Rows),
 					"Expected %d rows for: %s", tt.expectRows, tt.description)
 			}
@@ -1712,10 +1668,6 @@ func TestParseUnwind(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				if tt.expectRows > 0 {
 					assert.Equal(t, tt.expectRows, len(result.Rows),
 						"Expected %d rows for: %s", tt.expectRows, tt.description)
@@ -1742,7 +1694,7 @@ func TestParseParameters(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -1797,10 +1749,6 @@ func TestParseParameters(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				assert.Equal(t, tt.expectRows, len(result.Rows),
 					"Expected %d rows for: %s", tt.expectRows, tt.description)
 			}
@@ -1826,7 +1774,7 @@ func TestParseCaseExpressions(t *testing.T) {
 	}
 	for _, n := range nodes {
 		_, err := store.CreateNode(n)
-	require.NoError(t, err)
+		require.NoError(t, err)
 	}
 
 	tests := []struct {
@@ -1875,10 +1823,6 @@ func TestParseCaseExpressions(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				assert.Equal(t, tt.expectRows, len(result.Rows),
 					"Expected %d rows for: %s", tt.expectRows, tt.description)
 			}
@@ -1971,10 +1915,6 @@ func TestParseStringFunctions(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				require.GreaterOrEqual(t, len(result.Rows), 1)
 				assert.Equal(t, tt.expectValue, result.Rows[0][0],
 					"Expected %v for: %s", tt.expectValue, tt.description)
@@ -2056,10 +1996,6 @@ func TestParseListFunctions(t *testing.T) {
 			if tt.expectErr {
 				assert.Error(t, err, "Expected error for: %s", tt.description)
 			} else {
-				if err != nil {
-					t.Skipf("Feature not yet implemented: %s - %v", tt.description, err)
-					return
-				}
 				require.GreaterOrEqual(t, len(result.Rows), 1)
 				assert.Equal(t, tt.expectValue, result.Rows[0][0],
 					"Expected %v for: %s", tt.expectValue, tt.description)

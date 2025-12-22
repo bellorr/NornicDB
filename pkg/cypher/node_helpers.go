@@ -133,10 +133,10 @@ func (e *StorageExecutor) nodeToMap(node *storage.Node) map[string]interface{} {
 func (e *StorageExecutor) buildEmbeddingSummary(node *storage.Node) map[string]interface{} {
 	summary := map[string]interface{}{}
 
-	// Check if node has embedding in dedicated storage field (the only valid location)
-	if len(node.Embedding) > 0 {
+	// Check if node has embeddings (always stored in ChunkEmbeddings, even single chunk = array of 1)
+	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 		summary["status"] = "ready"
-		summary["dimensions"] = len(node.Embedding)
+		summary["dimensions"] = len(node.ChunkEmbeddings[0])
 	} else {
 		// No embedding yet - will be generated asynchronously by embed queue
 		summary["status"] = "pending"

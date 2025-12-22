@@ -143,7 +143,7 @@ func TestMimirStatsWithEmbeddings(t *testing.T) {
 	require.Len(t, nodes, 1)
 
 	// Set embedding on the node (this is what NornicDB's embed worker does)
-	nodes[0].Embedding = []float32{0.1, 0.2, 0.3, 0.4}
+	nodes[0].ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3, 0.4}}
 	nodes[0].Properties["has_embedding"] = true
 	// Also set "embedding" property for Mimir's IS NOT NULL check
 	nodes[0].Properties["embedding"] = true // Just a marker, not the actual array

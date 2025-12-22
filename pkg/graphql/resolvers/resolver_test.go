@@ -67,7 +67,7 @@ func createNodeViaCypher(t *testing.T, resolver *Resolver, labels []string, prop
 	propsStr += "}"
 
 	query := fmt.Sprintf("CREATE (n%s %s) RETURN n", labelsStr, propsStr)
-	result, err := resolver.executeCypher(ctx, query, params)
+	result, err := resolver.executeCypher(ctx, query, params, "")
 	require.NoError(t, err)
 	require.Len(t, result.Rows, 1)
 
@@ -100,7 +100,7 @@ func createEdgeViaCypher(t *testing.T, resolver *Resolver, sourceID, targetID, e
 	propsStr += "}"
 
 	query := fmt.Sprintf("MATCH (a), (b) WHERE (id(a) = $source OR a.id = $source) AND (id(b) = $target OR b.id = $target) CREATE (a)-[r:%s %s]->(b) RETURN r, id(a) as source, id(b) as target", edgeType, propsStr)
-	result, err := resolver.executeCypher(ctx, query, params)
+	result, err := resolver.executeCypher(ctx, query, params, "")
 	require.NoError(t, err)
 	require.Len(t, result.Rows, 1)
 

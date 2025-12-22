@@ -187,12 +187,12 @@ type Node struct {
 	Properties map[string]any `json:"properties"`
 
 	// NornicDB extensions
-	CreatedAt    time.Time `json:"-"`
-	UpdatedAt    time.Time `json:"-"`
-	DecayScore   float64   `json:"-"`
-	LastAccessed time.Time `json:"-"`
-	AccessCount  int64     `json:"-"`
-	Embedding    []float32 `json:"-"` // Vector embedding for semantic search
+	CreatedAt       time.Time   `json:"-"`
+	UpdatedAt       time.Time   `json:"-"`
+	DecayScore      float64     `json:"-"`
+	LastAccessed    time.Time   `json:"-"`
+	AccessCount     int64       `json:"-"`
+	ChunkEmbeddings [][]float32 `json:"-"` // All embeddings stored as chunks (even single chunk = array of 1) - opaque to users
 }
 
 // Edge represents a directed graph relationship (arc) between two nodes.
@@ -871,8 +871,8 @@ func NodeNeedsEmbedding(node *Node) bool {
 		}
 	}
 
-	// Skip if already has embedding vector - this is the primary check
-	if len(node.Embedding) > 0 {
+	// Skip if already has embeddings (always stored in ChunkEmbeddings, even single chunk = array of 1)
+	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 		return false
 	}
 
