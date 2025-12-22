@@ -53,17 +53,17 @@ docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
 
 # NVIDIA GPU (Windows/Linux) with bge-m3 embedding model + heimdall
 docker pull timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
+docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-cuda-bge-heimdall
 
 # NVIDIA GPU (Windows/Linux) with bge-m3 embedding model
 docker pull timothyswt/nornicdb-amd64-cuda-bge:latest
-docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
+docker run --gpus all -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-cuda-bge
 
 # NVIDIA GPU (Windows/Linux) BYOM
 docker pull timothyswt/nornicdb-amd64-cuda:latest
-docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
+docker run --gpus all -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-cuda
 
 # CPU Only (Windows/Linux) BYOM
@@ -77,15 +77,15 @@ docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-cpu-headless
 
 docker pull timothyswt/nornicdb-amd64-vulkan:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
+docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-vulkan:latest
 
 docker pull timothyswt/nornicdb-amd64-vulkan-bge:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
+docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-vulkan-bge:latest
 
 docker pull timothyswt/nornicdb-amd64-vulkan-headless:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
+docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-vulkan-headless:latest
 ```
 

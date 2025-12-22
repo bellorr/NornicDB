@@ -8,6 +8,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Latest Changes]
 
+## [1.0.10] - 2025-12-21
+
+### Added
+- **Vulkan GPU backend**: Added a native Vulkan GPU backend (pure-Go bindings) with compute shaders and tests. Files: `pkg/gpu/vulkan/*` (README, BUILD, bridge, shaders, tests).
+- **Multi-database / Composite DB support**: Added composite/multi-database support and enforcement layer enabling multi-tenant routing and aliases. Files: `pkg/multidb/*`, `pkg/server/multi_database_*.go`.
+- **GraphQL improvements**: Expanded GraphQL models, resolvers, subscriptions and tests. Files: `pkg/graphql/*` (models, resolvers, schema).
+- **OAuth provider & Swagger UI CLI**: New convenience commands for running an OAuth provider and a bundled Swagger UI. Files: `cmd/oauth-provider/*`, `cmd/swagger-ui/*`.
+- **Composite Storage Engine**: Added `pkg/storage/composite_*` for routing and dedup across multiple storage backends.
+- **Server basepath and multi-db tests**: Added server basepath handling and multi-database E2E tests. Files: `pkg/server/basepath.go`, `pkg/server/multi_database_*.go`.
+
+### Changed
+- **Build scripts**: Windows build scripts updated and hardened (`build.ps1`, `build.bat`), improved help text and added `vulkan` native variant. Safer quoting and ASCII-only help to avoid PowerShell parse issues.
+- **Cypher & executor**: Continued cypher fixes and performance work — many parser, aggregation and transaction improvements across `pkg/cypher/*`.
+- **Embedding & search**: Embeddings improvements (local GGUF support) and search namespace-awareness changes (`pkg/embed/*`, `pkg/search/*`).
+- **UI updates**: Swagger + admin UI changes and Vite/build adjustments.
+
+### Fixed
+- **PowerShell build parsing**: Fixed PowerShell parsing issues in `build.ps1` (unbalanced quoting and non-ASCII banner artifacts) so native builds parse and run reliably.
+- **Various query parsing and multi-db routing bugs**: Multiple fixes for query parsing, id() support, WITH/YIELD/RETURN interactions, and multi-database routing.
+
+### Tests
+- Extensive new tests and test harnesses for multi-db, composite storage, Vulkan bridge, GraphQL resolvers and many cypher scenarios. New and updated tests under `pkg/*` and `cmd/*`.
+
+### Docs
+- Large documentation additions: API OpenAPI, multi-database guides, GraphQL guide, operations/CLI docs, and architecture notes. Several new files in `docs/` and `docs/architecture`.
+
+### Notable files changed or added
+- Added: `pkg/gpu/vulkan/*`, `pkg/multidb/*`, `cmd/oauth-provider/*`, `cmd/swagger-ui/*`, `docs/api-reference/openapi.yaml`, `docs/development/MULTI_DB_E2E_TEST.md`, `scripts/run_multi_db_e2e_test.sh`.
+- Modified: `build.ps1`, `build.bat`, `Makefile`, `pkg/cypher/*`, `pkg/storage/*`, `pkg/graphql/*`, `pkg/server/server.go`, `pkg/nornicdb/*`, `ui/*`, many docs.
+
+### Technical details
+- Vulkan backend includes compute shader (`topk.comp`) and bridge code for platform integration. Local GGUF embedding support and embedding queue improvements were merged.
+- Composite storage provides namespaced routing and deduplication for multi-DB setups (`pkg/storage/namespaced.go`).
+- Build and CI: Windows native build target for `vulkan` added; PowerShell and batch scripts hardened to avoid parse failures.
+
+### Credits
+- Contributors: commits between tags include work by `orneryd` and `TJ Sweet` (see commit log for full details).
+
+
 ### Added
 - **Configurable Async Write Settings**: New configuration options for async write-behind cache
   - `NORNICDB_ASYNC_WRITES_ENABLED` (default: true) - Enable/disable async writes
