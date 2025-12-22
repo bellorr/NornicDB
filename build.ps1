@@ -160,6 +160,15 @@ function Build-Native {
             $outputName = "nornicdb-cuda-bge"
             Write-Host "[BUILD] CUDA + Local Embeddings + BGE Model" -ForegroundColor Cyan
         }
+        "vulkan" {
+            # Vulkan backend (pure-Go bindings, no CUDA)
+            # Requires Vulkan SDK at runtime (set VULKAN_SDK if needed)
+            $tags = "vulkan"
+            $cgoEnabled = "1"
+            $outputName = "nornicdb-vulkan"
+            Write-Host "[BUILD] Vulkan GPU (cross-platform NVIDIA/AMD/Intel)" -ForegroundColor Cyan
+            Write-Host "        Requires Vulkan SDK: https://vulkan.lunarg.com/" -ForegroundColor Yellow
+        }
         default {
             Write-Host "[ERROR] Unknown variant: $Variant" -ForegroundColor Red
             return
@@ -202,16 +211,14 @@ function Build-Native {
 function Build-AllNative {
     param([switch]$Headless)
     
-    @("cpu", "cpu-localllm", "cpu-bge", "cuda", "cuda-bge") | ForEach-Object {
+    @("cpu", "cpu-localllm", "cpu-bge", "cuda", "cuda-bge", "vulkan") | ForEach-Object {
         Write-Host ""
         Build-Native -Variant $_ -Headless:$Headless
     }
     
-    Write-Host ""
-    Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
-    Write-Host "║ All variants built!                                          ║" -ForegroundColor Green
-    Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Green
-    Get-ChildItem "$BinDir\nornicdb*.exe" | ForEach-Object { Write-Host "  $_" }
+    Write-Host "" 
+    Write-Host "=== All variants built! ===" -ForegroundColor Green
+    Get-ChildItem "$BinDir\nornicdb*.exe" | ForEach-Object { Write-Host ("  {0}" -f $_.Name) }
 }
 
 # =============================================================================
@@ -270,7 +277,7 @@ function Build-DockerImage {
     Invoke-Expression $cmd
     
     if ($LASTEXITCODE -eq 0) {
-        Write-Host "[DONE]  Built $image" -ForegroundColor Green
+        Write-Host ("[DONE]  Built {0}" -f $image) -ForegroundColor Green
     }
 }
 
@@ -298,9 +305,9 @@ switch ($Mode.ToLower()) {
         } elseif ($Target) {
             Build-Native -Variant $Target -Headless:$Headless
         } else {
-            Write-Host "Usage: .\build.ps1 native <variant> [-Headless]"
+            Write-Host "Usage: .\build.ps1 native VARIANT [-Headless]"
             Write-Host ""
-            Write-Host "Variants: cpu, cpu-localllm, cpu-bge, cuda, cuda-bge, all"
+            Write-Host "Variants: cpu, cpu-localllm, cpu-bge, cuda, cuda-bge, vulkan, all"
         }
     }
     "docker" {
@@ -310,7 +317,7 @@ switch ($Mode.ToLower()) {
             Build-DockerImage -Target $args[0]
             Push-DockerImage -Target $args[0]
         } else {
-            Write-Host "Usage: .\build.ps1 docker [build|deploy] <target>"
+            Write-Host "Usage: .\build.ps1 docker [build|deploy] TARGET"
             Write-Host ""
             Write-Host "Targets: amd64-cuda, amd64-cuda-bge, amd64-cpu"
         }
@@ -327,33 +334,32 @@ switch ($Mode.ToLower()) {
         Write-Host "Done."
     }
     default {
-        Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-        Write-Host "║ NornicDB Build Script                                        ║" -ForegroundColor Cyan
-        Write-Host "╚══════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-        Write-Host ""
-        Write-Host "NATIVE BUILDS (Windows .exe):"
-        Write-Host "  .\build.ps1 native cpu              CPU-only (smallest, ~15MB)"
-        Write-Host "  .\build.ps1 native cpu-localllm     CPU + embeddings, BYOM (~25MB)"
-        Write-Host "  .\build.ps1 native cpu-bge          CPU + embeddings + BGE (~425MB)"
-        Write-Host "  .\build.ps1 native cuda             CUDA + embeddings, BYOM (~30MB)"
-        Write-Host "  .\build.ps1 native cuda-bge         CUDA + embeddings + BGE (~430MB)"
-        Write-Host "  .\build.ps1 native all              Build all variants"
-        Write-Host ""
-        Write-Host "  Add -Headless to build without web UI"
-        Write-Host ""
-        Write-Host "DOCKER BUILDS (Linux containers):"
-        Write-Host "  .\build.ps1 docker build amd64-cuda"
-        Write-Host "  .\build.ps1 docker deploy amd64-cuda-bge"
-        Write-Host ""
-        Write-Host "SETUP:"
-        Write-Host "  .\build.ps1 download-libs           Get pre-built llama.cpp"
-        Write-Host "  .\build.ps1 download-model          Get BGE-M3 model (~400MB)"
-        Write-Host ""
-        Write-Host "PREREQUISITES BY VARIANT:"
-        Write-Host "  cpu:          Go 1.23+"
-        Write-Host "  cpu-localllm: Go 1.23+, llama.cpp libs"
-        Write-Host "  cpu-bge:      Go 1.23+, llama.cpp libs, BGE model"
-        Write-Host "  cuda:         Go 1.23+, llama.cpp CUDA libs, CUDA Toolkit"
-        Write-Host "  cuda-bge:     Go 1.23+, llama.cpp CUDA libs, CUDA Toolkit, BGE model"
+        Write-Host 'NornicDB Build Script' -ForegroundColor Cyan
+        Write-Host '' 
+        Write-Host 'NATIVE BUILDS (Windows .exe):'
+        Write-Host '.\build.ps1 native cpu              CPU-only (smallest, ~15MB)'
+        Write-Host '.\build.ps1 native cpu-localllm     CPU + embeddings, BYOM (~25MB)'
+        Write-Host '.\build.ps1 native cpu-bge          CPU + embeddings + BGE (~425MB)'
+        Write-Host '.\build.ps1 native cuda             CUDA + embeddings, BYOM (~30MB)'
+        Write-Host '.\build.ps1 native cuda-bge         CUDA + embeddings + BGE (~430MB)'
+        Write-Host '.\build.ps1 native vulkan           Vulkan GPU (cross-platform, ~20MB)'
+        Write-Host '.\build.ps1 native all              Build all variants'
+        Write-Host ''
+        Write-Host '  Add -Headless to build without web UI'
+        Write-Host ''
+        Write-Host 'DOCKER BUILDS (Linux containers):'
+        Write-Host '.\build.ps1 docker build amd64-cuda'
+        Write-Host '.\build.ps1 docker deploy amd64-cuda-bge'
+        Write-Host ''
+        Write-Host 'SETUP:'
+        Write-Host '.\build.ps1 download-libs           Get pre-built llama.cpp'
+        Write-Host '.\build.ps1 download-model          Get BGE-M3 model (~400MB)'
+        Write-Host ''
+        Write-Host 'PREREQUISITES BY VARIANT:'
+        Write-Host '  cpu:          Go 1.23+'
+        Write-Host '  cpu-localllm: Go 1.23+, llama.cpp libs'
+        Write-Host '  cpu-bge:      Go 1.23+, llama.cpp libs, BGE model'
+        Write-Host '  cuda:         Go 1.23+, llama.cpp CUDA libs, CUDA Toolkit'
+        Write-Host '  cuda-bge:     Go 1.23+, llama.cpp CUDA libs, CUDA Toolkit, BGE model'
     }
 }
