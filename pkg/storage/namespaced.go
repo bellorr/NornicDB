@@ -709,6 +709,19 @@ func (n *NamespacedEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, ed
 // FindNodeNeedingEmbedding finds a node that needs embedding, but only from this namespace.
 // It only looks for nodes with the current namespace prefix - all IDs must be prefixed.
 func (n *NamespacedEngine) FindNodeNeedingEmbedding() *Node {
+	// CRITICAL: If the inner engine is AsyncEngine (or wrapped with WALEngine), we need to
+	// check its cache first because nodes in the cache might not be in the underlying
+	// engine's pending index yet. Use the AsyncEngine's FindNodeNeedingEmbedding which
+	// already checks the cache, but we need to filter by namespace.
+	innerEngine := n.inner
+	// Unwrap WALEngine if present
+	if walEngine, ok := innerEngine.(*WALEngine); ok {
+		innerEngine = walEngine.GetEngine()
+	}
+
+	// If inner engine is AsyncEngine, it will check its cache first via its FindNodeNeedingEmbedding
+	// But we still need to filter by namespace, so we'll do that in the loop below
+
 	// Get underlying engine's finder
 	finder, ok := n.inner.(interface{ FindNodeNeedingEmbedding() *Node })
 	if !ok {
@@ -721,14 +734,19 @@ func (n *NamespacedEngine) FindNodeNeedingEmbedding() *Node {
 	// Keep trying until we find a node in our namespace or run out of nodes
 	maxAttempts := 10000 // Prevent infinite loop (but allow scanning many nodes)
 	skippedCount := 0
+	hitStaleLimit := false
 	for i := 0; i < maxAttempts; i++ {
 		node := finder.FindNodeNeedingEmbedding()
 		if node == nil {
-			// No more nodes need embedding
+			// No more nodes need embedding, OR the inner engine hit its stale entry limit
+			// The inner BadgerEngine has a 100-attempt limit for stale entries.
+			// If it returns nil, it might have hit that limit, so we should try the fallback.
 			if skippedCount > 0 {
 				fmt.Printf("🧹 Skipped %d nodes from other namespaces while searching\n", skippedCount)
 			}
-			return nil
+			// Always trigger fallback when inner engine returns nil - it might have hit stale entry limit
+			hitStaleLimit = true
+			break
 		}
 
 		// ALL node IDs must be prefixed - if not, it's a bug or old data
@@ -760,10 +778,56 @@ func (n *NamespacedEngine) FindNodeNeedingEmbedding() *Node {
 		skippedCount++
 	}
 
-	// Too many attempts - likely many nodes from other namespaces
-	if skippedCount > 0 {
-		fmt.Printf("⚠️  FindNodeNeedingEmbedding: gave up after %d attempts, skipped %d nodes from other namespaces\n", maxAttempts, skippedCount)
+	// Inner engine returned nil - this could mean:
+	// 1. No nodes need embedding (truly empty)
+	// 2. Inner engine hit stale entry limit (100 attempts in BadgerEngine)
+	// 3. All nodes in index are from other namespaces
+	// To be safe, always try the fallback when we get nil from the inner engine
+	// This ensures we don't miss nodes that aren't in the index yet
+	if hitStaleLimit {
+		if skippedCount > 0 {
+			fmt.Printf("⚠️  FindNodeNeedingEmbedding: inner engine returned nil after skipping %d nodes from other namespaces. Falling back to full scan...\n", skippedCount)
+		} else {
+			fmt.Printf("⚠️  FindNodeNeedingEmbedding: inner engine returned nil (may have hit stale entry limit). Falling back to full scan...\n")
+		}
+	} else if skippedCount > 0 {
+		fmt.Printf("⚠️  FindNodeNeedingEmbedding: gave up after %d attempts, skipped %d nodes. Falling back to full scan...\n", maxAttempts, skippedCount)
+	} else {
+		// No nodes found and no issues - but still try fallback once to be sure
+		// (This handles the case where nodes exist but aren't in the index)
 	}
+
+	// Fallback: scan all nodes in this namespace
+	nodes, err := n.AllNodes()
+	if err != nil {
+		return nil
+	}
+
+	// Find first node that needs embedding
+	for _, node := range nodes {
+		// Skip internal nodes
+		skip := false
+		for _, label := range node.Labels {
+			if len(label) > 0 && label[0] == '_' {
+				skip = true
+				break
+			}
+		}
+		if skip {
+			continue
+		}
+
+		// Check if node needs embedding
+		if (len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) && NodeNeedsEmbedding(node) {
+			// Found one! Add it to the pending index if not already there
+			if mgr, ok := n.inner.(interface{ AddToPendingEmbeddings(NodeID) }); ok {
+				prefixedID := n.prefixNodeID(node.ID)
+				mgr.AddToPendingEmbeddings(prefixedID)
+			}
+			return node
+		}
+	}
+
 	return nil
 }
 
@@ -832,6 +896,9 @@ func (n *NamespacedEngine) RefreshPendingEmbeddingsIndex() int {
 	totalRemoved := underlyingRemoved + removed
 	if added > 0 || totalRemoved > 0 {
 		fmt.Printf("📊 Pending embeddings index refreshed for namespace '%s': added %d nodes, removed %d stale entries (including %d from underlying cleanup)\n", n.namespace, added, totalRemoved, underlyingRemoved)
+	} else {
+		// Log even if no changes, to help debug why nodes aren't being found
+		fmt.Printf("📊 Pending embeddings index refreshed for namespace '%s': scanned %d nodes, no changes needed\n", n.namespace, len(nodes))
 	}
 
 	return totalRemoved

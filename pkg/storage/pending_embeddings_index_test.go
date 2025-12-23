@@ -322,7 +322,11 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 		require.NoError(t, err)
 
 		// Manually add stale entries to the pending index (simulating deleted nodes)
-		staleIDs := []NodeID{"stale-1", "stale-2", "stale-3"}
+		staleIDs := []NodeID{
+			NodeID(prefixTestID("stale-1")),
+			NodeID(prefixTestID("stale-2")),
+			NodeID(prefixTestID("stale-3")),
+		}
 		for _, staleID := range staleIDs {
 			err = engine.db.Update(func(txn *badger.Txn) error {
 				return txn.Set(pendingEmbedKey(staleID), []byte{})
@@ -376,7 +380,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 	t.Run("FindNodeNeedingEmbedding_returns_nil_after_max_attempts", func(t *testing.T) {
 		engine := newTestBadgerEngineForPending(t)
 
-		// Add 101 stale entries (more than the 100 max attempts)
+		// Add stale entries with no corresponding nodes.
 		for i := 0; i < 101; i++ {
 			staleID := NodeID(prefixTestID(fmt.Sprintf("stale-%d", i)))
 			err := engine.db.Update(func(txn *badger.Txn) error {
@@ -385,9 +389,10 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 			require.NoError(t, err)
 		}
 
-		// FindNodeNeedingEmbedding should give up after 100 attempts
+		// FindNodeNeedingEmbedding should clean stale entries and return nil.
 		found := engine.FindNodeNeedingEmbedding()
-		assert.Nil(t, found, "should return nil after max attempts to prevent infinite loop")
+		assert.Nil(t, found, "should return nil when only stale entries exist")
+		assert.Equal(t, 0, engine.PendingEmbeddingsCount(), "stale entries should be cleaned up")
 	})
 
 	t.Run("UpdateNodeEmbedding_only_updates_existing_nodes", func(t *testing.T) {

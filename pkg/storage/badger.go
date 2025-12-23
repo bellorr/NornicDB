@@ -2832,66 +2832,67 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 	}
 	b.mu.RUnlock()
 
-	maxAttempts := 100 // Prevent infinite loops from stale entries
-	attempts := 0
+	var found *Node
+	removedStale := 0
+	removedNoLongerNeeds := 0
 
-	for attempts < maxAttempts {
-		attempts++
-		var nodeID NodeID
+	_ = b.db.Update(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = true
+		opts.PrefetchSize = 10
+		it := txn.NewIterator(opts)
+		defer it.Close()
 
-		// Find first node in pending embeddings index - O(1)
-		b.db.View(func(txn *badger.Txn) error {
-			opts := badger.DefaultIteratorOptions
-			opts.PrefetchValues = false // Keys only
-			opts.PrefetchSize = 1
-			it := txn.NewIterator(opts)
-			defer it.Close()
-
-			prefix := []byte{prefixPendingEmbed}
-			it.Seek(prefix)
-			if it.ValidForPrefix(prefix) {
-				// Extract nodeID from key (skip prefix byte)
-				key := it.Item().Key()
-				if len(key) > 1 {
-					nodeID = NodeID(key[1:])
-				}
+		prefix := []byte{prefixPendingEmbed}
+		for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+			key := it.Item().Key()
+			if len(key) <= 1 {
+				continue
 			}
-			return nil
-		})
+			nodeID := NodeID(key[1:])
 
-		if nodeID == "" {
-			return nil // No nodes need embedding
+			// Verify node exists in the same transaction for consistency.
+			item, err := txn.Get(nodeKey(nodeID))
+			if err == badger.ErrKeyNotFound {
+				_ = txn.Delete(pendingEmbedKey(nodeID))
+				removedStale++
+				continue
+			}
+			if err != nil {
+				// Conservatively skip on unexpected errors.
+				continue
+			}
+
+			var node *Node
+			if err := item.Value(func(val []byte) error {
+				var decErr error
+				node, decErr = decodeNodeWithEmbeddings(txn, val, nodeID)
+				return decErr
+			}); err != nil || node == nil {
+				_ = txn.Delete(pendingEmbedKey(nodeID))
+				removedStale++
+				continue
+			}
+
+			// If node no longer needs embedding, remove it from the pending index.
+			if (len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0) || !NodeNeedsEmbedding(node) {
+				_ = txn.Delete(pendingEmbedKey(nodeID))
+				removedNoLongerNeeds++
+				continue
+			}
+
+			found = node
+			break
 		}
+		return nil
+	})
 
-		// Load the full node - CRITICAL: verify it actually exists
-		// ALL node IDs must be prefixed - no unprefixed IDs allowed
-		node, err := b.GetNode(nodeID)
-		if err != nil || node == nil {
-			// Node was deleted - remove from pending index immediately
-			// This is a stale entry that needs cleanup
-			fmt.Printf("🧹 Removing stale entry from pending embeddings index: %s (node doesn't exist)\n", nodeID)
-			b.MarkNodeEmbedded(nodeID)
-			// Continue to next iteration to try next node
-			continue
-		}
-
-		// Double-check it still needs embedding (may have been updated externally)
-		if (len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0) || !NodeNeedsEmbedding(node) {
-			// Node already has embedding - remove from pending index
-			b.MarkNodeEmbedded(nodeID)
-			// Continue to next iteration to try next node
-			continue
-		}
-
-		// Found a valid node that needs embedding
-		return node
+	// Log at most once per call (avoid per-entry spam on large stale indexes).
+	if removedStale > 0 || removedNoLongerNeeds > 0 {
+		log.Printf("🧹 Pending embeddings cleanup: removed %d stale entries, %d no-longer-needed", removedStale, removedNoLongerNeeds)
 	}
 
-	// If we've tried too many times, log a warning and return nil
-	if attempts >= maxAttempts {
-		fmt.Printf("⚠️  FindNodeNeedingEmbedding: Skipped %d stale entries, giving up to prevent infinite loop\n", attempts)
-	}
-	return nil
+	return found
 }
 
 // MarkNodeEmbedded removes a node from the pending embeddings index.

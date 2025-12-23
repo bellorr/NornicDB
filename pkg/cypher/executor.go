@@ -1021,24 +1021,12 @@ func (e *StorageExecutor) executeFastPathCreateDeleteRel(label1, label2, prop1 s
 		return nil, false
 	}
 
-	// Create the relationship
-	edgeID := e.generateID()
-	edge := &storage.Edge{
-		ID:         storage.EdgeID(edgeID),
-		Type:       relType,
-		StartNode:  node1.ID,
-		EndNode:    node2.ID,
-		Properties: make(map[string]interface{}),
-	}
-
-	if err := e.storage.CreateEdge(edge); err != nil {
-		return nil, false
-	}
-
-	// Delete the relationship immediately
-	if err := e.storage.DeleteEdge(edge.ID); err != nil {
-		return nil, false
-	}
+	// Optimization: This pattern creates a relationship and deletes it in the same
+	// statement without returning it. The relationship is not observable to the user,
+	// and the net graph effect is a no-op, so we skip storage writes entirely.
+	//
+	// We still validate that both endpoints exist (via the lookups above) and we
+	// still return correct query stats for Neo4j compatibility.
 
 	return &ExecuteResult{
 		Columns: []string{},
