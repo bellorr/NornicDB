@@ -442,6 +442,41 @@ func (ae *AsyncEngine) UpdateNode(node *Node) error {
 	return nil
 }
 
+// UpdateNodeEmbedding updates an existing node with its embedding.
+// Unlike UpdateNode, this MUST NOT create a new node; it returns ErrNotFound
+// if the node does not exist (in cache, in-flight, or in the underlying engine).
+func (ae *AsyncEngine) UpdateNodeEmbedding(node *Node) error {
+	ae.mu.Lock()
+	defer ae.mu.Unlock()
+
+	if ae.deleteNodes[node.ID] {
+		return ErrNotFound
+	}
+
+	// Exists in cache (including nodes created/updated but not yet flushed).
+	if _, ok := ae.nodeCache[node.ID]; ok {
+		ae.nodeCache[node.ID] = node
+		ae.pendingWrites++
+		return nil
+	}
+
+	// In-flight nodes will exist in the underlying engine after flush; allow update.
+	if ae.inFlightNodes[node.ID] {
+		ae.nodeCache[node.ID] = node
+		ae.pendingWrites++
+		return nil
+	}
+
+	// Verify existence in underlying engine before accepting the update.
+	if _, err := ae.engine.GetNode(node.ID); err != nil {
+		return ErrNotFound
+	}
+
+	ae.nodeCache[node.ID] = node
+	ae.pendingWrites++
+	return nil
+}
+
 // DeleteNode marks for deletion and returns immediately.
 // Optimized: if node was created in this transaction (still in cache),
 // just remove it from cache - no need to delete from underlying engine.
@@ -1093,6 +1128,157 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 	return count, nil
 }
 
+func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
+	// Keep same consistency semantics as NodeCount(): hold lock across engine read.
+	ae.mu.RLock()
+
+	pendingCreates := int64(0)
+	pendingUpdates := int64(0)
+	inFlightCreates := int64(0)
+	for id := range ae.nodeCache {
+		if !strings.HasPrefix(string(id), prefix) {
+			continue
+		}
+		if ae.updateNodes[id] {
+			pendingUpdates++
+			continue
+		}
+		if ae.inFlightNodes[id] {
+			inFlightCreates++
+			continue
+		}
+		pendingCreates++
+	}
+
+	pendingDeletes := int64(0)
+	for id := range ae.deleteNodes {
+		if strings.HasPrefix(string(id), prefix) {
+			pendingDeletes++
+		}
+	}
+
+	var engineCount int64
+	var err error
+	if stats, ok := ae.engine.(PrefixStatsEngine); ok {
+		engineCount, err = stats.NodeCountByPrefix(prefix)
+	} else {
+		// Correctness fallback for uncommon engines (slower).
+		engineCount, err = countNodesInEngineByPrefix(ae.engine, prefix)
+	}
+
+	ae.mu.RUnlock()
+	if err != nil {
+		return 0, err
+	}
+
+	count := engineCount + pendingCreates + inFlightCreates - pendingDeletes
+	if count < 0 {
+		log.Printf("⚠️ [COUNT BUG] NodeCountByPrefix went negative: prefix=%q engineCount=%d pendingCreates=%d pendingDeletes=%d result=%d (clamping to 0)",
+			prefix, engineCount, pendingCreates, pendingDeletes, count)
+		return 0, nil
+	}
+	_ = pendingUpdates // no-op (kept for symmetry with NodeCount)
+	return count, nil
+}
+
+func (ae *AsyncEngine) EdgeCountByPrefix(prefix string) (int64, error) {
+	ae.mu.RLock()
+
+	pendingCreates := int64(0)
+	inFlightCreates := int64(0)
+	for id := range ae.edgeCache {
+		if !strings.HasPrefix(string(id), prefix) {
+			continue
+		}
+		if ae.updateEdges[id] {
+			continue
+		}
+		if ae.inFlightEdges[id] {
+			inFlightCreates++
+			continue
+		}
+		pendingCreates++
+	}
+
+	pendingDeletes := int64(0)
+	for id := range ae.deleteEdges {
+		if strings.HasPrefix(string(id), prefix) {
+			pendingDeletes++
+		}
+	}
+
+	var engineCount int64
+	var err error
+	if stats, ok := ae.engine.(PrefixStatsEngine); ok {
+		engineCount, err = stats.EdgeCountByPrefix(prefix)
+	} else {
+		engineCount, err = countEdgesInEngineByPrefix(ae.engine, prefix)
+	}
+
+	ae.mu.RUnlock()
+	if err != nil {
+		return 0, err
+	}
+
+	count := engineCount + pendingCreates + inFlightCreates - pendingDeletes
+	if count < 0 {
+		log.Printf("⚠️ [COUNT BUG] EdgeCountByPrefix went negative: prefix=%q engineCount=%d pendingCreates=%d pendingDeletes=%d result=%d (clamping to 0)",
+			prefix, engineCount, pendingCreates, pendingDeletes, count)
+		return 0, nil
+	}
+	return count, nil
+}
+
+func countNodesInEngineByPrefix(engine Engine, prefix string) (int64, error) {
+	if streamer, ok := engine.(StreamingEngine); ok {
+		var count int64
+		err := streamer.StreamNodes(context.Background(), func(node *Node) error {
+			if strings.HasPrefix(string(node.ID), prefix) {
+				count++
+			}
+			return nil
+		})
+		return count, err
+	}
+
+	nodes, err := engine.AllNodes()
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, node := range nodes {
+		if strings.HasPrefix(string(node.ID), prefix) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func countEdgesInEngineByPrefix(engine Engine, prefix string) (int64, error) {
+	if streamer, ok := engine.(StreamingEngine); ok {
+		var count int64
+		err := streamer.StreamEdges(context.Background(), func(edge *Edge) error {
+			if strings.HasPrefix(string(edge.ID), prefix) {
+				count++
+			}
+			return nil
+		})
+		return count, err
+	}
+
+	edges, err := engine.AllEdges()
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, edge := range edges {
+		if strings.HasPrefix(string(edge.ID), prefix) {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // Close stops the background flush goroutine and flushes all pending data.
 // Returns an error if the final flush fails or if data remains unflushed.
 func (ae *AsyncEngine) Close() error {
@@ -1271,6 +1457,24 @@ func (ae *AsyncEngine) FindNodeNeedingEmbedding() *Node {
 	}
 
 	return nil
+}
+
+// RefreshPendingEmbeddingsIndex delegates to the underlying engine, if supported.
+// This keeps the pending-embeddings secondary index consistent even when AsyncEngine
+// is the outer-most storage layer.
+func (ae *AsyncEngine) RefreshPendingEmbeddingsIndex() int {
+	if mgr, ok := ae.engine.(interface{ RefreshPendingEmbeddingsIndex() int }); ok {
+		return mgr.RefreshPendingEmbeddingsIndex()
+	}
+	return 0
+}
+
+// MarkNodeEmbedded delegates to the underlying engine, if supported.
+// This removes a node from the pending-embeddings secondary index once embedded.
+func (ae *AsyncEngine) MarkNodeEmbedded(nodeID NodeID) {
+	if mgr, ok := ae.engine.(interface{ MarkNodeEmbedded(NodeID) }); ok {
+		mgr.MarkNodeEmbedded(nodeID)
+	}
 }
 
 // IterateNodes iterates through all nodes, checking cache first.

@@ -41,7 +41,9 @@ func TestOpen(t *testing.T) {
 		assert.True(t, db.config.AutoLinksEnabled)
 		assert.NotNil(t, db.storage)
 		assert.NotNil(t, db.decay)
-		assert.NotNil(t, db.inference)
+		inferEngine, err := db.GetOrCreateInferenceService(db.defaultDatabaseName(), db.storage)
+		require.NoError(t, err)
+		assert.NotNil(t, inferEngine)
 	})
 
 	t.Run("with custom config", func(t *testing.T) {
@@ -57,7 +59,9 @@ func TestOpen(t *testing.T) {
 
 		assert.Equal(t, tmpDir, db.config.DataDir)
 		assert.Nil(t, db.decay)
-		assert.Nil(t, db.inference)
+		inferEngine, err := db.GetOrCreateInferenceService(db.defaultDatabaseName(), db.storage)
+		require.NoError(t, err)
+		assert.Nil(t, inferEngine)
 	})
 }
 
@@ -682,9 +686,11 @@ func TestGenerateID(t *testing.T) {
 	ids := make(map[string]bool)
 	for i := 0; i < 100; i++ {
 		id := generateID("test")
+		// IDs are now UUIDs (prefix parameter is ignored for backward compatibility)
 		assert.False(t, ids[id], "ID should be unique")
+		// Verify it's a valid UUID format (8-4-4-4-12 hex digits)
+		assert.Regexp(t, `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`, id, "ID should be a valid UUID")
 		ids[id] = true
-		assert.Contains(t, id, "test-")
 	}
 }
 

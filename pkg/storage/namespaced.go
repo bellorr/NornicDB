@@ -560,12 +560,13 @@ func (n *NamespacedEngine) Close() error {
 // ============================================================================
 
 func (n *NamespacedEngine) NodeCount() (int64, error) {
-	// CRITICAL: If inner engine has its own NodeCount() (e.g., AsyncEngine with pending nodes),
-	// we must use it to get accurate counts that include pending operations.
-	// However, the inner engine's NodeCount() counts ALL nodes (all namespaces),
-	// so we need to filter by namespace prefix.
+	// Prefer a prefix-scoped count from the inner engine to keep COUNT fast
+	// in multi-database deployments.
+	if stats, ok := n.inner.(PrefixStatsEngine); ok {
+		return stats.NodeCountByPrefix(n.namespace + n.separator)
+	}
 
-	// Try streaming first (most efficient for large databases)
+	// Fallback: streaming scan (correct but slower; should be rare in production).
 	if streamer, ok := n.inner.(StreamingEngine); ok {
 		var count int64
 		err := streamer.StreamNodes(context.Background(), func(node *Node) error {
@@ -580,8 +581,7 @@ func (n *NamespacedEngine) NodeCount() (int64, error) {
 		return count, nil
 	}
 
-	// Fallback: Count nodes by loading them (works for all engines, includes pending in AsyncEngine)
-	// This ensures AsyncEngine's pending nodes are included via AllNodes()
+	// Last resort: load and filter.
 	nodes, err := n.AllNodes()
 	if err != nil {
 		return 0, err
@@ -590,10 +590,14 @@ func (n *NamespacedEngine) NodeCount() (int64, error) {
 }
 
 func (n *NamespacedEngine) EdgeCount() (int64, error) {
-	// Optimized: Use streaming to count without loading all edges into memory
+	// Prefer a prefix-scoped count from the inner engine.
+	if stats, ok := n.inner.(PrefixStatsEngine); ok {
+		return stats.EdgeCountByPrefix(n.namespace + n.separator)
+	}
+
+	// Fallback: streaming scan (correct but slower; should be rare in production).
 	var count int64
 	if streamer, ok := n.inner.(StreamingEngine); ok {
-		// Use streaming for efficient counting
 		err := streamer.StreamEdges(context.Background(), func(edge *Edge) error {
 			if n.hasEdgePrefix(edge.ID) {
 				count++
@@ -606,7 +610,7 @@ func (n *NamespacedEngine) EdgeCount() (int64, error) {
 		return count, nil
 	}
 
-	// Fallback: Count edges by loading them (less efficient but works for all engines)
+	// Last resort: load and filter.
 	edges, err := n.AllEdges()
 	if err != nil {
 		return 0, err
@@ -734,19 +738,11 @@ func (n *NamespacedEngine) FindNodeNeedingEmbedding() *Node {
 	// Keep trying until we find a node in our namespace or run out of nodes
 	maxAttempts := 10000 // Prevent infinite loop (but allow scanning many nodes)
 	skippedCount := 0
-	hitStaleLimit := false
 	for i := 0; i < maxAttempts; i++ {
 		node := finder.FindNodeNeedingEmbedding()
 		if node == nil {
-			// No more nodes need embedding, OR the inner engine hit its stale entry limit
-			// The inner BadgerEngine has a 100-attempt limit for stale entries.
-			// If it returns nil, it might have hit that limit, so we should try the fallback.
-			if skippedCount > 0 {
-				fmt.Printf("🧹 Skipped %d nodes from other namespaces while searching\n", skippedCount)
-			}
-			// Always trigger fallback when inner engine returns nil - it might have hit stale entry limit
-			hitStaleLimit = true
-			break
+			// No more nodes need embedding in the underlying engine.
+			return nil
 		}
 
 		// ALL node IDs must be prefixed - if not, it's a bug or old data
@@ -778,24 +774,8 @@ func (n *NamespacedEngine) FindNodeNeedingEmbedding() *Node {
 		skippedCount++
 	}
 
-	// Inner engine returned nil - this could mean:
-	// 1. No nodes need embedding (truly empty)
-	// 2. Inner engine hit stale entry limit (100 attempts in BadgerEngine)
-	// 3. All nodes in index are from other namespaces
-	// To be safe, always try the fallback when we get nil from the inner engine
-	// This ensures we don't miss nodes that aren't in the index yet
-	if hitStaleLimit {
-		if skippedCount > 0 {
-			fmt.Printf("⚠️  FindNodeNeedingEmbedding: inner engine returned nil after skipping %d nodes from other namespaces. Falling back to full scan...\n", skippedCount)
-		} else {
-			fmt.Printf("⚠️  FindNodeNeedingEmbedding: inner engine returned nil (may have hit stale entry limit). Falling back to full scan...\n")
-		}
-	} else if skippedCount > 0 {
-		fmt.Printf("⚠️  FindNodeNeedingEmbedding: gave up after %d attempts, skipped %d nodes. Falling back to full scan...\n", maxAttempts, skippedCount)
-	} else {
-		// No nodes found and no issues - but still try fallback once to be sure
-		// (This handles the case where nodes exist but aren't in the index)
-	}
+	// If we got here, we hit maxAttempts (usually because the underlying pending index
+	// is dominated by other namespaces). Fall back to scanning only this namespace.
 
 	// Fallback: scan all nodes in this namespace
 	nodes, err := n.AllNodes()

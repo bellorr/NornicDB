@@ -1579,7 +1579,7 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 
 	// Set DatabaseManager for system commands (CREATE/DROP/SHOW DATABASE)
 	// Wrap DatabaseManager to implement the interface expected by executor
-	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager})
+	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db})
 
 	return executor, nil
 }
@@ -1588,6 +1588,7 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 // cypher.DatabaseManagerInterface, avoiding import cycles.
 type databaseManagerAdapter struct {
 	manager *multidb.DatabaseManager
+	db      *nornicdb.DB
 }
 
 func (a *databaseManagerAdapter) CreateDatabase(name string) error {
@@ -1595,7 +1596,14 @@ func (a *databaseManagerAdapter) CreateDatabase(name string) error {
 }
 
 func (a *databaseManagerAdapter) DropDatabase(name string) error {
-	return a.manager.DropDatabase(name)
+	if err := a.manager.DropDatabase(name); err != nil {
+		return err
+	}
+	if a.db != nil {
+		a.db.ResetSearchService(name)
+		a.db.ResetInferenceService(name)
+	}
+	return nil
 }
 
 func (a *databaseManagerAdapter) ListDatabases() []cypher.DatabaseInfoInterface {
@@ -2890,22 +2898,18 @@ func (s *Server) handleSearchRebuild(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Invalidate cache and rebuild from scratch
-	s.searchServicesMu.Lock()
-	delete(s.searchServices, dbName)
-	s.searchServicesMu.Unlock()
+	s.db.ResetSearchService(dbName)
 
-	// Create fresh service and build indexes
-	searchSvc := search.NewServiceWithDimensions(storageEngine, s.db.VectorIndexDimensions())
-	err = searchSvc.BuildIndexes(r.Context())
+	searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine)
 	if err != nil {
 		s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.DatabaseError.General.UnknownError", err.Error())
 		return
 	}
 
-	// Cache the rebuilt service
-	s.searchServicesMu.Lock()
-	s.searchServices[dbName] = searchSvc
-	s.searchServicesMu.Unlock()
+	if err := searchSvc.BuildIndexes(r.Context()); err != nil {
+		s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.DatabaseError.General.UnknownError", err.Error())
+		return
+	}
 
 	response := map[string]interface{}{
 		"success":  true,
@@ -2918,27 +2922,8 @@ func (s *Server) handleSearchRebuild(w http.ResponseWriter, r *http.Request) {
 // getOrCreateSearchService returns a cached search service for the database,
 // creating and caching it if it doesn't exist. Search services are namespace-aware
 // because they're built from NamespacedEngine which automatically filters nodes.
-func (s *Server) getOrCreateSearchService(dbName string, storageEngine storage.Engine) *search.Service {
-	s.searchServicesMu.RLock()
-	if svc, exists := s.searchServices[dbName]; exists {
-		s.searchServicesMu.RUnlock()
-		return svc
-	}
-	s.searchServicesMu.RUnlock()
-
-	// Create new service (double-checked locking pattern)
-	s.searchServicesMu.Lock()
-	defer s.searchServicesMu.Unlock()
-
-	// Check again in case another goroutine created it
-	if svc, exists := s.searchServices[dbName]; exists {
-		return svc
-	}
-
-	// Create and cache new service
-	svc := search.NewServiceWithDimensions(storageEngine, s.db.VectorIndexDimensions())
-	s.searchServices[dbName] = svc
-	return svc
+func (s *Server) getOrCreateSearchService(dbName string, storageEngine storage.Engine) (*search.Service, error) {
+	return s.db.GetOrCreateSearchService(dbName, storageEngine)
 }
 
 // =============================================================================
@@ -3830,7 +3815,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Search services are cached per database since indexes are namespace-aware
 	// (the storage engine already filters to the correct namespace)
 	ctx := r.Context()
-	searchSvc := s.getOrCreateSearchService(dbName, storageEngine)
+	searchSvc, err := s.getOrCreateSearchService(dbName, storageEngine)
+	if err != nil {
+		s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
+		return
+	}
 
 	// Build indexes if needed (only on first use or after rebuild)
 	if searchSvc.EmbeddingCount() == 0 {

@@ -2720,6 +2720,41 @@ func (b *BadgerEngine) NodeCount() (int64, error) {
 	return count, nil
 }
 
+// NodeCountByPrefix counts nodes whose NodeID begins with the provided prefix.
+// The prefix refers to the NodeID string prefix (e.g., database namespace "nornic:").
+//
+// This is an optional fast-path used by NamespacedEngine to provide accurate
+// per-database counts without decoding values.
+func (b *BadgerEngine) NodeCountByPrefix(prefix string) (int64, error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return 0, ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	var count int64
+	err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false // key-only scan
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		keyPrefix := make([]byte, 0, 1+len(prefix))
+		keyPrefix = append(keyPrefix, prefixNode)
+		keyPrefix = append(keyPrefix, []byte(prefix)...)
+
+		for it.Seek(keyPrefix); it.ValidForPrefix(keyPrefix); it.Next() {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return count, nil
+}
+
 // EdgeCount returns the total number of valid, decodable edges.
 // This is consistent with AllEdges() - only counts edges that can be successfully decoded.
 func (b *BadgerEngine) EdgeCount() (int64, error) {
@@ -2753,6 +2788,38 @@ func (b *BadgerEngine) EdgeCount() (int64, error) {
 	// Sync the atomic counter with reality
 	b.edgeCount.Store(count)
 
+	return count, nil
+}
+
+// EdgeCountByPrefix counts edges whose EdgeID begins with the provided prefix.
+// The prefix refers to the EdgeID string prefix (e.g., database namespace "nornic:").
+func (b *BadgerEngine) EdgeCountByPrefix(prefix string) (int64, error) {
+	b.mu.RLock()
+	if b.closed {
+		b.mu.RUnlock()
+		return 0, ErrStorageClosed
+	}
+	b.mu.RUnlock()
+
+	var count int64
+	err := b.db.View(func(txn *badger.Txn) error {
+		opts := badger.DefaultIteratorOptions
+		opts.PrefetchValues = false // key-only scan
+		it := txn.NewIterator(opts)
+		defer it.Close()
+
+		keyPrefix := make([]byte, 0, 1+len(prefix))
+		keyPrefix = append(keyPrefix, prefixEdge)
+		keyPrefix = append(keyPrefix, []byte(prefix)...)
+
+		for it.Seek(keyPrefix); it.ValidForPrefix(keyPrefix); it.Next() {
+			count++
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
 	return count, nil
 }
 

@@ -2798,6 +2798,11 @@ func (w *WALEngine) UpdateNodeEmbedding(node *Node) error {
 			return fmt.Errorf("wal: failed to log update_embedding: %w", err)
 		}
 	}
+	// Prefer the embedding-only update path on the wrapped engine (e.g., AsyncEngine)
+	// so we don't accidentally treat embedding updates as creates in pending caches.
+	if embedUpdater, ok := w.engine.(interface{ UpdateNodeEmbedding(*Node) error }); ok {
+		return embedUpdater.UpdateNodeEmbedding(node)
+	}
 	return w.engine.UpdateNode(node)
 }
 
@@ -3048,9 +3053,69 @@ func (w *WALEngine) NodeCount() (int64, error) {
 	return w.engine.NodeCount()
 }
 
+func (w *WALEngine) NodeCountByPrefix(prefix string) (int64, error) {
+	if stats, ok := w.engine.(PrefixStatsEngine); ok {
+		return stats.NodeCountByPrefix(prefix)
+	}
+
+	// Correctness fallback (slower).
+	if streamer, ok := w.engine.(StreamingEngine); ok {
+		var count int64
+		err := streamer.StreamNodes(context.Background(), func(node *Node) error {
+			if strings.HasPrefix(string(node.ID), prefix) {
+				count++
+			}
+			return nil
+		})
+		return count, err
+	}
+
+	nodes, err := w.engine.AllNodes()
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, node := range nodes {
+		if strings.HasPrefix(string(node.ID), prefix) {
+			count++
+		}
+	}
+	return count, nil
+}
+
 // EdgeCount delegates to underlying engine.
 func (w *WALEngine) EdgeCount() (int64, error) {
 	return w.engine.EdgeCount()
+}
+
+func (w *WALEngine) EdgeCountByPrefix(prefix string) (int64, error) {
+	if stats, ok := w.engine.(PrefixStatsEngine); ok {
+		return stats.EdgeCountByPrefix(prefix)
+	}
+
+	// Correctness fallback (slower).
+	if streamer, ok := w.engine.(StreamingEngine); ok {
+		var count int64
+		err := streamer.StreamEdges(context.Background(), func(edge *Edge) error {
+			if strings.HasPrefix(string(edge.ID), prefix) {
+				count++
+			}
+			return nil
+		})
+		return count, err
+	}
+
+	edges, err := w.engine.AllEdges()
+	if err != nil {
+		return 0, err
+	}
+	var count int64
+	for _, edge := range edges {
+		if strings.HasPrefix(string(edge.ID), prefix) {
+			count++
+		}
+	}
+	return count, nil
 }
 
 // Close closes both the WAL and underlying engine.

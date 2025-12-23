@@ -126,7 +126,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,6 +137,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher"
@@ -149,7 +149,6 @@ import (
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/temporal"
 )
 
 // Errors returned by DB operations.
@@ -442,12 +441,18 @@ type DB struct {
 	baseStorage    storage.Engine // Underlying storage chain (must be closed to release Badger/WAL locks)
 	wal            *storage.WAL   // Write-ahead log for durability
 	decay          *decay.Manager
-	inference      *inference.Engine
 	cypherExecutor *cypher.StorageExecutor
 	gpuManager     interface{} // *gpu.Manager - interface to avoid circular import
 
-	// Search service (uses pre-computed embeddings from Mimir)
-	searchService *search.Service
+	// Search services (per database) using pre-computed embeddings.
+	embeddingDims       int     // Effective vector index dimensions in use
+	searchMinSimilarity float64 // Default MinSimilarity threshold for search
+	searchServicesMu sync.RWMutex
+	searchServices   map[string]*dbSearchService
+
+	// Per-database inference engines (topology, Kalman, etc.).
+	inferenceServicesMu sync.RWMutex
+	inferenceServices   map[string]*inference.Engine
 
 	// Async embedding queue for auto-generating embeddings
 	embedQueue        *EmbedQueue
@@ -954,47 +959,10 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Initialize inference engine
 	if config.AutoLinksEnabled {
-		inferConfig := &inference.Config{
-			SimilarityThreshold: config.AutoLinksSimilarityThreshold,
-			SimilarityTopK:      10,
-			CoAccessEnabled:     true,
-			CoAccessWindow:      config.AutoLinksCoAccessWindow,
-			CoAccessMinCount:    3,
-			TransitiveEnabled:   true,
-			TransitiveMinConf:   0.5,
-		}
-		db.inference = inference.New(inferConfig)
-
-		// Wire up TopologyIntegration if Auto-TLP (Temporal Link Prediction) feature flag is enabled
-		// This enables automatic relationship creation based on similarity, co-access, etc.
-		// Note: Manual TLP via Cypher (CALL gds.linkPrediction.*) is always available
-		if featureflags.IsAutoTLPEnabled() {
-			topoConfig := inference.DefaultTopologyConfig()
-			topoConfig.Enabled = true
-			topoConfig.Algorithm = "adamic_adar" // Best for social/knowledge graphs
-			topoConfig.Weight = 0.4              // 40% topology, 60% semantic
-			topoConfig.MinScore = 0.3
-			topoConfig.GraphRefreshInterval = 100 // Rebuild every 100 predictions
-
-			topo := inference.NewTopologyIntegration(db.storage, topoConfig)
-			db.inference.SetTopologyIntegration(topo)
-			fmt.Println("✅ Auto-TLP enabled (NORNICDB_AUTO_TLP_ENABLED=true)")
-		}
-
-		// Wire up KalmanAdapter if feature flag is enabled
-		// This enables Kalman-smoothed confidence and temporal pattern tracking
-		// Note: Base inference works without this - it's an enhancement
-		if featureflags.IsKalmanEnabled() {
-			kalmanConfig := inference.DefaultKalmanAdapterConfig()
-			kalmanAdapter := inference.NewKalmanAdapter(db.inference, kalmanConfig)
-
-			// Create temporal tracker for access pattern analysis
-			trackerConfig := temporal.DefaultConfig()
-			tracker := temporal.NewTracker(trackerConfig)
-			kalmanAdapter.SetTracker(tracker)
-
-			db.inference.SetKalmanAdapter(kalmanAdapter)
-			fmt.Println("✅ Kalman filtering enabled (NORNICDB_KALMAN_ENABLED=true)")
+		db.inferenceServices = make(map[string]*inference.Engine)
+		// Eagerly create default DB inference for parity with prior behavior.
+		if _, err := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage); err != nil {
+			return nil, fmt.Errorf("init inference: %w", err)
 		}
 	}
 
@@ -1010,32 +978,25 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
 	}
 
-	// Initialize search service with configured embedding dimensions
-	// This must match the embedding model's output dimensions (e.g., 512 for Apple Intelligence, 1024 for bge-m3)
+	// Initialize search service config (per-database services are created lazily).
 	embeddingDims := config.EmbeddingDimensions
 	if embeddingDims <= 0 {
 		embeddingDims = 1024 // Default for bge-m3 / mxbai-embed-large
 	}
-	db.searchService = search.NewServiceWithDimensions(db.storage, embeddingDims)
-	log.Printf("🔍 Search service initialized with %d-dimension vector index", embeddingDims)
-
-	// Configure search MinSimilarity threshold from config
-	// Apple Intelligence embeddings produce scores in 0.2-0.8 range, bge-m3/mxbai produce 0.7-0.99
-	// Always set this - 0.0 is a valid value meaning "no filtering"
-	db.searchService.SetDefaultMinSimilarity(config.SearchMinSimilarity)
-	log.Printf("🔍 Search MinSimilarity threshold set to %.2f", config.SearchMinSimilarity)
+	db.embeddingDims = embeddingDims
+	db.searchMinSimilarity = config.SearchMinSimilarity
+	db.searchServices = make(map[string]*dbSearchService)
+	log.Printf("🔍 Search services enabled (lazy per-database init, %d-dimension vector index)", embeddingDims)
 
 	// Wire up storage event callbacks to keep search indexes synchronized
 	// Storage is the single source of truth - it notifies when changes happen
 	// The storage chain can be: AsyncEngine -> WALEngine -> BadgerEngine
 	var underlyingEngine storage.Engine = db.storage
-	namespacePrefix := ""
 
 	// Unwrap NamespacedEngine first so we can:
 	//  1) Reach the underlying engine that emits events (BadgerEngine)
-	//  2) Filter/unprefix events to this DB's namespace for search indexing
+	//  2) Receive events with fully-qualified node IDs (<db>:<id>)
 	if namespacedEngine, ok := underlyingEngine.(*storage.NamespacedEngine); ok {
-		namespacePrefix = namespacedEngine.Namespace() + ":"
 		underlyingEngine = namespacedEngine.GetInnerEngine()
 	}
 
@@ -1051,91 +1012,39 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Set callbacks on the actual storage engine (BadgerEngine which implements StorageEventNotifier)
 	if notifier, ok := underlyingEngine.(storage.StorageEventNotifier); ok {
-		unprefixNodeID := func(id storage.NodeID) storage.NodeID {
-			if namespacePrefix == "" {
-				return id
-			}
-			s := string(id)
-			if strings.HasPrefix(s, namespacePrefix) {
-				return storage.NodeID(strings.TrimPrefix(s, namespacePrefix))
-			}
-			return id
-		}
-
-		filterInNamespace := func(id storage.NodeID) bool {
-			if namespacePrefix == "" {
-				return true
-			}
-			return strings.HasPrefix(string(id), namespacePrefix)
-		}
-
-		// When a node is created, automatically index it for search
-		notifier.OnNodeCreated(func(node *storage.Node) {
-			if node == nil || !filterInNamespace(node.ID) {
-				return
-			}
-			userNode := storage.CopyNode(node)
-			userNode.ID = unprefixNodeID(userNode.ID)
-			if err := db.searchService.IndexNode(userNode); err != nil {
-				// Log but don't fail - search indexing is best-effort
-				fmt.Printf("⚠️  Failed to index node %s: %v\n", node.ID, err)
-			}
-		})
-
-		// When a node is updated, re-index it for search
-		notifier.OnNodeUpdated(func(node *storage.Node) {
-			if node == nil || !filterInNamespace(node.ID) {
-				return
-			}
-			userNode := storage.CopyNode(node)
-			userNode.ID = unprefixNodeID(userNode.ID)
-			if err := db.searchService.IndexNode(userNode); err != nil {
-				fmt.Printf("⚠️  Failed to re-index node %s: %v\n", node.ID, err)
-			}
-		})
-
-		// When a node is deleted, remove it from search indexes
-		notifier.OnNodeDeleted(func(nodeID storage.NodeID) {
-			if !filterInNamespace(nodeID) {
-				return
-			}
-			userID := unprefixNodeID(nodeID)
-			if err := db.searchService.RemoveNode(userID); err != nil {
-				fmt.Printf("⚠️  Failed to remove node %s from search indexes: %v\n", nodeID, err)
-			}
-		})
+		// When a node is created/updated/deleted, route the event to the correct
+		// per-database search service based on the namespace prefix (<db>:<id>).
+		notifier.OnNodeCreated(func(node *storage.Node) { db.indexNodeFromEvent(node) })
+		notifier.OnNodeUpdated(func(node *storage.Node) { db.indexNodeFromEvent(node) })
+		notifier.OnNodeDeleted(func(nodeID storage.NodeID) { db.removeNodeFromEvent(nodeID) })
 	}
 
-	// Enable k-means clustering if feature flag is set
-	// This provides 10-50x speedup on large datasets (10K+ embeddings)
-	// Works with or without GPU (CPU fallback available)
+	// Enable k-means clustering if feature flag is set (applied lazily per database).
 	if featureflags.IsGPUClusteringEnabled() {
-		db.searchService.EnableClustering(nil, 100) // nil GPU manager = CPU-only
-		fmt.Println("🔬 K-means clustering enabled for accelerated semantic search")
+		fmt.Println("🔬 K-means clustering enabled (per-database, lazy init)")
 	}
 
 	// Note: Database encryption is now handled at the BadgerDB storage level (see above)
 	// When encryption is enabled, ALL data is encrypted at rest using AES-256.
 
-	// Build search indexes from existing data (including embeddings)
-	// This runs in background to not block startup
+	// Build search indexes for the default DB in background (other DBs are lazy).
+	defaultDBName := db.defaultDatabaseName()
 	db.bgWg.Add(1)
 	go func() {
 		defer db.bgWg.Done()
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		if err := db.searchService.BuildIndexes(ctx); err != nil {
+		// EnsureSearchIndexesBuilt also lazily creates the per-DB service entry.
+		// Without this, the background build can run before the service is created
+		// (e.g., before any request hits EmbeddingCount/Search), leaving the vector
+		// index empty until a manual rebuild/regenerate happens.
+		if _, err := db.EnsureSearchIndexesBuilt(ctx, defaultDBName, db.storage); err != nil {
 			fmt.Printf("⚠️  Failed to build search indexes: %v\n", err)
 		} else {
 			fmt.Println("✅ Search indexes built from existing data")
 
 			// Trigger k-means clustering if enabled
-			if db.searchService.IsClusteringEnabled() {
-				if err := db.searchService.TriggerClustering(); err != nil {
-					// Don't fail - clustering is optional optimization
-					fmt.Printf("⚠️  K-means clustering skipped: %v\n", err)
-				}
-			}
+			db.runClusteringOnceAllDatabases()
 		}
 	}()
 
@@ -1157,6 +1066,12 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	if db.baseStorage == nil {
+		// baseStorage is required for correctness (it’s the only engine that can see all namespaces).
+		// If this ever happens, initialization order is broken.
+		panic("nornicdb: baseStorage is nil in SetEmbedder")
+	}
+
 	// Share embedder with Cypher executor for server-side query embedding
 	// This enables: CALL db.index.vector.queryNodes('idx', 10, 'search text')
 	if db.cypherExecutor != nil {
@@ -1171,17 +1086,15 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 		return
 	}
 
-	// Create embed queue - worker will wait if embedder not ready yet
-	db.embedQueue = NewEmbedQueue(embedder, db.storage, db.embedWorkerConfig)
+	// Create embed queue against the un-namespaced base storage so it can pull work
+	// from ALL databases (node IDs are fully-qualified, e.g. "nornic:<id>").
+	db.embedQueue = NewEmbedQueue(embedder, db.baseStorage, db.embedWorkerConfig)
+
 	// Set callback to update search index after embedding.
 	// Note: IndexNode is idempotent (uses map keyed by node ID), so if the storage
 	// OnNodeUpdated callback also calls IndexNode, no double-counting occurs.
 	db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
-		if db.searchService != nil {
-			if err := db.searchService.IndexNode(node); err != nil {
-				log.Printf("⚠️ Failed to index embedded node %s: %v", node.ID, err)
-			}
-		}
+		db.indexNodeFromEvent(node)
 	})
 
 	// Start timer-based k-means clustering instead of trigger-based
@@ -1240,18 +1153,18 @@ type LoadResult struct {
 // BuildSearchIndexes builds the search indexes from loaded data.
 // Call this after loading data to enable search functionality.
 func (db *DB) BuildSearchIndexes(ctx context.Context) error {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	if db.closed {
+	db.mu.RLock()
+	closed := db.closed
+	db.mu.RUnlock()
+	if closed {
 		return ErrClosed
 	}
 
-	if db.searchService == nil {
-		return fmt.Errorf("search service not initialized")
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	if err != nil {
+		return err
 	}
-
-	return db.searchService.BuildIndexes(ctx)
+	return svc.BuildIndexes(ctx)
 }
 
 // GetStorage returns the namespaced storage engine for the default database.
@@ -1346,23 +1259,21 @@ func (db *DB) EmbedQueueStats() *QueueStats {
 // EmbeddingCount returns the total number of nodes with embeddings.
 // This is O(1) - the count is tracked by the vector index.
 func (db *DB) EmbeddingCount() int {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	if db.searchService == nil {
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	if err != nil || svc == nil {
 		return 0
 	}
-	return db.searchService.EmbeddingCount()
+	return svc.EmbeddingCount()
 }
 
 // VectorIndexDimensions returns the actual dimensions of the search service's vector index.
 // This is useful for debugging dimension mismatches between config and runtime.
 func (db *DB) VectorIndexDimensions() int {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-	if db.searchService == nil {
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	if err != nil || svc == nil {
 		return 0
 	}
-	return db.searchService.VectorIndexDimensions()
+	return svc.VectorIndexDimensions()
 }
 
 // EmbedExisting triggers the worker to scan for nodes without embeddings.
@@ -1392,8 +1303,8 @@ func (db *DB) ResetEmbedWorker() error {
 func (db *DB) ClearAllEmbeddings() (int, error) {
 	// First, clear the search service's vector index
 	// This ensures EmbeddingCount() returns 0 immediately
-	if db.searchService != nil {
-		db.searchService.ClearVectorIndex()
+	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+		svc.ClearVectorIndex()
 	}
 
 	// Unwrap storage layers to find the BadgerEngine
@@ -1475,25 +1386,28 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 		return nil, fmt.Errorf("storing memory: %w", err)
 	}
 
-	// Run auto-relationship inference if enabled
-	if db.inference != nil && len(mem.ChunkEmbeddings) > 0 && len(mem.ChunkEmbeddings[0]) > 0 {
-		suggestions, err := db.inference.OnStore(ctx, mem.ID, mem.ChunkEmbeddings[0]) // Use first chunk for inference
-		if err == nil {
-			for _, suggestion := range suggestions {
-				edge := &storage.Edge{
-					ID:            storage.EdgeID(generateID("edge")),
-					StartNode:     storage.NodeID(suggestion.SourceID),
-					EndNode:       storage.NodeID(suggestion.TargetID),
-					Type:          suggestion.Type,
-					Confidence:    suggestion.Confidence,
-					AutoGenerated: true,
-					CreatedAt:     now,
-					Properties: map[string]any{
-						"reason": suggestion.Reason,
-						"method": suggestion.Method,
-					},
+	// Run auto-relationship inference if enabled (per-database, default DB here).
+	if len(mem.ChunkEmbeddings) > 0 && len(mem.ChunkEmbeddings[0]) > 0 {
+		inferEngine, _ := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage)
+		if inferEngine != nil {
+			suggestions, err := inferEngine.OnStore(ctx, mem.ID, mem.ChunkEmbeddings[0]) // Use first chunk for inference
+			if err == nil {
+				for _, suggestion := range suggestions {
+					edge := &storage.Edge{
+						ID:            storage.EdgeID(generateID("edge")),
+						StartNode:     storage.NodeID(suggestion.SourceID),
+						EndNode:       storage.NodeID(suggestion.TargetID),
+						Type:          suggestion.Type,
+						Confidence:    suggestion.Confidence,
+						AutoGenerated: true,
+						CreatedAt:     now,
+						Properties: map[string]any{
+							"reason": suggestion.Reason,
+							"method": suggestion.Method,
+						},
+					}
+					_ = db.storage.CreateEdge(edge) // Best effort
 				}
-				_ = db.storage.CreateEdge(edge) // Best effort
 			}
 		}
 	}
@@ -1635,8 +1549,8 @@ func (db *DB) Recall(ctx context.Context, id string) (*Memory, error) {
 	}
 
 	// Track access for co-access inference
-	if db.inference != nil {
-		db.inference.OnAccess(ctx, mem.ID)
+	if inferEngine, _ := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage); inferEngine != nil {
+		inferEngine.OnAccess(ctx, mem.ID)
 	}
 
 	return mem, nil
@@ -1864,8 +1778,8 @@ func (db *DB) Forget(ctx context.Context, id string) error {
 	}
 
 	// Remove from search indexes first (before storage deletion)
-	if db.searchService != nil {
-		_ = db.searchService.RemoveNode(storage.NodeID(id))
+	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+		_ = svc.RemoveNode(storage.NodeID(id))
 	}
 
 	// Delete the node (storage should handle edge cleanup)
@@ -1876,11 +1790,10 @@ func (db *DB) Forget(ctx context.Context, id string) error {
 	return nil
 }
 
-// generateID creates a unique ID with prefix.
+// generateID creates a unique UUID.
+// The prefix parameter is ignored for backward compatibility but UUIDs are used for all IDs.
 func generateID(prefix string) string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return prefix + "-" + hex.EncodeToString(b)
+	return uuid.New().String()
 }
 
 // memoryToNode converts a Memory to a storage.Node.
@@ -2031,11 +1944,18 @@ func (db *DB) SetGPUManager(manager interface{}) {
 	defer db.mu.Unlock()
 	db.gpuManager = manager
 
-	// If clustering is enabled and GPU manager is provided, upgrade to GPU-accelerated
-	if manager != nil && db.searchService != nil && featureflags.IsGPUClusteringEnabled() {
+	// If clustering is enabled and GPU manager is provided, upgrade all cached
+	// per-database search services to GPU-accelerated mode.
+	if manager != nil && featureflags.IsGPUClusteringEnabled() {
 		if gpuMgr, ok := manager.(*gpu.Manager); ok {
-			db.searchService.EnableClustering(gpuMgr, 100)
-			fmt.Println("🚀 K-means clustering upgraded to GPU-accelerated mode")
+			db.searchServicesMu.RLock()
+			for _, entry := range db.searchServices {
+				if entry != nil && entry.svc != nil && entry.svc.IsClusteringEnabled() {
+					entry.svc.EnableClustering(gpuMgr, 100)
+				}
+			}
+			db.searchServicesMu.RUnlock()
+			fmt.Println("🚀 K-means clustering upgraded to GPU-accelerated mode (all databases)")
 		}
 	}
 }
@@ -2053,17 +1973,18 @@ func (db *DB) GetGPUManager() interface{} {
 // Returns nil if clustering is not enabled or there are too few embeddings.
 func (db *DB) TriggerSearchClustering() error {
 	db.mu.RLock()
-	defer db.mu.RUnlock()
+	closed := db.closed
+	db.mu.RUnlock()
+	if closed {
+		return ErrClosed
+	}
 
-	if db.searchService == nil {
+	if !featureflags.IsGPUClusteringEnabled() {
 		return nil
 	}
 
-	if !db.searchService.IsClusteringEnabled() {
-		return nil
-	}
-
-	return db.searchService.TriggerClustering()
+	db.runClusteringOnceAllDatabases()
+	return nil
 }
 
 // startClusteringTimer starts a background timer that runs k-means clustering
@@ -2079,26 +2000,8 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 		defer db.bgWg.Done()
 		log.Printf("🔬 K-means clustering timer started (interval: %v)", interval)
 
-		// Helper to run clustering
-		runClustering := func() {
-			if db.searchService != nil && db.searchService.IsClusteringEnabled() {
-				currentCount := db.searchService.EmbeddingCount()
-				// Skip if no new embeddings since last clustering
-				if currentCount == db.lastClusteredEmbedCount && db.lastClusteredEmbedCount > 0 {
-					return // No changes, skip
-				}
-
-				if err := db.searchService.TriggerClustering(); err != nil {
-					log.Printf("⚠️  K-means clustering skipped: %v", err)
-				} else {
-					db.lastClusteredEmbedCount = currentCount
-					log.Printf("🔬 K-means clustering completed (%d embeddings)", currentCount)
-				}
-			}
-		}
-
 		// Run immediately on startup
-		runClustering()
+		db.runClusteringOnceAllDatabases()
 
 		// Then run on timer
 		for {
@@ -2107,7 +2010,7 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 				log.Printf("🔬 K-means clustering timer stopped")
 				return
 			case <-db.clusterTicker.C:
-				runClustering()
+				db.runClusteringOnceAllDatabases()
 			}
 		}
 	}()
@@ -2134,19 +2037,17 @@ type SearchStats struct {
 
 // GetSearchStats returns search service statistics including clustering info.
 func (db *DB) GetSearchStats() *SearchStats {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
-	if db.searchService == nil {
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	if err != nil || svc == nil {
 		return nil
 	}
 
 	stats := &SearchStats{
-		EmbeddingCount:    db.searchService.EmbeddingCount(),
-		ClusteringEnabled: db.searchService.IsClusteringEnabled(),
+		EmbeddingCount:    svc.EmbeddingCount(),
+		ClusteringEnabled: svc.IsClusteringEnabled(),
 	}
 
-	if clusterStats := db.searchService.ClusterStats(); clusterStats != nil {
+	if clusterStats := svc.ClusterStats(); clusterStats != nil {
 		stats.IsClustered = clusterStats.Clustered
 		stats.NumClusters = clusterStats.NumClusters
 		stats.AvgClusterSize = clusterStats.AvgClusterSize
@@ -2534,10 +2435,10 @@ func (db *DB) CreateNode(ctx context.Context, labels []string, properties map[st
 		db.embedQueue.Enqueue(string(actualID))
 	}
 
-	// Update search indexes (live indexing for seamless Mimir compatibility)
-	if db.searchService != nil {
-		_ = db.searchService.IndexNode(node) // Best effort - search may lag behind writes
-	}
+		// Update search indexes (live indexing for seamless Mimir compatibility)
+		if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+			_ = svc.IndexNode(node) // Best effort - search may lag behind writes
+		}
 
 	return &Node{
 		ID:         id,
@@ -2589,8 +2490,8 @@ func (db *DB) UpdateNode(ctx context.Context, id string, properties map[string]i
 	}, nil
 }
 
-// DeleteNode deletes a node.
-func (db *DB) DeleteNode(ctx context.Context, id string) error {
+	// DeleteNode deletes a node.
+	func (db *DB) DeleteNode(ctx context.Context, id string) error {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
@@ -2599,8 +2500,8 @@ func (db *DB) DeleteNode(ctx context.Context, id string) error {
 	}
 
 	// Remove from search indexes first (before storage deletion)
-	if db.searchService != nil {
-		_ = db.searchService.RemoveNode(storage.NodeID(id))
+	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+		_ = svc.RemoveNode(storage.NodeID(id))
 	}
 
 	return db.storage.DeleteNode(storage.NodeID(id))
@@ -2813,7 +2714,8 @@ func (db *DB) Search(ctx context.Context, query string, labels []string, limit i
 		return nil, ErrClosed
 	}
 
-	if db.searchService == nil {
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	if err != nil || svc == nil {
 		return nil, fmt.Errorf("search service not initialized")
 	}
 
@@ -2826,7 +2728,7 @@ func (db *DB) Search(ctx context.Context, query string, labels []string, limit i
 
 	// Full-text search only (no embedding generation)
 	// For hybrid search, Mimir should call VectorSearch with pre-computed embedding
-	response, err := db.searchService.Search(ctx, query, nil, opts)
+	response, err := svc.Search(ctx, query, nil, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -2861,7 +2763,8 @@ func (db *DB) HybridSearch(ctx context.Context, query string, queryEmbedding []f
 		return nil, ErrClosed
 	}
 
-	if db.searchService == nil {
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	if err != nil || svc == nil {
 		return nil, fmt.Errorf("search service not initialized")
 	}
 
@@ -2873,7 +2776,7 @@ func (db *DB) HybridSearch(ctx context.Context, query string, queryEmbedding []f
 	}
 
 	// Execute RRF hybrid search with Mimir's pre-computed embedding
-	response, err := db.searchService.Search(ctx, query, queryEmbedding, opts)
+	response, err := svc.Search(ctx, query, queryEmbedding, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -3211,8 +3114,8 @@ func (db *DB) Restore(ctx context.Context, path string) error {
 	}
 
 	// Rebuild search indexes
-	if db.searchService != nil {
-		if err := db.searchService.BuildIndexes(ctx); err != nil {
+	if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+		if err := svc.BuildIndexes(ctx); err != nil {
 			log.Printf("⚠️  Warning: failed to rebuild search indexes: %v", err)
 		}
 	}
@@ -3361,8 +3264,8 @@ func (db *DB) DeleteUserData(ctx context.Context, userID string) error {
 	// Now delete the collected nodes
 	for _, id := range toDelete {
 		// Remove from search indexes first (before storage deletion)
-		if db.searchService != nil {
-			_ = db.searchService.RemoveNode(id)
+		if svc, _ := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); svc != nil {
+			_ = svc.RemoveNode(id)
 		}
 		if err := db.storage.DeleteNode(id); err != nil {
 			return err
@@ -3382,7 +3285,7 @@ func (db *DB) AnonymizeUserData(ctx context.Context, userID string) error {
 		return ErrClosed
 	}
 
-	anonymousID := "anon-" + generateID("")
+	anonymousID := generateID("")
 
 	// Collect nodes to update (can't update while streaming in some engines)
 	// We must make copies since other goroutines might be iterating over these nodes

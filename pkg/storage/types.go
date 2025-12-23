@@ -411,6 +411,19 @@ type Engine interface {
 	DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error)
 }
 
+// PrefixStatsEngine is an optional extension interface that provides fast per-prefix
+// statistics without scanning and decoding all records.
+//
+// The prefix refers to the *ID prefix* (e.g., a database namespace prefix like "nornic:")
+// and is applied to stored NodeID/EdgeID values (not the internal key prefix bytes).
+//
+// This is primarily used by NamespacedEngine so that NodeCount/EdgeCount can remain fast
+// in multi-database deployments while still returning namespace-scoped results.
+type PrefixStatsEngine interface {
+	NodeCountByPrefix(prefix string) (int64, error)
+	EdgeCountByPrefix(prefix string) (int64, error)
+}
+
 // NodeEventCallback is called when storage operations complete successfully.
 // This allows external services (like search indexes) to stay synchronized with storage.
 type NodeEventCallback func(node *Node)

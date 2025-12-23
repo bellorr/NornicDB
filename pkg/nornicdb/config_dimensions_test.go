@@ -40,7 +40,9 @@ func TestDBSearchServiceDimensionsMatchConfig(t *testing.T) {
 			defer db.Close()
 
 			// Check the search service's vector index dimensions
-			actualDims := db.searchService.VectorIndexDimensions()
+			svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+			require.NoError(t, err)
+			actualDims := svc.VectorIndexDimensions()
 			t.Logf("Search service vector index dimensions: %d", actualDims)
 
 			assert.Equal(t, tt.expectedDims, actualDims,
@@ -73,7 +75,9 @@ func TestDBConfigVsServerConfigDimensions(t *testing.T) {
 	defer db.Close()
 
 	// Check search service dimensions (this is what does vector search)
-	searchServiceDims := db.searchService.VectorIndexDimensions()
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+	searchServiceDims := svc.VectorIndexDimensions()
 	t.Logf("Search service vector index dimensions: %d", searchServiceDims)
 
 	// Both should be 512
