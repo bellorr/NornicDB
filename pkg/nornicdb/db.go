@@ -992,6 +992,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Storage is the single source of truth - it notifies when changes happen
 	// The storage chain can be: AsyncEngine -> WALEngine -> BadgerEngine
 	var underlyingEngine storage.Engine = db.storage
+	var asyncNotifier storage.StorageEventNotifier
 
 	// Unwrap NamespacedEngine first so we can:
 	//  1) Reach the underlying engine that emits events (BadgerEngine)
@@ -1002,6 +1003,9 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Unwrap AsyncEngine if present
 	if asyncEngine, ok := underlyingEngine.(*storage.AsyncEngine); ok {
+		// Keep a reference to also receive cache-only delete notifications (pending creates).
+		// These deletes never hit the inner engine, so only the async layer can emit them.
+		asyncNotifier = asyncEngine
 		underlyingEngine = asyncEngine.GetEngine()
 	}
 
@@ -1017,6 +1021,13 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		notifier.OnNodeCreated(func(node *storage.Node) { db.indexNodeFromEvent(node) })
 		notifier.OnNodeUpdated(func(node *storage.Node) { db.indexNodeFromEvent(node) })
 		notifier.OnNodeDeleted(func(nodeID storage.NodeID) { db.removeNodeFromEvent(nodeID) })
+	}
+
+	// Also register for async-cache delete notifications if the async layer exists.
+	// This handles the case where a node is created and then deleted while still
+	// buffered in AsyncEngine (so the inner engine never emits a delete event).
+	if asyncNotifier != nil {
+		asyncNotifier.OnNodeDeleted(func(nodeID storage.NodeID) { db.removeNodeFromEvent(nodeID) })
 	}
 
 	// Enable k-means clustering if feature flag is set (applied lazily per database).

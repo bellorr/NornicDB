@@ -33,6 +33,17 @@ type AsyncEngine struct {
 	deleteEdges map[EdgeID]bool
 	mu          sync.RWMutex
 
+	// Event callbacks (optional): used to keep external services in sync when
+	// operations are satisfied purely from the async cache (i.e., no inner engine
+	// callback will fire because the data never hit persistent storage).
+	onNodeCreated NodeEventCallback
+	onNodeUpdated NodeEventCallback
+	onNodeDeleted NodeDeleteCallback
+	onEdgeCreated EdgeEventCallback
+	onEdgeUpdated EdgeEventCallback
+	onEdgeDeleted EdgeDeleteCallback
+	callbackMu    sync.RWMutex
+
 	// In-flight tracking: nodes/edges being written but not yet cleared from cache
 	// This prevents double-counting in NodeCount/EdgeCount during flush
 	inFlightNodes map[NodeID]bool
@@ -60,6 +71,57 @@ type AsyncEngine struct {
 
 	// Flush mutex prevents concurrent flushes (race condition fix)
 	flushMu sync.RWMutex
+}
+
+// OnNodeCreated sets a callback to be invoked when nodes are created.
+func (ae *AsyncEngine) OnNodeCreated(callback NodeEventCallback) {
+	ae.callbackMu.Lock()
+	defer ae.callbackMu.Unlock()
+	ae.onNodeCreated = callback
+}
+
+// OnNodeUpdated sets a callback to be invoked when nodes are updated.
+func (ae *AsyncEngine) OnNodeUpdated(callback NodeEventCallback) {
+	ae.callbackMu.Lock()
+	defer ae.callbackMu.Unlock()
+	ae.onNodeUpdated = callback
+}
+
+// OnNodeDeleted sets a callback to be invoked when nodes are deleted.
+func (ae *AsyncEngine) OnNodeDeleted(callback NodeDeleteCallback) {
+	ae.callbackMu.Lock()
+	defer ae.callbackMu.Unlock()
+	ae.onNodeDeleted = callback
+}
+
+// OnEdgeCreated sets a callback to be invoked when edges are created.
+func (ae *AsyncEngine) OnEdgeCreated(callback EdgeEventCallback) {
+	ae.callbackMu.Lock()
+	defer ae.callbackMu.Unlock()
+	ae.onEdgeCreated = callback
+}
+
+// OnEdgeUpdated sets a callback to be invoked when edges are updated.
+func (ae *AsyncEngine) OnEdgeUpdated(callback EdgeEventCallback) {
+	ae.callbackMu.Lock()
+	defer ae.callbackMu.Unlock()
+	ae.onEdgeUpdated = callback
+}
+
+// OnEdgeDeleted sets a callback to be invoked when edges are deleted.
+func (ae *AsyncEngine) OnEdgeDeleted(callback EdgeDeleteCallback) {
+	ae.callbackMu.Lock()
+	defer ae.callbackMu.Unlock()
+	ae.onEdgeDeleted = callback
+}
+
+func (ae *AsyncEngine) notifyNodeDeleted(nodeID NodeID) {
+	ae.callbackMu.RLock()
+	callback := ae.onNodeDeleted
+	ae.callbackMu.RUnlock()
+	if callback != nil {
+		callback(nodeID)
+	}
 }
 
 // AsyncEngineConfig configures the async engine behavior.
@@ -504,6 +566,12 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 
 	// Check if node was created in this transaction (still in cache)
 	if node, existsInCache := ae.nodeCache[id]; existsInCache {
+		// If this is a pending CREATE (not an update of an existing node), deleting it
+		// will never hit the inner engine, so no inner OnNodeDeleted callback will fire.
+		// Emit a best-effort delete notification so external services (search indexes,
+		// embedding counts) can drop any speculative state for this node.
+		isPendingCreate := !ae.updateNodes[id]
+
 		// Remove from label index
 		for _, label := range node.Labels {
 			normalLabel := strings.ToLower(label)
@@ -519,6 +587,10 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 		if isInFlight {
 			ae.deleteNodes[id] = true
 			ae.pendingWrites++
+		}
+
+		if isPendingCreate {
+			ae.notifyNodeDeleted(id)
 		}
 		return nil
 	}
@@ -1383,6 +1455,11 @@ func (ae *AsyncEngine) BulkDeleteNodes(ids []NodeID) error {
 	defer ae.mu.Unlock()
 
 	for _, id := range ids {
+		// If this is a pending create in cache, deleting it won’t hit the inner engine.
+		// Notify best-effort so external services can remove any speculative indexes.
+		if _, ok := ae.nodeCache[id]; ok && !ae.updateNodes[id] {
+			ae.notifyNodeDeleted(id)
+		}
 		delete(ae.nodeCache, id)
 		ae.deleteNodes[id] = true
 	}
