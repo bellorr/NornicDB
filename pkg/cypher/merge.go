@@ -1177,45 +1177,6 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 				nodeContext[varName] = mergedNode
 				result.Stats.NodesCreated++ // May be 0 if node existed
 			}
-		} else if strings.HasPrefix(upperSeg, "MATCH") {
-			// MATCH segment: MATCH (var:Label {props}) [MERGE (e)-[:REL]->(var)]
-			if chainBroken {
-				// Chain already broken, skip this segment
-				continue
-			}
-
-			matchedNode, matchVarName, err := e.executeMatchSegment(ctx, segment, nodeContext)
-			if err != nil {
-				// MATCH error - chain breaks
-				chainBroken = true
-				continue
-			}
-
-			if matchedNode == nil {
-				// MATCH found nothing - chain breaks
-				chainBroken = true
-				continue
-			}
-
-			// Add matched node to context
-			if matchVarName != "" {
-				nodeContext[matchVarName] = matchedNode
-			}
-
-			// Check for MERGE relationship in this segment
-			mergeIdx := findKeywordIndex(segment, "MERGE")
-			if mergeIdx > 0 {
-				mergePart := strings.TrimSpace(segment[mergeIdx+5:])
-				if strings.Contains(mergePart, "-[") || strings.Contains(mergePart, "]-") {
-					// This is a relationship MERGE
-					err := e.executeMergeRelSegment(ctx, mergePart, nodeContext)
-					if err != nil {
-						// Log but don't fail - relationship might already exist
-					} else {
-						result.Stats.RelationshipsCreated++
-					}
-				}
-			}
 		} else if strings.HasPrefix(upperSeg, "RETURN") {
 			// RETURN segment: build final result
 			if chainBroken {
@@ -1247,10 +1208,222 @@ func (e *StorageExecutor) executeMergeWithChain(ctx context.Context, cypher stri
 				row[i] = e.evaluateExpressionWithContext(item.expr, nodeContext, relContext)
 			}
 			result.Rows = append(result.Rows, row)
+		} else {
+			// Segment after WITH: starts with a WITH projection (e.g., "e") followed by one or more clauses.
+			// Example:
+			//   WITH e
+			//   OPTIONAL MATCH (a:TypeA {name: 'A1'})
+			//   FOREACH (...)
+			//
+			// We apply WITH semantics by filtering context to only passed variables, then execute clauses in order.
+
+			segmentNodeCtx := nodeContext
+			segmentRelCtx := relContext
+
+			remaining, newNodeCtx, newRelCtx := e.applyWithProjection(segment, segmentNodeCtx, segmentRelCtx)
+			segmentNodeCtx = newNodeCtx
+			segmentRelCtx = newRelCtx
+
+			clauses := splitMergeChainClauseBlock(remaining)
+			for _, clause := range clauses {
+				if strings.TrimSpace(clause) == "" {
+					continue
+				}
+				upperClause := strings.ToUpper(strings.TrimSpace(clause))
+
+				// If chain is broken, we must still allow the final RETURN segment to produce 0 rows
+				// (handled above), but all intermediate updates/clauses are skipped.
+				if chainBroken {
+					continue
+				}
+
+				switch {
+				case strings.HasPrefix(upperClause, "OPTIONAL MATCH"):
+					matchedNode, matchVarName, err := e.executeMatchSegment(ctx, clause, segmentNodeCtx)
+					if err != nil {
+						// OPTIONAL MATCH errors still break execution (Neo4j would error)
+						return nil, err
+					}
+					if matchVarName != "" {
+						segmentNodeCtx[matchVarName] = matchedNode // may be nil
+					}
+				case strings.HasPrefix(upperClause, "MATCH"):
+					matchedNode, matchVarName, err := e.executeMatchSegment(ctx, clause, segmentNodeCtx)
+					if err != nil {
+						chainBroken = true
+						continue
+					}
+					if matchedNode == nil {
+						chainBroken = true
+						continue
+					}
+					if matchVarName != "" {
+						segmentNodeCtx[matchVarName] = matchedNode
+					}
+
+					// Check for MERGE relationship in this clause (MATCH ... MERGE ...)
+					mergeIdx := findKeywordIndex(clause, "MERGE")
+					if mergeIdx > 0 {
+						mergePart := strings.TrimSpace(clause[mergeIdx+5:])
+						if strings.Contains(mergePart, "-[") || strings.Contains(mergePart, "]-") {
+							err := e.executeMergeRelSegment(ctx, mergePart, segmentNodeCtx)
+							if err == nil {
+								result.Stats.RelationshipsCreated++
+							}
+						}
+					}
+				case strings.HasPrefix(upperClause, "FOREACH"):
+					_, err := e.executeForeachWithContext(ctx, clause, segmentNodeCtx, segmentRelCtx)
+					if err != nil {
+						return nil, err
+					}
+				}
+			}
+
+			// Persist segment context back to main context for subsequent segments.
+			nodeContext = segmentNodeCtx
+			relContext = segmentRelCtx
 		}
 	}
 
 	return result, nil
+}
+
+// applyWithProjection applies WITH semantics to a MERGE chain segment.
+//
+// The input segment is the text between "WITH" and the next "WITH"/"RETURN",
+// i.e. it starts with a projection list (e.g., "e") followed by the next clause.
+// It returns the remaining clause block plus filtered contexts.
+func (e *StorageExecutor) applyWithProjection(segment string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge) (remaining string, newNodeCtx map[string]*storage.Node, newRelCtx map[string]*storage.Edge) {
+	segment = strings.TrimSpace(segment)
+	if segment == "" {
+		return "", nodeCtx, relCtx
+	}
+
+	keywords := []string{"OPTIONAL MATCH", "MATCH", "FOREACH", "RETURN"}
+	nextClausePos := -1
+	for _, kw := range keywords {
+		if idx := findKeywordIndex(segment, kw); idx >= 0 {
+			if nextClausePos == -1 || idx < nextClausePos {
+				nextClausePos = idx
+			}
+		}
+	}
+	if nextClausePos == -1 {
+		// No further clause keywords - treat entire segment as projection list.
+		nextClausePos = len(segment)
+	}
+
+	withPart := strings.TrimSpace(segment[:nextClausePos])
+	remaining = strings.TrimSpace(segment[nextClausePos:])
+
+	// WITH * keeps everything.
+	if strings.TrimSpace(withPart) == "*" {
+		return remaining, nodeCtx, relCtx
+	}
+
+	items := e.parseReturnItems(withPart)
+	if len(items) == 0 {
+		// If we can't parse, avoid dropping context.
+		return remaining, nodeCtx, relCtx
+	}
+
+	newNodeCtx = make(map[string]*storage.Node)
+	newRelCtx = make(map[string]*storage.Edge)
+	for _, item := range items {
+		name := strings.TrimSpace(item.expr)
+		if item.alias != "" {
+			name = strings.TrimSpace(item.alias)
+		}
+		if name == "" {
+			continue
+		}
+		if n, ok := nodeCtx[name]; ok {
+			newNodeCtx[name] = n
+		}
+		if r, ok := relCtx[name]; ok {
+			newRelCtx[name] = r
+		}
+	}
+
+	return remaining, newNodeCtx, newRelCtx
+}
+
+func splitMergeChainClauseBlock(block string) []string {
+	block = strings.TrimSpace(block)
+	if block == "" {
+		return nil
+	}
+
+	keywords := []string{"OPTIONAL MATCH", "MATCH", "FOREACH", "RETURN"}
+
+	// Find the first clause start at top level.
+	start := -1
+	for _, kw := range keywords {
+		if idx := findKeywordIndex(block, kw); idx >= 0 {
+			if start == -1 || idx < start {
+				start = idx
+			}
+		}
+	}
+	if start == -1 {
+		return []string{block}
+	}
+	if start > 0 {
+		block = strings.TrimSpace(block[start:])
+	}
+
+	var clauses []string
+	pos := 0
+	for pos < len(block) {
+		// Identify which keyword starts here.
+		var currentKw string
+		for _, kw := range keywords {
+			if findKeywordIndex(block[pos:], kw) == 0 {
+				currentKw = kw
+				break
+			}
+		}
+		if currentKw == "" {
+			// Skip unknown leading content until the next recognized keyword.
+			next := -1
+			for _, kw := range keywords {
+				if idx := findKeywordIndex(block[pos:], kw); idx > 0 {
+					if next == -1 || idx < next {
+						next = idx
+					}
+				}
+			}
+			if next == -1 {
+				clauses = append(clauses, strings.TrimSpace(block[pos:]))
+				break
+			}
+			pos += next
+			continue
+		}
+
+		// Find the next clause start.
+		searchFrom := pos + len(currentKw)
+		nextStart := -1
+		for _, kw := range keywords {
+			if idx := findKeywordIndex(block[searchFrom:], kw); idx >= 0 {
+				abs := searchFrom + idx
+				if abs > pos && (nextStart == -1 || abs < nextStart) {
+					nextStart = abs
+				}
+			}
+		}
+
+		if nextStart == -1 {
+			clauses = append(clauses, strings.TrimSpace(block[pos:]))
+			break
+		}
+
+		clauses = append(clauses, strings.TrimSpace(block[pos:nextStart]))
+		pos = nextStart
+	}
+
+	return clauses
 }
 
 // splitMergeChainSegments splits a MERGE...WITH...MATCH chain into segments.
@@ -1305,16 +1478,10 @@ func (e *StorageExecutor) splitMergeChainSegments(cypher string) []string {
 			endPos = len(cypher)
 		}
 
-		// The segment after WITH might start with the variable name, then MATCH
+		// Preserve everything after WITH so we can apply WITH semantics and execute
+		// OPTIONAL MATCH/FOREACH patterns inside the segment.
 		segmentContent := strings.TrimSpace(cypher[startPos:endPos])
-
-		// Skip the variable part after WITH (e.g., "WITH e" -> skip "e")
-		// Find where MATCH or RETURN starts
-		matchIdx := findKeywordIndex(segmentContent, "MATCH")
-		if matchIdx > 0 {
-			// Add the MATCH segment
-			segments = append(segments, strings.TrimSpace(segmentContent[matchIdx:]))
-		} else if matchIdx == 0 {
+		if segmentContent != "" {
 			segments = append(segments, segmentContent)
 		}
 	}

@@ -1724,8 +1724,17 @@ func (e *StorageExecutor) buildJoinedResult(rows []joinedRow, sourceVar, targetV
 
 // executeForeach handles FOREACH clause - iterate and perform updates
 func (e *StorageExecutor) executeForeach(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	upper := strings.ToUpper(cypher)
-	foreachIdx := strings.Index(upper, "FOREACH")
+	return e.executeForeachWithContext(ctx, cypher, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+}
+
+// executeForeachWithContext executes a FOREACH clause with access to existing variable bindings.
+//
+// This is required for Neo4j-compatible patterns like:
+//
+//	OPTIONAL MATCH (a:TypeA {name: 'A1'})
+//	FOREACH (x IN CASE WHEN a IS NOT NULL THEN [1] ELSE [] END | MERGE (e)-[:REL]->(a))
+func (e *StorageExecutor) executeForeachWithContext(ctx context.Context, cypher string, nodeCtx map[string]*storage.Node, relCtx map[string]*storage.Edge) (*ExecuteResult, error) {
+	foreachIdx := findKeywordIndex(cypher, "FOREACH")
 	if foreachIdx == -1 {
 		return nil, fmt.Errorf("FOREACH clause not found in query: %q", truncateQuery(cypher, 80))
 	}
@@ -1746,6 +1755,9 @@ func (e *StorageExecutor) executeForeach(ctx context.Context, cypher string) (*E
 		}
 		parenEnd++
 	}
+	if depth != 0 {
+		return nil, fmt.Errorf("FOREACH requires balanced parentheses")
+	}
 
 	inner := strings.TrimSpace(cypher[parenStart+1 : parenEnd-1])
 
@@ -1765,12 +1777,14 @@ func (e *StorageExecutor) executeForeach(ctx context.Context, cypher string) (*E
 	listExpr := strings.TrimSpace(remainder[:pipeIdx])
 	updateClause := strings.TrimSpace(remainder[pipeIdx+1:])
 
-	list := e.evaluateExpressionWithContext(listExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+	list := e.evaluateExpressionWithContext(listExpr, nodeCtx, relCtx)
 
 	var items []interface{}
 	switch v := list.(type) {
 	case []interface{}:
 		items = v
+	case nil:
+		items = nil
 	default:
 		items = []interface{}{list}
 	}
@@ -1782,11 +1796,29 @@ func (e *StorageExecutor) executeForeach(ctx context.Context, cypher string) (*E
 	}
 
 	for _, item := range items {
-		itemStr := e.valueToLiteral(item)
-		substituted := strings.ReplaceAll(updateClause, variable, itemStr)
+		substituted := strings.TrimSpace(replaceVariableInQuery(updateClause, variable, item))
+		if substituted == "" {
+			continue
+		}
 
-		updateResult, err := e.Execute(ctx, substituted, nil)
-		if err == nil && updateResult.Stats != nil {
+		upper := strings.ToUpper(substituted)
+		var updateResult *ExecuteResult
+		var err error
+
+		switch {
+		case strings.HasPrefix(upper, "MERGE"):
+			updateResult, err = e.executeMergeWithContext(ctx, substituted, nodeCtx, relCtx)
+		default:
+			// Fallback: execute as standalone clause.
+			// This supports simple CREATE/SET/REMOVE updates that don't depend on external bindings.
+			updateResult, err = e.Execute(ctx, substituted, nil)
+		}
+
+		if err != nil {
+			return nil, err
+		}
+
+		if updateResult != nil && updateResult.Stats != nil {
 			result.Stats.NodesCreated += updateResult.Stats.NodesCreated
 			result.Stats.PropertiesSet += updateResult.Stats.PropertiesSet
 			result.Stats.RelationshipsCreated += updateResult.Stats.RelationshipsCreated

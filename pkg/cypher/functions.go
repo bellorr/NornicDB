@@ -4055,7 +4055,7 @@ skipArrayIndexing:
 		varName := expr[:dotIdx]
 		propName := expr[dotIdx+1:]
 
-		if node, ok := nodes[varName]; ok {
+		if node, ok := nodes[varName]; ok && node != nil {
 			// Handle has_embedding specially - check both property and native embedding field
 			if propName == "has_embedding" {
 				if val, ok := node.Properties["has_embedding"]; ok {
@@ -4072,7 +4072,7 @@ skipArrayIndexing:
 			}
 			return nil
 		}
-		if rel, ok := rels[varName]; ok {
+		if rel, ok := rels[varName]; ok && rel != nil {
 			if val, ok := rel.Properties[propName]; ok {
 				return val
 			}
@@ -4084,6 +4084,9 @@ skipArrayIndexing:
 	// Variable Reference - return whole node/rel/path
 	// ========================================
 	if node, ok := nodes[expr]; ok {
+		if node == nil {
+			return nil
+		}
 		// Check if this is a scalar wrapper (pseudo-node created for YIELD variables)
 		// If it only has a "value" property, return that value directly
 		if len(node.Properties) == 1 {
@@ -4094,6 +4097,9 @@ skipArrayIndexing:
 		return node
 	}
 	if rel, ok := rels[expr]; ok {
+		if rel == nil {
+			return nil
+		}
 		return map[string]interface{}{
 			"_edgeId":    string(rel.ID),
 			"type":       rel.Type,
