@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"fmt"
 	"testing"
 )
 
@@ -228,13 +229,66 @@ func TestRangeIndex_FloatValues(t *testing.T) {
 	}
 }
 
+func TestRangeIndex_ReinsertUpdatesValue(t *testing.T) {
+	sm := NewSchemaManager()
+
+	err := sm.AddRangeIndex("idx_reinsert", "Node", "value")
+	if err != nil {
+		t.Fatalf("AddRangeIndex failed: %v", err)
+	}
+
+	node := NodeID("n1")
+
+	if err := sm.RangeIndexInsert("idx_reinsert", node, 10); err != nil {
+		t.Fatalf("RangeIndexInsert(10) failed: %v", err)
+	}
+	if err := sm.RangeIndexInsert("idx_reinsert", node, 20); err != nil {
+		t.Fatalf("RangeIndexInsert(20) failed: %v", err)
+	}
+
+	// Full range should include exactly one row for the node.
+	all, err := sm.RangeQuery("idx_reinsert", nil, nil, true, true)
+	if err != nil {
+		t.Fatalf("RangeQuery failed: %v", err)
+	}
+	if len(all) != 1 || all[0] != node {
+		t.Fatalf("Expected 1 result [n1], got %v", all)
+	}
+
+	// Old range should be empty.
+	oldRange, err := sm.RangeQuery("idx_reinsert", 0, 15, true, true)
+	if err != nil {
+		t.Fatalf("RangeQuery failed: %v", err)
+	}
+	if len(oldRange) != 0 {
+		t.Fatalf("Expected 0 results for old range, got %v", oldRange)
+	}
+
+	// New range should match.
+	newRange, err := sm.RangeQuery("idx_reinsert", 15, 25, true, true)
+	if err != nil {
+		t.Fatalf("RangeQuery failed: %v", err)
+	}
+	if len(newRange) != 1 || newRange[0] != node {
+		t.Fatalf("Expected 1 result [n1] for new range, got %v", newRange)
+	}
+}
+
 func BenchmarkRangeIndex_Insert(b *testing.B) {
 	sm := NewSchemaManager()
 	sm.AddRangeIndex("bench_idx", "Node", "value")
 
+	// Keep index size bounded and realistic:
+	// update the same N node IDs repeatedly instead of continuously growing.
+	const numNodes = 10000
+	ids := make([]NodeID, numNodes)
+	for i := 0; i < numNodes; i++ {
+		ids[i] = NodeID(fmt.Sprintf("node-%d", i))
+	}
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		sm.RangeIndexInsert("bench_idx", NodeID("node-"+string(rune(i%10000))), i%10000)
+		_ = sm.RangeIndexInsert("bench_idx", ids[i%numNodes], i%numNodes)
 	}
 }
 

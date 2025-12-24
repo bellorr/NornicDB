@@ -318,7 +318,7 @@ type RangeIndex struct {
 	Label    string
 	Property string
 	entries  []rangeEntry   // Sorted by value for binary search
-	nodeMap  map[NodeID]int // NodeID -> index in entries (for O(1) delete)
+	nodeValue map[NodeID]float64 // NodeID -> current numeric value (for delete/update)
 	mu       sync.RWMutex
 }
 
@@ -722,7 +722,7 @@ func (sm *SchemaManager) AddRangeIndex(name, label, property string) error {
 		Label:    label,
 		Property: property,
 		entries:  make([]rangeEntry, 0),
-		nodeMap:  make(map[NodeID]int), // NodeID -> index in entries
+		nodeValue: make(map[NodeID]float64), // NodeID -> value
 	}
 
 	return nil
@@ -734,11 +734,33 @@ type rangeEntry struct {
 	nodeID NodeID
 }
 
+func (idx *RangeIndex) deleteEntryLocked(nodeID NodeID, value float64) bool {
+	// Find first entry with value >= target.
+	start := sort.Search(len(idx.entries), func(i int) bool {
+		return idx.entries[i].value >= value
+	})
+
+	// Scan until value differs; remove the matching nodeID.
+	for i := start; i < len(idx.entries); i++ {
+		entry := idx.entries[i]
+		if entry.value != value {
+			break
+		}
+		if entry.nodeID != nodeID {
+			continue
+		}
+		idx.entries = append(idx.entries[:i], idx.entries[i+1:]...)
+		return true
+	}
+
+	return false
+}
+
 // RangeIndexInsert adds a value to a range index.
 func (sm *SchemaManager) RangeIndexInsert(name string, nodeID NodeID, value interface{}) error {
-	sm.mu.Lock()
+	sm.mu.RLock()
 	idx, exists := sm.rangeIndexes[name]
-	sm.mu.Unlock()
+	sm.mu.RUnlock()
 
 	if !exists {
 		return fmt.Errorf("range index %s not found", name)
@@ -753,6 +775,13 @@ func (sm *SchemaManager) RangeIndexInsert(name string, nodeID NodeID, value inte
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
+	// If this node already exists in the index, remove its prior entry so we don't
+	// accumulate duplicate NodeID rows (which would both be incorrect and cause
+	// O(n^2) behavior over time).
+	if prev, ok := idx.nodeValue[nodeID]; ok {
+		_ = idx.deleteEntryLocked(nodeID, prev)
+	}
+
 	// Binary search for insert position
 	pos := sort.Search(len(idx.entries), func(i int) bool {
 		return idx.entries[i].value >= numVal
@@ -763,21 +792,16 @@ func (sm *SchemaManager) RangeIndexInsert(name string, nodeID NodeID, value inte
 	idx.entries = append(idx.entries, rangeEntry{})
 	copy(idx.entries[pos+1:], idx.entries[pos:])
 	idx.entries[pos] = entry
-	idx.nodeMap[nodeID] = pos
-
-	// Update positions of entries after insert
-	for i := pos + 1; i < len(idx.entries); i++ {
-		idx.nodeMap[idx.entries[i].nodeID] = i
-	}
+	idx.nodeValue[nodeID] = numVal
 
 	return nil
 }
 
 // RangeIndexDelete removes a value from a range index.
 func (sm *SchemaManager) RangeIndexDelete(name string, nodeID NodeID) error {
-	sm.mu.Lock()
+	sm.mu.RLock()
 	idx, exists := sm.rangeIndexes[name]
-	sm.mu.Unlock()
+	sm.mu.RUnlock()
 
 	if !exists {
 		return fmt.Errorf("range index %s not found", name)
@@ -786,19 +810,13 @@ func (sm *SchemaManager) RangeIndexDelete(name string, nodeID NodeID) error {
 	idx.mu.Lock()
 	defer idx.mu.Unlock()
 
-	pos, exists := idx.nodeMap[nodeID]
+	value, exists := idx.nodeValue[nodeID]
 	if !exists {
 		return nil // Not in index
 	}
 
-	// Remove from entries
-	idx.entries = append(idx.entries[:pos], idx.entries[pos+1:]...)
-	delete(idx.nodeMap, nodeID)
-
-	// Update positions of entries after delete
-	for i := pos; i < len(idx.entries); i++ {
-		idx.nodeMap[idx.entries[i].nodeID] = i
-	}
+	_ = idx.deleteEntryLocked(nodeID, value)
+	delete(idx.nodeValue, nodeID)
 
 	return nil
 }

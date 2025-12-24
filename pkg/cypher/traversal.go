@@ -25,14 +25,26 @@ type TraversalContext struct {
 	startNode   *storage.Node
 	endNode     *storage.Node
 	relTypes    []string // Allowed relationship types (empty = any)
+	relTypeSet  map[string]struct{}
 	direction   string   // "outgoing", "incoming", "both"
 	minHops     int
 	maxHops     int
-	visited     map[string]bool
+	visited     map[storage.NodeID]bool
 	paths       []PathResult
 	nodeCache   map[storage.NodeID]*storage.Node // Cache for batch-fetched nodes
 	limit       int                              // OPTIMIZATION: Early termination limit (0 = no limit)
 	resultCount int                              // Count of results found so far
+}
+
+func buildRelTypeSet(relTypes []string) map[string]struct{} {
+	if len(relTypes) <= 1 {
+		return nil
+	}
+	set := make(map[string]struct{}, len(relTypes))
+	for _, relType := range relTypes {
+		set[relType] = struct{}{}
+	}
+	return set
 }
 
 // RelationshipPattern represents a parsed relationship pattern
@@ -913,10 +925,11 @@ func (e *StorageExecutor) traverseGraphSequential(match *TraversalMatch, startNo
 		ctx := &TraversalContext{
 			startNode: startNode,
 			relTypes:  match.Relationship.Types,
+			relTypeSet: buildRelTypeSet(match.Relationship.Types),
 			direction: match.Relationship.Direction,
 			minHops:   match.Relationship.MinHops,
 			maxHops:   match.Relationship.MaxHops,
-			visited:   make(map[string]bool),
+			visited:   make(map[storage.NodeID]bool),
 			nodeCache: make(map[storage.NodeID]*storage.Node),
 		}
 
@@ -965,10 +978,11 @@ func (e *StorageExecutor) traverseGraphParallel(match *TraversalMatch, startNode
 				ctx := &TraversalContext{
 					startNode: startNode,
 					relTypes:  match.Relationship.Types,
+					relTypeSet: buildRelTypeSet(match.Relationship.Types),
 					direction: match.Relationship.Direction,
 					minHops:   match.Relationship.MinHops,
 					maxHops:   match.Relationship.MaxHops,
-					visited:   make(map[string]bool),
+					visited:   make(map[storage.NodeID]bool),
 					nodeCache: make(map[storage.NodeID]*storage.Node),
 				}
 
@@ -1097,10 +1111,11 @@ func (e *StorageExecutor) traverseFromNode(startNode *storage.Node, match *Trave
 	ctx := &TraversalContext{
 		startNode: startNode,
 		relTypes:  match.Relationship.Types,
+		relTypeSet: buildRelTypeSet(match.Relationship.Types),
 		direction: match.Relationship.Direction,
 		minHops:   match.Relationship.MinHops,
 		maxHops:   match.Relationship.MaxHops,
-		visited:   make(map[string]bool),
+		visited:   make(map[storage.NodeID]bool),
 		nodeCache: make(map[storage.NodeID]*storage.Node),
 	}
 
@@ -1162,15 +1177,14 @@ func (e *StorageExecutor) findPaths(
 	for _, edge := range edges {
 		// Check relationship type filter
 		if len(ctx.relTypes) > 0 {
-			found := false
-			for _, t := range ctx.relTypes {
-				if edge.Type == t {
-					found = true
-					break
+			if len(ctx.relTypes) == 1 {
+				if edge.Type != ctx.relTypes[0] {
+					continue
 				}
-			}
-			if !found {
-				continue
+			} else {
+				if _, ok := ctx.relTypeSet[edge.Type]; !ok {
+					continue
+				}
 			}
 		}
 
@@ -1183,7 +1197,7 @@ func (e *StorageExecutor) findPaths(
 		}
 
 		// Avoid cycles
-		if ctx.visited[string(nextNodeID)] {
+		if ctx.visited[nextNodeID] {
 			continue
 		}
 
@@ -1199,7 +1213,7 @@ func (e *StorageExecutor) findPaths(
 		}
 
 		// Mark as visited
-		ctx.visited[string(nextNodeID)] = true
+		ctx.visited[nextNodeID] = true
 
 		// Recurse with optimized path copying (pre-allocate exact size)
 		newPathNodes := make([]*storage.Node, len(pathNodes)+1)
@@ -1214,7 +1228,7 @@ func (e *StorageExecutor) findPaths(
 		results = append(results, subPaths...)
 
 		// Unmark for other paths
-		ctx.visited[string(nextNodeID)] = false
+		ctx.visited[nextNodeID] = false
 	}
 
 	return results
@@ -1319,6 +1333,8 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 		return nil
 	}
 
+	relTypeSet := buildRelTypeSet(relTypes)
+
 	// BFS for shortest path
 	type queueItem struct {
 		node *storage.Node
@@ -1334,11 +1350,10 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 		},
 	}}
 
-	visited := map[string]bool{string(startNode.ID): true}
+	visited := map[storage.NodeID]bool{startNode.ID: true}
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	for head := 0; head < len(queue); head++ {
+		current := queue[head]
 
 		if current.path.Length >= maxHops {
 			continue
@@ -1360,15 +1375,14 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 		for _, edge := range edges {
 			// Filter by relationship type
 			if len(relTypes) > 0 {
-				found := false
-				for _, t := range relTypes {
-					if edge.Type == t {
-						found = true
-						break
+				if len(relTypes) == 1 {
+					if edge.Type != relTypes[0] {
+						continue
 					}
-				}
-				if !found {
-					continue
+				} else {
+					if _, ok := relTypeSet[edge.Type]; !ok {
+						continue
+					}
 				}
 			}
 
@@ -1380,7 +1394,7 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 				nextNodeID = edge.StartNode
 			}
 
-			if visited[string(nextNodeID)] {
+			if visited[nextNodeID] {
 				continue
 			}
 
@@ -1389,9 +1403,17 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 				continue
 			}
 
+			newNodes := make([]*storage.Node, len(current.path.Nodes)+1)
+			copy(newNodes, current.path.Nodes)
+			newNodes[len(current.path.Nodes)] = nextNode
+
+			newRels := make([]*storage.Edge, len(current.path.Relationships)+1)
+			copy(newRels, current.path.Relationships)
+			newRels[len(current.path.Relationships)] = edge
+
 			newPath := PathResult{
-				Nodes:         append(append([]*storage.Node{}, current.path.Nodes...), nextNode),
-				Relationships: append(append([]*storage.Edge{}, current.path.Relationships...), edge),
+				Nodes:         newNodes,
+				Relationships: newRels,
 				Length:        current.path.Length + 1,
 			}
 
@@ -1400,7 +1422,7 @@ func (e *StorageExecutor) shortestPath(startNode, endNode *storage.Node, relType
 				return &newPath
 			}
 
-			visited[string(nextNodeID)] = true
+			visited[nextNodeID] = true
 			queue = append(queue, queueItem{node: nextNode, path: newPath})
 		}
 	}
@@ -1413,6 +1435,8 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 	if startNode == nil || endNode == nil {
 		return nil
 	}
+
+	relTypeSet := buildRelTypeSet(relTypes)
 
 	var results []PathResult
 	shortestLen := -1
@@ -1433,11 +1457,10 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 	}}
 
 	// Track visited at each depth
-	visitedDepth := map[string]int{string(startNode.ID): 0}
+	visitedDepth := map[storage.NodeID]int{startNode.ID: 0}
 
-	for len(queue) > 0 {
-		current := queue[0]
-		queue = queue[1:]
+	for head := 0; head < len(queue); head++ {
+		current := queue[head]
 
 		// If we've found a path, don't explore beyond that length
 		if shortestLen >= 0 && current.path.Length >= shortestLen {
@@ -1464,15 +1487,14 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 		for _, edge := range edges {
 			// Filter by type
 			if len(relTypes) > 0 {
-				found := false
-				for _, t := range relTypes {
-					if edge.Type == t {
-						found = true
-						break
+				if len(relTypes) == 1 {
+					if edge.Type != relTypes[0] {
+						continue
 					}
-				}
-				if !found {
-					continue
+				} else {
+					if _, ok := relTypeSet[edge.Type]; !ok {
+						continue
+					}
 				}
 			}
 
@@ -1484,7 +1506,7 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 			}
 
 			// Allow revisit if at same depth (for multiple paths)
-			prevDepth, seen := visitedDepth[string(nextNodeID)]
+			prevDepth, seen := visitedDepth[nextNodeID]
 			if seen && prevDepth < current.path.Length+1 {
 				continue
 			}
@@ -1494,9 +1516,17 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 				continue
 			}
 
+			newNodes := make([]*storage.Node, len(current.path.Nodes)+1)
+			copy(newNodes, current.path.Nodes)
+			newNodes[len(current.path.Nodes)] = nextNode
+
+			newRels := make([]*storage.Edge, len(current.path.Relationships)+1)
+			copy(newRels, current.path.Relationships)
+			newRels[len(current.path.Relationships)] = edge
+
 			newPath := PathResult{
-				Nodes:         append(append([]*storage.Node{}, current.path.Nodes...), nextNode),
-				Relationships: append(append([]*storage.Edge{}, current.path.Relationships...), edge),
+				Nodes:         newNodes,
+				Relationships: newRels,
 				Length:        current.path.Length + 1,
 			}
 
@@ -1511,7 +1541,7 @@ func (e *StorageExecutor) allShortestPaths(startNode, endNode *storage.Node, rel
 				continue
 			}
 
-			visitedDepth[string(nextNodeID)] = current.path.Length + 1
+			visitedDepth[nextNodeID] = current.path.Length + 1
 			queue = append(queue, queueItem{node: nextNode, path: newPath})
 		}
 	}
