@@ -37,8 +37,8 @@ func TestDefaultConfig(t *testing.T) {
 	if config.ReadBufferSize != 8192 {
 		t.Errorf("expected 8192 read buffer, got %d", config.ReadBufferSize)
 	}
-	if config.WriteBufferSize != 8192 {
-		t.Errorf("expected 8192 write buffer, got %d", config.WriteBufferSize)
+	if config.WriteBufferSize != 64*1024 {
+		t.Errorf("expected 64KiB write buffer, got %d", config.WriteBufferSize)
 	}
 }
 
@@ -693,6 +693,41 @@ func TestSendChunkLargeData(t *testing.T) {
 		size := int(conn.writeData[0])<<8 | int(conn.writeData[1])
 		if size != 1000 {
 			t.Errorf("expected size 1000, got %d", size)
+		}
+	})
+
+	t.Run("multi-chunk framing (>64KiB)", func(t *testing.T) {
+		conn := &mockConn{}
+		session := newTestSession(conn, nil)
+
+		data := make([]byte, 70000)
+		for i := range data {
+			data[i] = byte(i)
+		}
+
+		if err := session.sendChunk(data); err != nil {
+			t.Fatalf("sendChunk() error = %v", err)
+		}
+
+		// Expected framing:
+		//   [0xFF,0xFF] + 65535 bytes
+		//   [0x11,0x71] + 4465 bytes
+		//   [0x00,0x00] terminator
+		if len(conn.writeData) != (2+65535)+(2+4465)+2 {
+			t.Fatalf("unexpected total length: got=%d", len(conn.writeData))
+		}
+
+		if conn.writeData[0] != 0xFF || conn.writeData[1] != 0xFF {
+			t.Fatalf("first chunk header mismatch: %02x %02x", conn.writeData[0], conn.writeData[1])
+		}
+
+		off := 2 + 65535
+		if conn.writeData[off] != 0x11 || conn.writeData[off+1] != 0x71 {
+			t.Fatalf("second chunk header mismatch: %02x %02x", conn.writeData[off], conn.writeData[off+1])
+		}
+
+		if conn.writeData[len(conn.writeData)-2] != 0x00 || conn.writeData[len(conn.writeData)-1] != 0x00 {
+			t.Fatal("missing terminator chunk")
 		}
 	})
 

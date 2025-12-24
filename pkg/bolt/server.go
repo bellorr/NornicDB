@@ -165,11 +165,13 @@ const (
 )
 
 // Buffer pool for record serialization (reduces allocations for large result sets)
+// Pre-allocates 4KB buffers for typical record sizes
 var recordBufferPool = sync.Pool{
 	New: func() any {
-		// Pre-allocate 4KB buffer for typical records
-		buf := make([]byte, 0, 4096)
-		return &buf
+		// Pre-allocate 16KB buffer for typical records to reduce growth/allocations
+		// when encoding nodes/relationships + property maps.
+		buf := make([]byte, 0, 16*1024)
+		return buf
 	},
 }
 
@@ -470,7 +472,7 @@ func DefaultConfig() *Config {
 		Port:            7687,
 		MaxConnections:  100,
 		ReadBufferSize:  8192,
-		WriteBufferSize: 8192,
+		WriteBufferSize: 64 * 1024,
 	}
 }
 
@@ -1469,7 +1471,7 @@ func (s *Session) handlePull(data []byte) error {
 			}
 
 			row := s.lastResult.Rows[s.resultIndex]
-			if err := s.sendRecord(row); err != nil {
+			if err := s.writeRecordNoFlush(row); err != nil {
 				return err
 			}
 
@@ -1716,37 +1718,63 @@ func (s *Session) handleRollback(data []byte) error {
 }
 
 // sendRecord sends a RECORD response.
+// Uses buffer pooling to reduce allocations for high-frequency record sending.
 func (s *Session) sendRecord(fields []any) error {
+	// Get buffer from pool
+	buf := recordBufferPool.Get().([]byte)
+	buf = buf[:0] // Reset length, keep capacity
+
 	// Format: <struct marker 0xB1> <signature 0x71> <list of fields>
-	buf := []byte{0xB1, MsgRecord}
-	buf = append(buf, encodePackStreamList(fields)...)
-	return s.sendChunk(buf)
+	buf = append(buf, recordHeader...)
+	buf = encodePackStreamListInto(buf, fields)
+
+	// sendChunk flushes immediately, so it's safe to return buffer to pool after
+	err := s.sendChunk(buf)
+	recordBufferPool.Put(buf)
+	return err
+}
+
+// writeRecordNoFlush writes a RECORD message but does not flush.
+// It is used by PULL streaming to batch many records into a single flush
+// (the final SUCCESS message flushes everything).
+func (s *Session) writeRecordNoFlush(fields []any) error {
+	buf := recordBufferPool.Get().([]byte)
+	buf = buf[:0]
+	defer recordBufferPool.Put(buf)
+
+	buf = append(buf, recordHeader...)
+	buf = encodePackStreamListInto(buf, fields)
+
+	return s.writeMessageNoFlush(buf)
 }
 
 // sendRecordsBatched sends multiple RECORD responses using buffered I/O.
 // This dramatically reduces syscall overhead for large result sets.
 // For 500 records: ~500 syscalls → 1 syscall = ~8x faster
+// Uses buffer pooling to reduce allocations per record.
 func (s *Session) sendRecordsBatched(rows [][]any) error {
 	if len(rows) == 0 {
 		return nil
 	}
 
-	// Write all records to buffer
+	// Get buffer from pool for encoding records
+	buf := recordBufferPool.Get().([]byte)
+	defer recordBufferPool.Put(buf)
+
+	// Write all records to buffer (each record is a separate chunk)
 	for _, row := range rows {
-		recordData := []byte{0xB1, MsgRecord}
-		recordData = append(recordData, encodePackStreamList(row)...)
+		// Reset buffer length but keep capacity
+		buf = buf[:0]
 
-		// Write chunk header
-		size := len(recordData)
-		s.writer.WriteByte(byte(size >> 8))
-		s.writer.WriteByte(byte(size))
+		// Build record: struct marker + signature + list of fields
+		buf = append(buf, recordHeader...)
+		buf = encodePackStreamListInto(buf, row)
 
-		// Write record data
-		s.writer.Write(recordData)
-
-		// Write terminator
-		s.writer.WriteByte(0)
-		s.writer.WriteByte(0)
+		// bufio.Writer does not retain the provided slice after Write returns,
+		// so it's safe to reuse the pooled buffer on the next iteration.
+		if err := s.writeMessageNoFlush(buf); err != nil {
+			return err
+		}
 	}
 
 	// Don't flush here - let the final SUCCESS message flush everything
@@ -1756,47 +1784,102 @@ func (s *Session) sendRecordsBatched(rows [][]any) error {
 // sendSuccess sends a SUCCESS response with PackStream encoding.
 // Pre-allocated success header
 var successHeader = []byte{0xB1, MsgSuccess}
+var recordHeader = []byte{0xB1, MsgRecord}
+var failureHeader = []byte{0xB1, MsgFailure}
 
 func (s *Session) sendSuccess(metadata map[string]any) error {
-	// Reuse buffer from pool for small responses
-	buf := make([]byte, 0, 128)
+	// Get buffer from pool for encoding
+	buf := recordBufferPool.Get().([]byte)
+	buf = buf[:0] // Reset length, keep capacity
+
 	buf = append(buf, successHeader...)
-	buf = append(buf, encodePackStreamMap(metadata)...)
-	return s.sendChunk(buf)
+	buf = encodePackStreamMapInto(buf, metadata)
+
+	// sendChunk flushes immediately, so it's safe to return buffer to pool after
+	err := s.sendChunk(buf)
+	recordBufferPool.Put(buf)
+	return err
 }
 
 // sendFailure sends a FAILURE response.
+// Uses buffer pooling to reduce allocations.
 func (s *Session) sendFailure(code, message string) error {
-	buf := []byte{0xB1, MsgFailure}
+	// Get buffer from pool for encoding
+	buf := recordBufferPool.Get().([]byte)
+	buf = buf[:0] // Reset length, keep capacity
+
+	buf = append(buf, failureHeader...)
 	metadata := map[string]any{
 		"code":    code,
 		"message": message,
 	}
-	buf = append(buf, encodePackStreamMap(metadata)...)
-	return s.sendChunk(buf)
+	buf = encodePackStreamMapInto(buf, metadata)
+
+	// sendChunk flushes immediately, so it's safe to return buffer to pool after
+	err := s.sendChunk(buf)
+	recordBufferPool.Put(buf)
+	return err
 }
 
 // sendChunk sends a chunk to the client using buffered I/O.
 // The buffer is flushed after each complete message response.
 func (s *Session) sendChunk(data []byte) error {
-	size := len(data)
-
-	// Write chunk header (2 bytes)
-	s.writer.WriteByte(byte(size >> 8))
-	s.writer.WriteByte(byte(size))
-
-	// Write data
-	s.writer.Write(data)
-
-	// Write terminator (0x00 0x00)
-	s.writer.WriteByte(0)
-	s.writer.WriteByte(0)
-
-	// Flush immediately to ensure response is sent
-	// This is critical for request-response protocols
+	if err := s.writeMessageNoFlush(data); err != nil {
+		return err
+	}
 	return s.writer.Flush()
 }
 
+var messageTerminator = []byte{0x00, 0x00}
+
+// writeMessageNoFlush writes a complete Bolt message using chunk framing, but does
+// not flush the underlying buffered writer.
+//
+// Bolt messages are chunked with 2-byte big-endian sizes and a 0-sized terminator.
+// A single message may span multiple chunks (max chunk size is 65535 bytes).
+func (s *Session) writeMessageNoFlush(data []byte) error {
+	const maxChunkSize = 0xFFFF
+
+	// Preserve existing behavior: even for empty messages, write an explicit
+	// 0-sized chunk header followed by the terminator chunk.
+	if len(data) == 0 {
+		if _, err := s.writer.Write(messageTerminator); err != nil {
+			return err
+		}
+		if _, err := s.writer.Write(messageTerminator); err != nil {
+			return err
+		}
+		return nil
+	}
+
+	remaining := data
+	var header [2]byte
+
+	for len(remaining) > 0 {
+		chunkSize := len(remaining)
+		if chunkSize > maxChunkSize {
+			chunkSize = maxChunkSize
+		}
+
+		header[0] = byte(chunkSize >> 8)
+		header[1] = byte(chunkSize)
+
+		if _, err := s.writer.Write(header[:]); err != nil {
+			return err
+		}
+		if _, err := s.writer.Write(remaining[:chunkSize]); err != nil {
+			return err
+		}
+
+		remaining = remaining[chunkSize:]
+	}
+
+	// Terminator chunk (size 0)
+	if _, err := s.writer.Write(messageTerminator); err != nil {
+		return err
+	}
+	return nil
+}
 
 // getExecutorForDatabase returns a Cypher executor for the specified database.
 // This is used when DatabaseManager is configured to route queries to the correct database.

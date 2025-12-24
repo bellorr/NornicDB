@@ -7,7 +7,6 @@ package bolt
 import (
 	"context"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"runtime"
@@ -88,40 +87,40 @@ func TestBoltCypherIntegration(t *testing.T) {
 		defer conn.Close()
 
 		// Perform handshake
-		if err := performHandshake(t, conn); err != nil {
+		if err := PerformHandshakeWithTesting(t, conn); err != nil {
 			t.Fatalf("Handshake failed: %v", err)
 		}
 
 		// Send HELLO
-		if err := sendHello(t, conn); err != nil {
+		if err := SendHello(t, conn, nil); err != nil {
 			t.Fatalf("HELLO failed: %v", err)
 		}
 
 		// Wait for SUCCESS response
-		if err := readSuccess(t, conn); err != nil {
+		if err := ReadSuccess(t, conn); err != nil {
 			t.Fatalf("Expected SUCCESS after HELLO: %v", err)
 		}
 
 		// Send CREATE query
 		createQuery := "CREATE (n:Person {name: 'Alice', age: 30}) RETURN n"
-		if err := sendRun(t, conn, createQuery, nil); err != nil {
+		if err := SendRun(t, conn, createQuery, nil, nil); err != nil {
 			t.Fatalf("RUN failed: %v", err)
 		}
 
 		// Read SUCCESS with fields
-		if err := readSuccess(t, conn); err != nil {
+		if err := ReadSuccess(t, conn); err != nil {
 			t.Fatalf("Expected SUCCESS after RUN: %v", err)
 		}
 
 		// Send PULL to get results
-		if err := sendPull(t, conn); err != nil {
+		if err := SendPull(t, conn, nil); err != nil {
 			t.Fatalf("PULL failed: %v", err)
 		}
 
 		// Read RECORD and final SUCCESS
 		hasRecord := false
 		for {
-			msgType, err := readMessageType(t, conn)
+			msgType, err := ReadMessageType(t, conn)
 			if err != nil {
 				t.Fatalf("Failed to read message: %v", err)
 			}
@@ -148,40 +147,40 @@ func TestBoltCypherIntegration(t *testing.T) {
 		defer conn.Close()
 
 		// Perform handshake
-		if err := performHandshake(t, conn); err != nil {
+		if err := PerformHandshakeWithTesting(t, conn); err != nil {
 			t.Fatalf("Handshake failed: %v", err)
 		}
 
 		// Send HELLO
-		if err := sendHello(t, conn); err != nil {
+		if err := SendHello(t, conn, nil); err != nil {
 			t.Fatalf("HELLO failed: %v", err)
 		}
 
 		// Wait for SUCCESS
-		if err := readSuccess(t, conn); err != nil {
+		if err := ReadSuccess(t, conn); err != nil {
 			t.Fatalf("Expected SUCCESS: %v", err)
 		}
 
 		// Send MATCH query
 		matchQuery := "MATCH (n:Person) WHERE n.name = 'Alice' RETURN n.name, n.age"
-		if err := sendRun(t, conn, matchQuery, nil); err != nil {
+		if err := SendRun(t, conn, matchQuery, nil, nil); err != nil {
 			t.Fatalf("RUN failed: %v", err)
 		}
 
 		// Read SUCCESS
-		if err := readSuccess(t, conn); err != nil {
+		if err := ReadSuccess(t, conn); err != nil {
 			t.Fatalf("Expected SUCCESS: %v", err)
 		}
 
 		// Send PULL
-		if err := sendPull(t, conn); err != nil {
+		if err := SendPull(t, conn, nil); err != nil {
 			t.Fatalf("PULL failed: %v", err)
 		}
 
 		// Read results
 		hasRecord := false
 		for {
-			msgType, err := readMessageType(t, conn)
+			msgType, err := ReadMessageType(t, conn)
 			if err != nil {
 				t.Fatalf("Failed to read message: %v", err)
 			}
@@ -207,9 +206,9 @@ func TestBoltCypherIntegration(t *testing.T) {
 		defer conn.Close()
 
 		// Perform handshake and HELLO
-		performHandshake(t, conn)
-		sendHello(t, conn)
-		readSuccess(t, conn)
+		PerformHandshakeWithTesting(t, conn)
+		SendHello(t, conn, nil)
+		ReadSuccess(t, conn)
 
 		// Send parameterized query
 		query := "CREATE (n:Person {name: $name, age: $age}) RETURN n"
@@ -218,19 +217,19 @@ func TestBoltCypherIntegration(t *testing.T) {
 			"age":  int64(25),
 		}
 
-		if err := sendRun(t, conn, query, params); err != nil {
+		if err := SendRun(t, conn, query, params, nil); err != nil {
 			t.Fatalf("RUN failed: %v", err)
 		}
 
 		// Read SUCCESS
-		readSuccess(t, conn)
+		ReadSuccess(t, conn)
 
 		// Send PULL
-		sendPull(t, conn)
+		SendPull(t, conn, nil)
 
 		// Read results
 		for {
-			msgType, err := readMessageType(t, conn)
+			msgType, err := ReadMessageType(t, conn)
 			if err != nil {
 				break
 			}
@@ -249,184 +248,35 @@ func TestBoltCypherIntegration(t *testing.T) {
 		defer conn.Close()
 
 		// Handshake and HELLO
-		performHandshake(t, conn)
-		sendHello(t, conn)
-		readSuccess(t, conn)
+		PerformHandshakeWithTesting(t, conn)
+		SendHello(t, conn, nil)
+		ReadSuccess(t, conn)
 
 		// Send BEGIN
-		if err := sendBegin(t, conn); err != nil {
+		if err := SendBegin(t, conn, nil); err != nil {
 			t.Fatalf("BEGIN failed: %v", err)
 		}
-		readSuccess(t, conn)
+		ReadSuccess(t, conn)
 
 		// Send query in transaction
-		sendRun(t, conn, "CREATE (n:Test {id: 'tx-test'})", nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
+		SendRun(t, conn, "CREATE (n:Test {id: 'tx-test'})", nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
 
 		// Consume results
 		for {
-			msgType, _ := readMessageType(t, conn)
+			msgType, _ := ReadMessageType(t, conn)
 			if msgType == MsgSuccess {
 				break
 			}
 		}
 
 		// Send COMMIT
-		if err := sendCommit(t, conn); err != nil {
+		if err := SendCommit(t, conn); err != nil {
 			t.Fatalf("COMMIT failed: %v", err)
 		}
-		readSuccess(t, conn)
+		ReadSuccess(t, conn)
 	})
-}
-
-// Helper functions for protocol communication
-
-func performHandshake(t *testing.T, conn net.Conn) error {
-	t.Helper()
-
-	// Send magic + versions
-	handshake := []byte{
-		0x60, 0x60, 0xB0, 0x17, // Magic
-		0x00, 0x00, 0x04, 0x04, // Bolt 4.4
-		0x00, 0x00, 0x04, 0x03, // Bolt 4.3
-		0x00, 0x00, 0x04, 0x02, // Bolt 4.2
-		0x00, 0x00, 0x04, 0x01, // Bolt 4.1
-	}
-
-	if _, err := conn.Write(handshake); err != nil {
-		return err
-	}
-
-	// Read version response
-	resp := make([]byte, 4)
-	if _, err := io.ReadFull(conn, resp); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func sendHello(t *testing.T, conn net.Conn) error {
-	t.Helper()
-
-	// HELLO message: struct(0xB1) + signature(0x01) + empty map(0xA0)
-	message := []byte{0xB1, MsgHello, 0xA0}
-	return sendMessage(conn, message)
-}
-
-func sendRun(t *testing.T, conn net.Conn, query string, params map[string]any) error {
-	t.Helper()
-
-	// RUN message: struct + signature + query string + params map + extra map
-	message := []byte{0xB1, MsgRun}
-	message = append(message, encodePackStreamString(query)...)
-
-	if params == nil {
-		params = make(map[string]any)
-	}
-	message = append(message, encodePackStreamMap(params)...)
-
-	// Add empty extra map
-	message = append(message, 0xA0)
-
-	return sendMessage(conn, message)
-}
-
-func sendPull(t *testing.T, conn net.Conn) error {
-	t.Helper()
-
-	// PULL message: struct + signature + options map
-	message := []byte{0xB1, MsgPull, 0xA0}
-	return sendMessage(conn, message)
-}
-
-func sendBegin(t *testing.T, conn net.Conn) error {
-	t.Helper()
-
-	// BEGIN message: struct + signature + empty options
-	message := []byte{0xB1, MsgBegin, 0xA0}
-	return sendMessage(conn, message)
-}
-
-func sendCommit(t *testing.T, conn net.Conn) error {
-	t.Helper()
-
-	// COMMIT message: struct + signature (no data)
-	message := []byte{0xB0, MsgCommit}
-	return sendMessage(conn, message)
-}
-
-func sendMessage(conn net.Conn, data []byte) error {
-	// Chunk header
-	size := len(data)
-	header := []byte{byte(size >> 8), byte(size)}
-
-	if _, err := conn.Write(header); err != nil {
-		return err
-	}
-
-	// Data
-	if _, err := conn.Write(data); err != nil {
-		return err
-	}
-
-	// Terminator
-	if _, err := conn.Write([]byte{0x00, 0x00}); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func readSuccess(t *testing.T, conn net.Conn) error {
-	t.Helper()
-
-	msgType, err := readMessageType(t, conn)
-	if err != nil {
-		return err
-	}
-
-	if msgType != MsgSuccess {
-		return fmt.Errorf("expected SUCCESS (0x70), got 0x%02X", msgType)
-	}
-
-	return nil
-}
-
-func readMessageType(t *testing.T, conn net.Conn) (byte, error) {
-	t.Helper()
-
-	// Read all chunks until zero terminator
-	var message []byte
-
-	for {
-		// Read chunk header
-		header := make([]byte, 2)
-		if _, err := io.ReadFull(conn, header); err != nil {
-			return 0, err
-		}
-
-		size := int(header[0])<<8 | int(header[1])
-		if size == 0 {
-			break
-		}
-
-		// Read chunk data
-		chunk := make([]byte, size)
-		if _, err := io.ReadFull(conn, chunk); err != nil {
-			return 0, err
-		}
-
-		message = append(message, chunk...)
-	}
-
-	if len(message) < 2 {
-		return 0, fmt.Errorf("message too short")
-	}
-
-	// Message format: struct marker + signature
-	return message[1], nil
 }
 
 // TestBoltServerStress tests the server under load.
@@ -464,19 +314,19 @@ func TestBoltServerStress(t *testing.T) {
 			defer conn.Close()
 
 			// Perform handshake
-			performHandshake(t, conn)
-			sendHello(t, conn)
-			readSuccess(t, conn)
+			PerformHandshakeWithTesting(t, conn)
+			SendHello(t, conn, nil)
+			ReadSuccess(t, conn)
 
 			// Execute queries
 			query := fmt.Sprintf("CREATE (n:Test {id: %d}) RETURN n", id)
-			sendRun(t, conn, query, nil)
-			readSuccess(t, conn)
-			sendPull(t, conn)
+			SendRun(t, conn, query, nil, nil)
+			ReadSuccess(t, conn)
+			SendPull(t, conn, nil)
 
 			// Read results
 			for {
-				msgType, err := readMessageType(t, conn)
+				msgType, err := ReadMessageType(t, conn)
 				if err != nil {
 					done <- err
 					return
@@ -534,20 +384,20 @@ func TestBoltBenchmarkCreateDeleteRelationship(t *testing.T) {
 	defer conn.Close()
 
 	// Handshake and HELLO
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Create test nodes
-	sendRun(t, conn, "CREATE (a:Actor {name: 'Test'})", nil)
-	readSuccess(t, conn)
-	sendPull(t, conn)
-	readSuccess(t, conn) // SUCCESS after PULL
+	SendRun(t, conn, "CREATE (a:Actor {name: 'Test'})", nil, nil)
+	ReadSuccess(t, conn)
+	SendPull(t, conn, nil)
+	ReadSuccess(t, conn) // SUCCESS after PULL
 
-	sendRun(t, conn, "CREATE (m:Movie {title: 'Test'})", nil)
-	readSuccess(t, conn)
-	sendPull(t, conn)
-	readSuccess(t, conn)
+	SendRun(t, conn, "CREATE (m:Movie {title: 'Test'})", nil, nil)
+	ReadSuccess(t, conn)
+	SendPull(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Benchmark the slow query
 	iterations := 100
@@ -559,10 +409,10 @@ func TestBoltBenchmarkCreateDeleteRelationship(t *testing.T) {
 			WITH a, m LIMIT 1
 			CREATE (a)-[r:TEMP_REL]->(m)
 			DELETE r`
-		sendRun(t, conn, query, nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, query, nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	elapsed := time.Since(start)
 
@@ -599,26 +449,26 @@ func TestBoltBenchmarkCreateDeleteRelationship_LargeDataset(t *testing.T) {
 	}
 	defer conn.Close()
 
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Create 100 actors
 	t.Log("Creating 100 actors...")
 	for i := 0; i < 100; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d', born: %d})", i, 1950+i%50), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d', born: %d})", i, 1950+i%50), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 
 	// Create 150 movies
 	t.Log("Creating 150 movies...")
 	for i := 0; i < 150; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d', released: %d})", i, 1980+i%44), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d', released: %d})", i, 1980+i%44), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 
 	// Benchmark
@@ -631,10 +481,10 @@ func TestBoltBenchmarkCreateDeleteRelationship_LargeDataset(t *testing.T) {
 			WITH a, m LIMIT 1
 			CREATE (a)-[r:TEMP_REL]->(m)
 			DELETE r`
-		sendRun(t, conn, query, nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, query, nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	elapsed := time.Since(start)
 
@@ -671,26 +521,26 @@ func TestBoltBenchmarkCreateDeleteRelationship_Badger(t *testing.T) {
 	}
 	defer conn.Close()
 
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Create 100 actors
 	t.Log("Creating 100 actors (BadgerDB)...")
 	for i := 0; i < 100; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 
 	// Create 150 movies
 	t.Log("Creating 150 movies (BadgerDB)...")
 	for i := 0; i < 150; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 
 	// Benchmark
@@ -703,10 +553,10 @@ func TestBoltBenchmarkCreateDeleteRelationship_Badger(t *testing.T) {
 			WITH a, m LIMIT 1
 			CREATE (a)-[r:TEMP_REL]->(m)
 			DELETE r`
-		sendRun(t, conn, query, nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, query, nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	elapsed := time.Since(start)
 
@@ -736,18 +586,18 @@ func TestBoltResponseMetadata(t *testing.T) {
 	}
 	defer conn.Close()
 
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Test write query returns proper metadata
-	sendRun(t, conn, "CREATE (n:TestNode {name: 'test'})", nil)
-	if err := readSuccess(t, conn); err != nil {
+	SendRun(t, conn, "CREATE (n:TestNode {name: 'test'})", nil, nil)
+	if err := ReadSuccess(t, conn); err != nil {
 		t.Fatalf("RUN failed: %v", err)
 	}
 
-	sendPull(t, conn)
-	if err := readSuccess(t, conn); err != nil {
+	SendPull(t, conn, nil)
+	if err := ReadSuccess(t, conn); err != nil {
 		t.Fatalf("PULL failed: %v", err)
 	}
 
@@ -776,20 +626,20 @@ func TestBoltLatencyBreakdown(t *testing.T) {
 	}
 	defer conn.Close()
 
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Create test data
-	sendRun(t, conn, "CREATE (a:Actor {name: 'Keanu'})", nil)
-	readSuccess(t, conn)
-	sendPull(t, conn)
-	readSuccess(t, conn)
+	SendRun(t, conn, "CREATE (a:Actor {name: 'Keanu'})", nil, nil)
+	ReadSuccess(t, conn)
+	SendPull(t, conn, nil)
+	ReadSuccess(t, conn)
 
-	sendRun(t, conn, "CREATE (m:Movie {title: 'Matrix'})", nil)
-	readSuccess(t, conn)
-	sendPull(t, conn)
-	readSuccess(t, conn)
+	SendRun(t, conn, "CREATE (m:Movie {title: 'Matrix'})", nil, nil)
+	ReadSuccess(t, conn)
+	SendPull(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Measure each phase separately
 	iterations := 50
@@ -798,14 +648,14 @@ func TestBoltLatencyBreakdown(t *testing.T) {
 	for i := 0; i < iterations; i++ {
 		// Measure RUN
 		runStart := time.Now()
-		sendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r`, nil)
-		readSuccess(t, conn)
+		SendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r`, nil, nil)
+		ReadSuccess(t, conn)
 		runTotal += time.Since(runStart)
 
 		// Measure PULL
 		pullStart := time.Now()
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 		pullTotal += time.Since(pullStart)
 	}
 

@@ -9,71 +9,257 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
+var packstreamZero8 [8]byte
+
 // ============================================================================
 // PackStream Encoding
 // ============================================================================
 
-func encodePackStreamMap(m map[string]any) []byte {
+func encodePackStreamMapInto(dst []byte, m map[string]any) []byte {
 	if len(m) == 0 {
-		return []byte{0xA0}
+		return append(dst, 0xA0)
 	}
 
-	var buf []byte
 	size := len(m)
 	if size < 16 {
-		buf = append(buf, byte(0xA0+size))
+		dst = append(dst, byte(0xA0+size))
 	} else if size < 256 {
-		buf = append(buf, 0xD8, byte(size))
+		dst = append(dst, 0xD8, byte(size))
 	} else {
-		buf = append(buf, 0xD9, byte(size>>8), byte(size))
+		dst = append(dst, 0xD9, byte(size>>8), byte(size))
 	}
 
 	for k, v := range m {
-		buf = append(buf, encodePackStreamString(k)...)
-		buf = append(buf, encodePackStreamValue(v)...)
+		dst = encodePackStreamStringInto(dst, k)
+		dst = encodePackStreamValueInto(dst, v)
 	}
 
-	return buf
+	return dst
 }
 
-func encodePackStreamList(items []any) []byte {
+func encodePackStreamMap(m map[string]any) []byte {
+	return encodePackStreamMapInto(nil, m)
+}
+
+func encodePackStreamListInto(dst []byte, items []any) []byte {
 	if len(items) == 0 {
-		return []byte{0x90}
+		return append(dst, 0x90)
 	}
 
-	var buf []byte
 	size := len(items)
 	if size < 16 {
-		buf = append(buf, byte(0x90+size))
+		dst = append(dst, byte(0x90+size))
 	} else if size < 256 {
-		buf = append(buf, 0xD4, byte(size))
+		dst = append(dst, 0xD4, byte(size))
 	} else {
-		buf = append(buf, 0xD5, byte(size>>8), byte(size))
+		dst = append(dst, 0xD5, byte(size>>8), byte(size))
 	}
 
 	for _, item := range items {
-		buf = append(buf, encodePackStreamValue(item)...)
+		dst = encodePackStreamValueInto(dst, item)
 	}
 
-	return buf
+	return dst
+}
+
+func encodePackStreamList(items []any) []byte {
+	return encodePackStreamListInto(nil, items)
+}
+
+func encodePackStreamStringInto(dst []byte, s string) []byte {
+	length := len(s)
+
+	if length < 16 {
+		dst = append(dst, byte(0x80+length))
+	} else if length < 256 {
+		dst = append(dst, 0xD0, byte(length))
+	} else if length < 65536 {
+		dst = append(dst, 0xD1, byte(length>>8), byte(length))
+	} else {
+		dst = append(dst, 0xD2, byte(length>>24), byte(length>>16), byte(length>>8), byte(length))
+	}
+
+	return append(dst, s...)
 }
 
 func encodePackStreamString(s string) []byte {
-	length := len(s)
-	var buf []byte
+	return encodePackStreamStringInto(nil, s)
+}
 
-	if length < 16 {
-		buf = append(buf, byte(0x80+length))
-	} else if length < 256 {
-		buf = append(buf, 0xD0, byte(length))
-	} else if length < 65536 {
-		buf = append(buf, 0xD1, byte(length>>8), byte(length))
-	} else {
-		buf = append(buf, 0xD2, byte(length>>24), byte(length>>16), byte(length>>8), byte(length))
+func encodePackStreamValueInto(dst []byte, v any) []byte {
+	switch val := v.(type) {
+	case nil:
+		return append(dst, 0xC0)
+	case bool:
+		if val {
+			return append(dst, 0xC3)
+		}
+		return append(dst, 0xC2)
+	// All integer types - encode as INT64 for Neo4j driver compatibility
+	case int:
+		return encodePackStreamIntInto(dst, int64(val))
+	case int8:
+		return encodePackStreamIntInto(dst, int64(val))
+	case int16:
+		return encodePackStreamIntInto(dst, int64(val))
+	case int32:
+		return encodePackStreamIntInto(dst, int64(val))
+	case int64:
+		return encodePackStreamIntInto(dst, val)
+	case uint:
+		return encodePackStreamIntInto(dst, int64(val))
+	case uint8:
+		return encodePackStreamIntInto(dst, int64(val))
+	case uint16:
+		return encodePackStreamIntInto(dst, int64(val))
+	case uint32:
+		return encodePackStreamIntInto(dst, int64(val))
+	case uint64:
+		return encodePackStreamIntInto(dst, int64(val))
+	// Float types
+	case float32:
+		dst = append(dst, 0xC1)
+		dst = append(dst, packstreamZero8[:]...)
+		binary.BigEndian.PutUint64(dst[len(dst)-8:], math.Float64bits(float64(val)))
+		return dst
+	case float64:
+		dst = append(dst, 0xC1)
+		dst = append(dst, packstreamZero8[:]...)
+		binary.BigEndian.PutUint64(dst[len(dst)-8:], math.Float64bits(val))
+		return dst
+	case string:
+		return encodePackStreamStringInto(dst, val)
+	// Map types
+	case map[string]any:
+		// Check if this is a node (has _nodeId and labels)
+		if nodeId, hasNodeId := val["_nodeId"]; hasNodeId {
+			if labels, hasLabels := val["labels"]; hasLabels {
+				return encodeNodeInto(dst, nodeId, labels, val)
+			}
+		}
+		return encodePackStreamMapInto(dst, val)
+	// Storage types - Neo4j compatible node/edge encoding
+	case storage.Node:
+		return encodeStorageNodeInto(dst, &val)
+	case *storage.Node:
+		if val == nil {
+			return append(dst, 0xC0)
+		}
+		return encodeStorageNodeInto(dst, val)
+	case storage.Edge:
+		return encodeStorageEdgeInto(dst, &val)
+	case *storage.Edge:
+		if val == nil {
+			return append(dst, 0xC0)
+		}
+		return encodeStorageEdgeInto(dst, val)
+	// List types
+	case []string:
+		if len(val) == 0 {
+			return append(dst, 0x90)
+		}
+		size := len(val)
+		if size < 16 {
+			dst = append(dst, byte(0x90+size))
+		} else if size < 256 {
+			dst = append(dst, 0xD4, byte(size))
+		} else {
+			dst = append(dst, 0xD5, byte(size>>8), byte(size))
+		}
+		for _, s := range val {
+			dst = encodePackStreamStringInto(dst, s)
+		}
+		return dst
+	case []any:
+		return encodePackStreamListInto(dst, val)
+	case []int:
+		if len(val) == 0 {
+			return append(dst, 0x90)
+		}
+		size := len(val)
+		if size < 16 {
+			dst = append(dst, byte(0x90+size))
+		} else if size < 256 {
+			dst = append(dst, 0xD4, byte(size))
+		} else {
+			dst = append(dst, 0xD5, byte(size>>8), byte(size))
+		}
+		for _, n := range val {
+			dst = encodePackStreamIntInto(dst, int64(n))
+		}
+		return dst
+	case []int64:
+		if len(val) == 0 {
+			return append(dst, 0x90)
+		}
+		size := len(val)
+		if size < 16 {
+			dst = append(dst, byte(0x90+size))
+		} else if size < 256 {
+			dst = append(dst, 0xD4, byte(size))
+		} else {
+			dst = append(dst, 0xD5, byte(size>>8), byte(size))
+		}
+		for _, n := range val {
+			dst = encodePackStreamIntInto(dst, n)
+		}
+		return dst
+	case []float64:
+		if len(val) == 0 {
+			return append(dst, 0x90)
+		}
+		size := len(val)
+		if size < 16 {
+			dst = append(dst, byte(0x90+size))
+		} else if size < 256 {
+			dst = append(dst, 0xD4, byte(size))
+		} else {
+			dst = append(dst, 0xD5, byte(size>>8), byte(size))
+		}
+		for _, n := range val {
+			dst = append(dst, 0xC1)
+			dst = append(dst, packstreamZero8[:]...)
+			binary.BigEndian.PutUint64(dst[len(dst)-8:], math.Float64bits(n))
+		}
+		return dst
+	case []float32:
+		if len(val) == 0 {
+			return append(dst, 0x90)
+		}
+		size := len(val)
+		if size < 16 {
+			dst = append(dst, byte(0x90+size))
+		} else if size < 256 {
+			dst = append(dst, 0xD4, byte(size))
+		} else {
+			dst = append(dst, 0xD5, byte(size>>8), byte(size))
+		}
+		for _, n := range val {
+			dst = append(dst, 0xC1)
+			dst = append(dst, packstreamZero8[:]...)
+			binary.BigEndian.PutUint64(dst[len(dst)-8:], math.Float64bits(float64(n)))
+		}
+		return dst
+	case []map[string]any:
+		if len(val) == 0 {
+			return append(dst, 0x90)
+		}
+		size := len(val)
+		if size < 16 {
+			dst = append(dst, byte(0x90+size))
+		} else if size < 256 {
+			dst = append(dst, 0xD4, byte(size))
+		} else {
+			dst = append(dst, 0xD5, byte(size>>8), byte(size))
+		}
+		for _, m := range val {
+			dst = encodePackStreamMapInto(dst, m)
+		}
+		return dst
 	}
 
-	buf = append(buf, []byte(s)...)
-	return buf
+	// Fall back to existing implementation for less common types (nodes, relationships, etc.)
+	return append(dst, encodePackStreamValue(v)...)
 }
 
 func encodePackStreamValue(v any) []byte {
@@ -182,6 +368,191 @@ func encodePackStreamValue(v any) []byte {
 		// Unknown type - encode as null
 		return []byte{0xC0}
 	}
+}
+
+func encodePackStreamIntInto(dst []byte, val int64) []byte {
+	// Tiny int: -16 to 127 (inline, 1 byte)
+	if val >= -16 && val <= 127 {
+		return append(dst, byte(val))
+	}
+	// INT8: -128 to -17 (marker + 1 byte)
+	if val >= -128 && val < -16 {
+		return append(dst, 0xC8, byte(val))
+	}
+	// INT16: -32768 to 32767 (marker + 2 bytes)
+	if val >= -32768 && val <= 32767 {
+		return append(dst, 0xC9, byte(val>>8), byte(val))
+	}
+	// INT32: -2147483648 to 2147483647
+	if val >= -2147483648 && val <= 2147483647 {
+		return append(dst, 0xCA, byte(val>>24), byte(val>>16), byte(val>>8), byte(val))
+	}
+	// INT64: everything else
+	return append(dst, 0xCB,
+		byte(val>>56), byte(val>>48), byte(val>>40), byte(val>>32),
+		byte(val>>24), byte(val>>16), byte(val>>8), byte(val),
+	)
+}
+
+// encodeNodeInto encodes a map-based Cypher node as a proper Bolt Node structure (signature 0x4E).
+// Format: STRUCT(3 fields, signature 0x4E) + id + labels + properties
+func encodeNodeInto(dst []byte, nodeId any, labels any, props map[string]any) []byte {
+	// Bolt Node structure: B3 4E (tiny struct, 3 fields, signature 'N')
+	dst = append(dst, 0xB3, 0x4E)
+
+	// Field 1: Node ID (as int64 for Neo4j compatibility)
+	switch idVal := nodeId.(type) {
+	case int64:
+		dst = encodePackStreamIntInto(dst, idVal)
+	case int:
+		dst = encodePackStreamIntInto(dst, int64(idVal))
+	case string:
+		dst = encodePackStreamIntInto(dst, hashStringToInt64(idVal))
+	default:
+		dst = encodePackStreamIntInto(dst, 0)
+	}
+
+	// Field 2: Labels (list of strings)
+	switch l := labels.(type) {
+	case []string:
+		if len(l) == 0 {
+			dst = append(dst, 0x90)
+		} else if len(l) < 16 {
+			dst = append(dst, byte(0x90+len(l)))
+			for _, s := range l {
+				dst = encodePackStreamStringInto(dst, s)
+			}
+		} else if len(l) < 256 {
+			dst = append(dst, 0xD4, byte(len(l)))
+			for _, s := range l {
+				dst = encodePackStreamStringInto(dst, s)
+			}
+		} else {
+			dst = append(dst, 0xD5, byte(len(l)>>8), byte(len(l)))
+			for _, s := range l {
+				dst = encodePackStreamStringInto(dst, s)
+			}
+		}
+	case []any:
+		dst = encodePackStreamListInto(dst, l)
+	default:
+		dst = append(dst, 0x90)
+	}
+
+	// Field 3: Properties (map), skipping internal fields
+	propCount := 0
+	for k := range props {
+		if k == "_nodeId" || k == "labels" {
+			continue
+		}
+		propCount++
+	}
+
+	if propCount == 0 {
+		dst = append(dst, 0xA0)
+		return dst
+	}
+
+	if propCount < 16 {
+		dst = append(dst, byte(0xA0+propCount))
+	} else if propCount < 256 {
+		dst = append(dst, 0xD8, byte(propCount))
+	} else {
+		dst = append(dst, 0xD9, byte(propCount>>8), byte(propCount))
+	}
+
+	for k, v := range props {
+		if k == "_nodeId" || k == "labels" {
+			continue
+		}
+		dst = encodePackStreamStringInto(dst, k)
+		dst = encodePackStreamValueInto(dst, v)
+	}
+
+	return dst
+}
+
+func encodeStorageNodeInto(dst []byte, node *storage.Node) []byte {
+	// Bolt Node structure: B3 4E (tiny struct, 3 fields, signature 'N')
+	dst = append(dst, 0xB3, 0x4E)
+
+	// Field 1: Node ID (as int64)
+	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(node.ID)))
+
+	// Field 2: Labels (list of strings)
+	labels := node.Labels
+	if len(labels) == 0 {
+		dst = append(dst, 0x90)
+	} else if len(labels) < 16 {
+		dst = append(dst, byte(0x90+len(labels)))
+		for _, s := range labels {
+			dst = encodePackStreamStringInto(dst, s)
+		}
+	} else if len(labels) < 256 {
+		dst = append(dst, 0xD4, byte(len(labels)))
+		for _, s := range labels {
+			dst = encodePackStreamStringInto(dst, s)
+		}
+	} else {
+		dst = append(dst, 0xD5, byte(len(labels)>>8), byte(len(labels)))
+		for _, s := range labels {
+			dst = encodePackStreamStringInto(dst, s)
+		}
+	}
+
+	// Field 3: Properties (map)
+	props := node.Properties
+	if len(props) == 0 {
+		return append(dst, 0xA0)
+	}
+
+	propCount := len(props)
+	if propCount < 16 {
+		dst = append(dst, byte(0xA0+propCount))
+	} else if propCount < 256 {
+		dst = append(dst, 0xD8, byte(propCount))
+	} else {
+		dst = append(dst, 0xD9, byte(propCount>>8), byte(propCount))
+	}
+	for k, v := range props {
+		dst = encodePackStreamStringInto(dst, k)
+		dst = encodePackStreamValueInto(dst, v)
+	}
+	return dst
+}
+
+func encodeStorageEdgeInto(dst []byte, edge *storage.Edge) []byte {
+	// Bolt Relationship structure: B5 52 (tiny struct, 5 fields, signature 'R')
+	dst = append(dst, 0xB5, 0x52)
+
+	// Field 1: Relationship ID (as int64)
+	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(edge.ID)))
+	// Field 2: Start Node ID (as int64)
+	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(edge.StartNode)))
+	// Field 3: End Node ID (as int64)
+	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(edge.EndNode)))
+	// Field 4: Relationship Type (string)
+	dst = encodePackStreamStringInto(dst, edge.Type)
+
+	// Field 5: Properties (map)
+	props := edge.Properties
+	if len(props) == 0 {
+		return append(dst, 0xA0)
+	}
+
+	propCount := len(props)
+	if propCount < 16 {
+		dst = append(dst, byte(0xA0+propCount))
+	} else if propCount < 256 {
+		dst = append(dst, 0xD8, byte(propCount))
+	} else {
+		dst = append(dst, 0xD9, byte(propCount>>8), byte(propCount))
+	}
+	for k, v := range props {
+		dst = encodePackStreamStringInto(dst, k)
+		dst = encodePackStreamValueInto(dst, v)
+	}
+	return dst
 }
 
 // hashStringToInt64 converts a string ID to an int64 for Neo4j Bolt protocol compatibility.

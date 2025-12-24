@@ -71,22 +71,22 @@ func TestPerformance_RelationshipVsNode(t *testing.T) {
 	defer conn.Close()
 
 	// Handshake and HELLO
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Setup: Create nodes for relationship test
 	for i := 0; i < 10; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	for i := 0; i < 10; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 
 	iterations := 50
@@ -94,15 +94,15 @@ func TestPerformance_RelationshipVsNode(t *testing.T) {
 	// Test 1: Node create/delete (two queries)
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
-		sendRun(t, conn, "CREATE (n:TestNode {id: 1}) RETURN n", nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, "CREATE (n:TestNode {id: 1}) RETURN n", nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 
-		sendRun(t, conn, "MATCH (n:TestNode) DELETE n", nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, "MATCH (n:TestNode) DELETE n", nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	nodeTime := time.Since(start)
 	nodeOpsPerSec := float64(iterations) / nodeTime.Seconds()
@@ -110,10 +110,10 @@ func TestPerformance_RelationshipVsNode(t *testing.T) {
 	// Test 2: Relationship create/delete (compound query)
 	start = time.Now()
 	for i := 0; i < iterations; i++ {
-		sendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r`, nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r`, nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	relTime := time.Since(start)
 	relOpsPerSec := float64(iterations) / relTime.Seconds()
@@ -141,22 +141,22 @@ func TestPerformance_CompoundQueryShouldMatchSeparateQueries(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Setup
 	for i := 0; i < 10; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	for i := 0; i < 10; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 
 	iterations := 50
@@ -164,10 +164,10 @@ func TestPerformance_CompoundQueryShouldMatchSeparateQueries(t *testing.T) {
 	// Test 1: Compound query (one roundtrip)
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
-		sendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r`, nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) DELETE r`, nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	compoundTime := time.Since(start)
 	compoundOps := float64(iterations) / compoundTime.Seconds()
@@ -175,15 +175,15 @@ func TestPerformance_CompoundQueryShouldMatchSeparateQueries(t *testing.T) {
 	// Test 2: Two separate queries (two roundtrips)
 	start = time.Now()
 	for i := 0; i < iterations; i++ {
-		sendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) RETURN r`, nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, `MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:TEMP_REL]->(m) RETURN r`, nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 
-		sendRun(t, conn, "MATCH ()-[r:TEMP_REL]->() DELETE r", nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, "MATCH ()-[r:TEMP_REL]->() DELETE r", nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	separateTime := time.Since(start)
 	separateOps := float64(iterations) / separateTime.Seconds()
@@ -207,22 +207,22 @@ func TestPerformance_MinimumThroughput(t *testing.T) {
 	require.NoError(t, err)
 	defer conn.Close()
 
-	performHandshake(t, conn)
-	sendHello(t, conn)
-	readSuccess(t, conn)
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
 
 	// Setup
 	for i := 0; i < 100; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (a:Actor {name: 'Actor_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	for i := 0; i < 150; i++ {
-		sendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 
 	iterations := 100
@@ -230,10 +230,10 @@ func TestPerformance_MinimumThroughput(t *testing.T) {
 
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
-		sendRun(t, conn, query, nil)
-		readSuccess(t, conn)
-		sendPull(t, conn)
-		readSuccess(t, conn)
+		SendRun(t, conn, query, nil, nil)
+		ReadSuccess(t, conn)
+		SendPull(t, conn, nil)
+		ReadSuccess(t, conn)
 	}
 	elapsed := time.Since(start)
 	opsPerSec := float64(iterations) / elapsed.Seconds()

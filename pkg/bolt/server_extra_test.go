@@ -843,45 +843,19 @@ func newTestSessionWithAuth(conn net.Conn, executor QueryExecutor, auth BoltAuth
 }
 
 // buildHelloMessage builds a PackStream HELLO message with auth credentials.
-// Format: B1 01 (struct with 1 field, signature 0x01) + map with auth params
+// This is a convenience wrapper around BuildHelloMessage for backward compatibility.
 func buildHelloMessage(scheme, principal, credentials string) []byte {
-	// Build the extra map containing auth info
-	// Map with 3 entries: scheme, principal, credentials
-	buf := []byte{
-		0xB1, 0x01, // Struct marker (1 field) + HELLO signature
+	authParams := make(map[string]string)
+	if scheme != "" {
+		authParams["scheme"] = scheme
 	}
-
-	// Build map - A3 means tiny map with 3 entries
-	mapBytes := []byte{0xA3} // Map with 3 entries
-
-	// scheme key
-	mapBytes = append(mapBytes, buildPackStreamString("scheme")...)
-	mapBytes = append(mapBytes, buildPackStreamString(scheme)...)
-
-	// principal key
-	mapBytes = append(mapBytes, buildPackStreamString("principal")...)
-	mapBytes = append(mapBytes, buildPackStreamString(principal)...)
-
-	// credentials key
-	mapBytes = append(mapBytes, buildPackStreamString("credentials")...)
-	mapBytes = append(mapBytes, buildPackStreamString(credentials)...)
-
-	buf = append(buf, mapBytes...)
-	return buf
-}
-
-// buildPackStreamString builds a PackStream string encoding.
-func buildPackStreamString(s string) []byte {
-	if len(s) < 16 {
-		// Tiny string (0x80-0x8F)
-		return append([]byte{byte(0x80 + len(s))}, []byte(s)...)
+	if principal != "" {
+		authParams["principal"] = principal
 	}
-	if len(s) < 256 {
-		// STRING8
-		return append([]byte{0xD0, byte(len(s))}, []byte(s)...)
+	if credentials != "" {
+		authParams["credentials"] = credentials
 	}
-	// STRING16
-	return append([]byte{0xD1, byte(len(s) >> 8), byte(len(s))}, []byte(s)...)
+	return BuildHelloMessage(authParams)
 }
 
 func TestBoltAuthResult(t *testing.T) {
@@ -1265,7 +1239,7 @@ func buildRunMessage(query string, params map[string]any) []byte {
 	buf := []byte{}
 
 	// Query string
-	buf = append(buf, buildPackStreamString(query)...)
+	buf = append(buf, encodePackStreamString(query)...)
 
 	// Empty params map (A0 = tiny map with 0 entries)
 	buf = append(buf, 0xA0)

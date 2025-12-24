@@ -2,7 +2,6 @@
 package storage
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -141,39 +140,7 @@ func (b *BatchWriter) Commit() error {
 		if err != nil {
 			return fmt.Errorf("wal batch: failed to serialize entry seq %d: %w", seq, err)
 		}
-
-		// Calculate CRC of entire entry
-		entryCRC := crc32Checksum(entryBytes)
-
-		// Build atomic record: magic + version + length + payload + crc + trailer + padding
-		// Format v2 with corruption-proof trailer and 8-byte alignment
-		headerSize := 4 + 1 + 4
-		bodySize := len(entryBytes) + 4 + 8
-		rawRecordLen := int64(headerSize + bodySize)
-		alignedRecordLen := alignUp(rawRecordLen)
-		paddingLen := alignedRecordLen - rawRecordLen
-
-		record := make([]byte, alignedRecordLen)
-
-		offset := 0
-		binary.LittleEndian.PutUint32(record[offset:], walMagic)
-		offset += 4
-		record[offset] = walFormatVersion
-		offset += 1
-		binary.LittleEndian.PutUint32(record[offset:], uint32(len(entryBytes)))
-		offset += 4
-		copy(record[offset:], entryBytes)
-		offset += len(entryBytes)
-		binary.LittleEndian.PutUint32(record[offset:], entryCRC)
-		offset += 4
-		// Trailer canary - marks record as fully written
-		binary.LittleEndian.PutUint64(record[offset:], walTrailer)
-		offset += 8
-		// Zero-fill padding for alignment
-		for i := int64(0); i < paddingLen; i++ {
-			record[offset] = 0
-			offset++
-		}
+		record, alignedRecordLen := buildAtomicRecordV2(entryBytes)
 
 		// Write complete record
 		if _, err := b.wal.writer.Write(record); err != nil {
@@ -211,6 +178,3 @@ func (b *BatchWriter) Len() int {
 	defer b.mu.Unlock()
 	return len(b.pending)
 }
-
-// crc32Table uses Castagnoli polynomial for hardware acceleration on modern CPUs.
-// This provides proper CRC32 checksumming with strong collision resistance.

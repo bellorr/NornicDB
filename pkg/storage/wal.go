@@ -43,7 +43,6 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/config"
-	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 )
 
 // Additional WAL operation types (extends OperationType from transaction.go)
@@ -440,50 +439,11 @@ func (w *WAL) AppendWithDatabase(op OperationType, data interface{}, database st
 		return fmt.Errorf("wal: failed to serialize entry: %w", err)
 	}
 
-	// Calculate CRC of the entire entry (not just data)
-	entryCRC := crc32Checksum(entryBytes)
-
 	// Write atomically: magic + version + length + payload + crc + trailer + padding
 	// Format v2 adds trailer canary and 8-byte alignment for corruption-proof writes.
 	w.mu.Lock()
 	defer w.mu.Unlock()
-
-	// Calculate record size with trailer and alignment padding
-	// Header: magic(4) + version(1) + length(4) = 9 bytes
-	// Body: payload(N) + crc(4) + trailer(8)
-	headerSize := 4 + 1 + 4
-	bodySize := len(entryBytes) + 4 + 8
-	rawRecordLen := int64(headerSize + bodySize)
-	alignedRecordLen := alignUp(rawRecordLen)
-	paddingLen := alignedRecordLen - rawRecordLen
-
-	// Build the complete record in memory first
-	record := make([]byte, alignedRecordLen)
-
-	offset := 0
-	// Magic bytes
-	binary.LittleEndian.PutUint32(record[offset:], walMagic)
-	offset += 4
-	// Format version
-	record[offset] = walFormatVersion
-	offset += 1
-	// Payload length
-	binary.LittleEndian.PutUint32(record[offset:], uint32(len(entryBytes)))
-	offset += 4
-	// Payload
-	copy(record[offset:], entryBytes)
-	offset += len(entryBytes)
-	// CRC of payload
-	binary.LittleEndian.PutUint32(record[offset:], entryCRC)
-	offset += 4
-	// Trailer canary - marks record as fully written
-	binary.LittleEndian.PutUint64(record[offset:], walTrailer)
-	offset += 8
-	// Zero-fill padding for alignment (already zeroed by make, but explicit)
-	for i := int64(0); i < paddingLen; i++ {
-		record[offset] = 0
-		offset++
-	}
+	record, alignedRecordLen := buildAtomicRecordV2(entryBytes)
 
 	// Write the complete record in one call
 	if _, err := w.writer.Write(record); err != nil {
@@ -587,6 +547,7 @@ func (w *WAL) Stats() WALStats {
 func (w *WAL) Sequence() uint64 {
 	return w.sequence.Load()
 }
+
 var crc32Table = crc32.MakeTable(crc32.Castagnoli)
 
 // crc32Checksum computes a proper CRC32-C checksum.
@@ -630,6 +591,11 @@ func backupCorruptedWAL(walPath, walDir string) string {
 	// Sync backup to ensure it's durable
 	if err := dst.Sync(); err != nil {
 		fmt.Printf("⚠️  Failed to sync WAL backup: %v\n", err)
+	}
+
+	// Sync directory entry so the backup filename itself is durable.
+	if err := syncDir(walDir); err != nil {
+		fmt.Printf("⚠️  Failed to sync WAL backup directory: %v\n", err)
 	}
 
 	return backupPath
@@ -1171,38 +1137,7 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 			w.reopenWAL()
 			return fmt.Errorf("wal: failed to serialize entry seq %d: %w", entry.Sequence, err)
 		}
-
-		// Calculate CRC of entire entry
-		entryCRC := crc32Checksum(entryBytes)
-
-		// Build atomic record: magic + version + length + payload + crc + trailer + padding
-		// Calculate aligned record size for 8-byte alignment
-		headerSize := 4 + 1 + 4             // magic + version + length
-		bodySize := len(entryBytes) + 4 + 8 // payload + crc + trailer
-		rawRecordLen := int64(headerSize + bodySize)
-		alignedRecordLen := alignUp(rawRecordLen)
-		paddingLen := alignedRecordLen - rawRecordLen
-		record := make([]byte, alignedRecordLen)
-
-		offset := 0
-		binary.LittleEndian.PutUint32(record[offset:], walMagic)
-		offset += 4
-		record[offset] = walFormatVersion
-		offset += 1
-		binary.LittleEndian.PutUint32(record[offset:], uint32(len(entryBytes)))
-		offset += 4
-		copy(record[offset:], entryBytes)
-		offset += len(entryBytes)
-		binary.LittleEndian.PutUint32(record[offset:], entryCRC)
-		offset += 4
-		// Write trailer canary to detect incomplete writes
-		binary.LittleEndian.PutUint64(record[offset:], walTrailer)
-		offset += 8
-		// Zero-fill alignment padding (already zeroed by make, but explicit for clarity)
-		for i := int64(0); i < paddingLen; i++ {
-			record[offset] = 0
-			offset++
-		}
+		record, alignedRecordLen := buildAtomicRecordV2(entryBytes)
 
 		if _, err := tmpWriter.Write(record); err != nil {
 			tmpFile.Close()
@@ -1698,7 +1633,7 @@ func ReplayWALEntry(engine Engine, entry WALEntry) error {
 		if namespaced, ok := engine.(*NamespacedEngine); ok {
 			dbName = namespaced.Namespace()
 		} else {
-			globalConfig := nornicConfig.LoadFromEnv()
+			globalConfig := config.LoadFromEnv()
 			dbName = globalConfig.Database.DefaultDatabase
 			if dbName == "" {
 				dbName = "nornic" // Fallback
@@ -1821,7 +1756,7 @@ func UndoWALEntry(engine Engine, entry WALEntry) error {
 		if namespaced, ok := engine.(*NamespacedEngine); ok {
 			dbName = namespaced.Namespace()
 		} else {
-			globalConfig := nornicConfig.LoadFromEnv()
+			globalConfig := config.LoadFromEnv()
 			dbName = globalConfig.Database.DefaultDatabase
 			if dbName == "" {
 				dbName = "nornic" // Fallback
@@ -2039,7 +1974,7 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 		if snapshot != nil {
 			result.SnapshotSeq = snapshot.Sequence
 			// Get database name from config (WAL entries have unprefixed IDs)
-			globalConfig := nornicConfig.LoadFromEnv()
+			globalConfig := config.LoadFromEnv()
 			dbName := globalConfig.Database.DefaultDatabase
 			if dbName == "" {
 				dbName = "nornic" // Fallback to "nornic" if not configured
@@ -2230,7 +2165,7 @@ func RecoverFromWALWithResult(walDir, snapshotPath string) (*MemoryEngine, Repla
 			snapshotSeq = snapshot.Sequence
 
 			// Determine database name from snapshot contents or config.
-			globalConfig := nornicConfig.LoadFromEnv()
+			globalConfig := config.LoadFromEnv()
 			dbName := globalConfig.Database.DefaultDatabase
 			if dbName == "" {
 				dbName = "nornic" // Fallback to "nornic" if not configured
@@ -2324,5 +2259,3 @@ func ReplayWALEntries(engine Engine, entries []WALEntry) ReplayResult {
 
 	return result
 }
-
-
