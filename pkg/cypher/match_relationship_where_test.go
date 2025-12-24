@@ -127,4 +127,3 @@ func TestMatchRelationshipWithWhereIdFunction(t *testing.T) {
 		require.Len(t, result.Rows, 0, "Should find no edges for non-existent node")
 	})
 }
-

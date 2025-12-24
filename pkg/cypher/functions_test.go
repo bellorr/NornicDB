@@ -229,14 +229,14 @@ func TestStringFunctions(t *testing.T) {
 
 func TestSplitFunction(t *testing.T) {
 	e := setupTestExecutor(t)
-	
+
 	// Create a node with property for split test
 	node := createTestNode(t, e, "node-1", []string{"Test"}, map[string]interface{}{
 		"data": "a,b,c",
 		"sep":  ",",
 	})
 	nodes := map[string]*storage.Node{"n": node}
-	
+
 	// Test with node properties
 	result := e.evaluateExpressionWithContext("split(n.data, n.sep)", nodes, nil)
 	list, ok := result.([]interface{})
@@ -310,9 +310,9 @@ func TestRangeFunction(t *testing.T) {
 		expr     string
 		expected int // length of result
 	}{
-		{"range(0, 5)", 6},      // 0,1,2,3,4,5
-		{"range(0, 10, 2)", 6},  // 0,2,4,6,8,10
-		{"range(5, 0, -1)", 6},  // 5,4,3,2,1,0
+		{"range(0, 5)", 6},     // 0,1,2,3,4,5
+		{"range(0, 10, 2)", 6}, // 0,2,4,6,8,10
+		{"range(5, 0, -1)", 6}, // 5,4,3,2,1,0
 	}
 
 	for _, tt := range tests {
@@ -764,10 +764,10 @@ func TestReduceFunction(t *testing.T) {
 func TestFunctionPropertyAccess(t *testing.T) {
 	e := setupTestExecutor(t)
 	node := createTestNode(t, e, "node-1", []string{"Person"}, map[string]interface{}{
-		"name":     "Alice",
-		"age":      int64(30),
-		"active":   true,
-		"balance":  float64(100.50),
+		"name":    "Alice",
+		"age":     int64(30),
+		"active":  true,
+		"balance": float64(100.50),
 	})
 
 	nodes := map[string]*storage.Node{"n": node}
@@ -1076,34 +1076,34 @@ func TestAggregationInExpressionContext(t *testing.T) {
 
 func TestListPredicateFunctions(t *testing.T) {
 	e := setupTestExecutor(t)
-	
+
 	// Test with simple predicates that can be evaluated
 	// Note: these functions parse the WHERE predicate and substitute values
-	
+
 	// Test none() with empty result - no match expected
 	node := createTestNode(t, e, "node-1", []string{"Test"}, map[string]interface{}{
 		"empty": []interface{}{},
 	})
 	nodes := map[string]*storage.Node{"n": node}
-	
+
 	// none() on empty list should return true
 	result := e.evaluateExpressionWithContext("none(x IN n.empty WHERE true)", nodes, nil)
 	if result != true {
 		t.Errorf("none(x IN empty list) = %v, want true", result)
 	}
-	
+
 	// Test basic parsing - ensure functions don't crash
 	node2 := createTestNode(t, e, "node-2", []string{"Test"}, map[string]interface{}{
 		"nums": []interface{}{int64(1), int64(2), int64(3)},
 	})
 	nodes2 := map[string]*storage.Node{"n": node2}
-	
+
 	// all() should not crash even if predicate evaluation is limited
 	_ = e.evaluateExpressionWithContext("all(x IN n.nums WHERE x = x)", nodes2, nil)
-	
+
 	// any() should not crash
 	_ = e.evaluateExpressionWithContext("any(x IN n.nums WHERE x = x)", nodes2, nil)
-	
+
 	// single() should not crash
 	_ = e.evaluateExpressionWithContext("single(x IN n.nums WHERE x = x)", nodes2, nil)
 }
