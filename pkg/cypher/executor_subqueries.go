@@ -446,7 +446,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 				}
 
 				// Execute the substituted subquery with parameters
-				innerResult, err := e.Execute(ctx, substitutedBody, subqueryParams)
+				innerResult, err := e.executeInternal(ctx, substitutedBody, subqueryParams)
 				if err != nil {
 					// Log but continue with other seeds
 					continue
@@ -469,7 +469,7 @@ func (e *StorageExecutor) executeMatchWithCallSubquery(ctx context.Context, cyph
 		substitutedBody := "MATCH (" + nodePattern.variable + ") WHERE id(" + nodePattern.variable + ") = $" + seedIDParamName + " WITH " + nodePattern.variable + " " + restOfSubquery
 
 		// Execute the substituted subquery with parameters
-		innerResult, err := e.Execute(ctx, substitutedBody, subqueryParams)
+		innerResult, err := e.executeInternal(ctx, substitutedBody, subqueryParams)
 		if err != nil {
 			// Log but continue with other seeds
 			continue
@@ -559,7 +559,7 @@ func (e *StorageExecutor) executeCallSubquery(ctx context.Context, cypher string
 			innerResult, err = e.executeUnion(ctx, subqueryBody, false)
 		} else {
 			// Execute as single query
-			innerResult, err = e.Execute(ctx, subqueryBody, nil)
+			innerResult, err = e.executeInternal(ctx, subqueryBody, nil)
 		}
 	}
 
@@ -677,7 +677,7 @@ func (e *StorageExecutor) executeCallInTransactions(ctx context.Context, subquer
 
 	if !hasWrites {
 		// No write operations - execute once and return (no need for batching)
-		result, err := e.Execute(ctx, subquery, nil)
+		result, err := e.executeInternal(ctx, subquery, nil)
 		if err != nil {
 			return nil, fmt.Errorf("subquery execution failed: %w", err)
 		}
@@ -697,7 +697,7 @@ func (e *StorageExecutor) executeCallInTransactions(ctx context.Context, subquer
 
 	if readOnlyQuery != "" {
 		// Execute read-only version to get row count (doesn't perform writes)
-		readOnlyResult, err := e.Execute(ctx, readOnlyQuery, nil)
+		readOnlyResult, err := e.executeInternal(ctx, readOnlyQuery, nil)
 		if err == nil && readOnlyResult != nil {
 			totalRows = len(readOnlyResult.Rows)
 			resultColumns = readOnlyResult.Columns

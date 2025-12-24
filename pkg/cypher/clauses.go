@@ -288,7 +288,7 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, fmt.Sprintf("%v", v))
 			}
 		}
-		return e.Execute(ctx, substitutedRemainder, nil)
+		return e.executeInternal(ctx, substitutedRemainder, nil)
 	}
 
 	return &ExecuteResult{
@@ -870,7 +870,7 @@ func (e *StorageExecutor) executeUnion(ctx context.Context, cypher string, union
 	seen := make(map[string]bool) // For UNION (distinct) deduplication
 
 	for i, query := range queries {
-		result, err := e.Execute(ctx, query, nil)
+		result, err := e.executeInternal(ctx, query, nil)
 		if err != nil {
 			return nil, fmt.Errorf("error in UNION query %d (%q): %w", i+1, truncateQuery(query, 50), err)
 		}
@@ -1811,7 +1811,7 @@ func (e *StorageExecutor) executeForeachWithContext(ctx context.Context, cypher 
 		default:
 			// Fallback: execute as standalone clause.
 			// This supports simple CREATE/SET/REMOVE updates that don't depend on external bindings.
-			updateResult, err = e.Execute(ctx, substituted, nil)
+			updateResult, err = e.executeInternal(ctx, substituted, nil)
 		}
 
 		if err != nil {

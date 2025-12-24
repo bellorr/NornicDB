@@ -1,0 +1,40 @@
+package cypher
+
+import (
+	"context"
+	"fmt"
+	"strings"
+)
+
+// executeInternal executes a Cypher fragment as part of a larger execution flow.
+//
+// Unlike Execute(), this does NOT:
+//   - apply query limits / rate limiting
+//   - consult or populate result caches
+//   - start implicit transactions for write queries
+//
+// The key property is that internal subqueries/procedure bodies participate in
+// the caller's transaction context (explicit tx or implicit tx wrapper carried
+// on ctx), avoiding nested implicit transactions and misrouting.
+func (e *StorageExecutor) executeInternal(ctx context.Context, cypher string, params map[string]interface{}) (*ExecuteResult, error) {
+	cypher = strings.TrimSpace(cypher)
+	if cypher == "" {
+		return nil, fmt.Errorf("empty query")
+	}
+
+	// Basic syntax validation to preserve existing error behavior.
+	if err := e.validateSyntax(cypher); err != nil {
+		return nil, err
+	}
+
+	ctx = context.WithValue(ctx, paramsKey, params)
+	upper := strings.ToUpper(cypher)
+
+	// If we're in an explicit transaction, execute within it.
+	if e.txContext != nil && e.txContext.active {
+		return e.executeInTransaction(ctx, cypher, upper)
+	}
+
+	// Otherwise, stay on the caller's execution path (no implicit tx starts here).
+	return e.executeWithoutTransaction(ctx, cypher, upper)
+}

@@ -1382,7 +1382,7 @@ func (e *StorageExecutor) evaluateCollectSubquery(ctx context.Context, node *sto
 	}
 
 	// Execute the subquery
-	subqueryResult, err := e.Execute(ctx, substitutedQuery, nil)
+	subqueryResult, err := e.executeInternal(ctx, substitutedQuery, nil)
 	if err != nil {
 		return nil, fmt.Errorf("COLLECT subquery execution failed: %w", err)
 	}

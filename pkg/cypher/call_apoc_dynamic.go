@@ -46,7 +46,7 @@ func (e *StorageExecutor) callApocCypherRun(ctx context.Context, cypher string) 
 	}
 
 	// Execute the inner query
-	innerResult, err := e.Execute(ctx, innerQuery, params)
+	innerResult, err := e.executeInternal(ctx, innerQuery, params)
 	if err != nil {
 		return nil, fmt.Errorf("apoc.cypher.run inner query failed: %w", err)
 	}
@@ -119,7 +119,7 @@ func (e *StorageExecutor) callApocCypherRunMany(ctx context.Context, cypher stri
 			continue
 		}
 
-		innerResult, err := e.Execute(ctx, query, params)
+		innerResult, err := e.executeInternal(ctx, query, params)
 		if err != nil {
 			// Include error in result instead of failing
 			result.Rows = append(result.Rows, []interface{}{

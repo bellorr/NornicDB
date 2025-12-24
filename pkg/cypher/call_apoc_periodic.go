@@ -55,7 +55,7 @@ func (e *StorageExecutor) callApocPeriodicIterate(ctx context.Context, cypher st
 	}
 
 	// Execute the iterate query to get data to process
-	iterateResult, err := e.Execute(ctx, iterateQuery, nil)
+	iterateResult, err := e.executeInternal(ctx, iterateQuery, nil)
 	if err != nil {
 		return nil, fmt.Errorf("iterate query failed: %w", err)
 	}
@@ -88,7 +88,7 @@ func (e *StorageExecutor) callApocPeriodicIterate(ctx context.Context, cypher st
 			}
 
 			// Execute action query with row data as parameters
-			actionResult, err := e.Execute(ctx, actionQuery, params)
+			actionResult, err := e.executeInternal(ctx, actionQuery, params)
 			if err != nil {
 				errorCount++
 				continue
@@ -195,7 +195,7 @@ func (e *StorageExecutor) callApocPeriodicCommit(ctx context.Context, cypher str
 			statement = statement + fmt.Sprintf(" LIMIT %d", limit)
 		}
 
-		result, err := e.Execute(ctx, statement, params)
+		result, err := e.executeInternal(ctx, statement, params)
 		if err != nil {
 			break
 		}
