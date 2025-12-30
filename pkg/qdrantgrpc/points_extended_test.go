@@ -172,6 +172,32 @@ func TestPointsService_VectorOps_NamedVectors(t *testing.T) {
 		Vectors: &qpb.VectorsSelector{Names: []string{"b"}},
 	})
 	require.NoError(t, err)
+
+	// Deleted vector "b" must not be accessible via NamedEmbeddings fallback.
+	searchResp, err = svc.Search(ctx, &qpb.SearchPoints{
+		CollectionName: "test_collection",
+		Vector:         []float32{0, 1, 0, 0},
+		VectorName:     ptrString("b"),
+		Limit:          10,
+	})
+	require.NoError(t, err)
+	require.Len(t, searchResp.Result, 0)
+
+	getResp, err := svc.Get(ctx, &qpb.GetPoints{
+		CollectionName: "test_collection",
+		Ids:            []*qpb.PointId{{PointIdOptions: &qpb.PointId_Uuid{Uuid: "point1"}}},
+		WithVectors: &qpb.WithVectorsSelector{
+			SelectorOptions: &qpb.WithVectorsSelector_Enable{Enable: true},
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, getResp.Result, 1)
+	require.NotNil(t, getResp.Result[0].Vectors)
+	// Should still have vector "a" but not "b".
+	namedOut := getResp.Result[0].GetVectors().GetVectors()
+	require.NotNil(t, namedOut)
+	require.Contains(t, namedOut.Vectors, "a")
+	require.NotContains(t, namedOut.Vectors, "b")
 }
 
 func TestPointsService_RecommendAndGroupsAndFieldIndex(t *testing.T) {

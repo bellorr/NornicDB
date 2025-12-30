@@ -1107,10 +1107,19 @@ func (s *PointsService) recommendQueryVector(
 	}
 
 	pos := averageVectors(vectorsPos)
+	if pos == nil {
+		return nil, status.Error(codes.InvalidArgument, "failed to compute positive vector average: no valid vectors")
+	}
 	if len(vectorsNeg) == 0 {
 		return pos, nil
 	}
 	neg := averageVectors(vectorsNeg)
+	if neg == nil {
+		return nil, status.Error(codes.InvalidArgument, "failed to compute negative vector average: no valid vectors")
+	}
+	if len(pos) != len(neg) {
+		return nil, status.Errorf(codes.InvalidArgument, "dimension mismatch: positive vectors have dimension %d, negative vectors have dimension %d", len(pos), len(neg))
+	}
 	for i := range pos {
 		pos[i] = pos[i] - neg[i]
 	}
@@ -1674,8 +1683,23 @@ func upsertNodeVectors(node *storage.Node, names []string, vectors [][]float32) 
 }
 
 func deleteNodeVectors(node *storage.Node, names []string) {
-	if node == nil || len(node.ChunkEmbeddings) == 0 {
+	if node == nil || len(names) == 0 {
 		return
+	}
+
+	// Primary storage: NamedEmbeddings.
+	// Keep this consistent with upsertNodeVectors and nodeVectorByName.
+	if node.NamedEmbeddings != nil {
+		for _, n := range names {
+			key := n
+			if key == "" {
+				key = "default"
+			}
+			delete(node.NamedEmbeddings, key)
+		}
+		if len(node.NamedEmbeddings) == 0 {
+			node.NamedEmbeddings = nil
+		}
 	}
 
 	existingNames := nodeVectorNames(node)
@@ -1706,6 +1730,11 @@ func deleteNodeVectors(node *storage.Node, names []string) {
 			newNames = append(newNames, n)
 			newEmbeddings = append(newEmbeddings, node.ChunkEmbeddings[i])
 		}
+	}
+	if len(newEmbeddings) == 0 {
+		node.ChunkEmbeddings = nil
+		setNodeVectorNames(node, nil)
+		return
 	}
 	node.ChunkEmbeddings = newEmbeddings
 	setNodeVectorNames(node, newNames)
