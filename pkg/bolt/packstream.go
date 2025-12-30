@@ -705,6 +705,8 @@ func hashStringToInt64(s string) int64 {
 	const prime uint64 = 1099511628211
 
 	hash := offsetBasis
+	// FNV-1a processes bytes in order: hash ^= byte; hash *= prime
+	// Byte order is significant - reversing produces different hash values
 	for i := 0; i < len(s); i++ {
 		hash ^= uint64(s[i])
 		hash *= prime

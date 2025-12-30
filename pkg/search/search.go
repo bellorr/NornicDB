@@ -80,9 +80,12 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/gpu"
@@ -237,6 +240,14 @@ type Service struct {
 	crossEncoder  *CrossEncoder
 	mu            sync.RWMutex
 
+	// HNSW index for approximate nearest neighbor search (optional, lazy-initialized)
+	hnswIndex           *HNSWIndex
+	hnswMu              sync.RWMutex
+	hnswMaintOnce       sync.Once
+	hnswMaintStop       chan struct{}
+	hnswRebuildInFlight atomic.Bool
+	hnswLastRebuildUnix atomic.Int64
+
 	// GPU k-means clustering for accelerated search (optional)
 	clusterIndex   *gpu.ClusterIndex
 	clusterEnabled bool
@@ -251,6 +262,10 @@ type Service struct {
 	// Configurable via SetDefaultMinSimilarity(). Default: -1 (not set, use SearchOptions default)
 	// Set to 0.0 to let RRF handle relevance filtering.
 	defaultMinSimilarity float64
+
+	// Vector search pipeline (lazy-initialized)
+	vectorPipeline *VectorSearchPipeline
+	pipelineMu     sync.RWMutex
 }
 
 // NewService creates a new search Service with empty indexes.
@@ -444,7 +459,15 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 const DefaultMinEmbeddingsForClustering = 1000
 
 // TriggerClustering runs k-means clustering on all indexed embeddings.
-// Call this after BuildIndexes() completes to organize embeddings into clusters.
+//
+// Trigger Policies:
+//   - After bulk loads: Automatically called after BuildIndexes() completes
+//   - Periodic clustering: Background timer runs clustering at regular intervals
+//   - Manual trigger: Call this after bulk data loading to enable k-means routing
+//
+// Once clustering completes, the vector search pipeline automatically uses
+// KMeansCandidateGen for candidate generation, providing significant speedup
+// for very large datasets (N > 100K).
 //
 // Returns nil (not error) if there are too few embeddings - clustering will
 // be skipped silently as brute-force search is faster for small datasets.
@@ -597,16 +620,30 @@ func (s *Service) VectorIndexDimensions() int {
 
 // ClearVectorIndex removes all embeddings from the vector index.
 // This is used when regenerating all embeddings to reset the index count.
+// Also frees memory from HNSW tombstones which can accumulate over time.
 func (s *Service) ClearVectorIndex() {
+	// Lock order: pipelineMu -> mu -> hnswMu, matching pipeline construction paths.
+	s.pipelineMu.Lock()
+	s.vectorPipeline = nil
+	s.pipelineMu.Unlock()
+
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.vectorIndex != nil {
 		s.vectorIndex.Clear()
 	}
-	// Also clear cluster index if enabled
 	if s.clusterIndex != nil {
 		s.clusterIndex.Clear()
 	}
+	s.mu.Unlock()
+
+	// Also clear HNSW index if it exists (frees memory from tombstones).
+	// HNSW uses tombstones for deletes which never free memory, so explicit Clear() is required.
+	s.hnswMu.Lock()
+	if s.hnswIndex != nil {
+		s.hnswIndex.Clear()
+		s.hnswIndex = nil // Reset to nil so it can be recreated lazily
+	}
+	s.hnswMu.Unlock()
 }
 
 // IndexNode adds a node to all search indexes.
@@ -630,6 +667,14 @@ func (s *Service) IndexNode(node *storage.Node) error {
 					node.ID, len(mainEmbedding), s.vectorIndex.dimensions)
 			}
 		} else {
+			// Also add/update to HNSW index if it exists (for large datasets)
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				// Use Update() to handle both new and existing vectors correctly
+				_ = s.hnswIndex.Update(string(node.ID), mainEmbedding) // Best effort
+			}
+			s.hnswMu.RUnlock()
+
 			// Also add to cluster index if enabled
 			if s.clusterIndex != nil {
 				_ = s.clusterIndex.Add(string(node.ID), mainEmbedding) // Best effort
@@ -682,6 +727,13 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	// Remove main embedding
 	s.vectorIndex.Remove(nodeIDStr)
 	s.fulltextIndex.Remove(nodeIDStr)
+
+	// Also remove from HNSW index if it exists
+	s.hnswMu.RLock()
+	if s.hnswIndex != nil {
+		s.hnswIndex.Remove(nodeIDStr)
+	}
+	s.hnswMu.RUnlock()
 
 	// Also remove from cluster index if enabled
 	if s.clusterIndex != nil {
@@ -809,6 +861,13 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 		return s.fullTextSearchOnly(ctx, query, opts)
 	}
 
+	// For vector-only calls (no text query), skip hybrid and go straight to
+	// vector search. This avoids unnecessary BM25+RRF overhead and matches the
+	// intended semantics of "pure embedding" search.
+	if strings.TrimSpace(query) == "" {
+		return s.vectorSearchOnly(ctx, embedding, opts)
+	}
+
 	// Try RRF hybrid search
 	response, err := s.rrfHybridSearch(ctx, query, embedding, opts)
 	if err == nil && len(response.Results) > 0 {
@@ -926,6 +985,401 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 			FusedCandidates:  len(fusedResults),
 		},
 	}, nil
+}
+
+// SearchCandidate is a lightweight vector-search result: just the ID and score.
+//
+// This is intended for high-throughput call paths that don’t require node
+// enrichment (e.g. Qdrant-compatible gRPC searches that return IDs+scores).
+type SearchCandidate struct {
+	ID    string
+	Score float64
+}
+
+// VectorSearchCandidates performs vector-only search and returns lightweight
+// candidates without enrichment. It is optimized for throughput: it skips BM25,
+// RRF fusion, and storage fetches.
+//
+// This method uses the unified vector search pipeline (CandidateGen + ExactScore)
+// with automatic strategy selection (brute-force for small N, HNSW for large N).
+func (s *Service) VectorSearchCandidates(ctx context.Context, embedding []float32, opts *SearchOptions) ([]SearchCandidate, error) {
+	if opts == nil {
+		opts = DefaultSearchOptions()
+	}
+
+	opts.MinSimilarity = s.resolveMinSimilarity(opts)
+	if len(embedding) == 0 {
+		return nil, fmt.Errorf("vector search requires embedding")
+	}
+
+	// Try cluster-accelerated search first if available (preserves existing behavior)
+	s.mu.RLock()
+	useClusteredSearch := s.clusterIndex != nil && s.clusterIndex.IsClustered()
+	s.mu.RUnlock()
+
+	if useClusteredSearch {
+		candidateLimit := opts.Limit * 2
+		if candidateLimit <= 0 {
+			candidateLimit = 20
+		}
+		numClustersToSearch := 3
+		clusterResults, clusterErr := s.clusterIndex.SearchWithClusters(embedding, candidateLimit, numClustersToSearch)
+		if clusterErr == nil && len(clusterResults) > 0 {
+			results := make([]SearchCandidate, 0, len(clusterResults))
+			for _, r := range clusterResults {
+				results = append(results, SearchCandidate{ID: r.ID, Score: float64(r.Score)})
+			}
+			// Apply filters
+			if len(opts.Types) > 0 {
+				results = s.filterCandidatesByType(results, opts.Types)
+			}
+			if len(results) > opts.Limit && opts.Limit > 0 {
+				results = results[:opts.Limit]
+			}
+			return results, nil
+		}
+		// Fall through to pipeline if cluster search fails
+	}
+
+	// Use unified vector search pipeline
+	pipeline, err := s.getOrCreateVectorPipeline()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get vector pipeline: %w", err)
+	}
+
+	scored, err := pipeline.Search(ctx, embedding, opts.Limit, opts.GetMinSimilarity(0.5))
+	if err != nil {
+		return nil, err
+	}
+
+	// Convert to SearchCandidate
+	candidates := make([]SearchCandidate, len(scored))
+	for i, s := range scored {
+		candidates[i] = SearchCandidate{ID: s.ID, Score: s.Score}
+	}
+
+	// Apply type filters
+	if len(opts.Types) > 0 {
+		candidates = s.filterCandidatesByType(candidates, opts.Types)
+	}
+
+	return candidates, nil
+}
+
+// getOrCreateVectorPipeline returns the vector search pipeline, creating it if needed.
+//
+// The pipeline uses auto strategy selection:
+//   - K-means routing for very large datasets with clustering enabled (N > 100K, optimal)
+//   - Brute-force for small datasets (N < NSmallMax)
+//   - HNSW for large datasets (N >= NSmallMax, no clustering)
+func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
+	s.pipelineMu.RLock()
+	if s.vectorPipeline != nil {
+		s.pipelineMu.RUnlock()
+		return s.vectorPipeline, nil
+	}
+	s.pipelineMu.RUnlock()
+
+	s.pipelineMu.Lock()
+	defer s.pipelineMu.Unlock()
+
+	// Double-check after acquiring write lock
+	if s.vectorPipeline != nil {
+		return s.vectorPipeline, nil
+	}
+
+	s.mu.RLock()
+	vectorCount := s.vectorIndex.Count()
+	dimensions := s.vectorIndex.GetDimensions()
+	s.mu.RUnlock()
+
+	// Auto strategy: choose candidate generator based on dataset size and clustering
+	var candidateGen CandidateGenerator
+
+	// Check if k-means clustering is available and clustered (optimal for very large N)
+	useKMeans := s.clusterIndex != nil && s.clusterIndex.IsClustered()
+
+	if useKMeans {
+		// Very large dataset with clustering: use k-means routing
+		// K-means is optimal for N > 100K where cluster routing provides significant speedup
+		numClustersToSearch := 3 // Default: search 3 nearest clusters
+		candidateGen = NewKMeansCandidateGen(s.clusterIndex, s.vectorIndex, numClustersToSearch)
+	} else if vectorCount < NSmallMax {
+		// Small dataset: use brute-force
+		candidateGen = NewBruteForceCandidateGen(s.vectorIndex)
+	} else {
+		// Large dataset: use HNSW (lazy-initialize if needed)
+		hnswIndex, err := s.getOrCreateHNSWIndex(dimensions)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create HNSW index: %w", err)
+		}
+		candidateGen = NewHNSWCandidateGen(hnswIndex)
+	}
+
+	// Exact scoring defaults to SIMD CPU scoring.
+	exactScorer := NewCPUExactScorer(s.vectorIndex)
+
+	s.vectorPipeline = NewVectorSearchPipeline(candidateGen, exactScorer)
+	return s.vectorPipeline, nil
+}
+
+// getOrCreateHNSWIndex returns the HNSW index, creating it if needed.
+func (s *Service) getOrCreateHNSWIndex(dimensions int) (*HNSWIndex, error) {
+	s.hnswMu.RLock()
+	if s.hnswIndex != nil {
+		s.hnswMu.RUnlock()
+		return s.hnswIndex, nil
+	}
+	s.hnswMu.RUnlock()
+
+	// Snapshot the current vector index contents without holding hnswMu to avoid
+	// lock inversion with writers (IndexNode holds s.mu then takes hnswMu).
+	type vecPair struct {
+		id  string
+		vec []float32
+	}
+
+	s.mu.RLock()
+	vi := s.vectorIndex
+	s.mu.RUnlock()
+	if vi == nil {
+		return nil, fmt.Errorf("vector index is nil")
+	}
+
+	vi.mu.RLock()
+	pairs := make([]vecPair, 0, len(vi.vectors))
+	for id, vec := range vi.vectors {
+		pairs = append(pairs, vecPair{id: id, vec: vec})
+	}
+	vi.mu.RUnlock()
+
+	config := HNSWConfigFromEnv()
+	built := NewHNSWIndex(dimensions, config)
+	for _, p := range pairs {
+		if err := built.Add(p.id, p.vec); err != nil {
+			return nil, fmt.Errorf("failed to add vector to HNSW: %w", err)
+		}
+	}
+
+	// Install unless someone else won the race.
+	s.hnswMu.Lock()
+	if s.hnswIndex != nil {
+		existing := s.hnswIndex
+		s.hnswMu.Unlock()
+		return existing, nil
+	}
+
+	// Log configuration for observability
+	quality := os.Getenv("NORNICDB_VECTOR_ANN_QUALITY")
+	if quality == "" {
+		quality = "balanced"
+	}
+	log.Printf("🔍 HNSW index created: quality=%s M=%d efConstruction=%d efSearch=%d",
+		quality, config.M, config.EfConstruction, config.EfSearch)
+
+	s.hnswIndex = built
+	s.hnswMu.Unlock()
+
+	s.ensureHNSWMaintenance()
+	return built, nil
+}
+
+func (s *Service) ensureHNSWMaintenance() {
+	s.hnswMaintOnce.Do(func() {
+		s.hnswMaintStop = make(chan struct{})
+
+		interval := envDurationMs("NORNICDB_HNSW_MAINT_INTERVAL_MS", 30_000)
+		minRebuildInterval := envDurationSec("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", 60)
+		rebuildRatio := envFloat("NORNICDB_HNSW_TOMBSTONE_REBUILD_RATIO", 0.50)
+		maxOverhead := envFloat("NORNICDB_HNSW_MAX_TOMBSTONE_OVERHEAD_FACTOR", 2.0)
+		enabled := envBool("NORNICDB_HNSW_REBUILD_ENABLED", true)
+
+		ticker := time.NewTicker(interval)
+		go func() {
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ticker.C:
+					if !enabled {
+						continue
+					}
+					_ = s.maybeRebuildHNSW(context.Background(), rebuildRatio, maxOverhead, minRebuildInterval)
+				case <-s.hnswMaintStop:
+					return
+				}
+			}
+		}()
+	})
+}
+
+func (s *Service) maybeRebuildHNSW(ctx context.Context, tombstoneRatioThreshold, maxOverheadFactor float64, minInterval time.Duration) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if minInterval <= 0 {
+		minInterval = 60 * time.Second
+	}
+
+	last := time.Unix(s.hnswLastRebuildUnix.Load(), 0)
+	if !last.IsZero() && time.Since(last) < minInterval {
+		return nil
+	}
+
+	s.hnswMu.RLock()
+	old := s.hnswIndex
+	s.hnswMu.RUnlock()
+	if old == nil {
+		return nil
+	}
+
+	// Derive rebuild condition from a single read lock on the index.
+	old.mu.RLock()
+	total := len(old.nodeLevel)
+	live := old.liveCount
+	old.mu.RUnlock()
+	if total == 0 || live <= 0 {
+		return nil
+	}
+
+	deleted := total - live
+	ratio := float64(deleted) / float64(total)
+	overhead := float64(total) / float64(live)
+	if ratio <= tombstoneRatioThreshold && overhead <= maxOverheadFactor {
+		return nil
+	}
+
+	if !s.hnswRebuildInFlight.CompareAndSwap(false, true) {
+		return nil
+	}
+	defer s.hnswRebuildInFlight.Store(false)
+
+	// Snapshot vectors without holding hnswMu to avoid lock inversion with writers.
+	type vecPair struct {
+		id  string
+		vec []float32
+	}
+
+	s.mu.RLock()
+	vi := s.vectorIndex
+	s.mu.RUnlock()
+	if vi == nil {
+		return nil
+	}
+
+	vi.mu.RLock()
+	pairs := make([]vecPair, 0, len(vi.vectors))
+	for id, vec := range vi.vectors {
+		pairs = append(pairs, vecPair{id: id, vec: vec})
+	}
+	vi.mu.RUnlock()
+
+	rebuilt := NewHNSWIndex(old.dimensions, old.config)
+	for _, p := range pairs {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		_ = rebuilt.Add(p.id, p.vec)
+	}
+
+	// Swap only if the index hasn't changed.
+	s.hnswMu.Lock()
+	if s.hnswIndex == old {
+		s.hnswIndex = rebuilt
+		s.hnswLastRebuildUnix.Store(time.Now().Unix())
+
+		// Invalidate pipeline so the next query uses the rebuilt index.
+		s.pipelineMu.Lock()
+		s.vectorPipeline = nil
+		s.pipelineMu.Unlock()
+	}
+	s.hnswMu.Unlock()
+
+	return nil
+}
+
+func envBool(key string, fallback bool) bool {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+func envFloat(key string, fallback float64) float64 {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+func envDurationMs(key string, fallbackMs int) time.Duration {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return time.Duration(fallbackMs) * time.Millisecond
+	}
+	ms, err := strconv.Atoi(raw)
+	if err != nil || ms <= 0 {
+		return time.Duration(fallbackMs) * time.Millisecond
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+func envDurationSec(key string, fallbackSec int) time.Duration {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return time.Duration(fallbackSec) * time.Second
+	}
+	sec, err := strconv.Atoi(raw)
+	if err != nil || sec <= 0 {
+		return time.Duration(fallbackSec) * time.Second
+	}
+	return time.Duration(sec) * time.Second
+}
+
+// filterCandidatesByType filters candidates by node type/label.
+func (s *Service) filterCandidatesByType(candidates []SearchCandidate, types []string) []SearchCandidate {
+	if len(types) == 0 {
+		return candidates
+	}
+
+	typeSet := make(map[string]bool, len(types))
+	for _, t := range types {
+		typeSet[strings.ToLower(t)] = true
+	}
+
+	filtered := make([]SearchCandidate, 0, len(candidates))
+	for _, cand := range candidates {
+		node, err := s.engine.GetNode(storage.NodeID(cand.ID))
+		if err != nil {
+			continue // Skip if node not found
+		}
+
+		// Check if any label matches
+		matches := false
+		for _, label := range node.Labels {
+			if typeSet[strings.ToLower(label)] {
+				matches = true
+				break
+			}
+		}
+
+		if matches {
+			filtered = append(filtered, cand)
+		}
+	}
+
+	return filtered
 }
 
 // fuseRRF implements the Reciprocal Rank Fusion (RRF) algorithm.

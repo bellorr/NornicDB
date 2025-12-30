@@ -7,10 +7,29 @@ This guide covers all configuration options for NornicDB, including the new asyn
 NornicDB uses a YAML configuration file (typically `nornicdb.yaml`) that can be specified via:
 
 ```bash
-./nornicdb serve --config /path/to/config.yaml
+./nornicdb serve --config /path/to/nornicdb.yaml
 ```
 
 Or via environment variables (see Environment Variables section).
+
+### Config file discovery (when `--config` is not provided)
+
+NornicDB searches for a config file in this order:
+
+1. `NORNICDB_CONFIG` (explicit path)
+2. `~/.nornicdb/config.yaml`
+3. next to the binary: `config.yaml` or `nornicdb.yaml`
+4. current working directory: `config.yaml` or `nornicdb.yaml`
+5. container mount path: `/config/nornicdb.yaml` or `/config/config.yaml`
+6. OS user config dirs:
+   - macOS: `~/Library/Application Support/NornicDB/config.yaml`
+   - Linux: `~/.config/nornicdb/config.yaml`
+
+To avoid ambiguity in Docker/Kubernetes, prefer:
+
+```bash
+export NORNICDB_CONFIG=/config/nornicdb.yaml
+```
 
 ## Core Configuration
 
@@ -124,6 +143,8 @@ embeddings:
   dimensions: 1024
 ```
 
+> Note: embedding generation is **disabled by default** in current releases. Enable it explicitly with `NORNICDB_EMBEDDING_ENABLED=true` (or `nornicdb serve --embedding-enabled`) to get semantic search without manually storing vectors.
+
 ### Search Similarity ⭐ New
 
 Configure minimum similarity thresholds for vector search:
@@ -205,6 +226,38 @@ export NORNICDB_SEARCH_MIN_SIMILARITY=0.5
 export NORNICDB_EMBEDDINGS_PROVIDER=local
 export NORNICDB_EMBEDDINGS_MODEL=bge-m3
 ```
+
+## Qdrant gRPC Endpoint (Qdrant SDK Compatibility)
+
+NornicDB can expose a **Qdrant-compatible gRPC endpoint** so existing Qdrant SDKs can connect without modification.
+
+User guide: `docs/user-guides/qdrant-grpc.md`
+
+### Configuration (YAML)
+
+```yaml
+features:
+  qdrant_grpc_enabled: true
+  qdrant_grpc_listen_addr: ":6334"
+  qdrant_grpc_max_vector_dim: 4096
+  qdrant_grpc_max_batch_points: 1000
+  qdrant_grpc_max_top_k: 1000
+```
+
+### Environment variables
+
+| Variable | Default | Description |
+|---|---:|---|
+| `NORNICDB_QDRANT_GRPC_ENABLED` | `false` | Enable the Qdrant-compatible gRPC server |
+| `NORNICDB_QDRANT_GRPC_LISTEN_ADDR` | `:6334` | gRPC listen address |
+| `NORNICDB_QDRANT_GRPC_MAX_VECTOR_DIM` | `4096` | Maximum vector dimension |
+| `NORNICDB_QDRANT_GRPC_MAX_BATCH_POINTS` | `1000` | Max points per upsert |
+| `NORNICDB_QDRANT_GRPC_MAX_TOP_K` | `1000` | Max search results per query |
+
+### Embedding ownership
+
+- If `NORNICDB_EMBEDDING_ENABLED=true`, NornicDB owns embeddings; Qdrant vector mutation RPCs may be rejected to avoid conflicting sources of truth.
+- If you want Qdrant clients to upsert/update/delete vectors directly, set `NORNICDB_EMBEDDING_ENABLED=false`.
 
 ## Configuration Validation
 
