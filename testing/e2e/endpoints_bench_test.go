@@ -292,7 +292,11 @@ func (p *serverProc) stop(t *testing.T) {
 
 func buildNornicBinary(t *testing.T, repoRoot string) string {
 	t.Helper()
-	out := filepath.Join(t.TempDir(), "nornicdb-e2e")
+	binName := "nornicdb-e2e"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	out := filepath.Join(t.TempDir(), binName)
 	cmd := exec.Command("go", "build", "-o", out, "./cmd/nornicdb")
 	cmd.Dir = repoRoot
 	cmd.Stdout = os.Stdout
