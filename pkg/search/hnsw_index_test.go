@@ -44,7 +44,8 @@ func TestHNSWIndex_Add(t *testing.T) {
 		err := index.Add("vec1", []float32{1.0, 0.0, 0.0, 0.0})
 		require.NoError(t, err)
 		assert.Equal(t, 1, index.Size())
-		assert.Equal(t, "vec1", index.entryPoint)
+		require.True(t, index.hasEntryPoint)
+		assert.Equal(t, "vec1", index.internalToID[index.entryPoint])
 	})
 
 	t.Run("adds multiple vectors", func(t *testing.T) {
@@ -120,11 +121,13 @@ func TestHNSWIndex_Remove(t *testing.T) {
 		index.Add("vec1", []float32{1.0, 0.0, 0.0, 0.0})
 		index.Add("vec2", []float32{0.0, 1.0, 0.0, 0.0})
 		
+		require.True(t, index.hasEntryPoint)
 		entryBefore := index.entryPoint
-		index.Remove(entryBefore)
+		entryExternal := index.internalToID[entryBefore]
+		index.Remove(entryExternal)
 		
 		// Entry point should change
-		assert.NotEmpty(t, index.entryPoint)
+		assert.True(t, index.hasEntryPoint)
 		assert.NotEqual(t, entryBefore, index.entryPoint)
 	})
 
@@ -135,7 +138,7 @@ func TestHNSWIndex_Remove(t *testing.T) {
 		index.Remove("vec1")
 		
 		assert.Equal(t, 0, index.Size())
-		assert.Empty(t, index.entryPoint)
+		assert.False(t, index.hasEntryPoint)
 	})
 }
 
@@ -153,7 +156,7 @@ func TestHNSWIndex_Search(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, results, 1)
 		assert.Equal(t, "vec1", results[0].ID)
-		assert.InDelta(t, 1.0, results[0].Score, 0.01)
+		assert.InDelta(t, 1.0, float64(results[0].Score), 0.01)
 	})
 
 	t.Run("finds similar vectors", func(t *testing.T) {
@@ -193,7 +196,7 @@ func TestHNSWIndex_Search(t *testing.T) {
 		
 		// Only vec1 should match with threshold 0.9
 		for _, r := range results {
-			assert.GreaterOrEqual(t, r.Score, 0.9)
+			assert.GreaterOrEqual(t, float64(r.Score), 0.9)
 		}
 	})
 
