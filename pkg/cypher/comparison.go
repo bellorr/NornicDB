@@ -51,7 +51,9 @@ package cypher
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
+	"unicode"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -271,29 +273,87 @@ func (e *StorageExecutor) evaluateInOp(node *storage.Node, variable, whereClause
 	left := strings.TrimSpace(whereClause[:inIdx])
 	right := strings.TrimSpace(whereClause[inIdx+4:])
 
-	// Extract property
-	if !strings.HasPrefix(left, variable+".") {
+	// If the left side doesn't reference this variable, it's not our concern in this
+	// single-node evaluation context. Treat it as a pass-through.
+	if !containsIdentifierToken(left, variable) {
 		return true
 	}
-	propName := left[len(variable)+1:]
 
-	actualVal, exists := node.Properties[propName]
-	if !exists {
+	// Evaluate left side as an expression so we support:
+	//   - property access: n.id
+	//   - function calls: id(n), elementId(n)
+	//   - other expressions supported by the evaluator
+	actualVal := e.evaluateExpression(left, variable, node)
+	if actualVal == nil {
+		// Neo4j semantics: NULL IN [...] yields NULL (treated as false in WHERE)
 		return false
 	}
 
-	// Parse list: [val1, val2, ...]
-	if strings.HasPrefix(right, "[") && strings.HasSuffix(right, "]") {
-		listContent := right[1 : len(right)-1]
-		items := strings.Split(listContent, ",")
-		for _, item := range items {
-			itemVal := e.parseValue(strings.TrimSpace(item))
-			if e.compareEqual(actualVal, itemVal) {
-				return true
-			}
+	listVal := e.parseValue(right)
+	items, ok := toInterfaceSlice(listVal)
+	if !ok {
+		return false
+	}
+
+	for _, item := range items {
+		if e.compareEqual(actualVal, item) {
+			return true
 		}
 	}
 	return false
+}
+
+func toInterfaceSlice(v interface{}) ([]interface{}, bool) {
+	if v == nil {
+		return nil, false
+	}
+	if list, ok := v.([]interface{}); ok {
+		return list, true
+	}
+
+	rv := reflect.ValueOf(v)
+	if rv.Kind() != reflect.Slice {
+		return nil, false
+	}
+
+	out := make([]interface{}, rv.Len())
+	for i := 0; i < rv.Len(); i++ {
+		out[i] = rv.Index(i).Interface()
+	}
+	return out, true
+}
+
+// containsIdentifierToken returns true if expr contains ident as a standalone
+// identifier token (word boundary), e.g. "id(n)" contains "n" but "node" does not.
+func containsIdentifierToken(expr, ident string) bool {
+	if ident == "" {
+		return false
+	}
+
+	var token strings.Builder
+	flush := func() bool {
+		if token.Len() == 0 {
+			return false
+		}
+		t := token.String()
+		token.Reset()
+		return t == ident
+	}
+
+	for _, r := range expr {
+		if isIdentRune(r) {
+			token.WriteRune(r)
+			continue
+		}
+		if flush() {
+			return true
+		}
+	}
+	return flush()
+}
+
+func isIdentRune(r rune) bool {
+	return r == '_' || unicode.IsLetter(r) || unicode.IsDigit(r)
 }
 
 // evaluateIsNull handles IS NULL / IS NOT NULL.
