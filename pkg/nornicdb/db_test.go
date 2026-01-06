@@ -850,6 +850,206 @@ func TestDecayIntegration(t *testing.T) {
 	})
 }
 
+func TestTierPromotionIntegration(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("episodic memory promotes to semantic on frequent access", func(t *testing.T) {
+		config := &Config{
+			DecayEnabled:                      true,
+			DecayRecalculateInterval:          30 * time.Minute,
+			DecayArchiveThreshold:            0.01,
+			DecayPromotionEnabled:             true,
+			DecayEpisodicToSemanticThresh:     5,  // Lower for testing
+			DecayEpisodicToSemanticMinAge:     1 * 24 * time.Hour,
+			DecaySemanticToProceduralThresh:   10, // Lower for testing
+			DecaySemanticToProceduralMinAge:   2 * 24 * time.Hour,
+		}
+		db, err := Open(t.TempDir(), config)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Create episodic memory
+		mem := &Memory{
+			Content: "Frequently accessed episodic memory",
+			Tier:    TierEpisodic,
+		}
+
+		// Store with creation time in the past to meet age requirement
+		stored, err := db.Store(ctx, mem)
+		require.NoError(t, err)
+		assert.Equal(t, TierEpisodic, stored.Tier)
+
+		// Manually set CreatedAt to meet age requirement (hack for testing)
+		// In real usage, time passes naturally
+		node, err := db.storage.GetNode(storage.NodeID(stored.ID))
+		require.NoError(t, err)
+		node.CreatedAt = time.Now().Add(-2 * 24 * time.Hour) // Set directly on node
+		err = db.storage.UpdateNode(node)
+		require.NoError(t, err)
+
+		// Recall multiple times to meet access threshold
+		for i := 0; i < 5; i++ {
+			recalled, err := db.Recall(ctx, stored.ID)
+			require.NoError(t, err)
+			if i == 4 {
+				// After 5 accesses, should be promoted to semantic
+				assert.Equal(t, TierSemantic, recalled.Tier, "Should promote to semantic after threshold")
+			}
+		}
+	})
+
+	t.Run("semantic memory promotes to procedural on very frequent access", func(t *testing.T) {
+		config := &Config{
+			DecayEnabled:                      true,
+			DecayRecalculateInterval:          30 * time.Minute,
+			DecayArchiveThreshold:            0.01,
+			DecayPromotionEnabled:             true,
+			DecayEpisodicToSemanticThresh:     5,
+			DecayEpisodicToSemanticMinAge:     1 * 24 * time.Hour,
+			DecaySemanticToProceduralThresh:   10, // Lower for testing
+			DecaySemanticToProceduralMinAge:   2 * 24 * time.Hour,
+		}
+		db, err := Open(t.TempDir(), config)
+		require.NoError(t, err)
+		defer db.Close()
+
+		// Create semantic memory
+		mem := &Memory{
+			Content: "Very frequently accessed semantic memory",
+			Tier:    TierSemantic,
+		}
+
+		stored, err := db.Store(ctx, mem)
+		require.NoError(t, err)
+		assert.Equal(t, TierSemantic, stored.Tier)
+
+		// Manually set CreatedAt to meet age requirement
+		node, err := db.storage.GetNode(storage.NodeID(stored.ID))
+		require.NoError(t, err)
+		node.CreatedAt = time.Now().Add(-3 * 24 * time.Hour) // Set directly on node
+		err = db.storage.UpdateNode(node)
+		require.NoError(t, err)
+
+		// Recall multiple times to meet procedural threshold
+		for i := 0; i < 10; i++ {
+			recalled, err := db.Recall(ctx, stored.ID)
+			require.NoError(t, err)
+			if i == 9 {
+				// After 10 accesses, should be promoted to procedural
+				assert.Equal(t, TierProcedural, recalled.Tier, "Should promote to procedural after threshold")
+			}
+		}
+	})
+
+	t.Run("promotion disabled does not change tier", func(t *testing.T) {
+		config := &Config{
+			DecayEnabled:          true,
+			DecayPromotionEnabled: false, // Disabled
+		}
+		db, err := Open(t.TempDir(), config)
+		require.NoError(t, err)
+		defer db.Close()
+
+		mem := &Memory{
+			Content: "Memory with promotion disabled",
+			Tier:    TierEpisodic,
+		}
+
+		stored, err := db.Store(ctx, mem)
+		require.NoError(t, err)
+
+		// Set age requirement
+		node, err := db.storage.GetNode(storage.NodeID(stored.ID))
+		require.NoError(t, err)
+		node.Properties["_createdAt"] = time.Now().Add(-2 * 24 * time.Hour).Format(time.RFC3339)
+		err = db.storage.UpdateNode(node)
+		require.NoError(t, err)
+
+		// Recall many times
+		for i := 0; i < 20; i++ {
+			recalled, err := db.Recall(ctx, stored.ID)
+			require.NoError(t, err)
+			// Should remain episodic
+			assert.Equal(t, TierEpisodic, recalled.Tier, "Should not promote when disabled")
+		}
+	})
+
+	t.Run("procedural tier does not promote further", func(t *testing.T) {
+		config := &Config{
+			DecayEnabled:          true,
+			DecayPromotionEnabled: true,
+		}
+		db, err := Open(t.TempDir(), config)
+		require.NoError(t, err)
+		defer db.Close()
+
+		mem := &Memory{
+			Content: "Procedural memory",
+			Tier:    TierProcedural,
+		}
+
+		stored, err := db.Store(ctx, mem)
+		require.NoError(t, err)
+		assert.Equal(t, TierProcedural, stored.Tier)
+
+		// Recall many times
+		for i := 0; i < 100; i++ {
+			recalled, err := db.Recall(ctx, stored.ID)
+			require.NoError(t, err)
+			// Should remain procedural (highest tier)
+			assert.Equal(t, TierProcedural, recalled.Tier, "Procedural is highest tier")
+		}
+	})
+
+	t.Run("promotion updates decay score", func(t *testing.T) {
+		config := &Config{
+			DecayEnabled:                      true,
+			DecayPromotionEnabled:             true,
+			DecayEpisodicToSemanticThresh:     5,
+			DecayEpisodicToSemanticMinAge:     1 * 24 * time.Hour,
+			DecaySemanticToProceduralThresh:   100, // Very high to prevent double promotion
+			DecaySemanticToProceduralMinAge:   100 * 24 * time.Hour,
+		}
+		db, err := Open(t.TempDir(), config)
+		require.NoError(t, err)
+		defer db.Close()
+
+		mem := &Memory{
+			Content: "Memory for decay score test",
+			Tier:    TierEpisodic,
+		}
+
+		stored, err := db.Store(ctx, mem)
+		require.NoError(t, err)
+
+		// Set age requirement
+		node, err := db.storage.GetNode(storage.NodeID(stored.ID))
+		require.NoError(t, err)
+		node.CreatedAt = time.Now().Add(-2 * 24 * time.Hour) // Set directly on node
+		err = db.storage.UpdateNode(node)
+		require.NoError(t, err)
+
+		// Recall to trigger promotion
+		for i := 0; i < 6; i++ {
+			recalled, err := db.Recall(ctx, stored.ID)
+			require.NoError(t, err)
+
+			if recalled.Tier == TierSemantic {
+				// After promotion, decay score should be recalculated with new tier
+				// Semantic tier has slower decay, so score may improve
+				assert.Greater(t, recalled.DecayScore, 0.0, "Decay score should be valid")
+			}
+		}
+
+		// Final recall should have semantic tier and valid score
+		final, err := db.Recall(ctx, stored.ID)
+		require.NoError(t, err)
+		assert.Equal(t, TierSemantic, final.Tier, "Should be semantic, not procedural (threshold too high)")
+		assert.Greater(t, final.DecayScore, 0.0)
+		assert.LessOrEqual(t, final.DecayScore, 1.0)
+	})
+}
+
 func TestWithoutDecay(t *testing.T) {
 	ctx := context.Background()
 

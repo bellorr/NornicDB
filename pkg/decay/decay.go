@@ -225,6 +225,50 @@ type Config struct {
 	// Higher values emphasize manually-marked important memories.
 	// Use higher values for critical data that must persist.
 	ImportanceWeight float64
+
+	// PromotionEnabled controls whether tier promotion is enabled.
+	//
+	// Default: true
+	//
+	// When enabled, frequently accessed memories are automatically promoted
+	// to more stable tiers (Episodic → Semantic → Procedural).
+	PromotionEnabled bool
+
+	// EpisodicToSemanticThreshold is the minimum access count required to promote
+	// an episodic memory to semantic tier.
+	//
+	// Default: 10 accesses
+	//
+	// A memory must be accessed at least this many times AND meet the minimum
+	// age requirement (EpisodicToSemanticMinAge) to be promoted.
+	EpisodicToSemanticThreshold int64
+
+	// EpisodicToSemanticMinAge is the minimum age (in days) an episodic memory
+	// must be before it can be promoted to semantic tier.
+	//
+	// Default: 3 days
+	//
+	// This prevents very new memories from being promoted too quickly, ensuring
+	// only memories that have proven their value over time are promoted.
+	EpisodicToSemanticMinAge time.Duration
+
+	// SemanticToProceduralThreshold is the minimum access count required to promote
+	// a semantic memory to procedural tier.
+	//
+	// Default: 50 accesses
+	//
+	// A memory must be accessed at least this many times AND meet the minimum
+	// age requirement (SemanticToProceduralMinAge) to be promoted.
+	SemanticToProceduralThreshold int64
+
+	// SemanticToProceduralMinAge is the minimum age (in days) a semantic memory
+	// must be before it can be promoted to procedural tier.
+	//
+	// Default: 30 days
+	//
+	// This ensures only well-established, frequently-used knowledge becomes
+	// procedural memory (like muscle memory).
+	SemanticToProceduralMinAge time.Duration
 }
 
 // DefaultConfig returns a Config with sensible default values.
@@ -235,6 +279,11 @@ type Config struct {
 //   - RecencyWeight: 0.4 (40%)
 //   - FrequencyWeight: 0.3 (30%)
 //   - ImportanceWeight: 0.3 (30%)
+//   - PromotionEnabled: true
+//   - EpisodicToSemanticThreshold: 10 accesses
+//   - EpisodicToSemanticMinAge: 3 days
+//   - SemanticToProceduralThreshold: 50 accesses
+//   - SemanticToProceduralMinAge: 30 days
 //
 // These defaults provide a balanced approach suitable for most applications.
 //
@@ -244,11 +293,16 @@ type Config struct {
 //	manager := decay.New(config)
 func DefaultConfig() *Config {
 	return &Config{
-		RecalculateInterval: time.Hour,
-		ArchiveThreshold:    0.05,
-		RecencyWeight:       0.4,
-		FrequencyWeight:     0.3,
-		ImportanceWeight:    0.3,
+		RecalculateInterval:           time.Hour,
+		ArchiveThreshold:              0.05,
+		RecencyWeight:                 0.4,
+		FrequencyWeight:               0.3,
+		ImportanceWeight:              0.3,
+		PromotionEnabled:              true,
+		EpisodicToSemanticThreshold:   10,
+		EpisodicToSemanticMinAge:      3 * 24 * time.Hour, // 3 days
+		SemanticToProceduralThreshold: 50,
+		SemanticToProceduralMinAge:    30 * 24 * time.Hour, // 30 days
 	}
 }
 
@@ -407,12 +461,43 @@ func New(config *Config) *Manager {
 		config = DefaultConfig()
 	}
 
+	applyDefaultWeights(config)
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &Manager{
 		config: config,
 		ctx:    ctx,
 		cancel: cancel,
+	}
+}
+
+func applyDefaultWeights(config *Config) {
+	// If the caller didn't set any weights (common when providing a partial config),
+	// fall back to defaults rather than producing an always-zero score.
+	sum := config.RecencyWeight + config.FrequencyWeight + config.ImportanceWeight
+	if sum == 0 {
+		defaults := DefaultConfig()
+		config.RecencyWeight = defaults.RecencyWeight
+		config.FrequencyWeight = defaults.FrequencyWeight
+		config.ImportanceWeight = defaults.ImportanceWeight
+		return
+	}
+
+	// If weights are partially specified, invalid, or don't sum to 1, normalize.
+	// This preserves relative intent while keeping a properly normalized score.
+	if config.RecencyWeight < 0 || config.FrequencyWeight < 0 || config.ImportanceWeight < 0 {
+		defaults := DefaultConfig()
+		config.RecencyWeight = defaults.RecencyWeight
+		config.FrequencyWeight = defaults.FrequencyWeight
+		config.ImportanceWeight = defaults.ImportanceWeight
+		return
+	}
+
+	if sum != 1.0 {
+		config.RecencyWeight /= sum
+		config.FrequencyWeight /= sum
+		config.ImportanceWeight /= sum
 	}
 }
 
@@ -423,11 +508,16 @@ func (m *Manager) GetConfig() *Config {
 	defer m.mu.RUnlock()
 	// Return a copy to prevent modification
 	return &Config{
-		RecalculateInterval: m.config.RecalculateInterval,
-		ArchiveThreshold:    m.config.ArchiveThreshold,
-		RecencyWeight:       m.config.RecencyWeight,
-		FrequencyWeight:     m.config.FrequencyWeight,
-		ImportanceWeight:    m.config.ImportanceWeight,
+		RecalculateInterval:           m.config.RecalculateInterval,
+		ArchiveThreshold:              m.config.ArchiveThreshold,
+		RecencyWeight:                 m.config.RecencyWeight,
+		FrequencyWeight:               m.config.FrequencyWeight,
+		ImportanceWeight:              m.config.ImportanceWeight,
+		PromotionEnabled:              m.config.PromotionEnabled,
+		EpisodicToSemanticThreshold:   m.config.EpisodicToSemanticThreshold,
+		EpisodicToSemanticMinAge:      m.config.EpisodicToSemanticMinAge,
+		SemanticToProceduralThreshold: m.config.SemanticToProceduralThreshold,
+		SemanticToProceduralMinAge:    m.config.SemanticToProceduralMinAge,
 	}
 }
 
@@ -583,6 +673,83 @@ func (m *Manager) Reinforce(info *MemoryInfo) *MemoryInfo {
 	info.LastAccessed = time.Now()
 	info.AccessCount++
 	return info
+}
+
+// PromoteTier determines if a memory should be promoted to a more stable tier
+// based on access frequency and age.
+//
+// Tier promotion follows the pattern:
+//
+//	Episodic → Semantic → Procedural
+//
+// Promotion criteria:
+//   - Episodic → Semantic: Must have at least EpisodicToSemanticThreshold
+//     accesses AND be at least EpisodicToSemanticMinAge old.
+//   - Semantic → Procedural: Must have at least SemanticToProceduralThreshold
+//     accesses AND be at least SemanticToProceduralMinAge old.
+//
+// Returns the new tier if promotion should occur, otherwise returns the
+// current tier unchanged.
+//
+// If promotion is disabled (PromotionEnabled = false), returns the current tier.
+//
+// Example:
+//
+//	manager := decay.New(decay.DefaultConfig())
+//
+//	// Episodic memory with 15 accesses, 5 days old
+//	info := &decay.MemoryInfo{
+//		ID:           "mem-123",
+//		Tier:         decay.TierEpisodic,
+//		CreatedAt:    time.Now().Add(-5 * 24 * time.Hour),
+//		LastAccessed: time.Now(),
+//		AccessCount:  15,
+//	}
+//
+//	newTier := manager.PromoteTier(info)
+//	if newTier != info.Tier {
+//		fmt.Printf("Promoted from %s to %s\n", info.Tier, newTier)
+//		info.Tier = newTier
+//	}
+//
+// ELI12:
+//
+// Think of tier promotion like getting a driver's license. You start with a
+// learner's permit (episodic), then after practicing enough (10+ times over
+// 3+ days), you get a regular license (semantic). After lots of experience
+// (50+ times over 30+ days), you become an expert driver (procedural)!
+func (m *Manager) PromoteTier(info *MemoryInfo) Tier {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// If promotion is disabled, return current tier
+	if !m.config.PromotionEnabled {
+		return info.Tier
+	}
+
+	now := time.Now()
+	age := now.Sub(info.CreatedAt)
+
+	// Episodic → Semantic promotion
+	if info.Tier == TierEpisodic {
+		if info.AccessCount >= m.config.EpisodicToSemanticThreshold &&
+			age >= m.config.EpisodicToSemanticMinAge {
+			return TierSemantic
+		}
+		return info.Tier
+	}
+
+	// Semantic → Procedural promotion
+	if info.Tier == TierSemantic {
+		if info.AccessCount >= m.config.SemanticToProceduralThreshold &&
+			age >= m.config.SemanticToProceduralMinAge {
+			return TierProcedural
+		}
+		return info.Tier
+	}
+
+	// Procedural is the highest tier, no further promotion
+	return info.Tier
 }
 
 // ShouldArchive returns true if a memory's score is below the archive threshold.

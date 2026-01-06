@@ -307,9 +307,17 @@ type Config struct {
 	SearchMinSimilarity   float64 `yaml:"search_min_similarity"`    // Min cosine similarity for vector search (0.0 = no filter)
 
 	// Decay
-	DecayEnabled             bool          `yaml:"decay_enabled"`
-	DecayRecalculateInterval time.Duration `yaml:"decay_recalculate_interval"`
-	DecayArchiveThreshold    float64       `yaml:"decay_archive_threshold"`
+	DecayEnabled                    bool          `yaml:"decay_enabled"`
+	DecayRecalculateInterval        time.Duration `yaml:"decay_recalculate_interval"`
+	DecayArchiveThreshold           float64       `yaml:"decay_archive_threshold"`
+	DecayRecencyWeight              float64       `yaml:"decay_recency_weight"`
+	DecayFrequencyWeight            float64       `yaml:"decay_frequency_weight"`
+	DecayImportanceWeight           float64       `yaml:"decay_importance_weight"`
+	DecayPromotionEnabled           bool          `yaml:"decay_promotion_enabled"`
+	DecayEpisodicToSemanticThresh   int64         `yaml:"decay_episodic_to_semantic_threshold"`
+	DecayEpisodicToSemanticMinAge   time.Duration `yaml:"decay_episodic_to_semantic_min_age"`
+	DecaySemanticToProceduralThresh int64         `yaml:"decay_semantic_to_procedural_threshold"`
+	DecaySemanticToProceduralMinAge time.Duration `yaml:"decay_semantic_to_procedural_min_age"`
 
 	// Auto-linking
 	AutoLinksEnabled             bool          `yaml:"auto_links_enabled"`
@@ -369,34 +377,42 @@ type Config struct {
 //	db, err := nornicdb.Open("./data", config)
 func DefaultConfig() *Config {
 	return &Config{
-		DataDir:                      "./data",
-		EmbeddingProvider:            "openai", // Use OpenAI-compatible endpoint (llama.cpp, vLLM, etc.)
-		EmbeddingAPIURL:              "http://localhost:11434",
-		EmbeddingAPIKey:              "not-needed", // Dummy key for llama.cpp (doesn't validate)
-		EmbeddingModel:               "bge-m3",
-		EmbeddingDimensions:          1024,
-		AutoEmbedEnabled:             true, // Auto-generate embeddings on node creation
-		EmbedWorkerNumWorkers:        1,    // Single worker by default, increase for network-based embedders or multiple GPUs
-		DecayEnabled:                 true,
-		DecayRecalculateInterval:     time.Hour,
-		DecayArchiveThreshold:        0.05,
-		AutoLinksEnabled:             true,
-		AutoLinksSimilarityThreshold: 0.82,
-		AutoLinksCoAccessWindow:      30 * time.Second,
-		ParallelEnabled:              true,                  // Enable parallel query execution by default
-		ParallelMaxWorkers:           0,                     // 0 = auto (runtime.NumCPU())
-		ParallelMinBatchSize:         1000,                  // Parallelize for 1000+ items
-		AsyncWritesEnabled:           true,                  // Enable async writes for eventual consistency (faster writes)
-		AsyncFlushInterval:           50 * time.Millisecond, // Flush pending writes every 50ms
-		AsyncMaxNodeCacheSize:        50000,                 // Buffer up to 50K nodes before forcing flush (~35MB)
-		AsyncMaxEdgeCacheSize:        100000,                // Buffer up to 100K edges before forcing flush (~50MB)
-		BadgerNodeCacheMaxEntries:    10000,                 // Cache up to 10K hot nodes
-		BadgerEdgeTypeCacheMaxTypes:  50,                    // Cache up to 50 distinct edge types
-		EncryptionEnabled:            false,                 // Encryption disabled by default (opt-in)
-		EncryptionPassword:           "",                    // Must be set if encryption enabled
-		BoltPort:                     7687,
-		HTTPPort:                     7474,
-		KmeansClusterInterval:        15 * time.Minute, // Run k-means every 15 min (skips if no changes)
+		DataDir:                         "./data",
+		EmbeddingProvider:               "openai", // Use OpenAI-compatible endpoint (llama.cpp, vLLM, etc.)
+		EmbeddingAPIURL:                 "http://localhost:11434",
+		EmbeddingAPIKey:                 "not-needed", // Dummy key for llama.cpp (doesn't validate)
+		EmbeddingModel:                  "bge-m3",
+		EmbeddingDimensions:             1024,
+		AutoEmbedEnabled:                true, // Auto-generate embeddings on node creation
+		EmbedWorkerNumWorkers:           1,    // Single worker by default, increase for network-based embedders or multiple GPUs
+		DecayEnabled:                    true,
+		DecayRecalculateInterval:        time.Hour,
+		DecayArchiveThreshold:           0.05,
+		DecayRecencyWeight:              0.4,
+		DecayFrequencyWeight:            0.3,
+		DecayImportanceWeight:           0.3,
+		DecayPromotionEnabled:           true,
+		DecayEpisodicToSemanticThresh:   10,
+		DecayEpisodicToSemanticMinAge:   3 * 24 * time.Hour,
+		DecaySemanticToProceduralThresh: 50,
+		DecaySemanticToProceduralMinAge: 30 * 24 * time.Hour,
+		AutoLinksEnabled:                true,
+		AutoLinksSimilarityThreshold:    0.82,
+		AutoLinksCoAccessWindow:         30 * time.Second,
+		ParallelEnabled:                 true,                  // Enable parallel query execution by default
+		ParallelMaxWorkers:              0,                     // 0 = auto (runtime.NumCPU())
+		ParallelMinBatchSize:            1000,                  // Parallelize for 1000+ items
+		AsyncWritesEnabled:              true,                  // Enable async writes for eventual consistency (faster writes)
+		AsyncFlushInterval:              50 * time.Millisecond, // Flush pending writes every 50ms
+		AsyncMaxNodeCacheSize:           50000,                 // Buffer up to 50K nodes before forcing flush (~35MB)
+		AsyncMaxEdgeCacheSize:           100000,                // Buffer up to 100K edges before forcing flush (~50MB)
+		BadgerNodeCacheMaxEntries:       10000,                 // Cache up to 10K hot nodes
+		BadgerEdgeTypeCacheMaxTypes:     50,                    // Cache up to 50 distinct edge types
+		EncryptionEnabled:               false,                 // Encryption disabled by default (opt-in)
+		EncryptionPassword:              "",                    // Must be set if encryption enabled
+		BoltPort:                        7687,
+		HTTPPort:                        7474,
+		KmeansClusterInterval:           15 * time.Minute, // Run k-means every 15 min (skips if no changes)
 	}
 }
 
@@ -950,11 +966,26 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// Initialize decay manager
 	if config.DecayEnabled {
 		decayConfig := &decay.Config{
-			RecalculateInterval: config.DecayRecalculateInterval,
-			ArchiveThreshold:    config.DecayArchiveThreshold,
-			RecencyWeight:       0.4,
-			FrequencyWeight:     0.3,
-			ImportanceWeight:    0.3,
+			RecalculateInterval:           config.DecayRecalculateInterval,
+			ArchiveThreshold:              config.DecayArchiveThreshold,
+			RecencyWeight:                 config.DecayRecencyWeight,
+			FrequencyWeight:               config.DecayFrequencyWeight,
+			ImportanceWeight:              config.DecayImportanceWeight,
+			PromotionEnabled:              config.DecayPromotionEnabled,
+			EpisodicToSemanticThreshold:   config.DecayEpisodicToSemanticThresh,
+			EpisodicToSemanticMinAge:      config.DecayEpisodicToSemanticMinAge,
+			SemanticToProceduralThreshold: config.DecaySemanticToProceduralThresh,
+			SemanticToProceduralMinAge:    config.DecaySemanticToProceduralMinAge,
+		}
+		// Use defaults if not explicitly set
+		if !config.DecayPromotionEnabled && config.DecayEpisodicToSemanticThresh == 0 {
+			// If promotion wasn't explicitly disabled and thresholds are zero, use defaults
+			defaultDecayConfig := decay.DefaultConfig()
+			decayConfig.PromotionEnabled = defaultDecayConfig.PromotionEnabled
+			decayConfig.EpisodicToSemanticThreshold = defaultDecayConfig.EpisodicToSemanticThreshold
+			decayConfig.EpisodicToSemanticMinAge = defaultDecayConfig.EpisodicToSemanticMinAge
+			decayConfig.SemanticToProceduralThreshold = defaultDecayConfig.SemanticToProceduralThreshold
+			decayConfig.SemanticToProceduralMinAge = defaultDecayConfig.SemanticToProceduralMinAge
 		}
 		db.decay = decay.New(decayConfig)
 	}
@@ -1550,6 +1581,15 @@ func (db *DB) Recall(ctx context.Context, id string) (*Memory, error) {
 		mem.LastAccessed = info.LastAccessed
 		mem.AccessCount = info.AccessCount
 		mem.DecayScore = db.decay.CalculateScore(info)
+
+		// Check for tier promotion (frequently accessed memories move to more stable tiers)
+		newTier := db.decay.PromoteTier(info)
+		if newTier != info.Tier {
+			mem.Tier = MemoryTier(newTier)
+			info.Tier = newTier
+			// Recalculate decay score with new tier (may improve due to slower decay)
+			mem.DecayScore = db.decay.CalculateScore(info)
+		}
 	} else {
 		mem.LastAccessed = now
 		mem.AccessCount++

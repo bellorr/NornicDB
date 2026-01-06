@@ -15,7 +15,7 @@ import (
 func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()
 	require.NotNil(t, config)
-	
+
 	assert.Equal(t, time.Hour, config.RecalculateInterval)
 	assert.Equal(t, 0.05, config.ArchiveThreshold)
 	assert.Equal(t, 0.4, config.RecencyWeight)
@@ -32,12 +32,43 @@ func TestNew(t *testing.T) {
 		manager := New(config)
 		require.NotNil(t, manager)
 		assert.Equal(t, time.Minute, manager.config.RecalculateInterval)
+		assert.Equal(t, 0.4, manager.config.RecencyWeight)
+		assert.Equal(t, 0.3, manager.config.FrequencyWeight)
+		assert.Equal(t, 0.3, manager.config.ImportanceWeight)
 	})
-	
+
 	t.Run("nil config uses defaults", func(t *testing.T) {
 		manager := New(nil)
 		require.NotNil(t, manager)
 		assert.Equal(t, time.Hour, manager.config.RecalculateInterval)
+	})
+}
+
+func TestNew_NormalizesWeights(t *testing.T) {
+	t.Run("normalizes to sum=1", func(t *testing.T) {
+		manager := New(&Config{
+			RecencyWeight:    2,
+			FrequencyWeight:  1,
+			ImportanceWeight: 1,
+		})
+		require.NotNil(t, manager)
+		sum := manager.config.RecencyWeight + manager.config.FrequencyWeight + manager.config.ImportanceWeight
+		assert.InDelta(t, 1.0, sum, 1e-12)
+		assert.InDelta(t, 0.5, manager.config.RecencyWeight, 1e-12)
+		assert.InDelta(t, 0.25, manager.config.FrequencyWeight, 1e-12)
+		assert.InDelta(t, 0.25, manager.config.ImportanceWeight, 1e-12)
+	})
+
+	t.Run("negative weights fall back to defaults", func(t *testing.T) {
+		manager := New(&Config{
+			RecencyWeight:    -1,
+			FrequencyWeight:  1,
+			ImportanceWeight: 1,
+		})
+		require.NotNil(t, manager)
+		assert.Equal(t, 0.4, manager.config.RecencyWeight)
+		assert.Equal(t, 0.3, manager.config.FrequencyWeight)
+		assert.Equal(t, 0.3, manager.config.ImportanceWeight)
 	})
 }
 
@@ -51,12 +82,12 @@ func TestManager_CalculateScore(t *testing.T) {
 			LastAccessed: time.Now(),
 			AccessCount:  1,
 		}
-		
+
 		score := manager.CalculateScore(info)
 		// Should be close to RecencyWeight(0.4) + some frequency + importance
 		assert.Greater(t, score, 0.5)
 	})
-	
+
 	t.Run("old memory has lower score", func(t *testing.T) {
 		manager := New(nil)
 		info := &MemoryInfo{
@@ -66,69 +97,69 @@ func TestManager_CalculateScore(t *testing.T) {
 			LastAccessed: time.Now().Add(-30 * 24 * time.Hour), // 30 days old
 			AccessCount:  1,
 		}
-		
+
 		score := manager.CalculateScore(info)
 		// Episodic memory 30 days old should have significantly decayed
 		assert.Less(t, score, 0.5)
 	})
-	
+
 	t.Run("frequent access increases score", func(t *testing.T) {
 		manager := New(nil)
-		
+
 		lowAccess := &MemoryInfo{
 			ID:           "low",
 			Tier:         TierSemantic,
 			LastAccessed: time.Now().Add(-24 * time.Hour),
 			AccessCount:  1,
 		}
-		
+
 		highAccess := &MemoryInfo{
 			ID:           "high",
 			Tier:         TierSemantic,
 			LastAccessed: time.Now().Add(-24 * time.Hour),
 			AccessCount:  50,
 		}
-		
+
 		lowScore := manager.CalculateScore(lowAccess)
 		highScore := manager.CalculateScore(highAccess)
-		
+
 		assert.Greater(t, highScore, lowScore)
 	})
-	
+
 	t.Run("procedural tier decays slowest", func(t *testing.T) {
 		manager := New(nil)
 		oldTime := time.Now().Add(-60 * 24 * time.Hour) // 60 days old
-		
+
 		episodic := &MemoryInfo{
 			ID:           "episodic",
 			Tier:         TierEpisodic,
 			LastAccessed: oldTime,
 			AccessCount:  1,
 		}
-		
+
 		semantic := &MemoryInfo{
 			ID:           "semantic",
 			Tier:         TierSemantic,
 			LastAccessed: oldTime,
 			AccessCount:  1,
 		}
-		
+
 		procedural := &MemoryInfo{
 			ID:           "procedural",
 			Tier:         TierProcedural,
 			LastAccessed: oldTime,
 			AccessCount:  1,
 		}
-		
+
 		episodicScore := manager.CalculateScore(episodic)
 		semanticScore := manager.CalculateScore(semantic)
 		proceduralScore := manager.CalculateScore(procedural)
-		
+
 		// Procedural should decay slowest
 		assert.Greater(t, proceduralScore, semanticScore)
 		assert.Greater(t, semanticScore, episodicScore)
 	})
-	
+
 	t.Run("unknown tier uses semantic lambda", func(t *testing.T) {
 		manager := New(nil)
 		info := &MemoryInfo{
@@ -137,22 +168,22 @@ func TestManager_CalculateScore(t *testing.T) {
 			LastAccessed: time.Now(),
 			AccessCount:  1,
 		}
-		
+
 		score := manager.CalculateScore(info)
 		// Should not panic and should use default
 		assert.Greater(t, score, 0.0)
 	})
-	
+
 	t.Run("importance weight override", func(t *testing.T) {
 		manager := New(nil)
-		
+
 		defaultImportance := &MemoryInfo{
 			ID:           "default",
 			Tier:         TierSemantic,
 			LastAccessed: time.Now(),
 			AccessCount:  1,
 		}
-		
+
 		highImportance := &MemoryInfo{
 			ID:               "high",
 			Tier:             TierSemantic,
@@ -160,16 +191,16 @@ func TestManager_CalculateScore(t *testing.T) {
 			AccessCount:      1,
 			ImportanceWeight: 1.0, // Max importance
 		}
-		
+
 		defaultScore := manager.CalculateScore(defaultImportance)
 		highScore := manager.CalculateScore(highImportance)
-		
+
 		assert.Greater(t, highScore, defaultScore)
 	})
-	
+
 	t.Run("score clamped to 0-1", func(t *testing.T) {
 		manager := New(nil)
-		
+
 		// Test with extreme values
 		info := &MemoryInfo{
 			ID:               "test",
@@ -178,7 +209,7 @@ func TestManager_CalculateScore(t *testing.T) {
 			AccessCount:      1000, // Very high
 			ImportanceWeight: 1.0,
 		}
-		
+
 		score := manager.CalculateScore(info)
 		assert.LessOrEqual(t, score, 1.0)
 		assert.GreaterOrEqual(t, score, 0.0)
@@ -189,25 +220,25 @@ func TestManager_Reinforce(t *testing.T) {
 	t.Run("updates last accessed and count", func(t *testing.T) {
 		manager := New(nil)
 		oldTime := time.Now().Add(-time.Hour)
-		
+
 		info := &MemoryInfo{
 			ID:           "test",
 			Tier:         TierSemantic,
 			LastAccessed: oldTime,
 			AccessCount:  5,
 		}
-		
+
 		beforeReinforce := time.Now()
 		result := manager.Reinforce(info)
-		
+
 		assert.True(t, result.LastAccessed.After(beforeReinforce) || result.LastAccessed.Equal(beforeReinforce))
 		assert.Equal(t, int64(6), result.AccessCount)
 	})
-	
+
 	t.Run("returns same object", func(t *testing.T) {
 		manager := New(nil)
 		info := &MemoryInfo{ID: "test"}
-		
+
 		result := manager.Reinforce(info)
 		assert.Same(t, info, result)
 	})
@@ -217,23 +248,23 @@ func TestManager_ShouldArchive(t *testing.T) {
 	t.Run("below threshold", func(t *testing.T) {
 		config := &Config{ArchiveThreshold: 0.1}
 		manager := New(config)
-		
+
 		assert.True(t, manager.ShouldArchive(0.05))
 		assert.True(t, manager.ShouldArchive(0.09))
 	})
-	
+
 	t.Run("above threshold", func(t *testing.T) {
 		config := &Config{ArchiveThreshold: 0.1}
 		manager := New(config)
-		
+
 		assert.False(t, manager.ShouldArchive(0.1))
 		assert.False(t, manager.ShouldArchive(0.5))
 	})
-	
+
 	t.Run("exact threshold", func(t *testing.T) {
 		config := &Config{ArchiveThreshold: 0.1}
 		manager := New(config)
-		
+
 		// Exactly at threshold should NOT archive
 		assert.False(t, manager.ShouldArchive(0.1))
 	})
@@ -245,50 +276,50 @@ func TestManager_StartStop(t *testing.T) {
 			RecalculateInterval: 10 * time.Millisecond,
 		}
 		manager := New(config)
-		
+
 		var callCount int64
 		recalcFunc := func(ctx context.Context) error {
 			atomic.AddInt64(&callCount, 1)
 			return nil
 		}
-		
+
 		manager.Start(recalcFunc)
-		
+
 		// Wait for a few ticks
 		time.Sleep(50 * time.Millisecond)
-		
+
 		manager.Stop()
-		
+
 		// Should have been called at least once
 		assert.GreaterOrEqual(t, atomic.LoadInt64(&callCount), int64(1))
 	})
-	
+
 	t.Run("stop is idempotent", func(t *testing.T) {
 		manager := New(nil)
 		manager.Start(func(ctx context.Context) error { return nil })
-		
+
 		// Multiple stops should not panic
 		manager.Stop()
 		manager.Stop()
 	})
-	
+
 	t.Run("context cancellation stops goroutine", func(t *testing.T) {
 		config := &Config{
 			RecalculateInterval: time.Hour, // Long interval
 		}
 		manager := New(config)
-		
+
 		var started, stopped int64
-		
+
 		manager.Start(func(ctx context.Context) error {
 			atomic.AddInt64(&started, 1)
 			return nil
 		})
-		
+
 		// Immediately stop
 		manager.Stop()
 		atomic.AddInt64(&stopped, 1)
-		
+
 		// Should have stopped without blocking
 		assert.Equal(t, int64(1), atomic.LoadInt64(&stopped))
 	})
@@ -297,16 +328,16 @@ func TestManager_StartStop(t *testing.T) {
 func TestManager_GetStats(t *testing.T) {
 	t.Run("calculates stats correctly", func(t *testing.T) {
 		manager := New(nil)
-		
+
 		memories := []MemoryInfo{
 			{ID: "e1", Tier: TierEpisodic, LastAccessed: time.Now(), AccessCount: 1},
 			{ID: "e2", Tier: TierEpisodic, LastAccessed: time.Now(), AccessCount: 1},
 			{ID: "s1", Tier: TierSemantic, LastAccessed: time.Now(), AccessCount: 10},
 			{ID: "p1", Tier: TierProcedural, LastAccessed: time.Now(), AccessCount: 50},
 		}
-		
+
 		stats := manager.GetStats(memories)
-		
+
 		assert.Equal(t, int64(4), stats.TotalMemories)
 		assert.Equal(t, int64(2), stats.EpisodicCount)
 		assert.Equal(t, int64(1), stats.SemanticCount)
@@ -316,16 +347,16 @@ func TestManager_GetStats(t *testing.T) {
 		assert.Contains(t, stats.AvgByTier, TierSemantic)
 		assert.Contains(t, stats.AvgByTier, TierProcedural)
 	})
-	
+
 	t.Run("empty memories", func(t *testing.T) {
 		manager := New(nil)
-		
+
 		stats := manager.GetStats([]MemoryInfo{})
-		
+
 		assert.Equal(t, int64(0), stats.TotalMemories)
 		assert.Equal(t, 0.0, stats.AvgDecayScore)
 	})
-	
+
 	t.Run("counts archived memories", func(t *testing.T) {
 		config := &Config{
 			ArchiveThreshold: 0.5,
@@ -334,7 +365,7 @@ func TestManager_GetStats(t *testing.T) {
 			ImportanceWeight: 0.3,
 		}
 		manager := New(config)
-		
+
 		memories := []MemoryInfo{
 			// Very old episodic memory - should be archived
 			{
@@ -351,9 +382,9 @@ func TestManager_GetStats(t *testing.T) {
 				AccessCount:  10,
 			},
 		}
-		
+
 		stats := manager.GetStats(memories)
-		
+
 		// At least the old memory should be archived
 		assert.GreaterOrEqual(t, stats.ArchivedCount, int64(1))
 	})
@@ -364,17 +395,17 @@ func TestHalfLife(t *testing.T) {
 		halfLife := HalfLife(TierEpisodic)
 		assert.InDelta(t, 7.0, halfLife, 0.5) // Within half a day
 	})
-	
+
 	t.Run("semantic half-life is ~69 days", func(t *testing.T) {
 		halfLife := HalfLife(TierSemantic)
 		assert.InDelta(t, 69.0, halfLife, 1.0)
 	})
-	
+
 	t.Run("procedural half-life is ~693 days", func(t *testing.T) {
 		halfLife := HalfLife(TierProcedural)
 		assert.InDelta(t, 693.0, halfLife, 5.0)
 	})
-	
+
 	t.Run("unknown tier returns 0", func(t *testing.T) {
 		halfLife := HalfLife(Tier("UNKNOWN"))
 		assert.Equal(t, 0.0, halfLife)
@@ -401,7 +432,7 @@ func TestTierBaseImportance(t *testing.T) {
 func TestManager_Concurrency(t *testing.T) {
 	t.Run("concurrent score calculations", func(t *testing.T) {
 		manager := New(nil)
-		
+
 		var wg sync.WaitGroup
 		for i := 0; i < 100; i++ {
 			wg.Add(1)
@@ -429,24 +460,24 @@ func TestDecayFormula(t *testing.T) {
 			FrequencyWeight:  0.0,
 			ImportanceWeight: 0.0,
 		})
-		
+
 		base := &MemoryInfo{
 			ID:           "test",
 			Tier:         TierSemantic,
 			LastAccessed: time.Now(),
 			AccessCount:  1,
 		}
-		
+
 		// Score at time 0
 		score0 := manager.CalculateScore(base)
-		
+
 		// Score after half-life
 		lambda := tierLambda[TierSemantic]
 		halfLifeHours := math.Log(2) / lambda
-		
+
 		base.LastAccessed = time.Now().Add(-time.Duration(halfLifeHours) * time.Hour)
 		scoreHalfLife := manager.CalculateScore(base)
-		
+
 		// Score should be half
 		assert.InDelta(t, score0/2, scoreHalfLife, 0.05)
 	})
@@ -462,7 +493,7 @@ func BenchmarkCalculateScore(b *testing.B) {
 		LastAccessed: time.Now().Add(-24 * time.Hour),
 		AccessCount:  10,
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		manager.CalculateScore(info)
@@ -471,7 +502,7 @@ func BenchmarkCalculateScore(b *testing.B) {
 
 func BenchmarkGetStats(b *testing.B) {
 	manager := New(nil)
-	
+
 	memories := make([]MemoryInfo, 1000)
 	for i := range memories {
 		memories[i] = MemoryInfo{
@@ -481,9 +512,328 @@ func BenchmarkGetStats(b *testing.B) {
 			AccessCount:  int64(i % 100),
 		}
 	}
-	
+
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		manager.GetStats(memories)
 	}
+}
+
+// Tier Promotion Tests
+
+func TestManager_PromoteTier(t *testing.T) {
+	t.Run("promotion disabled returns current tier", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled: false,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierEpisodic,
+			CreatedAt:    time.Now().Add(-10 * 24 * time.Hour),
+			LastAccessed: time.Now(),
+			AccessCount:  100, // Would normally promote
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierEpisodic, newTier, "Should not promote when disabled")
+	})
+
+	t.Run("episodic to semantic - meets threshold and age", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:            true,
+			EpisodicToSemanticThreshold: 10,
+			EpisodicToSemanticMinAge:    3 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierEpisodic,
+			CreatedAt:    time.Now().Add(-5 * 24 * time.Hour), // 5 days old
+			LastAccessed: time.Now(),
+			AccessCount:  15, // Exceeds threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierSemantic, newTier, "Should promote episodic to semantic")
+	})
+
+	t.Run("episodic to semantic - insufficient accesses", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:            true,
+			EpisodicToSemanticThreshold: 10,
+			EpisodicToSemanticMinAge:    3 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierEpisodic,
+			CreatedAt:    time.Now().Add(-5 * 24 * time.Hour), // 5 days old
+			LastAccessed: time.Now(),
+			AccessCount:  5, // Below threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierEpisodic, newTier, "Should not promote with insufficient accesses")
+	})
+
+	t.Run("episodic to semantic - too young", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:            true,
+			EpisodicToSemanticThreshold: 10,
+			EpisodicToSemanticMinAge:    3 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierEpisodic,
+			CreatedAt:    time.Now().Add(-1 * 24 * time.Hour), // Only 1 day old
+			LastAccessed: time.Now(),
+			AccessCount:  15, // Exceeds threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierEpisodic, newTier, "Should not promote if too young")
+	})
+
+	t.Run("episodic to semantic - exactly at threshold", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:            true,
+			EpisodicToSemanticThreshold: 10,
+			EpisodicToSemanticMinAge:    3 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierEpisodic,
+			CreatedAt:    time.Now().Add(-4 * 24 * time.Hour), // 4 days old
+			LastAccessed: time.Now(),
+			AccessCount:  10, // Exactly at threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierSemantic, newTier, "Should promote at exact threshold")
+	})
+
+	t.Run("semantic to procedural - meets threshold and age", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:              true,
+			SemanticToProceduralThreshold: 50,
+			SemanticToProceduralMinAge:    30 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierSemantic,
+			CreatedAt:    time.Now().Add(-40 * 24 * time.Hour), // 40 days old
+			LastAccessed: time.Now(),
+			AccessCount:  60, // Exceeds threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierProcedural, newTier, "Should promote semantic to procedural")
+	})
+
+	t.Run("semantic to procedural - insufficient accesses", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:              true,
+			SemanticToProceduralThreshold: 50,
+			SemanticToProceduralMinAge:    30 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierSemantic,
+			CreatedAt:    time.Now().Add(-40 * 24 * time.Hour), // 40 days old
+			LastAccessed: time.Now(),
+			AccessCount:  30, // Below threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierSemantic, newTier, "Should not promote with insufficient accesses")
+	})
+
+	t.Run("semantic to procedural - too young", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:              true,
+			SemanticToProceduralThreshold: 50,
+			SemanticToProceduralMinAge:    30 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierSemantic,
+			CreatedAt:    time.Now().Add(-20 * 24 * time.Hour), // Only 20 days old
+			LastAccessed: time.Now(),
+			AccessCount:  60, // Exceeds threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierSemantic, newTier, "Should not promote if too young")
+	})
+
+	t.Run("semantic to procedural - exactly at threshold", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:              true,
+			SemanticToProceduralThreshold: 50,
+			SemanticToProceduralMinAge:    30 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierSemantic,
+			CreatedAt:    time.Now().Add(-35 * 24 * time.Hour), // 35 days old
+			LastAccessed: time.Now(),
+			AccessCount:  50, // Exactly at threshold
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierProcedural, newTier, "Should promote at exact threshold")
+	})
+
+	t.Run("procedural tier - no further promotion", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled: true,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierProcedural,
+			CreatedAt:    time.Now().Add(-365 * 24 * time.Hour), // 1 year old
+			LastAccessed: time.Now(),
+			AccessCount:  1000, // Very high access count
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierProcedural, newTier, "Procedural is highest tier, no further promotion")
+	})
+
+	t.Run("episodic to semantic - exactly at minimum age", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:            true,
+			EpisodicToSemanticThreshold: 10,
+			EpisodicToSemanticMinAge:    3 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierEpisodic,
+			CreatedAt:    time.Now().Add(-3 * 24 * time.Hour), // Exactly 3 days old
+			LastAccessed: time.Now(),
+			AccessCount:  10,
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierSemantic, newTier, "Should promote at exact minimum age")
+	})
+
+	t.Run("semantic to procedural - exactly at minimum age", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:              true,
+			SemanticToProceduralThreshold: 50,
+			SemanticToProceduralMinAge:    30 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierSemantic,
+			CreatedAt:    time.Now().Add(-30 * 24 * time.Hour), // Exactly 30 days old
+			LastAccessed: time.Now(),
+			AccessCount:  50,
+		}
+
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierProcedural, newTier, "Should promote at exact minimum age")
+	})
+
+	t.Run("default config has promotion enabled", func(t *testing.T) {
+		config := DefaultConfig()
+		assert.True(t, config.PromotionEnabled, "Default config should have promotion enabled")
+		assert.Equal(t, int64(10), config.EpisodicToSemanticThreshold)
+		assert.Equal(t, 3*24*time.Hour, config.EpisodicToSemanticMinAge)
+		assert.Equal(t, int64(50), config.SemanticToProceduralThreshold)
+		assert.Equal(t, 30*24*time.Hour, config.SemanticToProceduralMinAge)
+	})
+}
+
+func TestManager_PromoteTier_Integration(t *testing.T) {
+	t.Run("full promotion path: episodic -> semantic -> procedural", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:              true,
+			EpisodicToSemanticThreshold:   5, // Lower for testing
+			EpisodicToSemanticMinAge:      1 * 24 * time.Hour,
+			SemanticToProceduralThreshold: 10, // Lower for testing
+			SemanticToProceduralMinAge:    2 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		// Start as episodic
+		info := &MemoryInfo{
+			ID:           "test",
+			Tier:         TierEpisodic,
+			CreatedAt:    time.Now().Add(-2 * 24 * time.Hour),
+			LastAccessed: time.Now(),
+			AccessCount:  1,
+		}
+
+		// Should not promote yet (insufficient accesses)
+		newTier := manager.PromoteTier(info)
+		assert.Equal(t, TierEpisodic, newTier)
+
+		// Increase accesses to meet threshold
+		info.AccessCount = 5
+		newTier = manager.PromoteTier(info)
+		assert.Equal(t, TierSemantic, newTier, "Should promote to semantic")
+		info.Tier = newTier
+
+		// Should not promote to procedural yet (insufficient accesses)
+		newTier = manager.PromoteTier(info)
+		assert.Equal(t, TierSemantic, newTier)
+
+		// Increase accesses to meet procedural threshold
+		info.AccessCount = 10
+		info.CreatedAt = time.Now().Add(-3 * 24 * time.Hour) // Ensure age requirement met
+		newTier = manager.PromoteTier(info)
+		assert.Equal(t, TierProcedural, newTier, "Should promote to procedural")
+	})
+
+	t.Run("concurrent promotion checks", func(t *testing.T) {
+		config := &Config{
+			PromotionEnabled:            true,
+			EpisodicToSemanticThreshold: 10,
+			EpisodicToSemanticMinAge:    1 * 24 * time.Hour,
+		}
+		manager := New(config)
+
+		var wg sync.WaitGroup
+		for i := 0; i < 100; i++ {
+			wg.Add(1)
+			go func(id int) {
+				defer wg.Done()
+				info := &MemoryInfo{
+					ID:           string(rune('a' + id%26)),
+					Tier:         TierEpisodic,
+					CreatedAt:    time.Now().Add(-2 * 24 * time.Hour),
+					LastAccessed: time.Now(),
+					AccessCount:  int64(10 + id),
+				}
+				newTier := manager.PromoteTier(info)
+				// Should either stay episodic or promote to semantic
+				assert.True(t, newTier == TierEpisodic || newTier == TierSemantic)
+			}(i)
+		}
+		wg.Wait()
+	})
 }
