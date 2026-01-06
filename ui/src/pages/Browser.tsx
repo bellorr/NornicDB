@@ -1,34 +1,18 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-
-// Base path from environment variable (set at build time)
-const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
-import {
-  Database,
-  Search,
-  Play,
-  History,
-  Terminal,
-  Network,
-  HardDrive,
-  Clock,
-  Activity,
-  ChevronRight,
-  ChevronDown,
-  Sparkles,
-  X,
-  Zap,
-  Loader2,
-  MessageCircle,
-  Shield,
-  Trash2,
-  Edit,
-  Check,
-  Plus,
-} from "lucide-react";
+import { Terminal, Sparkles } from "lucide-react";
 import { useAppStore } from "../store/appStore";
 import { Bifrost } from "../../Bifrost";
 import { api } from "../utils/api";
+import { Header } from "../components/browser/Header";
+import { QueryPanel } from "../components/browser/QueryPanel";
+import { SearchPanel } from "../components/browser/SearchPanel";
+import { NodeDetailsPanel } from "../components/browser/NodeDetailsPanel";
+import { DeleteConfirmModal } from "../components/modals/DeleteConfirmModal";
+import { RegenerateConfirmModal } from "../components/modals/RegenerateConfirmModal";
+
+// Base path from environment variable (set at build time)
+const BASE_PATH = import.meta.env.VITE_BASE_PATH || "";
 
 interface EmbedStats {
   running: boolean;
@@ -71,7 +55,6 @@ export function Browser() {
   } = useAppStore();
 
   const [activeTab, setActiveTab] = useState<"query" | "search">("query");
-  const [showHistory, setShowHistory] = useState(false);
   const [embedData, setEmbedData] = useState<EmbedData>({
     stats: null,
     totalEmbeddings: 0,
@@ -83,8 +66,6 @@ export function Browser() {
   const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
-  const [editingProperties, setEditingProperties] = useState<Record<string, unknown>>({});
   const [deleting, setDeleting] = useState(false);
   const navigate = useNavigate();
 
@@ -114,7 +95,6 @@ export function Browser() {
     setEmbedTriggering(true);
     setEmbedMessage(null);
     try {
-      // Use regenerate=true to clear existing embeddings and regenerate all
       const res = await fetch(`${BASE_PATH}/nornicdb/embed/trigger?regenerate=true`, {
         method: "POST",
       });
@@ -127,11 +107,10 @@ export function Browser() {
       } else {
         setEmbedMessage(data.message || "Failed to trigger embeddings");
       }
-    } catch (err) {
+    } catch {
       setEmbedMessage("Error triggering embeddings");
     } finally {
       setEmbedTriggering(false);
-      // Clear message after 5 seconds (longer for regenerate)
       setTimeout(() => setEmbedMessage(null), 5000);
     }
   };
@@ -142,216 +121,58 @@ export function Browser() {
     return () => clearInterval(interval);
   }, [fetchStats]);
 
-  const handleQuerySubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    executeCypher();
+  const handleDeleteNodes = async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      const result = await api.deleteNodes(Array.from(selectedNodeIds));
+      setShowDeleteConfirm(false);
+
+      if (result.success) {
+        clearNodeSelection();
+        if (activeTab === "query") {
+          executeCypher();
+        } else {
+          executeSearch();
+        }
+      } else {
+        setDeleteError(result.errors.join(", "));
+      }
+    } catch (err) {
+      setShowDeleteConfirm(false);
+      setDeleteError(err instanceof Error ? err.message : "Unknown error occurred");
+    } finally {
+      setDeleting(false);
+    }
   };
 
-  const handleSearchSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    executeSearch();
+  const handleUpdateProperties = async (
+    nodeId: string,
+    props: Record<string, unknown>
+  ) => {
+    return await api.updateNodeProperties(nodeId, props);
   };
 
-  const formatUptime = (seconds: number) => {
-    const hours = Math.floor(seconds / 3600);
-    const mins = Math.floor((seconds % 3600) / 60);
-    return `${hours}h ${mins}m`;
+  const handleRefresh = () => {
+    if (activeTab === "query") {
+      executeCypher();
+    } else {
+      executeSearch();
+    }
   };
 
   return (
     <div className="min-h-screen bg-norse-night flex flex-col">
-      {/* Header */}
-      <header className="bg-norse-shadow border-b border-norse-rune px-4 py-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            {/* NornicDB Logo - Interwoven threads with gold nexus */}
-            <svg
-              viewBox="0 0 200 180"
-              width="44"
-              height="40"
-              className="flex-shrink-0"
-              role="img"
-              aria-hidden="true"
-            >
-              {/* Three interwoven threads */}
-              <path
-                d="M 40 140 Q 30 100 50 70 Q 70 40 100 35 Q 130 30 145 55 Q 155 75 140 90"
-                fill="none"
-                stroke="#4a9eff"
-                strokeWidth="12"
-                strokeLinecap="round"
-                opacity="0.9"
-              />
-              <path
-                d="M 100 25 Q 100 50 85 75 Q 70 100 85 120 Q 100 140 100 165"
-                fill="none"
-                stroke="#4a9eff"
-                strokeWidth="12"
-                strokeLinecap="round"
-              />
-              <path
-                d="M 160 140 Q 170 100 150 70 Q 130 40 100 35 Q 70 30 55 55 Q 45 75 60 90"
-                fill="none"
-                stroke="#4a9eff"
-                strokeWidth="12"
-                strokeLinecap="round"
-                opacity="0.9"
-              />
-              {/* Central nexus - solid gold colors without gradient for simplicity */}
-              <circle cx="100" cy="85" r="12" fill="#d4af37" />
-              <circle cx="100" cy="85" r="8" fill="#141824" />
-              <circle cx="100" cy="85" r="5" fill="#d4af37" />
-              {/* Destiny nodes */}
-              <circle cx="55" cy="65" r="5" fill="#d4af37" opacity="0.8" />
-              <circle cx="145" cy="65" r="5" fill="#d4af37" opacity="0.8" />
-              <circle cx="100" cy="140" r="5" fill="#d4af37" opacity="0.8" />
-              {/* Connecting lines */}
-              <line
-                x1="60"
-                y1="67"
-                x2="93"
-                y2="82"
-                stroke="#d4af37"
-                strokeWidth="1.5"
-                opacity="0.4"
-              />
-              <line
-                x1="140"
-                y1="67"
-                x2="107"
-                y2="82"
-                stroke="#d4af37"
-                strokeWidth="1.5"
-                opacity="0.4"
-              />
-              <line
-                x1="100"
-                y1="135"
-                x2="100"
-                y2="92"
-                stroke="#d4af37"
-                strokeWidth="1.5"
-                opacity="0.4"
-              />
-            </svg>
-            <div>
-              <h1 className="text-lg font-semibold text-white">NornicDB</h1>
-              <p className="text-xs text-norse-silver">
-                The Graph Database That Learns
-              </p>
-            </div>
-          </div>
-
-          {/* Connection Status */}
-          <div className="flex items-center gap-6">
-            {stats?.database && (
-              <>
-                <div className="flex items-center gap-2 text-sm">
-                  <Network className="w-4 h-4 text-norse-silver" />
-                  <span className="text-norse-silver">
-                    {stats.database.nodes?.toLocaleString() ?? "?"} nodes
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <HardDrive className="w-4 h-4 text-norse-silver" />
-                  <span className="text-norse-silver">
-                    {stats.database.edges?.toLocaleString() ?? "?"} edges
-                  </span>
-                </div>
-                <div className="flex items-center gap-2 text-sm">
-                  <Clock className="w-4 h-4 text-norse-silver" />
-                  <span className="text-norse-silver">
-                    {formatUptime(stats.server?.uptime_seconds ?? 0)}
-                  </span>
-                </div>
-              </>
-            )}
-            <button
-              type="button"
-              onClick={() => setShowRegenerateConfirm(true)}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/30`}
-              title={"Warning: This will clear and regenerate ALL embeddings"}
-            >
-              <Zap className="w-4 h-4" />
-              <span>Regenerate all Embeddings</span>
-            </button>
-            {/* Embed Button */}
-            <button
-              type="button"
-              disabled={embedTriggering}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
-                embedData.stats?.running
-                  ? "bg-amber-500/20 text-amber-400 border border-amber-500/30"
-                  : "bg-norse-shadow hover:bg-norse-rune text-norse-silver hover:text-white border border-norse-rune"
-              }`}
-              title={`Total embeddings: ${embedData.totalEmbeddings}${
-                embedData.stats
-                  ? `, Session: ${embedData.stats.processed} processed, ${embedData.stats.failed} failed`
-                  : ""
-              }`}
-            >
-              {embedTriggering || embedData.stats?.running ? (
-                <Loader2 className="w-4 h-4 animate-spin" />
-              ) : (
-                <Zap className="w-4 h-4" />
-              )}
-              <span>
-                {embedData.stats?.running ? "Embedding..." : "Embeddings"}
-              </span>
-              <span className="text-xs text-valhalla-gold">
-                ({embedData.totalEmbeddings.toLocaleString()})
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setShowAIChat(true)}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-valhalla-gold/20 hover:bg-valhalla-gold/30 text-valhalla-gold border border-valhalla-gold/30"
-              title="Open AI Assistant"
-            >
-              <MessageCircle className="w-4 h-4" />
-              <span>AI Assistant</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => navigate("/security")}
-              className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-norse-shadow hover:bg-norse-rune text-norse-silver hover:text-white border border-norse-rune"
-              title="Security & API Tokens"
-            >
-              <Shield className="w-4 h-4" />
-              <span>Security</span>
-            </button>
-
-            <div
-              className={`flex items-center gap-2 px-3 py-1 rounded-full ${
-                connected
-                  ? "bg-nornic-primary/20 status-connected"
-                  : "bg-red-500/20"
-              }`}
-            >
-              <Activity
-                className={`w-4 h-4 ${
-                  connected ? "text-nornic-primary" : "text-red-400"
-                }`}
-              />
-              <span
-                className={`text-sm ${
-                  connected ? "text-nornic-primary" : "text-red-400"
-                }`}
-              >
-                {connected ? "Connected" : "Disconnected"}
-              </span>
-            </div>
-          </div>
-        </div>
-        {/* Embed Message Toast */}
-        {embedMessage && (
-          <div className="absolute top-16 right-4 bg-norse-shadow border border-norse-rune rounded-lg px-4 py-2 text-sm text-norse-silver shadow-lg">
-            {embedMessage}
-          </div>
-        )}
-      </header>
+      <Header
+        stats={stats}
+        connected={connected}
+        embedData={embedData}
+        embedTriggering={embedTriggering}
+        embedMessage={embedMessage}
+        onRegenerateClick={() => setShowRegenerateConfirm(true)}
+        onAIChatClick={() => setShowAIChat(true)}
+        onSecurityClick={() => navigate("/security")}
+      />
 
       {/* Main Content */}
       <div className="flex-1 flex">
@@ -387,687 +208,72 @@ export function Browser() {
 
           {/* Query Panel */}
           {activeTab === "query" && (
-            <div className="flex-1 flex flex-col p-4 gap-4">
-              <form
-                onSubmit={handleQuerySubmit}
-                className="flex flex-col gap-3"
-              >
-                <div className="relative">
-                  <textarea
-                    value={cypherQuery}
-                    onChange={(e) => setCypherQuery(e.target.value)}
-                    className="cypher-editor w-full h-32 p-3 resize-none"
-                    placeholder="MATCH (n) RETURN n LIMIT 25"
-                    spellCheck={false}
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowHistory(!showHistory)}
-                    className="absolute top-2 right-2 p-1.5 rounded hover:bg-norse-rune transition-colors"
-                    title="Query History"
-                  >
-                    <History className="w-4 h-4 text-norse-silver" />
-                  </button>
-                </div>
-
-                {showHistory && queryHistory.length > 0 && (
-                  <div className="bg-norse-stone border border-norse-rune rounded-lg p-2 max-h-40 overflow-y-auto">
-                    {queryHistory.map((q, i) => (
-                      <button
-                        key={i}
-                        type="button"
-                        onClick={() => {
-                          setCypherQuery(q);
-                          setShowHistory(false);
-                        }}
-                        className="w-full text-left px-2 py-1 text-sm text-norse-silver hover:bg-norse-rune rounded truncate"
-                      >
-                        {q}
-                      </button>
-                    ))}
-                  </div>
-                )}
-
-                <button
-                  type="submit"
-                  disabled={queryLoading}
-                  className="flex items-center justify-center gap-2 px-4 py-2 bg-nornic-primary text-white rounded-lg hover:bg-nornic-secondary disabled:opacity-50 transition-colors"
-                >
-                  <Play className="w-4 h-4" />
-                  {queryLoading ? "Executing..." : "Run Query"}
-                </button>
-              </form>
-
-              {queryError && (
-                <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg">
-                  <p className="text-sm text-red-400 font-mono">{queryError}</p>
-                </div>
-              )}
-
-              {/* Query Results */}
-              {cypherResult && cypherResult.results[0] && (
-                <div className="flex-1 flex flex-col overflow-hidden">
-                  {/* Toolbar */}
-                  {selectedNodeIds.size > 0 && (
-                    <div className="flex items-center gap-2 p-2 bg-norse-shadow border-b border-norse-rune">
-                      <span className="text-sm text-norse-silver">
-                        {selectedNodeIds.size} selected
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setDeleteError(null);
-                          setShowDeleteConfirm(true);
-                        }}
-                        disabled={deleting}
-                        className="flex items-center gap-1 px-3 py-1 text-sm bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded disabled:opacity-50"
-                      >
-                        <Trash2 className="w-4 h-4" />
-                        Delete
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => clearNodeSelection()}
-                        className="px-3 py-1 text-sm text-norse-silver hover:text-white"
-                      >
-                        Clear
-                      </button>
-                    </div>
-                  )}
-                  
-                  {/* Delete Error Display */}
-                  {deleteError && (
-                    <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg m-2">
-                      <p className="text-sm text-red-400 font-mono">{deleteError}</p>
-                    </div>
-                  )}
-                  
-                  <div className="flex-1 overflow-auto">
-                    <table className="result-table">
-                      <thead>
-                        <tr>
-                          <th className="w-12">
-                            <input
-                              type="checkbox"
-                              checked={selectedNodeIds.size > 0 && getAllNodeIdsFromQueryResults().every(id => selectedNodeIds.has(id))}
-                              onChange={(e) => {
-                                if (e.target.checked) {
-                                  selectAllNodes(getAllNodeIdsFromQueryResults());
-                                } else {
-                                  clearNodeSelection();
-                                }
-                              }}
-                              onClick={(e) => e.stopPropagation()}
-                              className="cursor-pointer"
-                            />
-                          </th>
-                          {cypherResult.results[0].columns.map((col, i) => (
-                            <th key={i}>{col}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {cypherResult.results[0].data.map((row, i) => {
-                          // Extract node ID from first node-like object in row
-                          let nodeId: string | null = null;
-                          for (const cell of row.row) {
-                            if (cell && typeof cell === "object") {
-                              const cellObj = cell as Record<string, unknown>;
-                              if (cellObj.elementId || cellObj.id || cellObj._nodeId) {
-                                const nodeData = extractNodeFromResult(cellObj);
-                                if (nodeData) {
-                                  nodeId = nodeData.id;
-                                  break;
-                                }
-                              }
-                            }
-                          }
-
-                          return (
-                            <tr
-                              key={i}
-                              onClick={() => {
-                                if (nodeId) {
-                                  // Find first node-like object in row and select it
-                                  for (const cell of row.row) {
-                                    if (cell && typeof cell === "object") {
-                                      const cellObj = cell as Record<string, unknown>;
-                                      if (
-                                        cellObj.elementId ||
-                                        cellObj.id ||
-                                        cellObj._nodeId
-                                      ) {
-                                        const nodeData =
-                                          extractNodeFromResult(cellObj);
-                                        if (nodeData) {
-                                          setSelectedNode({
-                                            node: { ...nodeData, created_at: "" },
-                                            score: 0,
-                                          });
-                                          break;
-                                        }
-                                      }
-                                    }
-                                  }
-                                }
-                              }}
-                              className={`cursor-pointer hover:bg-nornic-primary/10 ${
-                                nodeId && selectedNodeIds.has(nodeId)
-                                  ? "bg-nornic-primary/20"
-                                  : ""
-                              }`}
-                            >
-                              <td onClick={(e) => e.stopPropagation()}>
-                                {nodeId && (
-                                  <input
-                                    type="checkbox"
-                                    checked={selectedNodeIds.has(nodeId)}
-                                    onChange={(e) => {
-                                      e.stopPropagation();
-                                      toggleNodeSelection(nodeId);
-                                    }}
-                                    className="cursor-pointer"
-                                  />
-                                )}
-                              </td>
-                              {row.row.map((cell, j) => (
-                                <td key={j} className="font-mono text-xs">
-                                  <ExpandableCell data={cell} />
-                                </td>
-                              ))}
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                  <p className="text-xs text-norse-silver mt-2 px-2">
-                    {cypherResult.results[0].data.length} row(s) returned
-                  </p>
-                </div>
-              )}
-            </div>
+            <QueryPanel
+              cypherQuery={cypherQuery}
+              setCypherQuery={setCypherQuery}
+              queryHistory={queryHistory}
+              queryLoading={queryLoading}
+              queryError={queryError}
+              cypherResult={cypherResult}
+              selectedNodeIds={selectedNodeIds}
+              deleteError={deleteError}
+              onExecute={executeCypher}
+              onNodeSelect={(nodeData) => {
+                setSelectedNode({
+                  node: { ...nodeData, created_at: "" },
+                  score: 0,
+                });
+              }}
+              onToggleSelect={toggleNodeSelection}
+              onSelectAll={(nodeIds) => selectAllNodes(nodeIds)}
+              onClearSelection={clearNodeSelection}
+              onDeleteClick={() => {
+                setDeleteError(null);
+                setShowDeleteConfirm(true);
+              }}
+              deleting={deleting}
+            />
           )}
 
           {/* Search Panel */}
           {activeTab === "search" && (
-            <div className="flex-1 flex flex-col p-4 gap-4">
-              <form onSubmit={handleSearchSubmit} className="flex gap-2">
-                <div className="relative flex-1">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-norse-fog" />
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    className="w-full pl-10 pr-4 py-2 bg-norse-stone border border-norse-rune rounded-lg text-white placeholder-norse-fog focus:outline-none focus:ring-2 focus:ring-nornic-primary"
-                    placeholder="Search nodes semantically..."
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={searchLoading}
-                  className="px-4 py-2 bg-nornic-primary text-white rounded-lg hover:bg-nornic-secondary disabled:opacity-50 transition-colors"
-                >
-                  {searchLoading ? "..." : "Search"}
-                </button>
-              </form>
-
-              {/* Search Results */}
-              <div className="flex-1 flex flex-col overflow-hidden">
-                {/* Toolbar */}
-                {selectedNodeIds.size > 0 && (
-                  <div className="flex items-center gap-2 p-2 bg-norse-shadow border-b border-norse-rune">
-                    <span className="text-sm text-norse-silver">
-                      {selectedNodeIds.size} selected
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setDeleteError(null);
-                        setShowDeleteConfirm(true);
-                      }}
-                      disabled={deleting}
-                      className="flex items-center gap-1 px-3 py-1 text-sm bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded disabled:opacity-50"
-                    >
-                      <Trash2 className="w-4 h-4" />
-                      Delete
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => clearNodeSelection()}
-                      className="px-3 py-1 text-sm text-norse-silver hover:text-white"
-                    >
-                      Clear
-                    </button>
-                  </div>
-                )}
-                
-                {/* Delete Error Display */}
-                {deleteError && (
-                  <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg m-2">
-                    <p className="text-sm text-red-400 font-mono">{deleteError}</p>
-                  </div>
-                )}
-
-                <div className="flex-1 overflow-auto space-y-2 p-2">
-                  {searchResults.length > 0 && (
-                    <div className="mb-2">
-                      <input
-                        type="checkbox"
-                        checked={selectedNodeIds.size > 0 && searchResults.every(r => selectedNodeIds.has(r.node.id))}
-                        onChange={(e) => {
-                          if (e.target.checked) {
-                            selectAllNodes(searchResults.map(r => r.node.id));
-                          } else {
-                            clearNodeSelection();
-                          }
-                        }}
-                        className="cursor-pointer mr-2"
-                      />
-                      <span className="text-xs text-norse-silver">Select all</span>
-                    </div>
-                  )}
-                  
-                  {searchResults.map((result) => (
-                    <div key={result.node.id}>
-                      {/* Main result card */}
-                      <div
-                        className={`w-full text-left p-3 rounded-lg border transition-colors ${
-                          selectedNode?.node.id === result.node.id
-                            ? "bg-nornic-primary/20 border-nornic-primary"
-                            : selectedNodeIds.has(result.node.id)
-                            ? "bg-nornic-primary/10 border-nornic-primary/50"
-                            : "bg-norse-stone border-norse-rune hover:border-norse-fog"
-                        }`}
-                      >
-                        <div className="flex items-start gap-2">
-                          <input
-                            type="checkbox"
-                            checked={selectedNodeIds.has(result.node.id)}
-                            onChange={(e) => {
-                              e.stopPropagation();
-                              toggleNodeSelection(result.node.id);
-                            }}
-                            onClick={(e) => e.stopPropagation()}
-                            className="mt-1 cursor-pointer"
-                          />
-                          <button
-                            type="button"
-                            onClick={() => setSelectedNode(result)}
-                            className="flex-1 text-left"
-                          >
-                      <div className="flex items-center justify-between mb-1">
-                        <div className="flex items-center gap-2">
-                          {result.node.labels.map((label) => (
-                            <span
-                              key={label}
-                              className="px-2 py-0.5 text-xs bg-frost-ice/20 text-frost-ice rounded"
-                            >
-                              {label}
-                            </span>
-                          ))}
-                        </div>
-                        <span className="text-xs text-valhalla-gold">
-                          Score: {result.score.toFixed(2)}
-                        </span>
-                      </div>
-                            <p className="text-sm text-norse-silver truncate">
-                              {getNodePreview(result.node.properties)}
-                            </p>
-                          </button>
-                        </div>
-                      </div>
-
-                    {/* Inline Similar Expansion */}
-                    {expandedSimilar?.nodeId === result.node.id && (
-                      <div className="ml-4 mt-2 mb-3 border-l-2 border-frost-ice/30 pl-3 animate-in slide-in-from-top-2 duration-200">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-xs font-medium text-frost-ice flex items-center gap-1">
-                            <Sparkles className="w-3 h-3" />
-                            Similar Items ({expandedSimilar.results.length})
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => collapseSimilar()}
-                            className="text-xs text-norse-fog hover:text-white transition-colors"
-                          >
-                            Close
-                          </button>
-                        </div>
-
-                        {expandedSimilar.loading ? (
-                          <div className="flex items-center gap-2 text-norse-fog text-sm py-2">
-                            <Loader2 className="w-4 h-4 animate-spin" />
-                            Finding similar...
-                          </div>
-                        ) : expandedSimilar.results.length === 0 ? (
-                          <p className="text-xs text-norse-fog py-2">
-                            No similar items found
-                          </p>
-                        ) : (
-                          <div className="space-y-1">
-                            {expandedSimilar.results.map((similar) => (
-                              <button
-                                type="button"
-                                key={similar.node.id}
-                                onClick={() => setSelectedNode(similar)}
-                                className="w-full text-left p-2 rounded bg-norse-shadow/50 hover:bg-norse-shadow border border-transparent hover:border-frost-ice/20 transition-colors"
-                              >
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-1">
-                                    {similar.node.labels
-                                      .slice(0, 2)
-                                      .map((label) => (
-                                        <span
-                                          key={label}
-                                          className="px-1.5 py-0.5 text-xs bg-frost-ice/10 text-frost-ice/80 rounded"
-                                        >
-                                          {label}
-                                        </span>
-                                      ))}
-                                  </div>
-                                  <span className="text-xs text-valhalla-gold/70">
-                                    {similar.score.toFixed(2)}
-                                  </span>
-                                </div>
-                                <p className="text-xs text-norse-silver/80 truncate mt-1">
-                                  {getNodePreview(similar.node.properties)}
-                                </p>
-                              </button>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-                    </div>
-                  ))}
-
-                  {searchResults.length === 0 &&
-                    searchQuery &&
-                    !searchLoading && (
-                      <p className="text-center text-norse-silver py-8">
-                        No results found
-                      </p>
-                    )}
-                </div>
-              </div>
-            </div>
+            <SearchPanel
+              searchQuery={searchQuery}
+              setSearchQuery={setSearchQuery}
+              searchLoading={searchLoading}
+              searchResults={searchResults}
+              selectedNodeIds={selectedNodeIds}
+              selectedNode={selectedNode}
+              deleteError={deleteError}
+              expandedSimilar={expandedSimilar}
+              onExecute={executeSearch}
+              onNodeSelect={setSelectedNode}
+              onToggleSelect={toggleNodeSelection}
+              onSelectAll={(nodeIds) => selectAllNodes(nodeIds)}
+              onClearSelection={clearNodeSelection}
+              onDeleteClick={() => {
+                setDeleteError(null);
+                setShowDeleteConfirm(true);
+              }}
+              onFindSimilar={findSimilar}
+              onCollapseSimilar={collapseSimilar}
+              deleting={deleting}
+            />
           )}
         </div>
 
         {/* Right Panel - Node Details */}
         <div className="w-1/2 flex flex-col bg-norse-shadow/30">
-          {selectedNode ? (
-            <>
-              <div className="flex items-center justify-between p-4 border-b border-norse-rune">
-                <h2 className="font-medium text-white">Node Details</h2>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      // Toggle: if already expanded for this node, collapse
-                      if (expandedSimilar?.nodeId === selectedNode.node.id) {
-                        collapseSimilar();
-                      } else {
-                        findSimilar(selectedNode.node.id);
-                      }
-                    }}
-                    className={`flex items-center gap-1 px-3 py-1 text-sm rounded transition-colors ${
-                      expandedSimilar?.nodeId === selectedNode.node.id
-                        ? "bg-frost-ice text-norse-night hover:bg-frost-ice/90"
-                        : "bg-frost-ice/20 text-frost-ice hover:bg-frost-ice/30"
-                    }`}
-                  >
-                    <Sparkles className="w-3 h-3" />
-                    {expandedSimilar?.nodeId === selectedNode.node.id
-                      ? "Hide Similar"
-                      : "Find Similar"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setSelectedNode(null)}
-                    className="p-1 hover:bg-norse-rune rounded transition-colors"
-                  >
-                    <X className="w-4 h-4 text-norse-silver" />
-                  </button>
-                </div>
-              </div>
-
-              <div className="flex-1 overflow-auto p-4">
-                {/* Labels */}
-                <div className="mb-4">
-                  <h3 className="text-xs font-medium text-norse-silver mb-2">
-                    LABELS
-                  </h3>
-                  <div className="flex flex-wrap gap-2">
-                    {(selectedNode.node.labels as string[]).map((label, i) => (
-                      <span
-                        key={`label-${i}`}
-                        className="px-3 py-1 bg-frost-ice/20 text-frost-ice rounded-full text-sm"
-                      >
-                        {String(label)}
-                      </span>
-                    ))}
-                  </div>
-                </div>
-
-                {/* ID */}
-                <div className="mb-4">
-                  <h3 className="text-xs font-medium text-norse-silver mb-2">
-                    ID
-                  </h3>
-                  <code className="text-sm text-valhalla-gold font-mono">
-                    {selectedNode.node.id}
-                  </code>
-                </div>
-
-                {/* Embedding Status - Always show at top */}
-                {"embedding" in selectedNode.node.properties &&
-                  selectedNode.node.properties.embedding != null && (
-                    <div className="mb-4">
-                      <h3 className="text-xs font-medium text-norse-silver mb-2">
-                        EMBEDDING
-                      </h3>
-                      <EmbeddingStatus
-                        embedding={selectedNode.node.properties.embedding}
-                      />
-                    </div>
-                  )}
-
-                {/* Scores */}
-                {(selectedNode.rrf_score ||
-                  selectedNode.vector_rank ||
-                  selectedNode.bm25_rank) && (
-                  <div className="mb-4 flex gap-4">
-                    {selectedNode.rrf_score && (
-                      <div>
-                        <h3 className="text-xs font-medium text-norse-silver mb-1">
-                          RRF Score
-                        </h3>
-                        <span className="text-nornic-accent">
-                          {selectedNode.rrf_score.toFixed(4)}
-                        </span>
-                      </div>
-                    )}
-                    {selectedNode.vector_rank && (
-                      <div>
-                        <h3 className="text-xs font-medium text-norse-silver mb-1">
-                          Vector Rank
-                        </h3>
-                        <span className="text-frost-ice">
-                          #{selectedNode.vector_rank}
-                        </span>
-                      </div>
-                    )}
-                    {selectedNode.bm25_rank && (
-                      <div>
-                        <h3 className="text-xs font-medium text-norse-silver mb-1">
-                          BM25 Rank
-                        </h3>
-                        <span className="text-valhalla-gold">
-                          #{selectedNode.bm25_rank}
-                        </span>
-                      </div>
-                    )}
-                  </div>
-                )}
-
-                {/* Properties (excluding embedding - shown above) */}
-                <div className="mb-4">
-                  <div className="flex items-center justify-between mb-2">
-                    <h3 className="text-xs font-medium text-norse-silver">
-                      PROPERTIES
-                    </h3>
-                    {editingNodeId !== selectedNode.node.id && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setEditingNodeId(selectedNode.node.id);
-                          setEditingProperties({ ...selectedNode.node.properties });
-                        }}
-                        className="flex items-center gap-1 px-2 py-1 text-xs bg-nornic-primary/20 hover:bg-nornic-primary/30 text-nornic-primary rounded"
-                      >
-                        <Edit className="w-3 h-3" />
-                        Edit
-                      </button>
-                    )}
-                  </div>
-                  
-                  {editingNodeId === selectedNode.node.id ? (
-                    <PropertyEditor
-                      properties={editingProperties}
-                      onSave={async (updatedProps) => {
-                        const result = await api.updateNodeProperties(selectedNode.node.id, updatedProps);
-                        if (result.success) {
-                          setEditingNodeId(null);
-                          setEditingProperties({});
-                          // Refresh the selected node by re-executing query or search
-                          if (activeTab === "query") {
-                            executeCypher();
-                          } else {
-                            executeSearch();
-                          }
-                        } else {
-                          alert(`Failed to update: ${result.error}`);
-                        }
-                      }}
-                      onCancel={() => {
-                        setEditingNodeId(null);
-                        setEditingProperties({});
-                      }}
-                    />
-                  ) : (
-                    <div className="space-y-2">
-                      {Object.entries(selectedNode.node.properties)
-                        .filter(([key]) => key !== "embedding")
-                        .map(([key, value]) => {
-                          const isReadOnly = isReadOnlyProperty(key);
-                          return (
-                            <div
-                              key={key}
-                              className={`bg-norse-stone rounded-lg p-3 ${
-                                isReadOnly ? "opacity-75" : ""
-                              }`}
-                            >
-                              <div className="flex items-center gap-2 mb-1">
-                                <ChevronRight className="w-3 h-3 text-norse-fog" />
-                                <span className="text-sm text-frost-ice font-medium">
-                                  {key}
-                                </span>
-                                {isReadOnly && (
-                                  <span className="text-xs text-norse-fog italic">
-                                    (read-only)
-                                  </span>
-                                )}
-                              </div>
-                              <div className="pl-5">
-                                <JsonPreview data={value} expanded />
-                              </div>
-                            </div>
-                          );
-                        })}
-                    </div>
-                  )}
-                </div>
-
-                {/* Similar Items Section - Shows when Find Similar is clicked */}
-                {expandedSimilar?.nodeId === selectedNode.node.id && (
-                  <div className="border-t border-norse-rune pt-4 animate-in slide-in-from-bottom-2 duration-200">
-                    <div className="flex items-center gap-2 mb-3">
-                      <Sparkles className="w-4 h-4 text-frost-ice" />
-                      <h3 className="text-sm font-medium text-frost-ice">
-                        Similar Items
-                      </h3>
-                      {!expandedSimilar.loading && (
-                        <span className="text-xs text-norse-fog">
-                          ({expandedSimilar.results.length} found)
-                        </span>
-                      )}
-                    </div>
-
-                    {expandedSimilar.loading ? (
-                      <div className="flex items-center gap-2 text-norse-fog py-4">
-                        <Loader2 className="w-5 h-5 animate-spin" />
-                        <span>Finding similar nodes...</span>
-                      </div>
-                    ) : expandedSimilar.results.length === 0 ? (
-                      <div className="text-center py-4 text-norse-fog">
-                        <p>No similar items found</p>
-                        <p className="text-xs mt-1">
-                          This node may not have an embedding yet
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-2">
-                        {expandedSimilar.results.map((similar) => (
-                          <button
-                            type="button"
-                            key={similar.node.id}
-                            onClick={() => setSelectedNode(similar)}
-                            className="w-full text-left p-3 rounded-lg bg-norse-stone hover:bg-norse-shadow border border-transparent hover:border-frost-ice/30 transition-colors"
-                          >
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                {similar.node.labels
-                                  .slice(0, 3)
-                                  .map((label) => (
-                                    <span
-                                      key={label}
-                                      className="px-2 py-0.5 text-xs bg-frost-ice/20 text-frost-ice rounded"
-                                    >
-                                      {label}
-                                    </span>
-                                  ))}
-                              </div>
-                              <span className="text-xs text-valhalla-gold font-medium">
-                                {(similar.score * 100).toFixed(1)}% similar
-                              </span>
-                            </div>
-                            <p className="text-sm text-norse-silver line-clamp-2">
-                              {getNodePreview(similar.node.properties)}
-                            </p>
-                            <p className="text-xs text-norse-fog mt-1 font-mono">
-                              {similar.node.id}
-                            </p>
-                          </button>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="flex-1 flex items-center justify-center">
-              <div className="text-center text-norse-silver">
-                <Database className="w-12 h-12 mx-auto mb-3 opacity-30" />
-                <p>Select a node to view details</p>
-                <p className="text-sm text-norse-fog mt-1">
-                  Run a query or search to get started
-                </p>
-              </div>
-            </div>
-          )}
+          <NodeDetailsPanel
+            selectedNode={selectedNode}
+            expandedSimilar={expandedSimilar}
+            onClose={() => setSelectedNode(null)}
+            onFindSimilar={findSimilar}
+            onCollapseSimilar={collapseSimilar}
+            onNodeSelect={setSelectedNode}
+            onUpdateProperties={handleUpdateProperties}
+            onRefresh={handleRefresh}
+          />
         </div>
       </div>
 
@@ -1075,734 +281,27 @@ export function Browser() {
       <Bifrost isOpen={showAIChat} onClose={() => setShowAIChat(false)} />
 
       {/* Regenerate Embeddings Confirmation Dialog */}
-      {showRegenerateConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-norse-deep border border-norse-rune rounded-xl p-6 max-w-md mx-4 shadow-2xl">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-red-500/20 rounded-lg">
-                <Zap className="w-6 h-6 text-red-400" />
-              </div>
-              <h3 className="text-lg font-semibold text-white">
-                Regenerate All Embeddings?
-              </h3>
-            </div>
-            <p className="text-norse-silver mb-2">
-              This will{" "}
-              <span className="text-red-400 font-medium">
-                clear all existing embeddings
-              </span>{" "}
-              and regenerate them from scratch.
-            </p>
-            <p className="text-norse-silver text-sm mb-6">
-              This operation runs in the background. You have{" "}
-              <span className="text-valhalla-gold">
-                {embedData.totalEmbeddings.toLocaleString()}
-              </span>{" "}
-              embeddings that will be regenerated.
-            </p>
-            <div className="flex gap-3 justify-end">
-              <button
-                type="button"
-                onClick={() => setShowRegenerateConfirm(false)}
-                className="px-4 py-2 rounded-lg text-norse-silver hover:text-white hover:bg-norse-rune transition-all"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowRegenerateConfirm(false);
-                  handleTriggerEmbed();
-                }}
-                className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/30 rounded-lg font-medium transition-all"
-              >
-                Yes, Regenerate All
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+      <RegenerateConfirmModal
+        isOpen={showRegenerateConfirm}
+        totalEmbeddings={embedData.totalEmbeddings}
+        onConfirm={() => {
+          setShowRegenerateConfirm(false);
+          handleTriggerEmbed();
+        }}
+        onCancel={() => setShowRegenerateConfirm(false)}
+      />
 
       {/* Delete Nodes Confirmation Dialog */}
-      {showDeleteConfirm && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-          <div className="bg-norse-deep border border-norse-rune rounded-xl p-6 max-w-md mx-4 shadow-2xl">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="p-2 bg-red-500/20 rounded-lg">
-                <Trash2 className="w-6 h-6 text-red-400" />
-              </div>
-              <h3 className="text-lg font-semibold text-white">
-                Delete {selectedNodeIds.size} Node{selectedNodeIds.size !== 1 ? 's' : ''}?
-              </h3>
-            </div>
-            <p className="text-norse-silver mb-2">
-              This will{" "}
-              <span className="text-red-400 font-medium">
-                permanently delete
-              </span>{" "}
-              the selected node{selectedNodeIds.size !== 1 ? 's' : ''} and all associated data.
-            </p>
-            <p className="text-norse-silver text-sm mb-6">
-              This action will remove:
-              <ul className="list-disc list-inside mt-2 space-y-1">
-                <li>The node{selectedNodeIds.size !== 1 ? 's' : ''} and all properties</li>
-                <li>All associated embeddings</li>
-                <li>All connected edges (relationships)</li>
-              </ul>
-              <span className="text-red-400 font-medium mt-2 block">
-                This action cannot be undone.
-              </span>
-            </p>
-            <div className="flex gap-3 justify-end">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowDeleteConfirm(false);
-                  setDeleteError(null);
-                }}
-                disabled={deleting}
-                className="px-4 py-2 rounded-lg text-norse-silver hover:text-white hover:bg-norse-rune transition-all disabled:opacity-50"
-              >
-                Cancel
-              </button>
-              <button
-                type="button"
-                onClick={async () => {
-                  setDeleting(true);
-                  setDeleteError(null);
-                  try {
-                    const result = await api.deleteNodes(Array.from(selectedNodeIds));
-                    // Always dismiss modal after attempt, even if there were errors
-                    // Errors will be displayed in the error message area
-                    setShowDeleteConfirm(false);
-                    
-                    if (result.success) {
-                      clearNodeSelection();
-                      // Refresh results based on active tab
-                      if (activeTab === "query") {
-                        executeCypher();
-                      } else {
-                        executeSearch();
-                      }
-                    } else {
-                      // Show errors after modal is dismissed
-                      setDeleteError(result.errors.join(', '));
-                    }
-                  } catch (err) {
-                    // Dismiss modal even on exception
-                    setShowDeleteConfirm(false);
-                    setDeleteError(err instanceof Error ? err.message : 'Unknown error occurred');
-                  } finally {
-                    setDeleting(false);
-                  }
-                }}
-                disabled={deleting}
-                className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/30 rounded-lg font-medium transition-all disabled:opacity-50"
-              >
-                {deleting ? "Deleting..." : `Yes, Delete ${selectedNodeIds.size} Node${selectedNodeIds.size !== 1 ? 's' : ''}`}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Helper components
-
-// Expandable cell for table results - click to toggle full JSON view
-function ExpandableCell({ data }: { data: unknown }) {
-  const [expanded, setExpanded] = useState(false);
-
-  if (data === null) return <span className="json-null">null</span>;
-  if (data === undefined) return <span className="text-norse-fog">-</span>;
-  
-  // Primitive types - no expansion needed
-  if (typeof data === "string") {
-    const truncated = data.length > 50;
-    return (
-      <span className="json-string" title={truncated ? data : undefined}>
-        {truncated ? data.slice(0, 50) + "..." : data}
-      </span>
-    );
-  }
-  if (typeof data === "number") return <span className="json-number">{data}</span>;
-  if (typeof data === "boolean") return <span className="json-boolean">{String(data)}</span>;
-
-  // Complex types - expandable
-  const isArray = Array.isArray(data);
-  const obj = data as Record<string, unknown>;
-  
-  // Try to extract node info for preview
-  const id = obj._nodeId || obj.id || obj.elementId;
-  const labels = obj.labels as string[] | undefined;
-  const props = obj.properties && typeof obj.properties === "object"
-    ? (obj.properties as Record<string, unknown>)
-    : obj;
-  const titleVal = props.title || props.name || props.text;
-  const title = titleVal ? String(titleVal) : "";
-  const type = obj.type;
-
-  if (expanded) {
-    return (
-      <div className="relative">
-        <button
-          type="button"
-          onClick={(e) => { e.stopPropagation(); setExpanded(false); }}
-          className="absolute top-1 right-1 p-0.5 rounded bg-norse-rune hover:bg-norse-fog/30 z-10"
-          title="Collapse"
-        >
-          <ChevronDown className="w-3 h-3 text-norse-silver" />
-        </button>
-        <pre className="text-xs text-norse-silver bg-norse-shadow/50 rounded p-2 pr-6 overflow-x-auto max-h-64 overflow-y-auto whitespace-pre-wrap">
-          {JSON.stringify(data, null, 2)}
-        </pre>
-      </div>
-    );
-  }
-
-  // Collapsed view - show preview
-  return (
-    <button
-      type="button"
-      onClick={(e) => { e.stopPropagation(); setExpanded(true); }}
-      className="flex items-center gap-1 hover:bg-norse-rune/50 rounded px-1 -mx-1 transition-colors text-left"
-      title="Click to expand"
-    >
-      <ChevronRight className="w-3 h-3 text-norse-fog flex-shrink-0" />
-      {id ? (
-        <div className="flex items-center gap-1.5 min-w-0">
-          {labels && labels.length > 0 ? (
-            <span className="px-1 py-0.5 text-xs bg-frost-ice/20 text-frost-ice rounded flex-shrink-0">
-              {labels[0]}
-            </span>
-          ) : typeof type === "string" ? (
-            <span className="px-1 py-0.5 text-xs bg-nornic-primary/20 text-nornic-primary rounded flex-shrink-0">
-              {type}
-            </span>
-          ) : null}
-          <span className="text-valhalla-gold text-xs truncate">{String(id).slice(0, 15)}</span>
-          {title && (
-            <span className="text-norse-silver truncate">
-              {String(title).slice(0, 30)}
-            </span>
-          )}
-        </div>
-      ) : isArray ? (
-        <span className="text-norse-silver">[{(data as unknown[]).length} items]</span>
-      ) : (
-        <span className="text-norse-silver">{"{"}...{Object.keys(obj).length} props{"}"}</span>
-      )}
-    </button>
-  );
-}
-
-function JsonPreview({
-  data,
-  expanded = false,
-}: {
-  data: unknown;
-  expanded?: boolean;
-}) {
-  if (data === null) return <span className="json-null">null</span>;
-  if (typeof data === "string") {
-    const displayValue = expanded
-      ? data
-      : data.slice(0, 100) + (data.length > 100 ? "..." : "");
-    return (
-      <span className="json-string whitespace-pre-wrap">"{displayValue}"</span>
-    );
-  }
-  if (typeof data === "number")
-    return <span className="json-number">{data}</span>;
-  if (typeof data === "boolean")
-    return <span className="json-boolean">{String(data)}</span>;
-  if (Array.isArray(data)) {
-    if (expanded) {
-      return (
-        <pre className="text-xs text-norse-silver bg-norse-shadow/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto">
-          {JSON.stringify(data, null, 2)}
-        </pre>
-      );
-    }
-    return <span className="text-norse-silver">[{data.length} items]</span>;
-  }
-  if (typeof data === "object") {
-    if (expanded) {
-      return (
-        <pre className="text-xs text-norse-silver bg-norse-shadow/50 rounded p-2 overflow-x-auto max-h-48 overflow-y-auto">
-          {JSON.stringify(data, null, 2)}
-        </pre>
-      );
-    }
-    const keys = Object.keys(data);
-    return (
-      <span className="text-norse-silver">
-        {"{"}...{keys.length} props{"}"}
-      </span>
-    );
-  }
-  return <span>{String(data)}</span>;
-}
-
-function getNodePreview(properties: Record<string, unknown>): string {
-  const previewFields = [
-    "title",
-    "name",
-    "text",
-    "content",
-    "description",
-    "path",
-  ];
-  for (const field of previewFields) {
-    if (properties[field] && typeof properties[field] === "string") {
-      return properties[field] as string;
-    }
-  }
-  return JSON.stringify(properties).slice(0, 100);
-}
-
-// Helper function to get all node IDs from query results
-function getAllNodeIdsFromQueryResults(): string[] {
-  const { cypherResult } = useAppStore.getState();
-  if (!cypherResult || !cypherResult.results[0]) {
-    return [];
-  }
-
-  const nodeIds: string[] = [];
-  for (const row of cypherResult.results[0].data) {
-    for (const cell of row.row) {
-      if (cell && typeof cell === "object") {
-        const cellObj = cell as Record<string, unknown>;
-        if (cellObj.elementId || cellObj.id || cellObj._nodeId) {
-          const nodeData = extractNodeFromResult(cellObj);
-          if (nodeData && !nodeIds.includes(nodeData.id)) {
-            nodeIds.push(nodeData.id);
-          }
-        }
-      }
-    }
-  }
-  return nodeIds;
-}
-
-// Extract node data from Cypher result cell
-// Supports both Neo4j format (nested properties) and legacy format (flat properties)
-function extractNodeFromResult(
-  cell: Record<string, unknown>
-): {
-  id: string;
-  labels: string[];
-  properties: Record<string, unknown>;
-} | null {
-  if (!cell || typeof cell !== "object") return null;
-
-  // Get ID - Neo4j uses elementId (e.g., "4:nornicdb:123"), also check _nodeId and id
-  let id = "";
-  if (typeof cell.elementId === "string") {
-    // Extract actual ID from elementId format "4:nornicdb:actualId"
-    const elementId = cell.elementId;
-    const parts = elementId.split(":");
-    id = parts.length >= 3 ? parts.slice(2).join(":") : elementId;
-  } else {
-    id = (cell._nodeId || cell.id) as string;
-  }
-  if (!id) return null;
-
-  // Get labels
-  let labels: string[] = [];
-  if (Array.isArray(cell.labels)) {
-    labels = cell.labels as string[];
-  } else if (cell.type && typeof cell.type === "string") {
-    labels = [cell.type];
-  }
-
-  // Check for Neo4j format with nested properties object
-  if (
-    cell.properties &&
-    typeof cell.properties === "object" &&
-    !Array.isArray(cell.properties)
-  ) {
-    // Neo4j format: { elementId, labels, properties: {...} }
-    return {
-      id,
-      labels,
-      properties: cell.properties as Record<string, unknown>,
-    };
-  }
-
-  // Legacy/fallback: Properties are the rest of the fields (excluding metadata)
-  const excludeKeys = new Set([
-    "_nodeId",
-    "id",
-    "elementId",
-    "labels",
-    "meta",
-    "properties",
-  ]);
-  const properties: Record<string, unknown> = {};
-  for (const [key, value] of Object.entries(cell)) {
-    if (!excludeKeys.has(key)) {
-      properties[key] = value;
-    }
-  }
-
-  return { id, labels, properties };
-}
-
-// Check if a property is read-only
-function isReadOnlyProperty(key: string): boolean {
-  const readOnlyKeys = [
-    "embedded_at",
-    "embedding_dimensions",
-    "embedding_model",
-    "has_embedding",
-    "db",
-    "chunk_count",
-    "embedding", // Also exclude embedding from editing
-  ];
-  return readOnlyKeys.includes(key);
-}
-
-// Property Editor Component
-function PropertyEditor({
-  properties,
-  onSave,
-  onCancel,
-}: {
-  properties: Record<string, unknown>;
-  onSave: (props: Record<string, unknown>) => Promise<void>;
-  onCancel: () => void;
-}) {
-  const [editedProps, setEditedProps] = useState<Record<string, { key: string; value: string; type: string }>>(() => {
-    const props: Record<string, { key: string; value: string; type: string }> = {};
-    for (const [key, value] of Object.entries(properties)) {
-      if (isReadOnlyProperty(key)) continue;
-      props[key] = {
-        key,
-        value: JSON.stringify(value),
-        type: typeof value === "string" ? "string" : typeof value === "number" ? "number" : typeof value === "boolean" ? "boolean" : "json",
-      };
-    }
-    return props;
-  });
-  const [newPropKey, setNewPropKey] = useState("");
-  const [newPropValue, setNewPropValue] = useState("");
-  const [newPropType, setNewPropType] = useState<"string" | "number" | "boolean" | "json">("string");
-  const [saving, setSaving] = useState(false);
-
-  const addNewProperty = () => {
-    if (!newPropKey.trim()) return;
-    
-    let parsedValue: unknown;
-    try {
-      if (newPropType === "json") {
-        parsedValue = JSON.parse(newPropValue);
-      } else if (newPropType === "number") {
-        parsedValue = parseFloat(newPropValue);
-        if (Number.isNaN(parsedValue)) {
-          alert("Invalid number");
-          return;
-        }
-      } else if (newPropType === "boolean") {
-        parsedValue = newPropValue.toLowerCase() === "true";
-      } else {
-        parsedValue = newPropValue;
-      }
-    } catch (err) {
-      alert(`Invalid ${newPropType}: ${err instanceof Error ? err.message : 'Parse error'}`);
-      return;
-    }
-
-    setEditedProps({
-      ...editedProps,
-      [newPropKey]: {
-        key: newPropKey,
-        value: JSON.stringify(parsedValue),
-        type: newPropType,
-      },
-    });
-    setNewPropKey("");
-    setNewPropValue("");
-    setNewPropType("string");
-  };
-
-  const removeProperty = (key: string) => {
-    const newProps = { ...editedProps };
-    delete newProps[key];
-    setEditedProps(newProps);
-  };
-
-  const updateProperty = (oldKey: string, newKey: string, value: string, type: string) => {
-    const newProps = { ...editedProps };
-    if (oldKey !== newKey) {
-      delete newProps[oldKey];
-    }
-    newProps[newKey] = { key: newKey, value, type };
-    setEditedProps(newProps);
-  };
-
-  const handleSave = async () => {
-    setSaving(true);
-    try {
-      const propsToSave: Record<string, unknown> = {};
-      
-      for (const prop of Object.values(editedProps)) {
-        try {
-          let parsedValue: unknown;
-          if (prop.type === "json") {
-            parsedValue = JSON.parse(prop.value);
-          } else if (prop.type === "number") {
-            parsedValue = parseFloat(prop.value);
-            if (Number.isNaN(parsedValue)) {
-              throw new Error(`Invalid number: ${prop.value}`);
-            }
-          } else if (prop.type === "boolean") {
-            parsedValue = prop.value.toLowerCase() === "true";
-          } else {
-            parsedValue = prop.value;
-          }
-          propsToSave[prop.key] = parsedValue;
-        } catch (err) {
-          alert(`Invalid value for ${prop.key}: ${err instanceof Error ? err.message : 'Parse error'}`);
-          setSaving(false);
-          return;
-        }
-      }
-
-      await onSave(propsToSave);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  // Separate read-only and editable properties
-  const readOnlyProps = Object.entries(properties)
-    .filter(([key]) => isReadOnlyProperty(key))
-    .map(([key, value]) => ({ key, value }));
-
-  return (
-    <div className="space-y-3">
-      {/* Read-only properties display */}
-      {readOnlyProps.length > 0 && (
-        <div className="mb-4">
-          <h4 className="text-xs font-medium text-norse-silver mb-2">
-            READ-ONLY PROPERTIES
-          </h4>
-          <div className="space-y-2">
-            {readOnlyProps.map(({ key, value }) => (
-              <div
-                key={key}
-                className="bg-norse-shadow/50 rounded-lg p-3 opacity-75"
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  <ChevronRight className="w-3 h-3 text-norse-fog" />
-                  <span className="text-sm text-frost-ice font-medium">
-                    {key}
-                  </span>
-                  <span className="text-xs text-norse-fog italic">
-                    (read-only)
-                  </span>
-                </div>
-                <div className="pl-5">
-                  <JsonPreview data={value} expanded />
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* Editable properties */}
-      <div>
-        <h4 className="text-xs font-medium text-norse-silver mb-2">
-          EDITABLE PROPERTIES
-        </h4>
-        {Object.values(editedProps).map((prop) => (
-          <div key={prop.key} className="bg-norse-stone rounded-lg p-3 mb-2">
-            <div className="flex items-center gap-2 mb-2">
-              <input
-                type="text"
-                value={prop.key}
-                onChange={(e) => updateProperty(prop.key, e.target.value, prop.value, prop.type)}
-                className="flex-1 px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
-                placeholder="Property key"
-              />
-              <select
-                value={prop.type}
-                onChange={(e) => updateProperty(prop.key, prop.key, prop.value, e.target.value as "string" | "number" | "boolean" | "json")}
-                className="px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
-              >
-                <option value="string">String</option>
-                <option value="number">Number</option>
-                <option value="boolean">Boolean</option>
-                <option value="json">JSON</option>
-              </select>
-              <button
-                type="button"
-                onClick={() => removeProperty(prop.key)}
-                className="p-1 hover:bg-red-500/20 rounded"
-              >
-                <X className="w-4 h-4 text-red-400" />
-              </button>
-            </div>
-            <textarea
-              value={prop.value}
-              onChange={(e) => updateProperty(prop.key, prop.key, e.target.value, prop.type)}
-              className="w-full px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white font-mono"
-              rows={prop.type === "json" ? 4 : 1}
-              placeholder={`Enter ${prop.type} value`}
-            />
-          </div>
-        ))}
-      </div>
-
-      {/* Add new property */}
-      <div className="bg-norse-stone rounded-lg p-3 border-2 border-dashed border-norse-rune">
-        <div className="flex items-center gap-2 mb-2">
-          <input
-            type="text"
-            value={newPropKey}
-            onChange={(e) => setNewPropKey(e.target.value)}
-            className="flex-1 px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
-            placeholder="New property key"
-            onKeyDown={(e) => {
-              if (e.key === "Enter") {
-                e.preventDefault();
-                addNewProperty();
-              }
-            }}
-          />
-          <select
-            value={newPropType}
-            onChange={(e) => setNewPropType(e.target.value as "string" | "number" | "boolean" | "json")}
-            className="px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white"
-          >
-            <option value="string">String</option>
-            <option value="number">Number</option>
-            <option value="boolean">Boolean</option>
-            <option value="json">JSON</option>
-          </select>
-          <button
-            type="button"
-            onClick={addNewProperty}
-            className="px-2 py-1 bg-nornic-primary/20 hover:bg-nornic-primary/30 text-nornic-primary rounded text-sm"
-          >
-            <Plus className="w-4 h-4" />
-          </button>
-        </div>
-        <textarea
-          value={newPropValue}
-          onChange={(e) => setNewPropValue(e.target.value)}
-          className="w-full px-2 py-1 bg-norse-shadow border border-norse-rune rounded text-sm text-white font-mono"
-          rows={newPropType === "json" ? 4 : 1}
-          placeholder={`Enter ${newPropType} value`}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-              e.preventDefault();
-              addNewProperty();
-            }
-          }}
-        />
-      </div>
-
-      {/* Save/Cancel buttons */}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          onClick={handleSave}
-          disabled={saving}
-          className="flex items-center gap-1 px-4 py-2 bg-nornic-primary text-white rounded hover:bg-nornic-secondary disabled:opacity-50"
-        >
-          <Check className="w-4 h-4" />
-          {saving ? "Saving..." : "Save"}
-        </button>
-        <button
-          type="button"
-          onClick={onCancel}
-          className="px-4 py-2 bg-norse-rune text-norse-silver rounded hover:bg-norse-fog"
-        >
-          Cancel
-        </button>
-      </div>
-    </div>
-  );
-}
-
-// Display embedding status nicely
-function EmbeddingStatus({ embedding }: { embedding: unknown }) {
-  if (!embedding || typeof embedding !== "object") {
-    return <span className="text-norse-silver">No embedding data</span>;
-  }
-
-  const emb = embedding as Record<string, unknown>;
-  const status = (emb.status as string) || "unknown";
-  const dimensions = (emb.dimensions as number) || 0;
-  const model = emb.model as string | undefined;
-
-  const isReady = status === "ready";
-  const isPending = status === "pending";
-
-  return (
-    <div className="bg-norse-stone rounded-lg p-3">
-      <div className="flex items-center gap-3">
-        {/* Status indicator */}
-        <div
-          className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${
-            isReady
-              ? "bg-nornic-primary/20"
-              : isPending
-              ? "bg-valhalla-gold/20"
-              : "bg-red-500/20"
-          }`}
-        >
-          <div
-            className={`w-2 h-2 rounded-full ${
-              isReady
-                ? "bg-nornic-primary animate-pulse"
-                : isPending
-                ? "bg-valhalla-gold animate-pulse"
-                : "bg-red-400"
-            }`}
-          />
-          <span
-            className={`text-sm font-medium ${
-              isReady
-                ? "text-nornic-primary"
-                : isPending
-                ? "text-valhalla-gold"
-                : "text-red-400"
-            }`}
-          >
-            {isReady ? "Ready" : isPending ? "Generating..." : status}
-          </span>
-        </div>
-
-        {/* Dimensions */}
-        {dimensions > 0 && (
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-norse-silver">Dimensions:</span>
-            <span className="text-sm text-frost-ice font-mono">
-              {dimensions}
-            </span>
-          </div>
-        )}
-
-        {/* Model */}
-        {model && (
-          <div className="flex items-center gap-1">
-            <span className="text-xs text-norse-silver">Model:</span>
-            <span className="text-sm text-nornic-accent">{model}</span>
-          </div>
-        )}
-      </div>
-
-      {isPending && (
-        <p className="text-xs text-norse-fog mt-2">
-          Embedding will be generated automatically by the background queue.
-        </p>
-      )}
+      <DeleteConfirmModal
+        isOpen={showDeleteConfirm}
+        nodeCount={selectedNodeIds.size}
+        deleting={deleting}
+        onConfirm={handleDeleteNodes}
+        onCancel={() => {
+          setShowDeleteConfirm(false);
+          setDeleteError(null);
+        }}
+      />
     </div>
   );
 }

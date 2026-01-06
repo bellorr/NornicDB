@@ -1,5 +1,12 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
+import { PageLayout } from '../components/common/PageLayout';
+import { PageHeader } from '../components/common/PageHeader';
+import { FormInput } from '../components/common/FormInput';
+import { Button } from '../components/common/Button';
+import { Alert } from '../components/common/Alert';
+import { Modal } from '../components/common/Modal';
+import { Plus, Edit, Trash2 } from 'lucide-react';
 
 // Base path from environment variable (set at build time)
 const BASE_PATH = import.meta.env.VITE_BASE_PATH || '';
@@ -192,95 +199,68 @@ export function AdminUsers() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center">
-        <div className="text-slate-400">Loading...</div>
-      </div>
+      <PageLayout>
+        <div className="flex items-center justify-center flex-1">
+          <div className="w-12 h-12 border-4 border-nornic-primary border-t-transparent rounded-full animate-spin" />
+        </div>
+      </PageLayout>
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white">
-      {/* Header */}
-      <header className="bg-slate-800 border-b border-slate-700 p-4">
-        <div className="max-w-6xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <button
-              type="button"
-              onClick={() => navigate('/security')}
-              className="text-slate-400 hover:text-white transition-colors"
-            >
-              ← Back to Security
-            </button>
-            <h1 className="text-xl font-semibold">User Management</h1>
-          </div>
-          <button
-            type="button"
+    <PageLayout>
+      <PageHeader
+        title="User Management"
+        backTo="/security"
+        backLabel="Back to Security"
+        actions={
+          <Button
+            variant={showCreateForm ? "secondary" : "primary"}
             onClick={() => setShowCreateForm(!showCreateForm)}
-            className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
+            icon={showCreateForm ? undefined : Plus}
           >
-            {showCreateForm ? 'Cancel' : '+ Create User'}
-          </button>
-        </div>
-      </header>
+            {showCreateForm ? 'Cancel' : 'Create User'}
+          </Button>
+        }
+      />
 
       {/* Main Content */}
       <main className="max-w-6xl mx-auto p-6">
-        {error && (
-          <div className="bg-red-900/30 border border-red-700/50 rounded p-3 text-red-300 text-sm mb-6">
-            {error}
-          </div>
-        )}
+        {error && <Alert type="error" message={error} className="mb-6" dismissible onDismiss={() => setError('')} />}
 
         {/* Create User Form */}
         {showCreateForm && (
-          <div className="bg-slate-800 rounded-lg p-6 mb-6">
-            <h2 className="text-lg font-semibold mb-4">Create New User</h2>
+          <div className="bg-norse-shadow border border-norse-rune rounded-lg p-6 mb-6">
+            <h2 className="text-lg font-semibold text-white mb-4">Create New User</h2>
             <form onSubmit={handleCreateUser} className="space-y-4">
-              <div>
-                <label htmlFor="username" className="block text-sm text-slate-400 mb-1">
-                  Username *
-                </label>
-                <input
-                  id="username"
-                  type="text"
-                  value={newUsername}
-                  onChange={(e) => setNewUsername(e.target.value)}
-                  required
-                  className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
+              <FormInput
+                id="username"
+                label="Username"
+                value={newUsername}
+                onChange={setNewUsername}
+                required
+              />
+
+              <FormInput
+                id="password"
+                type="password"
+                label="Password"
+                value={newPassword}
+                onChange={setNewPassword}
+                required
+              />
+              <p className="text-xs text-norse-fog -mt-2">Minimum 8 characters</p>
+
+              <FormInput
+                id="email"
+                type="email"
+                label="Email (optional)"
+                value={newEmail}
+                onChange={setNewEmail}
+              />
 
               <div>
-                <label htmlFor="password" className="block text-sm text-slate-400 mb-1">
-                  Password *
-                </label>
-                <input
-                  id="password"
-                  type="password"
-                  value={newPassword}
-                  onChange={(e) => setNewPassword(e.target.value)}
-                  required
-                  minLength={8}
-                  className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                />
-                <p className="text-xs text-slate-500 mt-1">Minimum 8 characters</p>
-              </div>
-
-              <div>
-                <label htmlFor="email" className="block text-sm text-slate-400 mb-1">
-                  Email (optional)
-                </label>
-                <input
-                  id="email"
-                  type="email"
-                  value={newEmail}
-                  onChange={(e) => setNewEmail(e.target.value)}
-                  className="w-full bg-slate-700 border border-slate-600 rounded px-3 py-2 text-white placeholder-slate-500 focus:outline-none focus:border-blue-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-sm text-slate-400 mb-2">Roles *</label>
+                <label className="block text-sm text-norse-silver mb-2">Roles *</label>
                 <div className="flex gap-4">
                   {['admin', 'editor', 'viewer'].map(role => (
                     <label key={role} className="flex items-center gap-2 cursor-pointer">
@@ -288,60 +268,57 @@ export function AdminUsers() {
                         type="checkbox"
                         checked={newRoles.includes(role)}
                         onChange={() => toggleRole(role, newRoles, setNewRoles)}
-                        className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500"
+                        className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary focus:ring-nornic-primary"
                       />
-                      <span className="text-sm capitalize">{role}</span>
+                      <span className="text-sm capitalize text-norse-silver">{role}</span>
                     </label>
                   ))}
                 </div>
               </div>
 
-              {createError && (
-                <div className="bg-red-900/30 border border-red-700/50 rounded p-3 text-red-300 text-sm">
-                  {createError}
-                </div>
-              )}
+              {createError && <Alert type="error" message={createError} />}
 
-              <button
+              <Button
                 type="submit"
                 disabled={creating || newRoles.length === 0}
-                className="px-4 py-2 bg-green-600 text-white rounded font-medium hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                loading={creating}
+                variant="success"
               >
-                {creating ? 'Creating...' : 'Create User'}
-              </button>
+                Create User
+              </Button>
             </form>
           </div>
         )}
 
         {/* Users Table */}
-        <div className="bg-slate-800 rounded-lg overflow-hidden">
+        <div className="bg-norse-shadow border border-norse-rune rounded-lg overflow-hidden">
           <div className="overflow-x-auto">
             <table className="w-full">
-              <thead className="bg-slate-700">
+              <thead className="bg-norse-stone">
                 <tr>
-                  <th className="px-4 py-3 text-left text-sm font-semibold">Username</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold">Email</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold">Roles</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold">Status</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold">Last Login</th>
-                  <th className="px-4 py-3 text-left text-sm font-semibold">Actions</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-norse-silver">Username</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-norse-silver">Email</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-norse-silver">Roles</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-norse-silver">Status</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-norse-silver">Last Login</th>
+                  <th className="px-4 py-3 text-left text-sm font-semibold text-norse-silver">Actions</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-700">
+              <tbody className="divide-y divide-norse-rune">
                 {users.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
+                    <td colSpan={6} className="px-4 py-8 text-center text-norse-fog">
                       No users found
                     </td>
                   </tr>
                 ) : (
                   users.map((user) => (
-                    <tr key={user.username} className="hover:bg-slate-750">
+                    <tr key={user.username} className="hover:bg-norse-stone/50">
                       <td className="px-4 py-3">
-                        <div className="font-medium">{user.username}</div>
+                        <div className="font-medium text-white">{user.username}</div>
                       </td>
-                      <td className="px-4 py-3 text-slate-300">
-                        {user.email || <span className="text-slate-500">—</span>}
+                      <td className="px-4 py-3 text-norse-silver">
+                        {user.email || <span className="text-norse-fog">—</span>}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-1 flex-wrap">
@@ -350,10 +327,10 @@ export function AdminUsers() {
                               key={role}
                               className={`px-2 py-1 rounded text-xs ${
                                 role === 'admin'
-                                  ? 'bg-red-900/30 text-red-300'
+                                  ? 'bg-red-500/20 text-red-400'
                                   : role === 'editor'
-                                  ? 'bg-blue-900/30 text-blue-300'
-                                  : 'bg-slate-700 text-slate-300'
+                                  ? 'bg-blue-500/20 text-blue-400'
+                                  : 'bg-norse-stone text-norse-silver'
                               }`}
                             >
                               {role}
@@ -363,36 +340,38 @@ export function AdminUsers() {
                       </td>
                       <td className="px-4 py-3">
                         {user.disabled ? (
-                          <span className="px-2 py-1 rounded text-xs bg-red-900/30 text-red-300">
+                          <span className="px-2 py-1 rounded text-xs bg-red-500/20 text-red-400">
                             Disabled
                           </span>
                         ) : (
-                          <span className="px-2 py-1 rounded text-xs bg-green-900/30 text-green-300">
+                          <span className="px-2 py-1 rounded text-xs bg-green-500/20 text-green-400">
                             Active
                           </span>
                         )}
                       </td>
-                      <td className="px-4 py-3 text-slate-400 text-sm">
+                      <td className="px-4 py-3 text-norse-fog text-sm">
                         {user.last_login
                           ? new Date(user.last_login).toLocaleString()
-                          : <span className="text-slate-500">Never</span>}
+                          : <span className="text-norse-fog">Never</span>}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex gap-2">
-                          <button
-                            type="button"
+                          <Button
+                            variant="secondary"
+                            size="sm"
                             onClick={() => handleEditUser(user)}
-                            className="px-3 py-1 bg-blue-600 text-white rounded text-sm hover:bg-blue-700 transition-colors"
+                            icon={Edit}
                           >
                             Edit
-                          </button>
-                          <button
-                            type="button"
+                          </Button>
+                          <Button
+                            variant="danger"
+                            size="sm"
                             onClick={() => handleDeleteUser(user.username)}
-                            className="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700 transition-colors"
+                            icon={Trash2}
                           >
                             Delete
-                          </button>
+                          </Button>
                         </div>
                       </td>
                     </tr>
@@ -405,69 +384,62 @@ export function AdminUsers() {
 
         {/* Edit User Modal */}
         {editingUser && (
-          <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-            <div className="bg-slate-800 rounded-lg p-6 max-w-md w-full">
-              <h2 className="text-lg font-semibold mb-4">Edit User: {editingUser.username}</h2>
-              
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-2">Roles</label>
-                  <div className="flex gap-4">
-                    {['admin', 'editor', 'viewer'].map(role => (
-                      <label key={role} className="flex items-center gap-2 cursor-pointer">
-                        <input
-                          type="checkbox"
-                          checked={editRoles.includes(role)}
-                          onChange={() => toggleRole(role, editRoles, setEditRoles)}
-                          className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500"
-                        />
-                        <span className="text-sm capitalize">{role}</span>
-                      </label>
-                    ))}
-                  </div>
-                </div>
-
-                <div>
-                  <label className="flex items-center gap-2 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={editDisabled}
-                      onChange={(e) => setEditDisabled(e.target.checked)}
-                      className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-sm">Disabled</span>
-                  </label>
-                </div>
-
-                {updateError && (
-                  <div className="bg-red-900/30 border border-red-700/50 rounded p-3 text-red-300 text-sm">
-                    {updateError}
-                  </div>
-                )}
-
-                <div className="flex gap-2 justify-end">
-                  <button
-                    type="button"
-                    onClick={() => setEditingUser(null)}
-                    className="px-4 py-2 bg-slate-700 text-white rounded hover:bg-slate-600 transition-colors"
-                  >
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleUpdateUser}
-                    disabled={updating || editRoles.length === 0}
-                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {updating ? 'Updating...' : 'Update'}
-                  </button>
+          <Modal
+            isOpen={!!editingUser}
+            onClose={() => setEditingUser(null)}
+            title={`Edit User: ${editingUser.username}`}
+          >
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-norse-silver mb-2">Roles</label>
+                <div className="flex gap-4">
+                  {['admin', 'editor', 'viewer'].map(role => (
+                    <label key={role} className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={editRoles.includes(role)}
+                        onChange={() => toggleRole(role, editRoles, setEditRoles)}
+                        className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary focus:ring-nornic-primary"
+                      />
+                      <span className="text-sm capitalize text-norse-silver">{role}</span>
+                    </label>
+                  ))}
                 </div>
               </div>
+
+              <div>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={editDisabled}
+                    onChange={(e) => setEditDisabled(e.target.checked)}
+                    className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary focus:ring-nornic-primary"
+                  />
+                  <span className="text-sm text-norse-silver">Disabled</span>
+                </label>
+              </div>
+
+              {updateError && <Alert type="error" message={updateError} />}
+
+              <div className="flex gap-2 justify-end pt-4 border-t border-norse-rune">
+                <Button
+                  variant="secondary"
+                  onClick={() => setEditingUser(null)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={handleUpdateUser}
+                  disabled={updating || editRoles.length === 0}
+                  loading={updating}
+                >
+                  Update
+                </Button>
+              </div>
             </div>
-          </div>
+          </Modal>
         )}
       </main>
-    </div>
+    </PageLayout>
   );
 }
-
