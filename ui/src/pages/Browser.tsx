@@ -1172,8 +1172,11 @@ export function Browser() {
                   setDeleteError(null);
                   try {
                     const result = await api.deleteNodes(Array.from(selectedNodeIds));
+                    // Always dismiss modal after attempt, even if there were errors
+                    // Errors will be displayed in the error message area
+                    setShowDeleteConfirm(false);
+                    
                     if (result.success) {
-                      setShowDeleteConfirm(false);
                       clearNodeSelection();
                       // Refresh results based on active tab
                       if (activeTab === "query") {
@@ -1182,9 +1185,12 @@ export function Browser() {
                         executeSearch();
                       }
                     } else {
+                      // Show errors after modal is dismissed
                       setDeleteError(result.errors.join(', '));
                     }
                   } catch (err) {
+                    // Dismiss modal even on exception
+                    setShowDeleteConfirm(false);
                     setDeleteError(err instanceof Error ? err.message : 'Unknown error occurred');
                   } finally {
                     setDeleting(false);

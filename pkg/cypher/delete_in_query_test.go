@@ -134,6 +134,31 @@ func TestDeleteWithINQuery(t *testing.T) {
 		assert.Contains(t, remainingIds, toKeep[1], "Should keep node-4")
 	})
 
+	t.Run("delete with elementId(n) IN parameter list", func(t *testing.T) {
+		_, toKeep := setupTestNodes(t)
+
+		query := `MATCH (n:Person) WHERE elementId(n) IN $ids DETACH DELETE n RETURN count(n) as deleted`
+		params := map[string]interface{}{
+			"ids": []string{"4:nornicdb:node-1", "4:nornicdb:node-2"},
+		}
+		result, err := exec.Execute(ctx, query, params)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		deleted := result.Rows[0][0].(int64)
+		assert.Equal(t, int64(2), deleted, "Should delete exactly 2 nodes")
+
+		// Verify remaining nodes
+		result, err = exec.Execute(ctx, "MATCH (n:Person) RETURN n.id as id ORDER BY n.id", nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 2, "Should have 2 nodes remaining")
+		remainingIds := []string{
+			result.Rows[0][0].(string),
+			result.Rows[1][0].(string),
+		}
+		assert.Contains(t, remainingIds, toKeep[0], "Should keep node-3")
+		assert.Contains(t, remainingIds, toKeep[1], "Should keep node-4")
+	})
+
 	t.Run("delete with OR condition id(n) IN OR n.id IN - should not delete all", func(t *testing.T) {
 		toDelete, toKeep := setupTestNodes(t)
 
@@ -148,8 +173,35 @@ func TestDeleteWithINQuery(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1)
 		deleted := result.Rows[0][0].(int64)
-		
+
 		// CRITICAL: Should only delete 2 nodes, not all 4
+		assert.Equal(t, int64(2), deleted, "Should delete exactly 2 nodes, not all nodes")
+
+		// Verify remaining nodes
+		result, err = exec.Execute(ctx, "MATCH (n:Person) RETURN n.id as id ORDER BY n.id", nil)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 2, "Should have 2 nodes remaining")
+		remainingIds := []string{
+			result.Rows[0][0].(string),
+			result.Rows[1][0].(string),
+		}
+		assert.Contains(t, remainingIds, toKeep[0], "Should keep node-3")
+		assert.Contains(t, remainingIds, toKeep[1], "Should keep node-4")
+		assert.NotContains(t, remainingIds, toDelete[0], "Should not have node-1")
+		assert.NotContains(t, remainingIds, toDelete[1], "Should not have node-2")
+	})
+
+	t.Run("delete with OR condition elementId(n) IN OR n.id IN - should not delete all", func(t *testing.T) {
+		toDelete, toKeep := setupTestNodes(t)
+
+		query := `MATCH (n:Person) WHERE elementId(n) IN $ids OR n.id IN $ids DETACH DELETE n RETURN count(n) as deleted`
+		params := map[string]interface{}{
+			"ids": []string{"4:nornicdb:node-1", "4:nornicdb:node-2"},
+		}
+		result, err := exec.Execute(ctx, query, params)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 1)
+		deleted := result.Rows[0][0].(int64)
 		assert.Equal(t, int64(2), deleted, "Should delete exactly 2 nodes, not all nodes")
 
 		// Verify remaining nodes
@@ -353,6 +405,24 @@ func TestMatchWithINQuery(t *testing.T) {
 		assert.Contains(t, ids, "node-2")
 	})
 
+	t.Run("match with elementId(n) IN parameter list", func(t *testing.T) {
+		setupTestNodes(t)
+
+		query := `MATCH (n:Person) WHERE elementId(n) IN $ids RETURN n.id as id ORDER BY n.id`
+		params := map[string]interface{}{
+			"ids": []string{"4:nornicdb:node-1", "4:nornicdb:node-2"},
+		}
+		result, err := exec.Execute(ctx, query, params)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 2, "Should match 2 nodes")
+		ids := []string{
+			result.Rows[0][0].(string),
+			result.Rows[1][0].(string),
+		}
+		assert.Contains(t, ids, "node-1")
+		assert.Contains(t, ids, "node-2")
+	})
+
 	t.Run("match with OR condition id(n) IN OR n.id IN", func(t *testing.T) {
 		setupTestNodes(t)
 
@@ -373,5 +443,24 @@ func TestMatchWithINQuery(t *testing.T) {
 		assert.NotContains(t, ids, "node-3")
 		assert.NotContains(t, ids, "node-4")
 	})
-}
 
+	t.Run("match with OR condition elementId(n) IN OR n.id IN", func(t *testing.T) {
+		setupTestNodes(t)
+
+		query := `MATCH (n:Person) WHERE elementId(n) IN $ids OR n.id IN $ids RETURN n.id as id ORDER BY n.id`
+		params := map[string]interface{}{
+			"ids": []string{"4:nornicdb:node-1", "4:nornicdb:node-2"},
+		}
+		result, err := exec.Execute(ctx, query, params)
+		require.NoError(t, err)
+		require.Len(t, result.Rows, 2, "Should match exactly 2 nodes, not all 4")
+		ids := []string{
+			result.Rows[0][0].(string),
+			result.Rows[1][0].(string),
+		}
+		assert.Contains(t, ids, "node-1")
+		assert.Contains(t, ids, "node-2")
+		assert.NotContains(t, ids, "node-3")
+		assert.NotContains(t, ids, "node-4")
+	})
+}

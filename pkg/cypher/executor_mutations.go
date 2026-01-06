@@ -231,10 +231,35 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				result.Columns[i] = item.expr
 			}
 
-			// Handle count(*) - return number of deleted items
+			// Handle count(n) or count(*) - return number of deleted nodes/relationships
+			// Neo4j behavior:
+			//   - count(n) returns only the number of nodes deleted (not relationships)
+			//   - count(*) returns the total entities deleted (nodes + relationships)
+			// This matches Neo4j's documented behavior for DELETE operations
 			upperExpr := strings.ToUpper(item.expr)
 			if strings.HasPrefix(upperExpr, "COUNT(") {
-				row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
+				// Extract what we're counting: count(n), count(r), count(*)
+				inner := strings.TrimSpace(item.expr[6 : len(item.expr)-1]) // Remove "count(" and ")"
+				upperInner := strings.ToUpper(inner)
+				
+				if upperInner == "*" {
+					// count(*) - return sum of nodes and relationships (Neo4j compatibility)
+					// Neo4j: count(*) in DELETE returns total entities (nodes + relationships)
+					row[i] = int64(result.Stats.NodesDeleted + result.Stats.RelationshipsDeleted)
+				} else {
+					// count(n) or count(r) - return only the count of what was deleted
+					// Neo4j: count(n) after DETACH DELETE n returns only nodes, not relationships
+					// Check if the variable matches the deleted variable (node deletion)
+					if strings.Contains(upperInner, strings.ToUpper(deleteVars)) {
+						// count(n) where n is the deleted node variable - return only nodes (Neo4j compatibility)
+						row[i] = int64(result.Stats.NodesDeleted)
+					} else {
+						// count(r) or count(something else) - check if it's a relationship
+						// For now, default to nodes only for safety
+						// In practice, DELETE queries typically use count(n) or count(*)
+						row[i] = int64(result.Stats.NodesDeleted)
+					}
+				}
 			}
 		}
 		result.Rows = [][]interface{}{row}

@@ -203,46 +203,110 @@ class NornicDBClient {
 
     const dbName = await this.getDefaultDatabase();
     
-    // Delete nodes one by one to ensure we only delete the exact nodes requested
-    // This is safer than using IN clause which might have matching issues
-    let totalDeleted = 0;
-    const errors: string[] = [];
-
-    for (const nodeId of nodeIds) {
-      try {
-        // Use id(n) function for matching internal storage ID, or fallback to n.id property
-        // This matches the pattern used in GraphQL resolvers
-        const statement = `MATCH (n) WHERE id(n) = $nodeId OR n.id = $nodeId DETACH DELETE n RETURN count(n) as deleted`;
-        const parameters = { nodeId };
-
-        const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include',
-          body: JSON.stringify({
-            statements: [{ statement, parameters }],
-          }),
-        });
-
-        const result: CypherResponse = await res.json();
-        
-        if (result.errors && result.errors.length > 0) {
-          errors.push(`Node ${nodeId}: ${result.errors.map(e => e.message).join(', ')}`);
-          continue;
-        }
-
-        const deleted = result.results[0]?.data[0]?.row[0] as number || 0;
-        totalDeleted += deleted;
-      } catch (err) {
-        errors.push(`Node ${nodeId}: ${err instanceof Error ? err.message : 'Unknown error'}`);
+    try {
+      // First, verify the nodes exist before deleting (safety check)
+      const verifyStatement = `MATCH (n) WHERE id(n) IN $ids RETURN id(n) as nodeId, elementId(n) as elementId`;
+      const verifyRes = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          statements: [{ statement: verifyStatement, parameters: { ids: nodeIds } }],
+        }),
+      });
+      
+      const verifyResult: CypherResponse = await verifyRes.json();
+      const foundCount = verifyResult.results[0]?.data?.length || 0;
+      
+      if (foundCount === 0) {
+        return {
+          success: false,
+          deleted: 0,
+          errors: [
+            `None of the requested nodes were found. ` +
+            `Requested IDs: ${nodeIds.join(', ')}. ` +
+            `This may indicate the nodes were already deleted or the IDs are incorrect.`
+          ],
+        };
       }
-    }
+      
+      if (foundCount !== nodeIds.length) {
+        return {
+          success: false,
+          deleted: 0,
+          errors: [
+            `Only ${foundCount} of ${nodeIds.length} requested nodes were found. ` +
+            `Requested IDs: ${nodeIds.join(', ')}. ` +
+            `Some nodes may not exist.`
+          ],
+        };
+      }
+      
+      // Use bulk delete with id(n) IN $ids - verified by unit tests to work correctly
+      // This is much more efficient than deleting one by one
+      // The UI extracts internal IDs from elementId, which id(n) matches perfectly
+      const statement = `MATCH (n) WHERE id(n) IN $ids DETACH DELETE n RETURN count(n) as deleted`;
+      const parameters = { ids: nodeIds };
 
-    return {
-      success: errors.length === 0,
-      deleted: totalDeleted,
-      errors,
-    };
+      const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          statements: [{ statement, parameters }],
+        }),
+      });
+
+      const result: CypherResponse = await res.json();
+      
+      if (result.errors && result.errors.length > 0) {
+        return {
+          success: false,
+          deleted: 0,
+          errors: result.errors.map(e => e.message),
+        };
+      }
+
+      const deleted = result.results[0]?.data[0]?.row[0] as number || 0;
+      
+      // CRITICAL: If more nodes were deleted than requested, this is a serious bug
+      // The WHERE clause should have filtered correctly - this indicates a query issue
+      if (deleted > nodeIds.length) {
+        return {
+          success: false,
+          deleted,
+          errors: [
+            `CRITICAL: Expected to delete ${nodeIds.length} nodes, but ${deleted} were deleted. ` +
+            `This indicates the WHERE clause did not filter correctly. ` +
+            `Requested IDs: ${nodeIds.join(', ')}`
+          ],
+        };
+      }
+      
+      // If fewer nodes were deleted, some may not exist
+      if (deleted < nodeIds.length) {
+        return {
+          success: false,
+          deleted,
+          errors: [
+            `Expected to delete ${nodeIds.length} nodes, but only ${deleted} were deleted. ` +
+            `Some nodes may not exist. Requested IDs: ${nodeIds.join(', ')}`
+          ],
+        };
+      }
+
+      return {
+        success: true,
+        deleted,
+        errors: [],
+      };
+    } catch (err) {
+      return {
+        success: false,
+        deleted: 0,
+        errors: [err instanceof Error ? err.message : 'Unknown error'],
+      };
+    }
   }
 
   async updateNodeProperties(nodeId: string, properties: Record<string, unknown>): Promise<{ success: boolean; error?: string }> {
