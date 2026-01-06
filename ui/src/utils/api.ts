@@ -202,41 +202,47 @@ class NornicDBClient {
     }
 
     const dbName = await this.getDefaultDatabase();
-    // Build Cypher query to delete multiple nodes
-    // Use id(n) function for matching internal storage ID, or fallback to n.id property
-    const statement = `MATCH (n) WHERE id(n) IN $ids OR n.id IN $ids DETACH DELETE n RETURN count(n) as deleted`;
-    const parameters = { ids: nodeIds };
+    
+    // Delete nodes one by one to ensure we only delete the exact nodes requested
+    // This is safer than using IN clause which might have matching issues
+    let totalDeleted = 0;
+    const errors: string[] = [];
 
-    try {
-      const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          statements: [{ statement, parameters }],
-        }),
-      });
+    for (const nodeId of nodeIds) {
+      try {
+        // Use id(n) function for matching internal storage ID, or fallback to n.id property
+        // This matches the pattern used in GraphQL resolvers
+        const statement = `MATCH (n) WHERE id(n) = $nodeId OR n.id = $nodeId DETACH DELETE n RETURN count(n) as deleted`;
+        const parameters = { nodeId };
 
-      const result: CypherResponse = await res.json();
-      
-      if (result.errors && result.errors.length > 0) {
-        return {
-          success: false,
-          deleted: 0,
-          errors: result.errors.map(e => e.message),
-        };
+        const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+          body: JSON.stringify({
+            statements: [{ statement, parameters }],
+          }),
+        });
+
+        const result: CypherResponse = await res.json();
+        
+        if (result.errors && result.errors.length > 0) {
+          errors.push(`Node ${nodeId}: ${result.errors.map(e => e.message).join(', ')}`);
+          continue;
+        }
+
+        const deleted = result.results[0]?.data[0]?.row[0] as number || 0;
+        totalDeleted += deleted;
+      } catch (err) {
+        errors.push(`Node ${nodeId}: ${err instanceof Error ? err.message : 'Unknown error'}`);
       }
-
-      // Extract deleted count from result
-      const deleted = result.results[0]?.data[0]?.row[0] as number || 0;
-      return { success: true, deleted, errors: [] };
-    } catch (err) {
-      return {
-        success: false,
-        deleted: 0,
-        errors: [err instanceof Error ? err.message : 'Failed to delete nodes'],
-      };
     }
+
+    return {
+      success: errors.length === 0,
+      deleted: totalDeleted,
+      errors,
+    };
   }
 
   async updateNodeProperties(nodeId: string, properties: Record<string, unknown>): Promise<{ success: boolean; error?: string }> {

@@ -81,6 +81,8 @@ export function Browser() {
   const [embedMessage, setEmbedMessage] = useState<string | null>(null);
   const [showAIChat, setShowAIChat] = useState(false);
   const [showRegenerateConfirm, setShowRegenerateConfirm] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [editingProperties, setEditingProperties] = useState<Record<string, unknown>>({});
   const [deleting, setDeleting] = useState(false);
@@ -453,24 +455,9 @@ export function Browser() {
                       </span>
                       <button
                         type="button"
-                        onClick={async () => {
-                          if (confirm(`Delete ${selectedNodeIds.size} node(s)?`)) {
-                            setDeleting(true);
-                            try {
-                              const result = await api.deleteNodes(Array.from(selectedNodeIds));
-                              if (result.success) {
-                                clearNodeSelection();
-                                // Refresh query results
-                                executeCypher();
-                              } else {
-                                alert(`Failed to delete: ${result.errors.join(', ')}`);
-                              }
-                            } catch (err) {
-                              alert(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
-                            } finally {
-                              setDeleting(false);
-                            }
-                          }
+                        onClick={() => {
+                          setDeleteError(null);
+                          setShowDeleteConfirm(true);
                         }}
                         disabled={deleting}
                         className="flex items-center gap-1 px-3 py-1 text-sm bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded disabled:opacity-50"
@@ -485,6 +472,13 @@ export function Browser() {
                       >
                         Clear
                       </button>
+                    </div>
+                  )}
+                  
+                  {/* Delete Error Display */}
+                  {deleteError && (
+                    <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg m-2">
+                      <p className="text-sm text-red-400 font-mono">{deleteError}</p>
                     </div>
                   )}
                   
@@ -628,24 +622,9 @@ export function Browser() {
                     </span>
                     <button
                       type="button"
-                      onClick={async () => {
-                        if (confirm(`Delete ${selectedNodeIds.size} node(s)?`)) {
-                          setDeleting(true);
-                          try {
-                            const result = await api.deleteNodes(Array.from(selectedNodeIds));
-                            if (result.success) {
-                              clearNodeSelection();
-                              // Refresh search results
-                              executeSearch();
-                            } else {
-                              alert(`Failed to delete: ${result.errors.join(', ')}`);
-                            }
-                          } catch (err) {
-                            alert(`Error: ${err instanceof Error ? err.message : 'Unknown error'}`);
-                          } finally {
-                            setDeleting(false);
-                          }
-                        }
+                      onClick={() => {
+                        setDeleteError(null);
+                        setShowDeleteConfirm(true);
                       }}
                       disabled={deleting}
                       className="flex items-center gap-1 px-3 py-1 text-sm bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded disabled:opacity-50"
@@ -660,6 +639,13 @@ export function Browser() {
                     >
                       Clear
                     </button>
+                  </div>
+                )}
+                
+                {/* Delete Error Display */}
+                {deleteError && (
+                  <div className="p-3 bg-red-500/10 border border-red-500/30 rounded-lg m-2">
+                    <p className="text-sm text-red-400 font-mono">{deleteError}</p>
                   </div>
                 )}
 
@@ -1131,6 +1117,83 @@ export function Browser() {
                 className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/30 rounded-lg font-medium transition-all"
               >
                 Yes, Regenerate All
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Nodes Confirmation Dialog */}
+      {showDeleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <div className="bg-norse-deep border border-norse-rune rounded-xl p-6 max-w-md mx-4 shadow-2xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="p-2 bg-red-500/20 rounded-lg">
+                <Trash2 className="w-6 h-6 text-red-400" />
+              </div>
+              <h3 className="text-lg font-semibold text-white">
+                Delete {selectedNodeIds.size} Node{selectedNodeIds.size !== 1 ? 's' : ''}?
+              </h3>
+            </div>
+            <p className="text-norse-silver mb-2">
+              This will{" "}
+              <span className="text-red-400 font-medium">
+                permanently delete
+              </span>{" "}
+              the selected node{selectedNodeIds.size !== 1 ? 's' : ''} and all associated data.
+            </p>
+            <p className="text-norse-silver text-sm mb-6">
+              This action will remove:
+              <ul className="list-disc list-inside mt-2 space-y-1">
+                <li>The node{selectedNodeIds.size !== 1 ? 's' : ''} and all properties</li>
+                <li>All associated embeddings</li>
+                <li>All connected edges (relationships)</li>
+              </ul>
+              <span className="text-red-400 font-medium mt-2 block">
+                This action cannot be undone.
+              </span>
+            </p>
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDeleteConfirm(false);
+                  setDeleteError(null);
+                }}
+                disabled={deleting}
+                className="px-4 py-2 rounded-lg text-norse-silver hover:text-white hover:bg-norse-rune transition-all disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  setDeleting(true);
+                  setDeleteError(null);
+                  try {
+                    const result = await api.deleteNodes(Array.from(selectedNodeIds));
+                    if (result.success) {
+                      setShowDeleteConfirm(false);
+                      clearNodeSelection();
+                      // Refresh results based on active tab
+                      if (activeTab === "query") {
+                        executeCypher();
+                      } else {
+                        executeSearch();
+                      }
+                    } else {
+                      setDeleteError(result.errors.join(', '));
+                    }
+                  } catch (err) {
+                    setDeleteError(err instanceof Error ? err.message : 'Unknown error occurred');
+                  } finally {
+                    setDeleting(false);
+                  }
+                }}
+                disabled={deleting}
+                className="px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 hover:text-red-300 border border-red-500/30 rounded-lg font-medium transition-all disabled:opacity-50"
+              >
+                {deleting ? "Deleting..." : `Yes, Delete ${selectedNodeIds.size} Node${selectedNodeIds.size !== 1 ? 's' : ''}`}
               </button>
             </div>
           </div>
