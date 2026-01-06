@@ -3,10 +3,11 @@
  * Extracted from Browser.tsx for reusability
  */
 
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { Play, History } from "lucide-react";
 import { QueryResultsTable } from "./QueryResultsTable";
 import { SelectionToolbar } from "../common/SelectionToolbar";
+import { QueryAutocomplete } from "./QueryAutocomplete";
 import { getAllNodeIdsFromQueryResults } from "../../utils/nodeUtils";
 
 interface QueryPanelProps {
@@ -53,10 +54,27 @@ export function QueryPanel({
   deleting = false,
 }: QueryPanelProps) {
   const [showHistory, setShowHistory] = useState(false);
+  const [autocompleteEnabled, setAutocompleteEnabled] = useState(true);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onExecute();
+  };
+
+  const handleSuggestionSelect = (suggestion: string) => {
+    setCypherQuery(suggestion);
+    // Focus back on textarea
+    setTimeout(() => {
+      textareaRef.current?.focus();
+      // Move cursor to end
+      if (textareaRef.current) {
+        textareaRef.current.setSelectionRange(
+          suggestion.length,
+          suggestion.length
+        );
+      }
+    }, 0);
   };
 
   return (
@@ -64,20 +82,53 @@ export function QueryPanel({
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
         <div className="relative">
           <textarea
+            ref={textareaRef}
             value={cypherQuery}
             onChange={(e) => setCypherQuery(e.target.value)}
             className="cypher-editor w-full h-32 p-3 resize-none"
             placeholder="MATCH (n) RETURN n LIMIT 25"
             spellCheck={false}
           />
-          <button
-            type="button"
-            onClick={() => setShowHistory(!showHistory)}
-            className="absolute top-2 right-2 p-1.5 rounded hover:bg-norse-rune transition-colors"
-            title="Query History"
-          >
-            <History className="w-4 h-4 text-norse-silver" />
-          </button>
+          <div className="absolute top-2 right-2 flex items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setShowHistory(!showHistory)}
+              className="p-1.5 rounded hover:bg-norse-rune transition-colors"
+              title="Query History"
+            >
+              <History className="w-4 h-4 text-norse-silver" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setAutocompleteEnabled(!autocompleteEnabled)}
+              className={`p-1.5 rounded transition-colors ${
+                autocompleteEnabled
+                  ? "bg-nornic-primary/20 hover:bg-nornic-primary/30"
+                  : "hover:bg-norse-rune"
+              }`}
+              title={autocompleteEnabled ? "Disable AI Autocomplete" : "Enable AI Autocomplete"}
+            >
+              <svg
+                className="w-4 h-4 text-norse-silver"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M13 10V3L4 14h7v7l9-11h-7z"
+                />
+              </svg>
+            </button>
+          </div>
+          <QueryAutocomplete
+            query={cypherQuery}
+            onSuggestionSelect={handleSuggestionSelect}
+            enabled={autocompleteEnabled && !queryLoading}
+            textareaRef={textareaRef}
+          />
         </div>
 
         {showHistory && queryHistory.length > 0 && (

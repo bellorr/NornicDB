@@ -201,7 +201,7 @@ func (s *Server) registerHeimdallRoutes(mux *http.ServeMux) {
 	// ==========================================================================
 	// Heimdall AI Assistant Endpoints (Bifrost chat interface)
 	// ==========================================================================
-	// Routes: /api/bifrost/status, /api/bifrost/chat/completions, /api/bifrost/events
+	// Routes: /api/bifrost/status, /api/bifrost/chat/completions, /api/bifrost/autocomplete, /api/bifrost/events
 	// All Bifrost endpoints require authentication (PermRead minimum)
 	if s.heimdallHandler == nil {
 		return
@@ -215,6 +215,10 @@ func (s *Server) registerHeimdallRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/bifrost/chat/completions", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		s.heimdallHandler.ServeHTTP(w, r)
 	}, auth.PermWrite))
+	// Autocomplete - read access required (queries schema, generates suggestions)
+	mux.HandleFunc("/api/bifrost/autocomplete", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		s.heimdallHandler.ServeHTTP(w, r)
+	}, auth.PermRead))
 	// SSE events - read access required
 	mux.HandleFunc("/api/bifrost/events", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
 		s.heimdallHandler.ServeHTTP(w, r)

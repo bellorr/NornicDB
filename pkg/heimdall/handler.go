@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -62,6 +63,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.handleChatCompletions(w, r)
 	case r.URL.Path == "/api/bifrost/events":
 		h.handleEvents(w, r)
+	case r.URL.Path == "/api/bifrost/autocomplete":
+		h.handleAutocomplete(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -151,6 +154,227 @@ func (h *Handler) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Keep connection alive until client disconnects
 	<-r.Context().Done()
+}
+
+// handleAutocomplete provides Cypher query autocomplete suggestions.
+// POST /api/bifrost/autocomplete
+//
+// Request body:
+//
+//	{
+//	  "query": "MATCH (n",
+//	  "cursor_position": 10  // optional
+//	}
+//
+// Response:
+//
+//	{
+//	  "suggestion": "MATCH (n) RETURN n LIMIT 25",
+//	  "schema": {
+//	    "labels": ["Person", "File", ...],
+//	    "properties": ["name", "age", ...],
+//	    "relTypes": ["KNOWS", "OWNS", ...]
+//	  }
+//	}
+func (h *Handler) handleAutocomplete(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Query          string `json:"query"`
+		CursorPosition int    `json:"cursor_position,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.Query == "" {
+		http.Error(w, "query parameter required", http.StatusBadRequest)
+		return
+	}
+
+	// Invoke the autocomplete action
+	ctx := ActionContext{
+		Context:  r.Context(),
+		Params:   map[string]interface{}{"query": req.Query, "cursor_position": req.CursorPosition},
+		Database: h.database,
+		Metrics:  h.metrics,
+		Bifrost:  h.bifrost,
+	}
+
+	result, err := ExecuteAction("heimdall.autocomplete.suggest", ctx)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("Autocomplete error: %v", err), http.StatusInternalServerError)
+		return
+	}
+
+	// If we have schema info but no suggestion, use SLM to generate one
+	if result != nil && result.Success {
+		schema, _ := result.Data["schema"].(map[string]interface{})
+		suggestion, _ := result.Data["suggestion"].(string)
+
+		// If no suggestion from action, use SLM to generate one
+		if suggestion == "" && h.manager != nil {
+			// Build prompt with schema context
+			labels, _ := schema["labels"].([]interface{})
+			properties, _ := schema["properties"].([]interface{})
+			relTypes, _ := schema["relTypes"].([]interface{})
+
+			labelStrs := make([]string, 0, len(labels))
+			for _, l := range labels {
+				if s, ok := l.(string); ok {
+					labelStrs = append(labelStrs, s)
+				}
+			}
+			propStrs := make([]string, 0, len(properties))
+			for _, p := range properties {
+				if s, ok := p.(string); ok {
+					propStrs = append(propStrs, s)
+				}
+			}
+			relStrs := make([]string, 0, len(relTypes))
+			for _, r := range relTypes {
+				if s, ok := r.(string); ok {
+					relStrs = append(relStrs, s)
+				}
+			}
+
+			// Build a clearer prompt that explains the difference between properties and relationship types
+			var schemaContext strings.Builder
+			if len(labelStrs) > 0 {
+				schemaContext.WriteString(fmt.Sprintf("Node labels: %s\n", strings.Join(labelStrs, ", ")))
+			}
+			if len(propStrs) > 0 {
+				// Limit properties to avoid overwhelming the prompt
+				propsToShow := propStrs
+				if len(propsToShow) > 20 {
+					propsToShow = propsToShow[:20]
+				}
+				schemaContext.WriteString(fmt.Sprintf("Node properties (use as n.propertyName): %s\n", strings.Join(propsToShow, ", ")))
+			}
+			if len(relStrs) > 0 {
+				// Limit relationship types
+				relsToShow := relStrs
+				if len(relsToShow) > 10 {
+					relsToShow = relsToShow[:10]
+				}
+				schemaContext.WriteString(fmt.Sprintf("Relationship types (use in patterns like (a)-[:TYPE]->(b)): %s\n", strings.Join(relsToShow, ", ")))
+			}
+
+			prompt := fmt.Sprintf(`Complete this Cypher query. Return ONLY the completed Cypher query, nothing else.
+
+%s
+Rules:
+- Return ONLY the Cypher query, no explanations
+- Properties are accessed as n.propertyName (e.g., n.name, n.age)
+- Relationship types are used in patterns like (a)-[:KNOWS]->(b), NOT as properties
+- If missing LIMIT, add LIMIT 25 at the end
+- Stop immediately after the query
+
+Current query:
+%s
+
+Complete Cypher query:`,
+				schemaContext.String(),
+				req.Query)
+
+			// Use raw prompt for direct completion with stricter parameters to prevent repetition
+			slmResult, err := h.manager.Generate(r.Context(), prompt, GenerateParams{
+				MaxTokens:   128, // Reduced to prevent repetition
+				Temperature: 0.2, // Lower temperature for more focused output
+				TopP:        0.8,
+				TopK:        20,
+				StopTokens:  []string{"IMPORTANT", "Rules:", "Available", "Complete query:", "\n\n\n"}, // Stop on instruction patterns
+			})
+			if err == nil && slmResult != "" {
+				// Clean up the suggestion - extract only the first valid Cypher query
+				cleanSuggestion := strings.TrimSpace(slmResult)
+
+				// Remove markdown code blocks
+				cleanSuggestion = strings.TrimPrefix(cleanSuggestion, "```cypher")
+				cleanSuggestion = strings.TrimPrefix(cleanSuggestion, "```")
+				cleanSuggestion = strings.TrimSuffix(cleanSuggestion, "```")
+				cleanSuggestion = strings.TrimSpace(cleanSuggestion)
+
+				// Split by newlines and extract the first complete query
+				lines := strings.Split(cleanSuggestion, "\n")
+				cypherKeywordRegex := regexp.MustCompile(`^(MATCH|CREATE|MERGE|DELETE|SET|RETURN|WITH|UNWIND|CALL|LOAD|START|UNION|OPTIONAL)`)
+				instructionPattern := regexp.MustCompile(`(?i)^(IMPORTANT|Rules?:|Available|Complete)`)
+
+				var queryParts []string
+				foundQuery := false
+
+				for _, line := range lines {
+					line = strings.TrimSpace(line)
+					if line == "" {
+						continue
+					}
+
+					// Stop immediately if we hit instruction patterns
+					if instructionPattern.MatchString(line) {
+						break
+					}
+
+					// If we found a query line, start collecting
+					if cypherKeywordRegex.MatchString(line) {
+						// If we already found a query and hit another one, stop (prevent repetition)
+						if foundQuery {
+							break
+						}
+						foundQuery = true
+						queryParts = []string{line}
+					} else if foundQuery {
+						// Continue collecting query parts until we hit an instruction or another query
+						if instructionPattern.MatchString(line) || cypherKeywordRegex.MatchString(line) {
+							break
+						}
+						queryParts = append(queryParts, line)
+					}
+				}
+
+				if len(queryParts) > 0 {
+					cleanSuggestion = strings.Join(queryParts, " ")
+					// Remove any remaining instruction text using regex
+					cleanSuggestion = regexp.MustCompile(`(?i)\s+(IMPORTANT|Rules?:|Available|Complete).*$`).ReplaceAllString(cleanSuggestion, "")
+					cleanSuggestion = strings.TrimSpace(cleanSuggestion)
+
+					// Remove any repetition patterns (query repeated multiple times)
+					// Split by common delimiters and take the first unique query
+					parts := regexp.MustCompile(`\s{2,}|\n{2,}`).Split(cleanSuggestion, -1)
+					if len(parts) > 0 {
+						cleanSuggestion = parts[0]
+					}
+
+					// Only use if it's a valid improvement and doesn't contain instruction text
+					if cleanSuggestion != "" &&
+						len(cleanSuggestion) > len(req.Query) &&
+						cleanSuggestion != req.Query &&
+						!strings.Contains(strings.ToUpper(cleanSuggestion), "IMPORTANT") &&
+						!strings.Contains(strings.ToUpper(cleanSuggestion), "RULES") {
+						suggestion = cleanSuggestion
+					}
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"suggestion": suggestion,
+			"schema":     schema,
+		})
+		return
+	}
+
+	// Fallback response
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"suggestion": "",
+		"schema":     map[string]interface{}{},
+	})
 }
 
 // sendCancellationResponse sends a cancellation response to the client.
@@ -910,7 +1134,7 @@ func (h *Handler) defaultFormatResponse(result *ActionResult) string {
 	}
 
 	// If there's no structured data, just return the message
-	if result.Data == nil || len(result.Data) == 0 {
+	if len(result.Data) == 0 {
 		return result.Message
 	}
 

@@ -1151,6 +1151,83 @@ func BuiltinActions() []ActionFunc {
 				}, nil
 			},
 		},
+		{
+			Name:        "heimdall.autocomplete.suggest",
+			Description: "Generate Cypher query autocomplete suggestions based on database schema",
+			Category:    "query",
+			Handler: func(ctx ActionContext) (*ActionResult, error) {
+				// Get query from params
+				query, _ := ctx.Params["query"].(string)
+				if query == "" {
+					return &ActionResult{
+						Success: false,
+						Message: "query parameter required",
+					}, nil
+				}
+
+				// Query database for schema information
+				var labels []string
+				var properties []string
+				var relTypes []string
+
+				// Get all labels
+				if ctx.Database != nil {
+					labelResults, err := ctx.Database.Query(ctx, "CALL db.labels() YIELD label RETURN label", nil)
+					if err == nil {
+						for _, row := range labelResults {
+							if label, ok := row["label"].(string); ok {
+								labels = append(labels, label)
+							}
+						}
+					}
+
+					// Get all relationship types
+					relResults, err := ctx.Database.Query(ctx, "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType", nil)
+					if err == nil {
+						for _, row := range relResults {
+							if relType, ok := row["relationshipType"].(string); ok {
+								relTypes = append(relTypes, relType)
+							}
+						}
+					}
+
+					// Get sample properties from nodes (limit to avoid performance issues)
+					propResults, err := ctx.Database.Query(ctx, `
+						MATCH (n)
+						WITH n, keys(n) as props
+						UNWIND props as prop
+						RETURN DISTINCT prop
+						LIMIT 50
+					`, nil)
+					if err == nil {
+						for _, row := range propResults {
+							if prop, ok := row["prop"].(string); ok {
+								properties = append(properties, prop)
+							}
+						}
+					}
+				}
+
+				// Build schema context
+				schemaInfo := map[string]interface{}{
+					"labels":      labels,
+					"properties":  properties,
+					"relTypes":    relTypes,
+				}
+
+				// Use SLM to generate completion if available
+				// For now, return schema info - UI can use this for intelligent autocomplete
+				return &ActionResult{
+					Success: true,
+					Message: "Autocomplete suggestions",
+					Data: map[string]interface{}{
+						"query":      query,
+						"schema":     schemaInfo,
+						"suggestion": "", // Will be filled by UI or SLM
+					},
+				}, nil
+			},
+		},
 	}
 }
 
