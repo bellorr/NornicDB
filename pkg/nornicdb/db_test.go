@@ -855,14 +855,14 @@ func TestTierPromotionIntegration(t *testing.T) {
 
 	t.Run("episodic memory promotes to semantic on frequent access", func(t *testing.T) {
 		config := &Config{
-			DecayEnabled:                      true,
-			DecayRecalculateInterval:          30 * time.Minute,
-			DecayArchiveThreshold:            0.01,
-			DecayPromotionEnabled:             true,
-			DecayEpisodicToSemanticThresh:     5,  // Lower for testing
-			DecayEpisodicToSemanticMinAge:     1 * 24 * time.Hour,
-			DecaySemanticToProceduralThresh:   10, // Lower for testing
-			DecaySemanticToProceduralMinAge:   2 * 24 * time.Hour,
+			DecayEnabled:                    true,
+			DecayRecalculateInterval:        30 * time.Minute,
+			DecayArchiveThreshold:           0.01,
+			DecayPromotionEnabled:           true,
+			DecayEpisodicToSemanticThresh:   5, // Lower for testing
+			DecayEpisodicToSemanticMinAge:   1 * 24 * time.Hour,
+			DecaySemanticToProceduralThresh: 10, // Lower for testing
+			DecaySemanticToProceduralMinAge: 2 * 24 * time.Hour,
 		}
 		db, err := Open(t.TempDir(), config)
 		require.NoError(t, err)
@@ -900,14 +900,14 @@ func TestTierPromotionIntegration(t *testing.T) {
 
 	t.Run("semantic memory promotes to procedural on very frequent access", func(t *testing.T) {
 		config := &Config{
-			DecayEnabled:                      true,
-			DecayRecalculateInterval:          30 * time.Minute,
-			DecayArchiveThreshold:            0.01,
-			DecayPromotionEnabled:             true,
-			DecayEpisodicToSemanticThresh:     5,
-			DecayEpisodicToSemanticMinAge:     1 * 24 * time.Hour,
-			DecaySemanticToProceduralThresh:   10, // Lower for testing
-			DecaySemanticToProceduralMinAge:   2 * 24 * time.Hour,
+			DecayEnabled:                    true,
+			DecayRecalculateInterval:        30 * time.Minute,
+			DecayArchiveThreshold:           0.01,
+			DecayPromotionEnabled:           true,
+			DecayEpisodicToSemanticThresh:   5,
+			DecayEpisodicToSemanticMinAge:   1 * 24 * time.Hour,
+			DecaySemanticToProceduralThresh: 10, // Lower for testing
+			DecaySemanticToProceduralMinAge: 2 * 24 * time.Hour,
 		}
 		db, err := Open(t.TempDir(), config)
 		require.NoError(t, err)
@@ -1003,12 +1003,12 @@ func TestTierPromotionIntegration(t *testing.T) {
 
 	t.Run("promotion updates decay score", func(t *testing.T) {
 		config := &Config{
-			DecayEnabled:                      true,
-			DecayPromotionEnabled:             true,
-			DecayEpisodicToSemanticThresh:     5,
-			DecayEpisodicToSemanticMinAge:     1 * 24 * time.Hour,
-			DecaySemanticToProceduralThresh:   100, // Very high to prevent double promotion
-			DecaySemanticToProceduralMinAge:   100 * 24 * time.Hour,
+			DecayEnabled:                    true,
+			DecayPromotionEnabled:           true,
+			DecayEpisodicToSemanticThresh:   5,
+			DecayEpisodicToSemanticMinAge:   1 * 24 * time.Hour,
+			DecaySemanticToProceduralThresh: 100, // Very high to prevent double promotion
+			DecaySemanticToProceduralMinAge: 100 * 24 * time.Hour,
 		}
 		db, err := Open(t.TempDir(), config)
 		require.NoError(t, err)

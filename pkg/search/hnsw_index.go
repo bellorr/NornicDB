@@ -357,12 +357,11 @@ func (h *HNSWIndex) searchWithEf(ctx context.Context, query []float32, k int, mi
 
 	candidates := h.searchLayerHeapPooled(normalized, ep, ef, 0)
 
+	// Score candidates using CPU SIMD (direct, no batching overhead)
 	results := make([]ANNResult, 0, k)
-	var ctxErr error
 	for _, candidateID := range candidates {
 		if err := ctx.Err(); err != nil {
-			ctxErr = err
-			break
+			return results, err
 		}
 
 		if int(candidateID) >= len(h.nodeLevel) || h.deleted[candidateID] {
@@ -383,9 +382,6 @@ func (h *HNSWIndex) searchWithEf(ctx context.Context, query []float32, k int, mi
 	}
 
 	h.idsPool.Put(candidates[:0])
-	if ctxErr != nil {
-		return results, ctxErr
-	}
 	return results, nil
 }
 
