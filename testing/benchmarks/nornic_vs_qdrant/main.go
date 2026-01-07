@@ -13,7 +13,6 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -31,7 +30,6 @@ import (
 
 func main() {
 	var (
-		qdrantAddr = flag.String("qdrant-grpc-addr", "127.0.0.1:6334", "Qdrant gRPC address")
 		points     = flag.Int("points", 20_000, "Synthetic points to load (ignored if -dataset is set)")
 		dim        = flag.Int("dim", 128, "Vector dimension (required)")
 		k          = flag.Int("k", 10, "Top-K results")
@@ -53,35 +51,17 @@ func main() {
 		fatalf("invalid args: points must be >0 when dataset is empty")
 	}
 
-	root, err := repoRoot()
-	if err != nil {
-		fatalf("repo root: %v", err)
-	}
+	// Docker services are presumed already running on fixed ports:
+	// Qdrant: HTTP 6333, gRPC 6334
+	// NornicDB: HTTP 6335, gRPC 6336
+	qdrantAddr := "127.0.0.1:6334"
+	nornicAddr := "127.0.0.1:6336"
 
-	// Ensure local Qdrant gRPC is reachable.
-	waitTCP(*qdrantAddr, 3*time.Second)
-
-	dataDir, err := os.MkdirTemp("", "nornicdb-vs-qdrant.*")
-	if err != nil {
-		fatalf("mktemp: %v", err)
-	}
-	defer os.RemoveAll(dataDir)
-
-	httpPort := pickPort()
-	boltPort := pickPort()
-	nornicGRPCPort := pickPort()
-	nornicAddr := fmt.Sprintf("127.0.0.1:%d", nornicGRPCPort)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	server, err := startNornicDB(ctx, root, dataDir, httpPort, boltPort, nornicGRPCPort)
-	if err != nil {
-		fatalf("start nornicdb: %v", err)
-	}
-	defer func() { _ = server.stop() }()
-
-	waitTCP(nornicAddr, 45*time.Second)
+	// Verify services are reachable (quick check, services should already be up)
+	logf("Verifying services are reachable...")
+	waitTCP(qdrantAddr, 5*time.Second)
+	waitTCP(nornicAddr, 5*time.Second)
+	logf("Services verified: Qdrant gRPC=%s, NornicDB gRPC=%s", qdrantAddr, nornicAddr)
 
 	spec := datasetSpec{
 		path:   *dataset,
@@ -89,12 +69,18 @@ func main() {
 		dim:    *dim,
 	}
 	logf("Loading dataset into both targets: %s", spec.describe(*collection))
-	if _, err := loadDatasetIntoTarget(nornicAddr, *collection, spec, time.Duration(*loadTO)*time.Second); err != nil {
+	logf("Loading into NornicDB...")
+	nornicCount, err := loadDatasetIntoTarget(nornicAddr, *collection, spec, time.Duration(*loadTO)*time.Second)
+	if err != nil {
 		fatalf("load nornicdb: %v", err)
 	}
-	if _, err := loadDatasetIntoTarget(*qdrantAddr, *collection, spec, time.Duration(*loadTO)*time.Second); err != nil {
+	logf("Loaded %d points into NornicDB", nornicCount)
+	logf("Loading into Qdrant...")
+	qdrantCount, err := loadDatasetIntoTarget(qdrantAddr, *collection, spec, time.Duration(*loadTO)*time.Second)
+	if err != nil {
 		fatalf("load qdrant: %v", err)
 	}
+	logf("Loaded %d points into Qdrant", qdrantCount)
 
 	queryVec := makeDeterministicQuery(*dim)
 
@@ -110,15 +96,20 @@ func main() {
 	})
 	printSummary("NornicDB", nornicSum)
 
-	logf("Running benchmark: Qdrant (local)")
+	logf("Running benchmark: Qdrant (Docker)")
 	qdrantSum := runBenchmark("qdrant", runCfg, func() (workerFn, func(), error) {
-		return newSearchWorker(*qdrantAddr, *collection, queryVec, uint64(*k), *hnswEf)
+		return newSearchWorker(qdrantAddr, *collection, queryVec, uint64(*k), *hnswEf)
 	})
 	printSummary("Qdrant", qdrantSum)
 
 	csvPath := *outCSV
 	if !filepath.IsAbs(csvPath) {
-		csvPath = filepath.Join(root, csvPath)
+		// Try to find repo root for relative paths
+		root, err := repoRoot()
+		if err == nil {
+			csvPath = filepath.Join(root, csvPath)
+		}
+		// If we can't find repo root, use the path as-is (might be absolute or relative to CWD)
 	}
 	rows := []csvRow{
 		rowFromSummary("nornicdb", spec.pointsForCSV(), *dim, *k, *concurrent, nornicSum),
@@ -128,66 +119,6 @@ func main() {
 		fatalf("write csv: %v", err)
 	}
 	logf("CSV appended: %s", csvPath)
-}
-
-type serverProc struct {
-	cmd  *exec.Cmd
-	logf *os.File
-}
-
-func (s *serverProc) stop() error {
-	if s == nil || s.cmd == nil || s.cmd.Process == nil {
-		return nil
-	}
-	_ = s.cmd.Process.Signal(os.Interrupt)
-
-	done := make(chan error, 1)
-	go func() { done <- s.cmd.Wait() }()
-
-	select {
-	case <-time.After(5 * time.Second):
-		_ = s.cmd.Process.Kill()
-		<-done
-	case <-done:
-	}
-
-	if s.logf != nil {
-		_ = s.logf.Close()
-	}
-	return nil
-}
-
-func startNornicDB(ctx context.Context, repoRoot, dataDir string, httpPort, boltPort, grpcPort int) (*serverProc, error) {
-	logPath := filepath.Join(dataDir, "server.log")
-	f, err := os.Create(logPath)
-	if err != nil {
-		return nil, fmt.Errorf("create server log: %w", err)
-	}
-
-	cmd := exec.CommandContext(ctx, "go", "run", "./cmd/nornicdb", "serve",
-		"--data-dir", dataDir,
-		"--address", "127.0.0.1",
-		"--http-port", strconv.Itoa(httpPort),
-		"--bolt-port", strconv.Itoa(boltPort),
-		"--no-auth",
-		"--headless",
-	)
-	cmd.Dir = repoRoot
-	cmd.Stdout = f
-	cmd.Stderr = f
-	cmd.Env = append(os.Environ(),
-		"NORNICDB_QDRANT_GRPC_ENABLED=true",
-		fmt.Sprintf("NORNICDB_QDRANT_GRPC_LISTEN_ADDR=127.0.0.1:%d", grpcPort),
-		"NORNICDB_EMBEDDING_ENABLED=false", // allow vector mutations
-		"NORNICDB_MCP_ENABLED=false",
-		"NORNICDB_HEIMDALL_ENABLED=false",
-	)
-
-	if err := cmd.Start(); err != nil {
-		_ = f.Close()
-		return nil, fmt.Errorf("start: %w", err)
-	}
-	return &serverProc{cmd: cmd, logf: f}, nil
 }
 
 func repoRoot() (string, error) {
@@ -207,15 +138,6 @@ func repoRoot() (string, error) {
 		dir = next
 	}
 	return "", fmt.Errorf("could not find go.mod from %s", wd)
-}
-
-func pickPort() int {
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		fatalf("pickPort listen: %v", err)
-	}
-	defer l.Close()
-	return l.Addr().(*net.TCPAddr).Port
 }
 
 func waitTCP(addr string, timeout time.Duration) {
@@ -268,16 +190,30 @@ func loadDatasetIntoTarget(grpcAddr, collection string, spec datasetSpec, timeou
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	conn, err := grpc.DialContext(ctx, grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	logf("  Connecting to %s (timeout: 10s)...", grpcAddr)
+	// Use a shorter timeout for the initial connection
+	connCtx, connCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer connCancel()
+
+	conn, err := grpc.DialContext(connCtx, grpcAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithBlock())
 	if err != nil {
+		if connCtx.Err() == context.DeadlineExceeded {
+			return 0, fmt.Errorf("grpc dial %s: connection timeout after 10s (service may not be running, port not accessible, or gRPC not ready)", grpcAddr)
+		}
 		return 0, fmt.Errorf("grpc dial %s: %w", grpcAddr, err)
 	}
+	logf("  Connected successfully")
 	defer conn.Close()
 
 	collections := qpb.NewCollectionsClient(conn)
 	points := qpb.NewPointsClient(conn)
 
+	logf("  Deleting existing collection %q (if any)...", collection)
 	_, _ = collections.Delete(ctx, &qpb.DeleteCollection{CollectionName: collection})
+
+	logf("  Creating collection %q with dim=%d...", collection, spec.dim)
 	_, err = collections.Create(ctx, &qpb.CreateCollection{
 		CollectionName: collection,
 		VectorsConfig: &qpb.VectorsConfig{
@@ -289,13 +225,17 @@ func loadDatasetIntoTarget(grpcAddr, collection string, spec datasetSpec, timeou
 	if err != nil {
 		return 0, fmt.Errorf("create collection %q @ %s: %w", collection, grpcAddr, err)
 	}
+	logf("  Collection created, starting data load...")
 
 	const batch = 256
 	upsertBatch := func(buf []*qpb.PointStruct) error {
 		rpcCtx, rpcCancel := context.WithTimeout(ctx, 60*time.Second)
 		defer rpcCancel()
 		_, err := points.Upsert(rpcCtx, &qpb.UpsertPoints{CollectionName: collection, Points: buf})
-		return err
+		if err != nil {
+			return fmt.Errorf("upsert batch of %d points: %w", len(buf), err)
+		}
+		return nil
 	}
 
 	if spec.path != "" {
@@ -345,9 +285,12 @@ func loadDatasetIntoTarget(grpcAddr, collection string, spec datasetSpec, timeou
 
 			if len(buf) >= batch {
 				if err := upsertBatch(buf); err != nil {
-					return 0, err
+					return 0, fmt.Errorf("upsert batch at line %d: %w", line, err)
 				}
 				total += len(buf)
+				if total%1000 == 0 {
+					logf("  Loaded %d points...", total)
+				}
 				buf = buf[:0]
 			}
 		}
@@ -360,9 +303,11 @@ func loadDatasetIntoTarget(grpcAddr, collection string, spec datasetSpec, timeou
 			}
 			total += len(buf)
 		}
+		logf("  Finished loading %d points, verifying count...", total)
 		if err := waitForPointCount(ctx, points, collection, total); err != nil {
-			return total, err
+			return total, fmt.Errorf("waitForPointCount: %w", err)
 		}
+		logf("  Verified %d points in collection", total)
 		return total, nil
 	}
 
@@ -395,10 +340,15 @@ func loadDatasetIntoTarget(grpcAddr, collection string, spec datasetSpec, timeou
 		if err := upsertBatch(buf); err != nil {
 			return 0, fmt.Errorf("upsert batch@%d: %w", off, err)
 		}
+		if (off+batch)%1000 == 0 || off+batch >= spec.points {
+			logf("  Loaded %d/%d points...", off+batch, spec.points)
+		}
 	}
+	logf("  Finished loading %d points, verifying count...", spec.points)
 	if err := waitForPointCount(ctx, points, collection, spec.points); err != nil {
-		return spec.points, err
+		return spec.points, fmt.Errorf("waitForPointCount: %w", err)
 	}
+	logf("  Verified %d points in collection", spec.points)
 	return spec.points, nil
 }
 
@@ -442,13 +392,25 @@ func waitForPointCount(ctx context.Context, points qpb.PointsClient, collection 
 	}
 	exact := true
 	deadline := time.Now().Add(30 * time.Second)
+	attempts := 0
 	for time.Now().Before(deadline) {
+		attempts++
 		resp, err := points.Count(ctx, &qpb.CountPoints{
 			CollectionName: collection,
 			Exact:          &exact,
 		})
-		if err == nil && resp != nil && resp.Result != nil && int(resp.Result.Count) >= want {
-			return nil
+		if err != nil {
+			if attempts%10 == 0 {
+				logf("    Count RPC error (attempt %d): %v", attempts, err)
+			}
+		} else if resp != nil && resp.Result != nil {
+			current := int(resp.Result.Count)
+			if attempts%5 == 0 {
+				logf("    Current count: %d/%d", current, want)
+			}
+			if current >= want {
+				return nil
+			}
 		}
 		select {
 		case <-ctx.Done():
@@ -456,7 +418,7 @@ func waitForPointCount(ctx context.Context, points qpb.PointsClient, collection 
 		case <-time.After(200 * time.Millisecond):
 		}
 	}
-	return fmt.Errorf("timeout waiting for points count=%d in %q", want, collection)
+	return fmt.Errorf("timeout waiting for points count=%d in %q (after %d attempts)", want, collection, attempts)
 }
 
 func pointIDFromString(id string) *qpb.PointId {

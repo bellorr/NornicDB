@@ -2,28 +2,40 @@ services:
   nornicdb:
     build:
       context: .
-      dockerfile: docker/Dockerfile.amd64-cuda-heimdall
+      dockerfile: docker/Dockerfile.arm64-metal-heimdall
       args:
-        EMBED_MODEL: "true"  # Include bge-m3.gguf in image
+        EMBED_MODEL: "true" # Include bge-m3.gguf in image
       tags:
-        - timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest
-    image: timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest
+        - timothyswt/nornicdb-arm64-metal-bge-heimdall:latest
+    image: timothyswt/nornicdb-arm64-metal-bge-heimdall:latest
+    # build:
+    #   context: .
+    #   dockerfile: docker/Dockerfile.amd64-cuda-heimdall
+    #   args:
+    #     EMBED_MODEL: "true"  # Include bge-m3.gguf in image
+    #   tags:
+    #     - timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest
+    # image: timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest
     container_name: nornicdb
     volumes:
       - ./data/test:/data
     ports:
       - "7474:7474" # HTTP API & Browser UI
       - "7687:7687" # Bolt protocol (Neo4j compatible)
+      - "6334:6334" # qDrant GRPC compatibility endpoint
     environment:
       - NORNICDB_DATA_DIR=/data
       - NORNICDB_HTTP_PORT=7474
       - NORNICDB_BOLT_PORT=7687
-      # - NORNICDB_HEIMDALL_ENABLED=true
+      - NORNICDB_HEIMDALL_ENABLED=true
       - NORNICDB_AUTO_TLP_ENABLED=false
       - NORNICDB_KMEANS_CLUSTERING_ENABLED=true
       - NORNICDB_EMBEDDING_PROVIDER=local
       - NORNICDB_NO_AUTH=${NORNICDB_NO_AUTH:-true}
-      - GOGC=50
+      # - GOGC=50
+      # Qdrant gRPC compatibility layer
+      - NORNICDB_QDRANT_GRPC_ENABLED=true
+      - NORNICDB_QDRANT_GRPC_LISTEN_ADDR=0.0.0.0:6334
     restart: unless-stopped
     healthcheck:
       test:
@@ -40,10 +52,10 @@ services:
           memory: 2GB
         reservations:
           memory: 1GB
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu, compute, utility]
+          # devices:
+          #   - driver: nvidia
+          #     count: 1
+          #     capabilities: [gpu, compute, utility]
 
 networks:
   mcp_network:
