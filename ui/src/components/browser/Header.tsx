@@ -12,7 +12,9 @@ import {
   Loader2,
   MessageCircle,
   Shield,
+  Database,
 } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { DatabaseStats } from "../../utils/api";
 
 interface HeaderProps {
@@ -40,6 +42,8 @@ export function Header({
   onAIChatClick,
   onSecurityClick,
 }: HeaderProps) {
+  const navigate = useNavigate();
+
   const formatUptime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
     const mins = Math.floor((seconds % 3600) / 60);
@@ -197,6 +201,16 @@ export function Header({
           >
             <MessageCircle className="w-4 h-4" />
             <span>AI Assistant</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => navigate("/collections")}
+            className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-norse-shadow hover:bg-norse-rune text-norse-silver hover:text-white border border-norse-rune"
+            title="Manage Collections"
+          >
+            <Database className="w-4 h-4" />
+            <span>Collections</span>
           </button>
 
           <button

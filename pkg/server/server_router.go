@@ -25,6 +25,7 @@ func (s *Server) buildRouter() http.Handler {
 	s.registerMCPRoutes(mux)
 	s.registerHeimdallRoutes(mux)
 	s.registerGraphQLRoutes(mux)
+	s.registerCollectionsRoutes(mux)
 
 	return s.wrapWithMiddleware(mux)
 }

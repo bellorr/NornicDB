@@ -48,10 +48,41 @@ export interface CypherResponse {
       meta: unknown[];
     }>;
   }>;
-  errors: Array<{
+  errors?: Array<{
     code: string;
     message: string;
   }>;
+}
+
+export interface Collection {
+  name: string;
+  info: {
+    status: string;
+    points_count: number;
+    vectors_count: number;
+    config: {
+      params: {
+        vectors: {
+          size: number;
+          distance: string;
+        };
+      };
+    };
+  };
+}
+
+export interface CollectionInfo {
+  status: string;
+  points_count: number;
+  indexed_vectors_count: number;
+  config: {
+    params: {
+      vectors: {
+        size: number;
+        distance: string;
+      };
+    };
+  };
 }
 
 interface DiscoveryResponse {
@@ -355,6 +386,87 @@ class NornicDBClient {
         success: false,
         error: err instanceof Error ? err.message : 'Failed to update node',
       };
+    }
+  }
+
+  // ============================================================================
+  // Collections API (Qdrant-compatible)
+  // ============================================================================
+
+  /**
+   * List all collections
+   */
+  async listCollections(): Promise<Collection[]> {
+    const res = await fetch(`${BASE_PATH}/api/collections`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ status: { error: 'Failed to list collections' } }));
+      throw new Error(error.status?.error || 'Failed to list collections');
+    }
+
+    const data = await res.json();
+    return data.result?.collections || [];
+  }
+
+  /**
+   * Get collection information
+   */
+  async getCollection(name: string): Promise<CollectionInfo> {
+    const res = await fetch(`${BASE_PATH}/api/collections/${encodeURIComponent(name)}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ status: { error: 'Failed to get collection' } }));
+      throw new Error(error.status?.error || 'Failed to get collection');
+    }
+
+    const data = await res.json();
+    return data.result;
+  }
+
+  /**
+   * Create a new collection
+   */
+  async createCollection(name: string, size: number, distance: 'Cosine' | 'Euclidean' | 'Dot'): Promise<void> {
+    const res = await fetch(`${BASE_PATH}/api/collections`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        name,
+        vectors: {
+          size,
+          distance,
+        },
+      }),
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ status: { error: 'Failed to create collection' } }));
+      throw new Error(error.status?.error || 'Failed to create collection');
+    }
+  }
+
+  /**
+   * Delete a collection
+   */
+  async deleteCollection(name: string): Promise<void> {
+    const res = await fetch(`${BASE_PATH}/api/collections/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ status: { error: 'Failed to delete collection' } }));
+      throw new Error(error.status?.error || 'Failed to delete collection');
     }
   }
 }
