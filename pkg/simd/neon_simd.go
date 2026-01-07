@@ -5,7 +5,7 @@ package simd
 /*
 #cgo CXXFLAGS: -O3 -march=armv8-a+simd -std=c++11
 #cgo LDFLAGS: -lm
-#include "neon_simd.h"
+#include "neon_simd_arm64.h"
 */
 import "C"
 import (
@@ -81,4 +81,3 @@ func runtimeInfo() RuntimeInfo {
 		Accelerated:    true,
 	}
 }
-
