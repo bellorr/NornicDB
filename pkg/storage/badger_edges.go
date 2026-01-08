@@ -245,9 +245,9 @@ func (b *BadgerEngine) DeleteEdge(id EdgeID) error {
 	// Invalidate only this edge type (not entire cache)
 	if err == nil {
 		if edgeType != "" {
-			b.cacheOnEdgeDeleted(edgeType)
+			b.cacheOnEdgeDeleted(id, edgeType)
 		} else {
-			b.cacheOnEdgesDeleted(1)
+			b.cacheOnEdgesDeleted([]EdgeID{id})
 		}
 
 		// Notify listeners (e.g., graph analyzers) about the deleted edge
@@ -436,7 +436,7 @@ func (b *BadgerEngine) BulkDeleteEdges(ids []EdgeID) error {
 
 	// Invalidate edge type cache on successful bulk delete and update count
 	if err == nil && deletedCount > 0 {
-		b.cacheOnEdgesDeleted(deletedCount)
+		b.cacheOnEdgesDeleted(deletedIDs)
 
 		// Notify listeners (e.g., graph analyzers) for each deleted edge
 		for _, id := range deletedIDs {

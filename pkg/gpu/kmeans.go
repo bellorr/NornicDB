@@ -795,6 +795,42 @@ func (ci *ClusterIndex) GetClusterMembers(clusterIDs []int) []int {
 	return members
 }
 
+// GetClusterMemberIDs returns node IDs belonging to the given clusters.
+//
+// This is the stable, package-level API for consuming cluster membership outside
+// the gpu package. It intentionally copies the IDs to avoid exposing internal
+// slices that may be mutated during re-clustering.
+func (ci *ClusterIndex) GetClusterMemberIDs(clusterIDs []int) []string {
+	ci.clusterMu.RLock()
+	defer ci.clusterMu.RUnlock()
+
+	if !ci.clustered {
+		return nil
+	}
+
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
+
+	var out []string
+	for _, cid := range clusterIDs {
+		members, ok := ci.clusterMap[cid]
+		if !ok {
+			continue
+		}
+		for _, idx := range members {
+			if idx >= 0 && idx < len(ci.nodeIDs) {
+				out = append(out, ci.nodeIDs[idx])
+			}
+		}
+	}
+	return out
+}
+
+// GetClusterMemberIDsForCluster returns node IDs for a single cluster ID.
+func (ci *ClusterIndex) GetClusterMemberIDsForCluster(clusterID int) []string {
+	return ci.GetClusterMemberIDs([]int{clusterID})
+}
+
 // SearchWithClusters performs cluster-accelerated similarity search.
 //
 // This method:

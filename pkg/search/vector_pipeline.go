@@ -107,7 +107,7 @@ func NewBruteForceCandidateGen(vectorIndex *VectorIndex) *BruteForceCandidateGen
 func (b *BruteForceCandidateGen) SearchCandidates(ctx context.Context, query []float32, k int, minSimilarity float64) ([]Candidate, error) {
 	// For brute-force, we generate more candidates than k to allow for filtering
 	candidateLimit := calculateCandidateLimit(k)
-	
+
 	results, err := b.vectorIndex.Search(ctx, query, candidateLimit, minSimilarity)
 	if err != nil {
 		return nil, err
@@ -143,7 +143,7 @@ func NewHNSWCandidateGen(hnswIndex *HNSWIndex) *HNSWCandidateGen {
 func (h *HNSWCandidateGen) SearchCandidates(ctx context.Context, query []float32, k int, minSimilarity float64) ([]Candidate, error) {
 	// For HNSW, we generate more candidates than k for exact reranking
 	candidateLimit := calculateCandidateLimit(k)
-	
+
 	results, err := h.hnswIndex.Search(ctx, query, candidateLimit, minSimilarity)
 	if err != nil {
 		return nil, err
@@ -246,6 +246,62 @@ func (g *GPUExactScorer) ScoreCandidates(ctx context.Context, query []float32, c
 	return g.cpuFallback.ScoreCandidates(ctx, query, candidates)
 }
 
+// GPUBruteForceCandidateGen uses gpu.EmbeddingIndex.Search() as an exact candidate generator.
+//
+// Note: gpu.EmbeddingIndex.Search() does not currently accept a context, so this
+// generator cannot cancel mid-kernel. It checks ctx before invoking the search.
+type GPUBruteForceCandidateGen struct {
+	embeddingIndex *gpu.EmbeddingIndex
+}
+
+func NewGPUBruteForceCandidateGen(embeddingIndex *gpu.EmbeddingIndex) *GPUBruteForceCandidateGen {
+	return &GPUBruteForceCandidateGen{embeddingIndex: embeddingIndex}
+}
+
+func (g *GPUBruteForceCandidateGen) SearchCandidates(ctx context.Context, query []float32, k int, minSimilarity float64) ([]Candidate, error) {
+	if g.embeddingIndex == nil {
+		return nil, fmt.Errorf("gpu embedding index unavailable")
+	}
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+
+	candidateLimit := calculateCandidateLimit(k)
+	results, err := g.embeddingIndex.Search(query, candidateLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]Candidate, 0, len(results))
+	for _, r := range results {
+		score := float64(r.Score)
+		if score < minSimilarity {
+			continue
+		}
+		candidates = append(candidates, Candidate{ID: r.ID, Score: score})
+	}
+	return candidates, nil
+}
+
+// IdentityExactScorer is used when the candidate generator already returns exact scores.
+type IdentityExactScorer struct{}
+
+func (i *IdentityExactScorer) ScoreCandidates(ctx context.Context, query []float32, candidates []Candidate) ([]ScoredCandidate, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+	scored := make([]ScoredCandidate, len(candidates))
+	for idx, c := range candidates {
+		scored[idx] = ScoredCandidate{ID: c.ID, Score: c.Score}
+	}
+	sort.Slice(scored, func(a, b int) bool { return scored[a].Score > scored[b].Score })
+	return scored, nil
+}
+
 // calculateCandidateLimit calculates the number of candidates to generate.
 //
 // Formula: C = max(k * CandidateMultiplier, 200) capped by MaxCandidates
@@ -263,10 +319,10 @@ func calculateCandidateLimit(k int) int {
 // VectorSearchPipeline implements the unified vector search pipeline.
 //
 // Pipeline stages:
-//   1. CandidateGen: Generate candidates (brute-force or HNSW)
-//   2. ExactScore: Re-score candidates exactly (CPU or GPU)
-//   3. Filter: Apply minSimilarity threshold
-//   4. TopK: Return top-k results
+//  1. CandidateGen: Generate candidates (brute-force or HNSW)
+//  2. ExactScore: Re-score candidates exactly (CPU or GPU)
+//  3. Filter: Apply minSimilarity threshold
+//  4. TopK: Return top-k results
 type VectorSearchPipeline struct {
 	candidateGen CandidateGenerator
 	exactScorer  ExactScorer

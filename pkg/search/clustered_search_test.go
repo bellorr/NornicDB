@@ -344,7 +344,7 @@ func TestVectorSearchOnly_UsesClusterWhenAvailable(t *testing.T) {
 	assert.NotNil(t, response)
 
 	// Without clustering, should use standard vector search
-	assert.Equal(t, "vector", response.SearchMethod)
+	assert.Equal(t, "vector_brute", response.SearchMethod)
 }
 
 // TestIndexNode_AddsToClusterIndex tests that IndexNode adds embeddings

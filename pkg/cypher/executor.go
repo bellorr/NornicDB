@@ -120,6 +120,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/cypher/antlr"
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/vectorspace"
 )
@@ -205,6 +206,10 @@ type StorageExecutor struct {
 	// If set, vector search can accept string queries which are embedded automatically
 	embedder QueryEmbedder
 
+	// searchService optionally provides unified search semantics for Cypher procedures.
+	// When set, db.index.vector.queryNodes delegates to search.Service.
+	searchService *search.Service
+
 	// onNodeCreated is called when a node is created or updated via CREATE/MERGE
 	// This allows the embed queue to be notified of new content requiring embeddings
 	onNodeCreated NodeCreatedCallback
@@ -289,6 +294,7 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		planCache:         NewQueryPlanCache(500),   // Cache 500 parsed query plans
 		analyzer:          NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
 		nodeLookupCache:   make(map[string]*storage.Node, 1000),
+		searchService:     search.NewService(store),
 		vectorRegistry:    vectorspace.NewIndexRegistry(),
 		vectorIndexSpaces: make(map[string]vectorspace.VectorSpaceKey),
 	}
@@ -320,6 +326,12 @@ func (e *StorageExecutor) SetDatabaseManager(dbManager DatabaseManagerInterface)
 //	// CALL db.index.vector.queryNodes('idx', 10, 'search query')   // String (auto-embedded)
 func (e *StorageExecutor) SetEmbedder(embedder QueryEmbedder) {
 	e.embedder = embedder
+}
+
+// SetSearchService sets the unified search service used by Cypher procedures.
+// When set, db.index.vector.queryNodes will delegate to search.Service.
+func (e *StorageExecutor) SetSearchService(svc *search.Service) {
+	e.searchService = svc
 }
 
 // SetVectorRegistry allows wiring a shared index registry (e.g., per database).

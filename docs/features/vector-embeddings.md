@@ -10,6 +10,9 @@ NornicDB automatically generates vector embeddings for nodes, enabling:
 - Automatic relationship inference
 - Clustering and categorization
 
+**Storage model:** NornicDB-managed embeddings are stored on nodes in `ChunkEmbeddings` (the first chunk is the main embedding). Client-managed vectors (e.g. via Qdrant gRPC) are stored in `NamedEmbeddings`.
+See `docs/architecture/embedding-search.md` for details.
+
 ## Embedding Providers
 
 | Provider | Latency | Cost | Quality |
@@ -199,16 +202,20 @@ Where `k` is typically 60.
 
 ## Indexing
 
-### HNSW Index
+### Vector Index (Auto Strategy)
 
-Embeddings are indexed using HNSW for O(log N) search:
+Embeddings are indexed using an auto-selected strategy:
+
+- **GPU brute-force (exact)** when GPU is enabled and `N` is within the configured threshold
+- **CPU brute-force (exact)** for small datasets (low overhead)
+- **HNSW (ANN)** for large datasets when brute-force is no longer viable
 
 ```go
-// Index is built automatically
-// Parameters are tuned for quality/speed balance
-// M: 16 (connections per node)
-// efConstruction: 200 (build-time accuracy)
-// efSearch: 50 (query-time accuracy)
+// Indexing/search strategy is selected automatically at runtime.
+// HNSW parameters (when used) are tuned for quality/speed balance:
+//   M: 16
+//   efConstruction: 200
+//   efSearch: 50
 ```
 
 ### Rebuild Index
@@ -285,4 +292,3 @@ result, _ := db.ExecuteCypher(ctx, `
 - **[Vector Search](../user-guides/vector-search.md)** - Search guide
 - **[Hybrid Search](../user-guides/hybrid-search.md)** - RRF fusion
 - **[GPU Acceleration](gpu-acceleration.md)** - Speed up embeddings
-

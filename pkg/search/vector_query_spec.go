@@ -1,0 +1,380 @@
+package search
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"math"
+	"sort"
+	"strings"
+
+	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/storage"
+)
+
+// VectorQuerySpec describes how to resolve embeddings for a Cypher-style vector query.
+//
+// This is intentionally a "core" representation of Cypher vector index metadata:
+// the Cypher layer can remain syntax-compatible, while the search layer owns the
+// implementation details and can choose the best execution strategy.
+type VectorQuerySpec struct {
+	// IndexName is informational only (used for debugging/observability).
+	IndexName string
+
+	// Label optionally filters candidate nodes to those that have this label.
+	Label string
+
+	// Property is the Cypher vector index "property" name.
+	//
+	// Resolution semantics:
+	//   1) Prefer NamedEmbeddings[Property] (or "default" when Property is empty)
+	//   2) If Property is set, next try node.Properties[Property] as a vector array
+	//   3) Fallback to ChunkEmbeddings[0..N] (best score across chunks)
+	Property string
+
+	// Similarity is the similarity function name. Supported values:
+	// "cosine" (default), "dot", "euclidean".
+	Similarity string
+
+	// Limit is the maximum number of results to return (top-K).
+	Limit int
+}
+
+// VectorQueryHit is a lightweight result row for Cypher-compatible vector queries.
+// ID is the node ID (not a chunk/named vector ID).
+type VectorQueryHit struct {
+	ID    string
+	Score float64
+}
+
+// VectorQueryNodes executes a Cypher-style vector query.
+//
+// This method preserves Cypher semantics for per-node embedding selection:
+//   1) Prefer NamedEmbeddings[Property] (or "default" when Property is empty)
+//   2) If Property is set, next try node.Properties[Property] as a vector array
+//   3) Fallback to ChunkEmbeddings[0..N] (best score across chunks)
+//
+// For performance, cosine-similarity queries are executed against the in-memory
+// vector index (unified pipeline) rather than scanning storage.
+func (s *Service) VectorQueryNodes(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec) ([]VectorQueryHit, error) {
+	if s == nil || s.engine == nil {
+		return nil, fmt.Errorf("search service unavailable")
+	}
+	if len(queryEmbedding) == 0 {
+		return nil, fmt.Errorf("query embedding required")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if spec.Limit <= 0 {
+		spec.Limit = 10
+	}
+
+	vectorName := spec.Property
+	if vectorName == "" {
+		vectorName = "default"
+	}
+	similarity := spec.Similarity
+	if similarity == "" {
+		similarity = "cosine"
+	}
+
+	// If the query dimensions don't match the configured index dimensions, Cypher expects
+	// an empty result set (not an error).
+	if s.vectorIndex != nil && s.vectorIndex.Count() > 0 && len(queryEmbedding) != s.vectorIndex.GetDimensions() {
+		return nil, nil
+	}
+
+	// Fast path: cosine queries can use the indexed vector pipeline.
+	if strings.EqualFold(similarity, "cosine") {
+		return s.vectorQueryNodesIndexed(ctx, queryEmbedding, spec, vectorName)
+	}
+
+	// Exact (index-backed) path for dot/euclidean: compute per-node scores from in-memory vectors
+	// without scanning storage.
+	return s.vectorQueryNodesExact(ctx, queryEmbedding, spec, vectorName, strings.ToLower(similarity))
+}
+
+func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string) ([]VectorQueryHit, error) {
+	// Ensure the vector index is populated (tests and some embedding-only setups create nodes directly in storage).
+	if s.vectorIndex != nil && s.vectorIndex.Count() == 0 {
+		_ = s.BuildIndexes(ctx)
+	}
+	if s.vectorIndex == nil || s.vectorIndex.Count() == 0 {
+		return nil, nil
+	}
+
+	pipeline, err := s.getOrCreateVectorPipeline()
+	if err != nil {
+		return nil, err
+	}
+
+	// Overfetch to keep recall reasonable after applying Cypher precedence rules.
+	overfetch := spec.Limit * 50
+	if overfetch < 200 {
+		overfetch = 200
+	}
+	if overfetch > 20000 {
+		overfetch = 20000
+	}
+
+	scored, err := pipeline.Search(ctx, queryEmbedding, overfetch, 0.0)
+	if err != nil {
+		if errors.Is(err, ErrDimensionMismatch) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	candidateNodes := make(map[string]struct{}, len(scored))
+	for _, r := range scored {
+		candidateNodes[normalizeVectorResultIDToNodeID(r.ID)] = struct{}{}
+	}
+
+	normalizedQuery := vector.Normalize(queryEmbedding)
+
+	type scoredNode struct {
+		id    string
+		score float64
+	}
+	out := make([]scoredNode, 0, min(len(candidateNodes), spec.Limit*2))
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.vectorIndex.mu.RLock()
+	defer s.vectorIndex.mu.RUnlock()
+
+	for nodeID := range candidateNodes {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		if spec.Label != "" {
+			labels := s.nodeLabels[nodeID]
+			has := false
+			for _, l := range labels {
+				if l == spec.Label {
+					has = true
+					break
+				}
+			}
+			if !has {
+				continue
+			}
+		}
+
+		// Apply Cypher precedence for selecting which vector represents this node.
+		bestScore := -1.0
+
+		if named := s.nodeNamedVector[nodeID]; named != nil {
+			if vecID, ok := named[vectorName]; ok {
+				if v, ok := s.vectorIndex.vectors[vecID]; ok {
+					bestScore = float64(vector.DotProductSIMD(normalizedQuery, v))
+				}
+			}
+		}
+
+		if bestScore < 0 && spec.Property != "" {
+			if props := s.nodePropVector[nodeID]; props != nil {
+				if vecID, ok := props[spec.Property]; ok {
+					if v, ok := s.vectorIndex.vectors[vecID]; ok {
+						bestScore = float64(vector.DotProductSIMD(normalizedQuery, v))
+					}
+				}
+			}
+		}
+
+		if bestScore < 0 {
+			for _, vecID := range s.nodeChunkVectors[nodeID] {
+				if v, ok := s.vectorIndex.vectors[vecID]; ok {
+					score := float64(vector.DotProductSIMD(normalizedQuery, v))
+					if score > bestScore {
+						bestScore = score
+					}
+				}
+			}
+		}
+
+		if bestScore >= 0 {
+			out = append(out, scoredNode{id: nodeID, score: bestScore})
+		}
+	}
+
+	sort.Slice(out, func(i, j int) bool { return out[i].score > out[j].score })
+	if len(out) > spec.Limit {
+		out = out[:spec.Limit]
+	}
+
+	hits := make([]VectorQueryHit, 0, len(out))
+	for _, r := range out {
+		hits = append(hits, VectorQueryHit{ID: r.id, Score: r.score})
+	}
+	return hits, nil
+}
+
+func (s *Service) vectorQueryNodesExact(ctx context.Context, queryEmbedding []float32, spec VectorQuerySpec, vectorName string, similarity string) ([]VectorQueryHit, error) {
+	// Ensure the vector index is populated (tests and some embedding-only setups create nodes directly in storage).
+	if s.vectorIndex != nil && s.vectorIndex.Count() == 0 {
+		_ = s.BuildIndexes(ctx)
+	}
+	if s.vectorIndex == nil || s.vectorIndex.Count() == 0 {
+		return nil, nil
+	}
+	if len(queryEmbedding) != s.vectorIndex.GetDimensions() {
+		return nil, nil
+	}
+
+	type scoredNode struct {
+		id    string
+		score float64
+	}
+	scored := make([]scoredNode, 0, spec.Limit*2)
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	s.vectorIndex.mu.RLock()
+	defer s.vectorIndex.mu.RUnlock()
+
+	for nodeID, labels := range s.nodeLabels {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		if spec.Label != "" {
+			has := false
+			for _, l := range labels {
+				if l == spec.Label {
+					has = true
+					break
+				}
+			}
+			if !has {
+				continue
+			}
+		}
+
+		bestScore := math.Inf(-1)
+
+		// Apply Cypher precedence for selecting which vector represents this node.
+		if named := s.nodeNamedVector[nodeID]; named != nil {
+			if vecID, ok := named[vectorName]; ok {
+				if v, ok := s.vectorIndex.rawVectors[vecID]; ok {
+					bestScore = cypherVectorSimilarity(similarity, queryEmbedding, v)
+				}
+			}
+		}
+
+		if math.IsInf(bestScore, -1) && spec.Property != "" {
+			if props := s.nodePropVector[nodeID]; props != nil {
+				if vecID, ok := props[spec.Property]; ok {
+					if v, ok := s.vectorIndex.rawVectors[vecID]; ok {
+						bestScore = cypherVectorSimilarity(similarity, queryEmbedding, v)
+					}
+				}
+			}
+		}
+
+		if math.IsInf(bestScore, -1) {
+			for _, vecID := range s.nodeChunkVectors[nodeID] {
+				if v, ok := s.vectorIndex.rawVectors[vecID]; ok {
+					score := cypherVectorSimilarity(similarity, queryEmbedding, v)
+					if score > bestScore {
+						bestScore = score
+					}
+				}
+			}
+		}
+
+		if !math.IsInf(bestScore, -1) {
+			scored = append(scored, scoredNode{id: nodeID, score: bestScore})
+		}
+	}
+
+	sort.Slice(scored, func(i, j int) bool { return scored[i].score > scored[j].score })
+	if len(scored) > spec.Limit {
+		scored = scored[:spec.Limit]
+	}
+
+	out := make([]VectorQueryHit, 0, len(scored))
+	for _, s := range scored {
+		out = append(out, VectorQueryHit{ID: s.id, Score: s.score})
+	}
+	return out, nil
+}
+
+func cypherVectorSimilarity(similarity string, query []float32, candidate []float32) float64 {
+	switch similarity {
+	case "euclidean":
+		return vector.EuclideanSimilarity(query, candidate)
+	case "dot":
+		return float64(vector.DotProduct(query, candidate))
+	default:
+		return vector.CosineSimilarity(query, candidate)
+	}
+}
+
+func resolveCypherCandidateEmbeddings(node *storage.Node, propertyKey string, vectorName string) [][]float32 {
+	if node == nil {
+		return nil
+	}
+
+	if node.NamedEmbeddings != nil {
+		if emb, ok := node.NamedEmbeddings[vectorName]; ok && len(emb) > 0 {
+			return [][]float32{emb}
+		}
+	}
+
+	if propertyKey != "" && node.Properties != nil {
+		if emb, ok := node.Properties[propertyKey]; ok {
+			if vec := toFloat32SliceAny(emb); len(vec) > 0 {
+				return [][]float32{vec}
+			}
+		}
+	}
+
+	if len(node.ChunkEmbeddings) > 0 {
+		return node.ChunkEmbeddings
+	}
+
+	return nil
+}
+
+func toFloat32SliceAny(v any) []float32 {
+	switch x := v.(type) {
+	case []float32:
+		out := make([]float32, len(x))
+		copy(out, x)
+		return out
+	case []float64:
+		out := make([]float32, len(x))
+		for i, f := range x {
+			out[i] = float32(f)
+		}
+		return out
+	case []any:
+		out := make([]float32, 0, len(x))
+		for _, item := range x {
+			switch t := item.(type) {
+			case float32:
+				out = append(out, t)
+			case float64:
+				out = append(out, float32(t))
+			case int:
+				out = append(out, float32(t))
+			case int64:
+				out = append(out, float32(t))
+			default:
+				return nil
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}

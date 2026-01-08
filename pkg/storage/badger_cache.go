@@ -49,6 +49,7 @@ func (b *BadgerEngine) cacheDeleteNode(id NodeID) {
 func (b *BadgerEngine) cacheOnNodeCreated(node *Node) {
 	b.cacheStoreNode(node)
 	b.nodeCount.Add(1)
+	b.addNamespaceNodeCount(node.ID, 1)
 }
 
 func (b *BadgerEngine) cacheOnNodeUpdated(node *Node) {
@@ -72,6 +73,13 @@ func (b *BadgerEngine) cacheOnNodesCreated(nodes []*Node) {
 	if created > 0 {
 		b.nodeCount.Add(created)
 	}
+
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		b.addNamespaceNodeCount(node.ID, 1)
+	}
 }
 
 // cacheOnNodeDeleted invalidates node cache and updates cached counts.
@@ -81,10 +89,12 @@ func (b *BadgerEngine) cacheOnNodeDeleted(id NodeID, edgesDeleted int64) {
 
 	// Decrement cached node count for O(1) stats.
 	b.nodeCount.Add(-1)
+	b.addNamespaceNodeCount(id, -1)
 
 	// Decrement cached edge count for edges deleted with this node.
 	if edgesDeleted > 0 {
 		b.edgeCount.Add(-edgesDeleted)
+		b.addNamespaceEdgeCountFromNode(id, -edgesDeleted)
 		// We don't know which types were removed cheaply; invalidate whole type cache.
 		b.InvalidateEdgeTypeCache()
 	}
@@ -96,6 +106,7 @@ func (b *BadgerEngine) cacheOnEdgeCreated(edge *Edge) {
 	}
 	b.InvalidateEdgeTypeCacheForType(edge.Type)
 	b.edgeCount.Add(1)
+	b.addNamespaceEdgeCount(edge.ID, 1)
 }
 
 // cacheOnEdgeUpdated invalidates relevant edge type cache entries when an edge changes.
@@ -110,12 +121,14 @@ func (b *BadgerEngine) cacheOnEdgeUpdated(oldType string, newEdge *Edge) {
 	b.InvalidateEdgeTypeCacheForType(newEdge.Type)
 }
 
-func (b *BadgerEngine) cacheOnEdgeDeleted(edgeType string) {
-	if edgeType == "" {
-		return
+func (b *BadgerEngine) cacheOnEdgeDeleted(id EdgeID, edgeType string) {
+	if edgeType != "" {
+		b.InvalidateEdgeTypeCacheForType(edgeType)
+	} else {
+		b.InvalidateEdgeTypeCache()
 	}
-	b.InvalidateEdgeTypeCacheForType(edgeType)
 	b.edgeCount.Add(-1)
+	b.addNamespaceEdgeCount(id, -1)
 }
 
 func (b *BadgerEngine) cacheOnEdgesCreated(edges []*Edge) {
@@ -125,15 +138,40 @@ func (b *BadgerEngine) cacheOnEdgesCreated(edges []*Edge) {
 	// Bulk inserts can include many types; invalidate once.
 	b.InvalidateEdgeTypeCache()
 	b.edgeCount.Add(int64(len(edges)))
+
+	for _, edge := range edges {
+		if edge == nil {
+			continue
+		}
+		b.addNamespaceEdgeCount(edge.ID, 1)
+	}
 }
 
-func (b *BadgerEngine) cacheOnEdgesDeleted(deletedCount int64) {
-	if deletedCount <= 0 {
+func (b *BadgerEngine) cacheOnEdgesDeleted(deletedIDs []EdgeID) {
+	if len(deletedIDs) == 0 {
 		return
 	}
 	// Bulk delete may cover many types; invalidate once.
 	b.InvalidateEdgeTypeCache()
-	b.edgeCount.Add(-deletedCount)
+	b.edgeCount.Add(-int64(len(deletedIDs)))
+
+	// Batch namespace updates under a single lock.
+	deltas := make(map[string]int64)
+	for _, id := range deletedIDs {
+		prefix, ok := namespacePrefixFromID(string(id))
+		if !ok {
+			continue
+		}
+		deltas[prefix]--
+	}
+	if len(deltas) == 0 {
+		return
+	}
+	b.namespaceCountsMu.Lock()
+	for prefix, delta := range deltas {
+		b.namespaceEdgeCounts[prefix] += delta
+	}
+	b.namespaceCountsMu.Unlock()
 }
 
 func (b *BadgerEngine) cacheOnNodesDeleted(deletedNodeIDs []NodeID, deletedNodeCount, totalEdgesDeleted int64) {
@@ -146,21 +184,67 @@ func (b *BadgerEngine) cacheOnNodesDeleted(deletedNodeIDs []NodeID, deletedNodeC
 	}
 	b.nodeCount.Add(-deletedNodeCount)
 
+	// Update per-namespace node counts.
+	namespaces := make(map[string]int64)
+	for _, nodeID := range deletedNodeIDs {
+		prefix, ok := namespacePrefixFromID(string(nodeID))
+		if !ok {
+			continue
+		}
+		namespaces[prefix]--
+	}
+	if len(namespaces) > 0 {
+		b.namespaceCountsMu.Lock()
+		for prefix, delta := range namespaces {
+			b.namespaceNodeCounts[prefix] += delta
+		}
+		b.namespaceCountsMu.Unlock()
+	}
+
 	if totalEdgesDeleted > 0 {
 		b.edgeCount.Add(-totalEdgesDeleted)
+
+		// We only have an aggregate edge delete count. If the deleted nodes span
+		// multiple namespaces, we can't attribute edges precisely.
+		if len(namespaces) == 1 {
+			for prefix := range namespaces {
+				b.namespaceCountsMu.Lock()
+				b.namespaceEdgeCounts[prefix] -= totalEdgesDeleted
+				b.namespaceCountsMu.Unlock()
+				break
+			}
+		}
+
 		b.InvalidateEdgeTypeCache()
 	}
 }
 
-// cacheInvalidateNodes removes node IDs from the cache without affecting counts.
-// Used by explicit transactions after commit to ensure subsequent reads see committed state.
-func (b *BadgerEngine) cacheInvalidateNodes(nodeIDs map[NodeID]*Node, deleted map[NodeID]struct{}) {
-	b.nodeCacheMu.Lock()
-	for nodeID := range nodeIDs {
-		delete(b.nodeCache, nodeID)
+func (b *BadgerEngine) addNamespaceNodeCount(id NodeID, delta int64) {
+	prefix, ok := namespacePrefixFromID(string(id))
+	if !ok {
+		return
 	}
-	for nodeID := range deleted {
-		delete(b.nodeCache, nodeID)
+	b.namespaceCountsMu.Lock()
+	b.namespaceNodeCounts[prefix] += delta
+	b.namespaceCountsMu.Unlock()
+}
+
+func (b *BadgerEngine) addNamespaceEdgeCount(id EdgeID, delta int64) {
+	prefix, ok := namespacePrefixFromID(string(id))
+	if !ok {
+		return
 	}
-	b.nodeCacheMu.Unlock()
+	b.namespaceCountsMu.Lock()
+	b.namespaceEdgeCounts[prefix] += delta
+	b.namespaceCountsMu.Unlock()
+}
+
+func (b *BadgerEngine) addNamespaceEdgeCountFromNode(nodeID NodeID, delta int64) {
+	prefix, ok := namespacePrefixFromID(string(nodeID))
+	if !ok {
+		return
+	}
+	b.namespaceCountsMu.Lock()
+	b.namespaceEdgeCounts[prefix] += delta
+	b.namespaceCountsMu.Unlock()
 }

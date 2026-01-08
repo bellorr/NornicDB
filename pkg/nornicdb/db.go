@@ -1021,6 +1021,17 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	db.searchServices = make(map[string]*dbSearchService)
 	log.Printf("🔍 Search services enabled (lazy per-database init, %d-dimension vector index)", embeddingDims)
 
+	// Wire Cypher vector procedures through the unified search service.
+	// This preserves Neo4j/Cypher interface compatibility while centralizing the
+	// implementation in the core search layer.
+	if db.cypherExecutor != nil {
+		if svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage); err == nil {
+			db.cypherExecutor.SetSearchService(svc)
+		} else {
+			fmt.Printf("⚠️  Search service unavailable for Cypher executor: %v\n", err)
+		}
+	}
+
 	// Wire up storage event callbacks to keep search indexes synchronized
 	// Storage is the single source of truth - it notifies when changes happen
 	// The storage chain can be: AsyncEngine -> WALEngine -> BadgerEngine

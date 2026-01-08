@@ -54,12 +54,15 @@ NornicDB can run in two modes:
 
 1) **NornicDB-managed embeddings** (`NORNICDB_EMBEDDING_ENABLED=true`)
 - NornicDB owns embedding generation and storage.
-- Qdrant “vector mutation” RPCs (e.g. Upsert/UpdateVectors/DeleteVectors) may be rejected with `FailedPrecondition` to avoid conflicting sources of truth.
+- Qdrant “vector mutation” RPCs (e.g. Upsert/UpdateVectors/DeleteVectors) may be rejected with `FailedPrecondition` as a policy choice (to avoid multiple external writers).
 - Qdrant **text queries** via `Points.Query` are supported (NornicDB embeds the query).
 
 2) **Client-managed vectors** (`NORNICDB_EMBEDDING_ENABLED=false`)
 - Your Qdrant client owns vectors and can upsert/update/delete vectors normally.
 - Best fit when you want to use Qdrant SDKs “as-is”.
+
+Note: Qdrant vectors are stored in `Node.NamedEmbeddings`, while NornicDB-managed embeddings are stored in `Node.ChunkEmbeddings`, so the two embedding systems do not overwrite each other.
+For the internal details, see `docs/architecture/embedding-search.md`.
 
 If you want to use Qdrant SDKs for ingestion, set:
 
@@ -244,4 +247,3 @@ This typically means NornicDB-managed embeddings are enabled. If you want the cl
 ```bash
 export NORNICDB_EMBEDDING_ENABLED=false
 ```
-

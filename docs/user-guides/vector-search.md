@@ -30,7 +30,7 @@ NornicDB maintains **two complementary vector index systems**:
 #### 1. Internal Automatic Index (Zero Configuration)
 
 NornicDB automatically maintains an internal vector index that:
-- **Indexes all nodes** with embeddings in `node.Embedding`
+- **Indexes nodes** with managed embeddings in `node.ChunkEmbeddings` (main embedding is `ChunkEmbeddings[0]`)
 - **Updates automatically** when nodes are created, updated, or deleted
 - **Requires no setup** - works out of the box
 - **Used by** REST API (`/nornicdb/search`) and hybrid search
@@ -45,6 +45,8 @@ db.searchService = search.NewServiceWithDimensions(storage, 1024)
 // OnNodeDeleted → searchService.RemoveNode(nodeID)
 ```
 
+`search.Service.IndexNode()` also indexes `node.NamedEmbeddings` (client-managed vectors, e.g. Qdrant gRPC) under IDs like `nodeID-named-{vectorName}`.
+
 #### 2. User-Defined Cypher Indexes (Optional)
 
 Create named indexes for specific labels/properties:
@@ -53,26 +55,28 @@ Create named indexes for specific labels/properties:
 CALL db.index.vector.createNodeIndex(
   'embeddings',      -- Your index name
   'Document',        -- Node label to filter
-  'embedding',       -- Property name to search
+  'embedding',       -- Property name to search (also used as a NamedEmbeddings key if present)
   1024,              -- Vector dimensions
   'cosine'           -- Similarity: 'cosine', 'euclidean', or 'dot'
 )
 ```
 
 **Key insight:** User-defined indexes are **metadata only** - they specify which nodes to search and where to find embeddings. The actual embeddings come from either:
-1. The specified property (e.g., `node.Properties["embedding"]`)
-2. **OR** the internal `node.Embedding` field (fallback)
+1. `node.NamedEmbeddings[index.property]` (or `"default"` when no property is configured)
+2. The specified property (e.g., `node.Properties["embedding"]` when it contains a vector array)
+3. `node.ChunkEmbeddings[0..N]` (best score across chunks)
 
-### Embedding Lookup Order
+### Embedding Lookup Order (Cypher `db.index.vector.queryNodes`)
 
 When `db.index.vector.queryNodes` runs, it finds embeddings in this order:
 
 ```
-1. If user index specifies a property → check node.Properties[property]
-2. If not found → fall back to node.Embedding (internal field)
+1. NamedEmbeddings[index.property] (or "default")
+2. node.Properties[index.property] (vector array)
+3. ChunkEmbeddings[0..N]
 ```
 
-This means **user-defined indexes can use auto-generated embeddings!**
+This means **user-defined indexes can match managed embeddings** (via `ChunkEmbeddings`) and/or property vectors.
 
 ---
 
@@ -166,13 +170,13 @@ SET n.embedding = [0.7, 0.2, 0.05, 0.05],
 CALL db.index.vector.createNodeIndex(
   'embeddings',      -- index name
   'Document',        -- node label  
-  'embedding',       -- property name (or use 'embedding' to use node.Embedding)
+  'embedding',       -- property name (also used as a NamedEmbeddings key if present)
   1024,              -- dimensions
   'cosine'           -- similarity function: 'cosine', 'euclidean', or 'dot'
 )
 ```
 
-> 💡 **Tip:** If you set the property to `'embedding'` and nodes don't have that property, the search will automatically fall back to `node.Embedding` (the internal auto-generated embeddings).
+> 💡 **Tip:** If nodes don’t have `node.Properties["embedding"]`, Cypher search can still match them via `node.ChunkEmbeddings` (managed embeddings) and/or `node.NamedEmbeddings`.
 
 ---
 
@@ -225,7 +229,7 @@ curl -X POST http://localhost:7474/nornicdb/search \
 | Neo4j driver compatibility | `db.index.vector.queryNodes` with user index |
 | Filter by specific label | User-defined index with label filter |
 | Custom embedding property | User-defined index with property name |
-| Use auto-generated embeddings | Either (both support `node.Embedding`) |
+| Use managed embeddings | Either (Cypher uses `ChunkEmbeddings`; HTTP uses `search.Service`) |
 | Hybrid vector + keyword search | REST API (built-in RRF fusion) |
 
 ---
@@ -361,6 +365,26 @@ combined := mergeResults(vectorResults, fullTextResults)
 ---
 
 ## Performance Tuning
+
+### Vector Strategy Selection
+
+NornicDB chooses the fastest available vector-search strategy at runtime:
+
+1. **K-means clustered search** (when clustering is enabled and clustered)
+2. **GPU brute-force (exact)** (when GPU is enabled and the dataset is within the configured threshold)
+3. **CPU brute-force (exact)** for small datasets
+4. **HNSW (ANN)** for large CPU-only datasets
+
+GPU brute-force is **exact** and typically stays competitive to much larger `N` than CPU brute-force due to massive parallelism.
+Once brute-force becomes too slow (or GPU is unavailable), the pipeline switches to HNSW.
+
+Tuning knobs:
+
+```bash
+# Use GPU brute-force when N is in this range (defaults shown)
+export NORNICDB_VECTOR_GPU_BRUTE_MIN_N=20000
+export NORNICDB_VECTOR_GPU_BRUTE_MAX_N=250000
+```
 
 ### Dimensions
 

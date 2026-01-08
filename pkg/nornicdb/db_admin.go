@@ -54,19 +54,24 @@ func (db *DB) SetGPUManager(manager interface{}) {
 	defer db.mu.Unlock()
 	db.gpuManager = manager
 
-	// If clustering is enabled and GPU manager is provided, upgrade all cached
-	// per-database search services to GPU-accelerated mode.
-	if manager != nil && nornicConfig.IsGPUClusteringEnabled() {
-		if gpuMgr, ok := manager.(*gpu.Manager); ok {
-			db.searchServicesMu.RLock()
-			for _, entry := range db.searchServices {
-				if entry != nil && entry.svc != nil && entry.svc.IsClusteringEnabled() {
-					entry.svc.EnableClustering(gpuMgr, 100)
-				}
-			}
-			db.searchServicesMu.RUnlock()
-			fmt.Println("🚀 K-means clustering upgraded to GPU-accelerated mode (all databases)")
+	gpuMgr, _ := manager.(*gpu.Manager)
+
+	// Upgrade all cached per-database search services.
+	db.searchServicesMu.RLock()
+	for _, entry := range db.searchServices {
+		if entry == nil || entry.svc == nil {
+			continue
 		}
+		entry.svc.SetGPUManager(gpuMgr)
+
+		if gpuMgr != nil && nornicConfig.IsGPUClusteringEnabled() && entry.svc.IsClusteringEnabled() {
+			entry.svc.EnableClustering(gpuMgr, 100)
+		}
+	}
+	db.searchServicesMu.RUnlock()
+
+	if gpuMgr != nil {
+		fmt.Println("🚀 GPU acceleration enabled for search services (all databases)")
 	}
 }
 

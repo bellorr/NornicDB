@@ -155,7 +155,10 @@ var (
 type VectorIndex struct {
 	dimensions int
 	mu         sync.RWMutex
-	vectors    map[string][]float32
+	// vectors holds normalized vectors (unit length) for cosine similarity and HNSW.
+	vectors map[string][]float32
+	// rawVectors holds the original, unnormalized vectors for dot/euclidean scoring.
+	rawVectors map[string][]float32
 }
 
 // NewVectorIndex creates a new vector similarity index for the given dimensions.
@@ -184,6 +187,7 @@ func NewVectorIndex(dimensions int) *VectorIndex {
 	return &VectorIndex{
 		dimensions: dimensions,
 		vectors:    make(map[string][]float32),
+		rawVectors: make(map[string][]float32),
 	}
 }
 
@@ -230,8 +234,13 @@ func (v *VectorIndex) Add(id string, vec []float32) error {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 
-	// Normalize for faster cosine similarity calculation
-	v.vectors[id] = vector.Normalize(vec)
+	// Copy to protect against caller mutation.
+	raw := make([]float32, len(vec))
+	copy(raw, vec)
+
+	// Normalize for faster cosine similarity calculation.
+	v.rawVectors[id] = raw
+	v.vectors[id] = vector.Normalize(raw)
 	return nil
 }
 
@@ -259,6 +268,7 @@ func (v *VectorIndex) Remove(id string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	delete(v.vectors, id)
+	delete(v.rawVectors, id)
 }
 
 // Search finds vectors similar to the query vector using cosine similarity.
@@ -373,6 +383,7 @@ func (v *VectorIndex) Clear() {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.vectors = make(map[string][]float32)
+	v.rawVectors = make(map[string][]float32)
 }
 
 // HasVector checks if a vector exists for the given ID.

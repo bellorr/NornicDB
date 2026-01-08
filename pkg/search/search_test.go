@@ -884,11 +884,7 @@ func TestSearchService_VectorSearchOnly(t *testing.T) {
 	engine := storage.NewNamespacedEngine(baseEngine, "test")
 
 	// Create a service with 4-dimensional vector index
-	svc := &Service{
-		engine:        engine,
-		vectorIndex:   NewVectorIndex(4), // Use 4 dimensions for test vectors
-		fulltextIndex: NewFulltextIndex(),
-	}
+	svc := NewServiceWithDimensions(engine, 4)
 
 	// Create nodes with embeddings in the Embedding field
 	nodes := []*storage.Node{
@@ -961,6 +957,50 @@ func TestSearchService_FilterByType(t *testing.T) {
 	for _, r := range response.Results {
 		assert.Contains(t, r.Labels, "Person")
 		assert.NotContains(t, r.Labels, "Document")
+	}
+}
+
+func TestHybridSearch_DoesNotHoldServiceLockWhileWaitingForPipeline(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 4)
+
+	opts := DefaultSearchOptions()
+	opts.Limit = 10
+	embedding := []float32{1, 0, 0, 0}
+
+	svc.pipelineMu.Lock()
+
+	searchDone := make(chan error, 1)
+	go func() {
+		_, err := svc.rrfHybridSearch(context.Background(), "query", embedding, opts)
+		searchDone <- err
+	}()
+
+	// Give the goroutine a moment to block on pipelineMu.
+	time.Sleep(10 * time.Millisecond)
+
+	// If rrfHybridSearch holds svc.mu while waiting for pipelineMu, this lock attempt will block.
+	locked := make(chan struct{})
+	go func() {
+		svc.mu.Lock()
+		svc.mu.Unlock()
+		close(locked)
+	}()
+
+	select {
+	case <-locked:
+	case <-time.After(200 * time.Millisecond):
+		svc.pipelineMu.Unlock()
+		t.Fatal("deadlock risk: rrfHybridSearch holds service lock while waiting for pipeline")
+	}
+
+	svc.pipelineMu.Unlock()
+
+	select {
+	case err := <-searchDone:
+		require.NoError(t, err)
+	case <-time.After(1 * time.Second):
+		t.Fatal("rrfHybridSearch did not return after pipeline unlock")
 	}
 }
 

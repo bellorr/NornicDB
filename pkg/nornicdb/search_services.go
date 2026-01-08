@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	featureflags "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -20,7 +21,7 @@ type dbSearchService struct {
 	buildOnce sync.Once
 	buildErr  error
 
-	clusterMu              sync.Mutex
+	clusterMu               sync.Mutex
 	lastClusteredEmbedCount int
 }
 
@@ -65,6 +66,11 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	}
 	svc := search.NewServiceWithDimensions(storageEngine, dims)
 	svc.SetDefaultMinSimilarity(db.searchMinSimilarity)
+
+	// Enable GPU brute-force search if a GPU manager is configured.
+	if mgr, ok := db.gpuManager.(*gpu.Manager); ok {
+		svc.SetGPUManager(mgr)
+	}
 
 	// Enable per-database clustering if the feature flag is enabled.
 	// Each Service maintains its own cluster index and must cluster independently.

@@ -97,6 +97,7 @@ type HNSWIndex struct {
 	visitedPool  sync.Pool
 	heapPool     sync.Pool
 	idsPool      sync.Pool
+	itemsPool    sync.Pool
 }
 
 type visitedGenState struct {
@@ -136,6 +137,9 @@ func NewHNSWIndex(dimensions int, config HNSWConfig) *HNSWIndex {
 	}
 	h.idsPool.New = func() any {
 		return make([]uint32, 0, config.EfSearch*2)
+	}
+	h.itemsPool.New = func() any {
+		return make([]hnswDistItem, 0, config.EfSearch*2)
 	}
 	return h
 }
@@ -356,32 +360,36 @@ func (h *HNSWIndex) searchWithEf(ctx context.Context, query []float32, k int, mi
 	}
 
 	candidates := h.searchLayerHeapPooled(normalized, ep, ef, 0)
+	defer h.itemsPool.Put(candidates[:0])
 
-	// Score candidates using CPU SIMD (direct, no batching overhead)
-	results := make([]ANNResult, 0, k)
-	for _, candidateID := range candidates {
-		if err := ctx.Err(); err != nil {
-			return results, err
-		}
-
-		if int(candidateID) >= len(h.nodeLevel) || h.deleted[candidateID] {
-			continue
-		}
-		similarity := vector.DotProductSIMD(normalized, h.vectorAtLocked(candidateID))
-
-		if similarity >= minSim32 {
-			results = append(results, ANNResult{
-				ID:    h.internalToID[candidateID],
-				Score: similarity,
-			})
-		}
-
-		if len(results) >= k {
-			break
-		}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
-	h.idsPool.Put(candidates[:0])
+	// Distances were computed during graph traversal; reuse them to avoid a second
+	// scoring pass. Candidate list is already ordered by increasing distance.
+	//
+	// dist = 1 - cosine_similarity (for normalized vectors)
+	// score = 1 - dist
+	limit := k
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
+	results := make([]ANNResult, 0, limit)
+	for i := 0; i < len(candidates) && len(results) < k; i++ {
+		item := candidates[i]
+		score := float32(1.0) - item.dist
+		if score < minSim32 {
+			break // remaining candidates have lower scores
+		}
+		if int(item.id) >= len(h.internalToID) {
+			continue
+		}
+		results = append(results, ANNResult{
+			ID:    h.internalToID[item.id],
+			Score: score,
+		})
+	}
 	return results, nil
 }
 
@@ -597,7 +605,7 @@ func (h *HNSWIndex) searchLayerHeap(query []float32, entryID uint32, ef int, lev
 	return resultList
 }
 
-func (h *HNSWIndex) searchLayerHeapPooled(query []float32, entryID uint32, ef int, level int) []uint32 {
+func (h *HNSWIndex) searchLayerHeapPooled(query []float32, entryID uint32, ef int, level int) []hnswDistItem {
 	visited := h.visitedPool.Get().(*visitedGenState)
 	defer h.visitedPool.Put(visited)
 	if len(visited.gen) < len(h.nodeLevel) {
@@ -675,16 +683,16 @@ func (h *HNSWIndex) searchLayerHeapPooled(query []float32, entryID uint32, ef in
 	}
 
 	n := results.Len()
-	bufAny := h.idsPool.Get()
-	buf := bufAny.([]uint32)
+	bufAny := h.itemsPool.Get()
+	buf := bufAny.([]hnswDistItem)
 	if cap(buf) < n {
-		buf = make([]uint32, n)
+		buf = make([]hnswDistItem, n)
 	} else {
 		buf = buf[:n]
 	}
 	for i := n - 1; i >= 0; i-- {
-		item := results.Pop()
-		buf[i] = item.id
+		item := results.Pop() // furthest first
+		buf[i] = item         // closest ends up at index 0
 	}
 	return buf
 }
