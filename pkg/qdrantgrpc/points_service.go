@@ -16,8 +16,6 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-const qdrantVectorNamesKey = "_qdrant_vector_names"
-
 // PointsService implements the upstream Qdrant Points gRPC service (package `qdrant`).
 // It stores points as NornicDB nodes and (optionally) indexes them via search.Service.
 type PointsService struct {
@@ -101,7 +99,7 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 			Properties: props,
 		}
 
-		// Write vectors to NamedEmbeddings instead of ChunkEmbeddings
+		// Write vectors to NamedEmbeddings
 		// Qdrant unnamed vector → NamedEmbeddings["default"]
 		// Qdrant named vectors → NamedEmbeddings[name]
 		if node.NamedEmbeddings == nil {
@@ -118,13 +116,6 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 			}
 			node.NamedEmbeddings[vectorName] = vecs[i]
 		}
-
-		// Keep ChunkEmbeddings for backward compatibility during migration
-		// TODO: Remove ChunkEmbeddings once all code paths use NamedEmbeddings
-		if len(vecs) > 0 {
-			node.ChunkEmbeddings = vecs
-		}
-		setNodeVectorNames(node, vecNames)
 
 		if prev := existing[nodeID]; prev != nil {
 			oldVectorNamesByID[string(node.ID)] = nodeVectorNames(prev)
@@ -173,7 +164,15 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 			}
 
 			oldNames := oldVectorNamesByID[string(node.ID)]
-			if err := s.vecIndex.replacePoint(req.CollectionName, meta.Dimensions, meta.Distance, string(node.ID), oldNames, newNames, node.ChunkEmbeddings); err != nil {
+			vectors := make([][]float32, 0, len(newNames))
+			for _, name := range newNames {
+				vec, ok := nodeVectorByName(node, name)
+				if !ok {
+					return nil, status.Errorf(codes.Internal, "missing vector %q for point %s", name, node.ID)
+				}
+				vectors = append(vectors, vec)
+			}
+			if err := s.vecIndex.replacePoint(req.CollectionName, meta.Dimensions, meta.Distance, string(node.ID), oldNames, newNames, vectors); err != nil {
 				return nil, status.Errorf(codes.Internal, "failed to index point %s: %v", node.ID, err)
 			}
 		}
@@ -1555,70 +1554,28 @@ func extractDenseFromVector(v *qpb.Vector) ([]float32, error) {
 }
 
 func nodeVectorNames(node *storage.Node) []string {
-	if node == nil || node.Properties == nil {
+	if node == nil {
 		return nil
 	}
-	raw, ok := node.Properties[qdrantVectorNamesKey]
-	if !ok || raw == nil {
+	if len(node.NamedEmbeddings) == 0 {
 		return nil
 	}
-	switch v := raw.(type) {
-	case []string:
-		return v
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			s, ok := item.(string)
-			if ok {
-				out = append(out, s)
-			}
-		}
-		return out
-	default:
-		return nil
-	}
-}
-
-func setNodeVectorNames(node *storage.Node, names []string) {
-	if node.Properties == nil {
-		node.Properties = make(map[string]any)
-	}
-	if len(names) == 0 || (len(names) == 1 && names[0] == "") {
-		delete(node.Properties, qdrantVectorNamesKey)
-		return
-	}
-	out := make([]string, len(names))
-	copy(out, names)
-	node.Properties[qdrantVectorNamesKey] = out
-}
-
-func nodeVectorIndexByName(node *storage.Node, vectorName string) (int, bool) {
-	if node == nil || len(node.ChunkEmbeddings) == 0 {
-		return 0, false
-	}
-	names := nodeVectorNames(node)
-	if len(names) == 0 {
-		if vectorName == "" {
-			return 0, true
-		}
-		return 0, false
-	}
-	for i, name := range names {
-		if name == vectorName {
-			if i < len(node.ChunkEmbeddings) {
-				return i, true
-			}
-			return 0, false
+	// Extract vector names from NamedEmbeddings keys (stable order).
+	names := make([]string, 0, len(node.NamedEmbeddings))
+	for name := range node.NamedEmbeddings {
+		// Map "default" back to empty string for unnamed vector
+		if name == "default" {
+			names = append(names, "")
+		} else {
+			names = append(names, name)
 		}
 	}
-	if vectorName == "" && len(node.ChunkEmbeddings) > 0 {
-		return 0, true
-	}
-	return 0, false
+	sort.Strings(names)
+	return names
 }
 
 func nodeVectorByName(node *storage.Node, vectorName string) ([]float32, bool) {
-	// First, try NamedEmbeddings (new data model)
+	// Get vector from NamedEmbeddings
 	effectiveName := vectorName
 	if effectiveName == "" {
 		effectiveName = "default"
@@ -1628,17 +1585,7 @@ func nodeVectorByName(node *storage.Node, vectorName string) ([]float32, bool) {
 			return vec, true
 		}
 	}
-
-	// Fall back to ChunkEmbeddings for backward compatibility
-	idx, ok := nodeVectorIndexByName(node, vectorName)
-	if !ok || idx >= len(node.ChunkEmbeddings) {
-		return nil, false
-	}
-	vec := node.ChunkEmbeddings[idx]
-	if len(vec) == 0 {
-		return nil, false
-	}
-	return vec, true
+	return nil, false
 }
 
 func nodeHasLabel(node *storage.Node, label string) bool {
@@ -1658,7 +1605,7 @@ func upsertNodeVectors(node *storage.Node, names []string, vectors [][]float32) 
 		return
 	}
 
-	// Write vectors to NamedEmbeddings instead of ChunkEmbeddings
+	// Write vectors to NamedEmbeddings
 	// Qdrant unnamed vector → NamedEmbeddings["default"]
 	// Qdrant named vectors → NamedEmbeddings[name]
 	if node.NamedEmbeddings == nil {
@@ -1675,11 +1622,6 @@ func upsertNodeVectors(node *storage.Node, names []string, vectors [][]float32) 
 		}
 		node.NamedEmbeddings[vectorName] = vectors[i]
 	}
-
-	// Keep ChunkEmbeddings for backward compatibility during migration
-	// TODO: Remove ChunkEmbeddings once all code paths use NamedEmbeddings
-	node.ChunkEmbeddings = vectors
-	setNodeVectorNames(node, names)
 }
 
 func deleteNodeVectors(node *storage.Node, names []string) {
@@ -1687,8 +1629,7 @@ func deleteNodeVectors(node *storage.Node, names []string) {
 		return
 	}
 
-	// Primary storage: NamedEmbeddings.
-	// Keep this consistent with upsertNodeVectors and nodeVectorByName.
+	// Delete from NamedEmbeddings
 	if node.NamedEmbeddings != nil {
 		for _, n := range names {
 			key := n
@@ -1701,43 +1642,6 @@ func deleteNodeVectors(node *storage.Node, names []string) {
 			node.NamedEmbeddings = nil
 		}
 	}
-
-	existingNames := nodeVectorNames(node)
-	if len(existingNames) == 0 {
-		// Single unnamed vector.
-		for _, n := range names {
-			if n == "" {
-				node.ChunkEmbeddings = nil
-				setNodeVectorNames(node, nil)
-				return
-			}
-		}
-		return
-	}
-
-	toDelete := make(map[string]struct{}, len(names))
-	for _, n := range names {
-		toDelete[n] = struct{}{}
-	}
-
-	newNames := make([]string, 0, len(existingNames))
-	newEmbeddings := make([][]float32, 0, len(existingNames))
-	for i, n := range existingNames {
-		if _, ok := toDelete[n]; ok {
-			continue
-		}
-		if i < len(node.ChunkEmbeddings) {
-			newNames = append(newNames, n)
-			newEmbeddings = append(newEmbeddings, node.ChunkEmbeddings[i])
-		}
-	}
-	if len(newEmbeddings) == 0 {
-		node.ChunkEmbeddings = nil
-		setNodeVectorNames(node, nil)
-		return
-	}
-	node.ChunkEmbeddings = newEmbeddings
-	setNodeVectorNames(node, newNames)
 }
 
 func withPayloadSelection(props map[string]any, selector *qpb.WithPayloadSelector) map[string]any {
@@ -1749,9 +1653,6 @@ func withPayloadSelection(props map[string]any, selector *qpb.WithPayloadSelecto
 	clean := func() map[string]any {
 		out := make(map[string]any, len(props))
 		for k, v := range props {
-			if k == qdrantVectorNamesKey {
-				continue
-			}
 			if len(k) >= 8 && k[:8] == "_qdrant_" {
 				continue
 			}
@@ -1817,8 +1718,8 @@ func vectorsOutputFromNode(node *storage.Node, requestedNames []string) *qpb.Vec
 		return nil
 	}
 
-	// First, try NamedEmbeddings (new data model)
-	if node.NamedEmbeddings != nil && len(node.NamedEmbeddings) > 0 {
+	// Get vectors from NamedEmbeddings
+	if len(node.NamedEmbeddings) > 0 {
 		// Determine which names to include
 		includeNames := make([]string, 0)
 		if len(requestedNames) > 0 {
@@ -1888,52 +1789,8 @@ func vectorsOutputFromNode(node *storage.Node, requestedNames []string) *qpb.Vec
 		}
 	}
 
-	// Fall back to ChunkEmbeddings for backward compatibility
-	if len(node.ChunkEmbeddings) == 0 {
-		return nil
-	}
-
-	names := nodeVectorNames(node)
-	if len(names) == 0 {
-		// Single unnamed vector.
-		for _, requested := range requestedNames {
-			if requested != "" {
-				return nil
-			}
-		}
-		return &qpb.VectorsOutput{
-			VectorsOptions: &qpb.VectorsOutput_Vector{
-				Vector: &qpb.VectorOutput{
-					Vector: &qpb.VectorOutput_Dense{Dense: &qpb.DenseVector{Data: node.ChunkEmbeddings[0]}},
-				},
-			},
-		}
-	}
-
-	includeNames := names
-	if len(requestedNames) > 0 {
-		includeNames = requestedNames
-	}
-
-	out := make(map[string]*qpb.VectorOutput, len(includeNames))
-	for _, name := range includeNames {
-		idx, ok := nodeVectorIndexByName(node, name)
-		if !ok || idx >= len(node.ChunkEmbeddings) {
-			continue
-		}
-		out[name] = &qpb.VectorOutput{
-			Vector: &qpb.VectorOutput_Dense{Dense: &qpb.DenseVector{Data: node.ChunkEmbeddings[idx]}},
-		}
-	}
-	if len(out) == 0 {
-		return nil
-	}
-
-	return &qpb.VectorsOutput{
-		VectorsOptions: &qpb.VectorsOutput_Vectors{
-			Vectors: &qpb.NamedVectorsOutput{Vectors: out},
-		},
-	}
+	// No NamedEmbeddings found
+	return nil
 }
 
 func payloadToProperties(payload map[string]*qpb.Value) map[string]any {
@@ -1953,9 +1810,6 @@ func propertiesToPayload(props map[string]any) map[string]*qpb.Value {
 	}
 	out := make(map[string]*qpb.Value, len(props))
 	for k, v := range props {
-		if k == qdrantVectorNamesKey {
-			continue
-		}
 		out[k] = anyToValue(v)
 	}
 	return out

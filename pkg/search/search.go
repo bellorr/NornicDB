@@ -652,7 +652,45 @@ func (s *Service) IndexNode(node *storage.Node) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Index all chunk embeddings (always stored in ChunkEmbeddings, even for single chunks)
+	// Index all embeddings: NamedEmbeddings and ChunkEmbeddings
+	// Strategy:
+	//   - NamedEmbeddings: Index each named vector at "node-id-named-{vectorName}"
+	//   - ChunkEmbeddings: Index main at node.ID, chunks at "node-id-chunk-N"
+	// This allows efficient indexed search for all embedding types
+	// Embeddings are stored in struct fields (opaque to users), not in properties
+
+	// Index NamedEmbeddings (each named vector gets its own index entry)
+	if len(node.NamedEmbeddings) > 0 {
+		for vectorName, embedding := range node.NamedEmbeddings {
+			if len(embedding) == 0 {
+				continue
+			}
+
+			// Index each named embedding with ID: "node-id-named-{vectorName}"
+			namedID := fmt.Sprintf("%s-named-%s", node.ID, vectorName)
+			if err := s.vectorIndex.Add(namedID, embedding); err != nil {
+				if err == ErrDimensionMismatch {
+					log.Printf("⚠️ IndexNode %s named[%s]: embedding dimension mismatch (got %d, expected %d)",
+						node.ID, vectorName, len(embedding), s.vectorIndex.dimensions)
+				}
+				continue
+			}
+
+			// Also add/update to HNSW index if it exists
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				_ = s.hnswIndex.Update(namedID, embedding) // Best effort
+			}
+			s.hnswMu.RUnlock()
+
+			// Also add to cluster index if enabled
+			if s.clusterIndex != nil {
+				_ = s.clusterIndex.Add(namedID, embedding) // Best effort
+			}
+		}
+	}
+
+	// Index ChunkEmbeddings (always stored in ChunkEmbeddings, even for single chunks)
 	// Strategy:
 	//   - Always index a "main" embedding at node.ID (using first chunk)
 	//   - For multi-chunk nodes, also index each chunk separately at "node-id-chunk-N"
@@ -684,6 +722,7 @@ func (s *Service) IndexNode(node *storage.Node) error {
 		// For multi-chunk nodes, also index each chunk separately with chunk suffix
 		// This allows granular search at the chunk level while maintaining node-level search
 		// Note: chunk 0 is indexed both as main (node.ID) and as chunk-0 for consistency
+		// ALL chunks are indexed in vectorIndex, HNSW, and clusterIndex for complete search coverage
 		if len(node.ChunkEmbeddings) > 1 {
 			for i, embedding := range node.ChunkEmbeddings {
 				if len(embedding) > 0 {
@@ -697,6 +736,14 @@ func (s *Service) IndexNode(node *storage.Node) error {
 						// Continue indexing other chunks even if one fails
 						continue
 					}
+
+					// Also add/update to HNSW index if it exists (for large datasets)
+					// ALL chunks are indexed in HNSW for complete search coverage
+					s.hnswMu.RLock()
+					if s.hnswIndex != nil {
+						_ = s.hnswIndex.Update(chunkID, embedding) // Best effort
+					}
+					s.hnswMu.RUnlock()
 
 					// Also add to cluster index if enabled
 					if s.clusterIndex != nil {
@@ -740,6 +787,27 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 		s.clusterIndex.Remove(nodeIDStr)
 	}
 
+	// Remove all named embeddings (they're indexed as "node-id-named-{vectorName}")
+	// We need to load the node to know which named embeddings exist
+	node, err := s.engine.GetNode(nodeID)
+	if err == nil && node != nil && len(node.NamedEmbeddings) > 0 {
+		for vectorName := range node.NamedEmbeddings {
+			namedID := fmt.Sprintf("%s-named-%s", nodeIDStr, vectorName)
+			s.vectorIndex.Remove(namedID)
+
+			// Also remove from HNSW index if it exists
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				s.hnswIndex.Remove(namedID)
+			}
+			s.hnswMu.RUnlock()
+
+			if s.clusterIndex != nil {
+				s.clusterIndex.Remove(namedID)
+			}
+		}
+	}
+
 	// Remove all chunk embeddings (they're indexed as "node-id-chunk-0", "node-id-chunk-1", etc.)
 	// We need to remove them by iterating and checking for chunk IDs
 	// Since we don't know how many chunks there are, we'll try removing up to 1000 chunks
@@ -747,6 +815,14 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	for i := 0; i < 1000; i++ {
 		chunkID := fmt.Sprintf("%s-chunk-%d", nodeIDStr, i)
 		s.vectorIndex.Remove(chunkID)
+
+		// Also remove from HNSW index if it exists
+		s.hnswMu.RLock()
+		if s.hnswIndex != nil {
+			s.hnswIndex.Remove(chunkID)
+		}
+		s.hnswMu.RUnlock()
+
 		if s.clusterIndex != nil {
 			s.clusterIndex.Remove(chunkID)
 		}

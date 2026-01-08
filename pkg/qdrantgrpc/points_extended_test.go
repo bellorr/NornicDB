@@ -173,7 +173,7 @@ func TestPointsService_VectorOps_NamedVectors(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Deleted vector "b" must not be accessible via NamedEmbeddings fallback.
+	// Deleted vector "b" must not be accessible.
 	searchResp, err = svc.Search(ctx, &qpb.SearchPoints{
 		CollectionName: "test_collection",
 		Vector:         []float32{0, 1, 0, 0},

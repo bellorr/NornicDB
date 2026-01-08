@@ -359,8 +359,8 @@ The Qdrant gRPC package is a **thin translation layer** that maps Qdrant RPCs to
 | Point | Node with `QdrantPoint` + collection labels |
 | PointId | NodeID: `qdrant:{collection}:{id}` |
 | Payload | Node.Properties |
-| Vector(s) | `Node.ChunkEmbeddings` (named vectors preserved via internal name→index mapping) |
-| Named Vectors | Node.ChunkEmbeddings[N] (future) |
+| Vector(s) | `Node.NamedEmbeddings` (Qdrant unnamed vector stored under key `"default"`) |
+| Named Vectors | `Node.NamedEmbeddings[name]` |
 | Filter | In-memory property filter |
 
 ### Key Benefits

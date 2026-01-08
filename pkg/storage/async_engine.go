@@ -553,66 +553,89 @@ func (ae *AsyncEngine) UpdateNodeEmbedding(node *Node) error {
 // CRITICAL: If node is in-flight (being flushed), we must also mark for deletion
 // because the flush will write it to the underlying engine.
 func (ae *AsyncEngine) DeleteNode(id NodeID) error {
-	ae.mu.Lock()
-	defer ae.mu.Unlock()
+	for {
+		ae.mu.Lock()
 
-	// Check if already marked for deletion (idempotent)
-	if ae.deleteNodes[id] {
-		return nil
-	}
-
-	// Check if node is being flushed right now (in-flight)
-	isInFlight := ae.inFlightNodes[id]
-
-	// Check if node was created in this transaction (still in cache)
-	if node, existsInCache := ae.nodeCache[id]; existsInCache {
-		// If this is a pending CREATE (not an update of an existing node), deleting it
-		// will never hit the inner engine, so no inner OnNodeDeleted callback will fire.
-		// Emit a best-effort delete notification so external services (search indexes,
-		// embedding counts) can drop any speculative state for this node.
-		isPendingCreate := !ae.updateNodes[id]
-
-		// Remove from label index
-		for _, label := range node.Labels {
-			normalLabel := strings.ToLower(label)
-			if ae.labelIndex[normalLabel] != nil {
-				delete(ae.labelIndex[normalLabel], id)
-			}
+		// Check if already marked for deletion (idempotent)
+		if ae.deleteNodes[id] {
+			ae.mu.Unlock()
+			return nil
 		}
-		// Remove from cache
-		delete(ae.nodeCache, id)
 
-		// CRITICAL FIX: If node is in-flight, the flush will still write it
-		// to the underlying engine, so we must also mark it for deletion
+		// Check if node is being flushed right now (in-flight)
+		isInFlight := ae.inFlightNodes[id]
+
+		// Check if node was created/updated in this transaction (still in cache)
+		if node, existsInCache := ae.nodeCache[id]; existsInCache {
+			// If this is a pending CREATE (not an update of an existing node), deleting it
+			// will never hit the inner engine, so no inner OnNodeDeleted callback will fire.
+			// Emit a best-effort delete notification so external services (search indexes,
+			// embedding counts) can drop any speculative state for this node.
+			shouldNotify := !ae.updateNodes[id]
+
+			// Remove from label index
+			for _, label := range node.Labels {
+				normalLabel := strings.ToLower(label)
+				if ae.labelIndex[normalLabel] != nil {
+					delete(ae.labelIndex[normalLabel], id)
+				}
+			}
+			// Remove from cache
+			delete(ae.nodeCache, id)
+
+			// CRITICAL FIX: If node is in-flight, the flush will still write it
+			// to the underlying engine, so we must also mark it for deletion
+			if isInFlight {
+				ae.deleteNodes[id] = true
+				ae.pendingWrites++
+			}
+
+			ae.mu.Unlock()
+			if shouldNotify {
+				ae.notifyNodeDeleted(id)
+			}
+			return nil
+		}
+
+		// If in-flight, it will exist in underlying engine after flush - mark for deletion
 		if isInFlight {
 			ae.deleteNodes[id] = true
 			ae.pendingWrites++
+			ae.mu.Unlock()
+			return nil
 		}
 
-		if isPendingCreate {
-			ae.notifyNodeDeleted(id)
-		}
-		return nil
-	}
+		ae.mu.Unlock()
 
-	// If in-flight, it will exist in underlying engine after flush - mark for deletion
-	if isInFlight {
+		// Check if node actually exists in underlying engine before marking for deletion.
+		// This prevents count going negative for non-existent nodes.
+		if _, err := ae.engine.GetNode(id); err != nil {
+			// Node doesn't exist anywhere - nothing to delete
+			return ErrNotFound
+		}
+
+		// Re-check state under lock in case the node was recreated/updated concurrently.
+		ae.mu.Lock()
+		if ae.deleteNodes[id] {
+			ae.mu.Unlock()
+			return nil
+		}
+		if _, existsInCache := ae.nodeCache[id]; existsInCache {
+			ae.mu.Unlock()
+			continue
+		}
+		if ae.inFlightNodes[id] {
+			ae.deleteNodes[id] = true
+			ae.pendingWrites++
+			ae.mu.Unlock()
+			return nil
+		}
+
 		ae.deleteNodes[id] = true
 		ae.pendingWrites++
+		ae.mu.Unlock()
 		return nil
 	}
-
-	// Check if node actually exists in underlying engine before marking for deletion
-	// This prevents count going negative for non-existent nodes
-	if _, err := ae.engine.GetNode(id); err != nil {
-		// Node doesn't exist anywhere - nothing to delete
-		return ErrNotFound
-	}
-
-	// Node exists in underlying engine - mark for deletion
-	ae.deleteNodes[id] = true
-	ae.pendingWrites++
-	return nil
 }
 
 // CreateEdge adds to cache and returns immediately.
@@ -1452,18 +1475,23 @@ func (ae *AsyncEngine) BulkCreateEdges(edges []*Edge) error {
 // BulkDeleteNodes marks multiple nodes for deletion (async).
 func (ae *AsyncEngine) BulkDeleteNodes(ids []NodeID) error {
 	ae.mu.Lock()
-	defer ae.mu.Unlock()
+	notifyDeletes := make([]NodeID, 0)
 
 	for _, id := range ids {
 		// If this is a pending create in cache, deleting it won’t hit the inner engine.
 		// Notify best-effort so external services can remove any speculative indexes.
 		if _, ok := ae.nodeCache[id]; ok && !ae.updateNodes[id] {
-			ae.notifyNodeDeleted(id)
+			notifyDeletes = append(notifyDeletes, id)
 		}
 		delete(ae.nodeCache, id)
 		ae.deleteNodes[id] = true
 	}
 	ae.pendingWrites += int64(len(ids))
+	ae.mu.Unlock()
+
+	for _, id := range notifyDeletes {
+		ae.notifyNodeDeleted(id)
+	}
 	return nil
 }
 

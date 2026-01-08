@@ -26,7 +26,7 @@
 // # Data Model Mapping
 //
 //   - Qdrant Collection → Collection metadata in registry
-//   - Qdrant Point → NornicDB Node with embeddings in ChunkEmbeddings (supports named vectors)
+//   - Qdrant Point → NornicDB Node with embeddings in NamedEmbeddings (supports named vectors)
 //   - Qdrant Payload → NornicDB Node properties
 //   - Qdrant PointId → NornicDB NodeID (prefixed: qdrant:<collection>:<id>)
 //
