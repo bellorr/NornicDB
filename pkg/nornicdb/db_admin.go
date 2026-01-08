@@ -107,6 +107,9 @@ func (db *DB) TriggerSearchClustering() error {
 // can cause performance issues when embeddings are created frequently.
 // Runs immediately on startup, then every interval thereafter (skipping if no changes).
 func (db *DB) startClusteringTimer(interval time.Duration) {
+	if db.clusterTicker != nil {
+		return
+	}
 	db.clusterTicker = time.NewTicker(interval)
 	db.clusterTickerStop = make(chan struct{})
 

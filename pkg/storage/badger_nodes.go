@@ -86,7 +86,9 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 		}
 
 		// Add to pending embeddings index if it needs embedding (atomic with node creation)
-		if (len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) && NodeNeedsEmbedding(node) {
+		if !isSystemNamespaceID(string(node.ID)) &&
+			(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
+			NodeNeedsEmbedding(node) {
 			if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 				return err
 			}
@@ -218,7 +220,9 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 				}
 			}
 			// Add to pending embeddings index if needed (same as CreateNode)
-			if (len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) && NodeNeedsEmbedding(node) {
+			if !isSystemNamespaceID(string(node.ID)) &&
+				(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
+				NodeNeedsEmbedding(node) {
 				if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 					return err
 				}
@@ -306,9 +310,12 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 			// Node has embedding - remove from pending index
 			txn.Delete(pendingEmbedKey(node.ID))
-		} else if NodeNeedsEmbedding(node) {
+		} else if !isSystemNamespaceID(string(node.ID)) && NodeNeedsEmbedding(node) {
 			// Node needs embedding - ensure it's in pending index
 			txn.Set(pendingEmbedKey(node.ID), []byte{})
+		} else {
+			// Never embed system database nodes.
+			txn.Delete(pendingEmbedKey(node.ID))
 		}
 
 		return nil
@@ -507,74 +514,10 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 	var deletedEdgeIDs []EdgeID
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		key := nodeKey(id)
-
-		// CRITICAL: Delete separately stored embeddings FIRST, before checking if node exists.
-		// This ensures embeddings are cleaned up even if the node record is missing or corrupted.
-		// Embeddings use namespaced keys (prefixEmbedding + nodeID + 0x00 + chunkIndex),
-		// so we must use the same prefixed ID that was used when storing them.
-		embPrefix := embeddingPrefix(id)
-		opts := badger.DefaultIteratorOptions
-		opts.Prefix = embPrefix
-		it := txn.NewIterator(opts)
-		defer it.Close()
-		for it.Rewind(); it.Valid(); it.Next() {
-			if err := txn.Delete(it.Item().Key()); err != nil {
-				return fmt.Errorf("failed to delete embedding chunk: %w", err)
-			}
-		}
-
-		// Get node for label cleanup
-		item, err := txn.Get(key)
-		if err == badger.ErrKeyNotFound {
-			// Node doesn't exist, but we've already cleaned up embeddings above
-			// Also clean up pending embeddings index
-			txn.Delete(pendingEmbedKey(id))
-			return ErrNotFound
-		}
-		if err != nil {
-			return err
-		}
-
-		var node *Node
-		if err := item.Value(func(val []byte) error {
-			var decodeErr error
-			node, decodeErr = decodeNodeWithEmbeddings(txn, val, id)
-			return decodeErr
-		}); err != nil {
-			return err
-		}
-
-		// Delete label indexes
-		for _, label := range node.Labels {
-			if err := txn.Delete(labelIndexKey(label, id)); err != nil {
-				return err
-			}
-		}
-
-		// Delete outgoing edges (and track count)
-		outPrefix := outgoingIndexPrefix(id)
-		outCount, outIDs, err := b.deleteEdgesWithPrefix(txn, outPrefix)
-		if err != nil {
-			return err
-		}
-		totalEdgesDeleted += outCount
-		deletedEdgeIDs = append(deletedEdgeIDs, outIDs...)
-
-		// Delete incoming edges (and track count)
-		inPrefix := incomingIndexPrefix(id)
-		inCount, inIDs, err := b.deleteEdgesWithPrefix(txn, inPrefix)
-		if err != nil {
-			return err
-		}
-		totalEdgesDeleted += inCount
-		deletedEdgeIDs = append(deletedEdgeIDs, inIDs...)
-
-		// Remove from pending embeddings index (if present)
-		txn.Delete(pendingEmbedKey(id))
-
-		// Delete the node
-		return txn.Delete(key)
+		edgesDeleted, edgeIDs, err := b.deleteNodeInTxn(txn, id)
+		totalEdgesDeleted = edgesDeleted
+		deletedEdgeIDs = edgeIDs
+		return err
 	})
 
 	// Invalidate cache on successful delete

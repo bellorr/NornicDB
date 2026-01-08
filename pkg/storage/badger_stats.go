@@ -244,6 +244,13 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 			}
 			nodeID := NodeID(key[1:])
 
+			// Never embed the system database; remove any stale/system entries.
+			if isSystemNamespaceID(string(nodeID)) {
+				_ = txn.Delete(pendingEmbedKey(nodeID))
+				removedNoLongerNeeds++
+				continue
+			}
+
 			// Verify node exists in the same transaction for consistency.
 			item, err := txn.Get(nodeKey(nodeID))
 			if err == badger.ErrKeyNotFound {
@@ -350,6 +357,13 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 			}
 			nodeID := NodeID(key[1:])
 
+			// Never embed the system database; remove from pending index if present.
+			if isSystemNamespaceID(string(nodeID)) {
+				txn.Delete(key)
+				removed++
+				continue
+			}
+
 			// Check if node exists and still needs embedding
 			// ALL node IDs must be prefixed - no unprefixed IDs allowed
 			keyToCheck := nodeKey(nodeID)
@@ -413,6 +427,9 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 				continue
 			}
 			nodeID := NodeID(key[1:])
+			if isSystemNamespaceID(string(nodeID)) {
+				continue
+			}
 
 			item.Value(func(val []byte) error {
 				node, err := decodeNodeWithEmbeddings(txn, val, nodeID)
@@ -514,8 +531,13 @@ func (b *BadgerEngine) StreamNodes(ctx context.Context, fn func(node *Node) erro
 			item := it.Item()
 			var node *Node
 			err := item.Value(func(val []byte) error {
+				key := item.Key()
+				if len(key) <= 1 {
+					return nil
+				}
+				nodeID := NodeID(key[1:])
 				var decErr error
-				node, decErr = decodeNode(val)
+				node, decErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decErr
 			})
 			if err != nil {
@@ -602,8 +624,13 @@ func (b *BadgerEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn f
 			item := it.Item()
 			var node *Node
 			err := item.Value(func(val []byte) error {
+				key := item.Key()
+				if len(key) <= 1 {
+					return nil
+				}
+				nodeID := NodeID(key[1:])
 				var decErr error
-				node, decErr = decodeNode(val)
+				node, decErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decErr
 			})
 			if err != nil {
@@ -614,6 +641,9 @@ func (b *BadgerEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn f
 
 			if len(chunk) >= chunkSize {
 				if err := fn(chunk); err != nil {
+					if err == ErrIterationStopped {
+						return nil
+					}
 					return err
 				}
 				// Reset chunk, reuse capacity
@@ -624,6 +654,9 @@ func (b *BadgerEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn f
 		// Process remaining nodes
 		if len(chunk) > 0 {
 			if err := fn(chunk); err != nil {
+				if err == ErrIterationStopped {
+					return nil
+				}
 				return err
 			}
 		}

@@ -1098,8 +1098,14 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		} else {
 			fmt.Println("✅ Search indexes built from existing data")
 
-			// Trigger k-means clustering if enabled
-			db.runClusteringOnceAllDatabases()
+			// If the clustering timer is active, it already runs immediately on startup.
+			// Avoid duplicating work by triggering clustering here only when there's no timer.
+			db.mu.RLock()
+			timerActive := db.clusterTicker != nil
+			db.mu.RUnlock()
+			if !timerActive {
+				db.runClusteringOnceAllDatabases()
+			}
 		}
 	}()
 

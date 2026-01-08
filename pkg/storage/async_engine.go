@@ -73,6 +73,14 @@ type AsyncEngine struct {
 	flushMu sync.RWMutex
 }
 
+// ListNamespaces returns known namespaces from the wrapped engine, if supported.
+func (ae *AsyncEngine) ListNamespaces() []string {
+	if lister, ok := ae.engine.(NamespaceLister); ok {
+		return lister.ListNamespaces()
+	}
+	return nil
+}
+
 // OnNodeCreated sets a callback to be invoked when nodes are created.
 func (ae *AsyncEngine) OnNodeCreated(callback NodeEventCallback) {
 	ae.callbackMu.Lock()

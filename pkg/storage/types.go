@@ -426,6 +426,15 @@ type PrefixStatsEngine interface {
 	EdgeCountByPrefix(prefix string) (int64, error)
 }
 
+// NamespaceLister is an optional extension interface that reports the known
+// database namespaces stored in an engine.
+//
+// Returned values are unqualified namespace names (e.g., "nornic", "db2"),
+// not ID prefixes (e.g., "nornic:").
+type NamespaceLister interface {
+	ListNamespaces() []string
+}
+
 // NodeEventCallback is called when storage operations complete successfully.
 // This allows external services (like search indexes) to stay synchronized with storage.
 type NodeEventCallback func(node *Node)

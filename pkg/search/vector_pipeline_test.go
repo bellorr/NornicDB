@@ -268,3 +268,26 @@ func TestVectorSearchCandidates_AutoStrategy(t *testing.T) {
 	assert.GreaterOrEqual(t, len(candidates), 0)
 }
 
+func TestVectorSearchPipeline_UsesBruteForceWhenClusteredAndSmall(t *testing.T) {
+	engine := storage.NewMemoryEngine()
+	svc := NewServiceWithDimensions(engine, 4)
+
+	// Enable clustering and force it to cluster with a small dataset.
+	svc.EnableClustering(nil, 2)
+	svc.SetMinEmbeddingsForClustering(1)
+
+	for i := 0; i < 20; i++ {
+		node := &storage.Node{
+			ID:              storage.NodeID(fmt.Sprintf("node%d", i)),
+			ChunkEmbeddings: [][]float32{{1, 0, 0, 0}},
+		}
+		require.NoError(t, svc.IndexNode(node))
+	}
+
+	require.NoError(t, svc.TriggerClustering())
+
+	pipeline, err := svc.getOrCreateVectorPipeline()
+	require.NoError(t, err)
+	_, ok := pipeline.candidateGen.(*BruteForceCandidateGen)
+	require.True(t, ok)
+}

@@ -13,3 +13,10 @@ func namespacePrefixFromID(id string) (string, bool) {
 	return id[:idx+1], true
 }
 
+func isSystemNamespaceID(id string) bool {
+	prefix, ok := namespacePrefixFromID(id)
+	if !ok {
+		return false
+	}
+	return prefix == "system:"
+}

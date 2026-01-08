@@ -41,6 +41,14 @@ type WALEngine struct {
 	totalSnapshots   atomic.Int64
 }
 
+// ListNamespaces returns known namespaces from the wrapped engine, if supported.
+func (w *WALEngine) ListNamespaces() []string {
+	if lister, ok := w.engine.(NamespaceLister); ok {
+		return lister.ListNamespaces()
+	}
+	return nil
+}
+
 // NewWALEngine creates a WAL-backed storage engine.
 func NewWALEngine(engine Engine, wal *WAL) *WALEngine {
 	return &WALEngine{

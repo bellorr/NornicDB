@@ -256,46 +256,11 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 		return ErrTransactionClosed
 	}
 
-	// Get node to delete its indexes
-	var node *Node
-	if pending, exists := tx.pendingNodes[nodeID]; exists {
-		node = pending
-	} else {
-		key := nodeKey(nodeID)
-		item, err := tx.badgerTx.Get(key)
-		if err == badger.ErrKeyNotFound {
-			return ErrNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("reading node: %w", err)
-		}
-
-		var nodeBytes []byte
-		if err := item.Value(func(val []byte) error {
-			nodeBytes = append([]byte{}, val...)
-			return nil
-		}); err != nil {
-			return fmt.Errorf("reading node value: %w", err)
-		}
-
-		node, err = deserializeNode(nodeBytes)
-		if err != nil {
-			return fmt.Errorf("deserializing node: %w", err)
-		}
-	}
-
-	// Delete node
-	key := nodeKey(nodeID)
-	if err := tx.badgerTx.Delete(key); err != nil {
-		return fmt.Errorf("deleting node: %w", err)
-	}
-
-	// Delete label indexes
-	for _, label := range node.Labels {
-		indexKey := labelIndexKey(label, nodeID)
-		if err := tx.badgerTx.Delete(indexKey); err != nil {
-			return fmt.Errorf("deleting label index: %w", err)
-		}
+	// Delete with the same semantics as BadgerEngine.DeleteNode (cascade edges + embedding cleanup),
+	// but within the transaction for atomicity.
+	edgesDeleted, deletedEdgeIDs, err := tx.engine.deleteNodeInTxn(tx.badgerTx, nodeID)
+	if err != nil {
+		return err
 	}
 
 	// Track deletion
@@ -306,7 +271,8 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 		Type:      OpDeleteNode,
 		Timestamp: time.Now(),
 		NodeID:    nodeID,
-		OldNode:   node,
+		EdgesDeleted:   edgesDeleted,
+		DeletedEdgeIDs: deletedEdgeIDs,
 	})
 
 	return nil
@@ -505,21 +471,24 @@ func (tx *BadgerTransaction) Commit() error {
 	// Apply cache/count updates and fire callbacks after commit.
 	// This keeps cached stats O(1) and ensures external systems (e.g. search indexes)
 	// observe transactional writes the same way as non-transactional writes.
-	for _, op := range tx.operations {
-		switch op.Type {
-		case OpCreateNode:
-			tx.engine.cacheOnNodeCreated(op.Node)
-			tx.engine.notifyNodeCreated(op.Node)
-		case OpUpdateNode:
-			tx.engine.cacheOnNodeUpdated(op.Node)
-			tx.engine.notifyNodeUpdated(op.Node)
-		case OpDeleteNode:
-			tx.engine.cacheOnNodeDeleted(op.NodeID, 0)
-			tx.engine.notifyNodeDeleted(op.NodeID)
-		case OpCreateEdge:
-			tx.engine.cacheOnEdgeCreated(op.Edge)
-			tx.engine.notifyEdgeCreated(op.Edge)
-		case OpUpdateEdge:
+		for _, op := range tx.operations {
+			switch op.Type {
+			case OpCreateNode:
+				tx.engine.cacheOnNodeCreated(op.Node)
+				tx.engine.notifyNodeCreated(op.Node)
+			case OpUpdateNode:
+				tx.engine.cacheOnNodeUpdated(op.Node)
+				tx.engine.notifyNodeUpdated(op.Node)
+			case OpDeleteNode:
+				tx.engine.cacheOnNodeDeleted(op.NodeID, op.EdgesDeleted)
+				for _, edgeID := range op.DeletedEdgeIDs {
+					tx.engine.notifyEdgeDeleted(edgeID)
+				}
+				tx.engine.notifyNodeDeleted(op.NodeID)
+			case OpCreateEdge:
+				tx.engine.cacheOnEdgeCreated(op.Edge)
+				tx.engine.notifyEdgeCreated(op.Edge)
+			case OpUpdateEdge:
 			oldType := ""
 			if op.OldEdge != nil {
 				oldType = op.OldEdge.Type

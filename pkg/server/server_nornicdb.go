@@ -278,19 +278,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Search services are cached per database since indexes are namespace-aware
 	// (the storage engine already filters to the correct namespace)
 	ctx := r.Context()
-	searchSvc, err := s.getOrCreateSearchService(dbName, storageEngine)
+	searchSvc, err := s.db.EnsureSearchIndexesBuilt(ctx, dbName, storageEngine)
 	if err != nil {
-		s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
-		return
-	}
-
-	// Build indexes if needed (only on first use or after rebuild)
-	if searchSvc.EmbeddingCount() == 0 {
-		// Indexes are empty, build them from existing nodes
-		if err := searchSvc.BuildIndexes(ctx); err != nil {
-			log.Printf("⚠️ Failed to build search indexes: %v", err)
-			// Continue anyway - search will work with whatever is indexed
-		}
+		// Best effort: continue with whatever is currently indexed.
+		log.Printf("⚠️ Failed to build search indexes for db %s: %v", dbName, err)
 	}
 
 	opts := search.DefaultSearchOptions()

@@ -263,6 +263,7 @@ type Service struct {
 	// GPU k-means clustering for accelerated search (optional)
 	clusterIndex   *gpu.ClusterIndex
 	clusterEnabled bool
+	clusterUsesGPU bool
 
 	// Optional IVF-HNSW acceleration: build one HNSW per cluster to use centroids
 	// as a routing layer for CPU-only large datasets.
@@ -479,6 +480,14 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// If clustering is already enabled, only rebuild when switching CPU<->GPU.
+	if s.clusterEnabled && s.clusterIndex != nil {
+		requestGPU := gpuManager != nil && gpuManager.IsEnabled()
+		if s.clusterUsesGPU == requestGPU {
+			return
+		}
+	}
+
 	if numClusters <= 0 {
 		numClusters = 100 // Default
 	}
@@ -500,6 +509,27 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 
 	s.clusterIndex = gpu.NewClusterIndex(gpuManager, embConfig, kmeansConfig)
 	s.clusterEnabled = true
+	s.clusterUsesGPU = gpuManager != nil && gpuManager.IsEnabled()
+
+	// Backfill embeddings from the current vector index so clustering can run
+	// immediately, even if indexes were built before clustering was enabled.
+	if s.vectorIndex != nil {
+		s.vectorIndex.mu.RLock()
+		ids := make([]string, 0, len(s.vectorIndex.vectors))
+		embs := make([][]float32, 0, len(s.vectorIndex.vectors))
+		for id, vec := range s.vectorIndex.vectors {
+			if len(vec) == 0 {
+				continue
+			}
+			copyVec := make([]float32, len(vec))
+			copy(copyVec, vec)
+			ids = append(ids, id)
+			embs = append(embs, copyVec)
+		}
+		s.vectorIndex.mu.RUnlock()
+
+		_ = s.clusterIndex.AddBatch(ids, embs) // Best effort
+	}
 
 	mode := "CPU"
 	if gpuManager != nil {
@@ -943,11 +973,14 @@ func (s *Service) IndexNode(node *storage.Node) error {
 		}
 	}
 
-	// Index ChunkEmbeddings (always stored in ChunkEmbeddings, even for single chunks)
+	// Index ChunkEmbeddings (chunked documents)
 	// Strategy:
-	//   - Always index a "main" embedding at node.ID (using first chunk)
-	//   - For multi-chunk nodes, also index each chunk separately at "node-id-chunk-N"
-	// This allows both quick node-level search and granular chunk-level search
+	//   - Index a "main" embedding at node.ID (currently uses chunk 0 as a representative)
+	//   - For multi-chunk nodes, index every chunk separately at "node-id-chunk-N"
+	//
+	// Vector search uses ALL chunk vectors because we overfetch and then collapse
+	// chunk IDs back to a unique node ID. The "main" embedding is an additional
+	// node-level entry used by some call paths and for compatibility.
 	// Chunk embeddings are stored in struct field (opaque to users), not in properties
 	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 		chunkIDs := make([]string, 0, len(node.ChunkEmbeddings)+1)
@@ -1559,6 +1592,10 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 	// This path is exact and typically highest-throughput within its tuned N range.
 	if gpuEnabled && vectorCount >= gpuMinN && vectorCount <= gpuMaxN {
 		candidateGen = NewGPUBruteForceCandidateGen(s.gpuEmbeddingIndex)
+	} else if vectorCount < NSmallMax {
+		// Small dataset: use brute-force on CPU (exact).
+		// Even if clustering is available, centroid routing reduces recall and adds overhead at small N.
+		candidateGen = NewBruteForceCandidateGen(s.vectorIndex)
 	} else if s.clusterIndex != nil && s.clusterIndex.IsClustered() {
 		// If clustering is enabled and clusters are built, use centroid routing on CPU
 		// (GPU subset scoring when GPU is enabled but full brute is out-of-range, else IVF-HNSW when available,
@@ -1587,9 +1624,6 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 				candidateGen = NewKMeansCandidateGen(s.clusterIndex, s.vectorIndex, numClustersToSearch)
 			}
 		}
-	} else if vectorCount < NSmallMax {
-		// Small dataset: use brute-force on CPU
-		candidateGen = NewBruteForceCandidateGen(s.vectorIndex)
 	} else {
 		// Large dataset: use HNSW (lazy-initialize if needed)
 		hnswIndex, err := s.getOrCreateHNSWIndex(dimensions)

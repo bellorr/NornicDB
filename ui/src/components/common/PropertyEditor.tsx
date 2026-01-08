@@ -28,17 +28,22 @@ export function PropertyEditor({
     > = {};
     for (const [key, value] of Object.entries(properties)) {
       if (isReadOnlyProperty(key)) continue;
+      const valueType =
+        typeof value === "string"
+          ? "string"
+          : typeof value === "number"
+          ? "number"
+          : typeof value === "boolean"
+          ? "boolean"
+          : "json";
+      // For string type, use value directly (don't JSON.stringify to avoid double quotes)
+      // For other types, use JSON.stringify for proper display
+      const displayValue =
+        valueType === "string" ? (value as string) : JSON.stringify(value);
       props[key] = {
         key,
-        value: JSON.stringify(value),
-        type:
-          typeof value === "string"
-            ? "string"
-            : typeof value === "number"
-            ? "number"
-            : typeof value === "boolean"
-            ? "boolean"
-            : "json",
+        value: displayValue,
+        type: valueType,
       };
     }
     return props;

@@ -17,8 +17,8 @@ func TestIVFHNSW_UsedAfterClustering_CPUOnly(t *testing.T) {
 	svc.EnableClustering(nil, 2)
 	svc.SetMinEmbeddingsForClustering(1)
 
-	// Two obvious groups.
-	for i := 0; i < 50; i++ {
+	// Two obvious groups, large enough to use an ANN pipeline (>= NSmallMax).
+	for i := 0; i < 3000; i++ {
 		n := &storage.Node{
 			ID:              storage.NodeID("a-" + itoa(i)),
 			Labels:          []string{"Doc"},
@@ -26,7 +26,7 @@ func TestIVFHNSW_UsedAfterClustering_CPUOnly(t *testing.T) {
 		}
 		require.NoError(t, svc.IndexNode(n))
 	}
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 3000; i++ {
 		n := &storage.Node{
 			ID:              storage.NodeID("b-" + itoa(i)),
 			Labels:          []string{"Doc"},
