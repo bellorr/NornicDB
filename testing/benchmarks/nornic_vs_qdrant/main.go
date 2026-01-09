@@ -41,6 +41,9 @@ func main() {
 		dataset    = flag.String("dataset", "", "Optional JSONL dataset path (one JSON object per line with fields: id, vector, payload)")
 		collection = flag.String("collection", "bench_col", "Collection name to use in both systems")
 		outCSV     = flag.String("csv", "testing/benchmarks/nornic_vs_qdrant/results.csv", "CSV output path")
+		qdrantAddr = flag.String("qdrant-grpc-addr", "127.0.0.1:6334", "Qdrant gRPC address")
+		nornicAddr = flag.String("nornic-grpc-addr", "127.0.0.1:6336", "NornicDB gRPC address (Qdrant-compatible)")
+		skipQdrant = flag.Bool("skip-qdrant", false, "If set, only benchmark NornicDB")
 	)
 	flag.Parse()
 
@@ -51,17 +54,22 @@ func main() {
 		fatalf("invalid args: points must be >0 when dataset is empty")
 	}
 
-	// Docker services are presumed already running on fixed ports:
-	// Qdrant: HTTP 6333, gRPC 6334
-	// NornicDB: HTTP 6335, gRPC 6336
-	qdrantAddr := "127.0.0.1:6334"
-	nornicAddr := "127.0.0.1:6336"
+	// Docker services are presumed already running.
+	// Defaults:
+	//   - Qdrant gRPC: 127.0.0.1:6334
+	//   - NornicDB gRPC: 127.0.0.1:6336 (override with -nornic-grpc-addr)
 
 	// Verify services are reachable (quick check, services should already be up)
 	logf("Verifying services are reachable...")
-	waitTCP(qdrantAddr, 5*time.Second)
-	waitTCP(nornicAddr, 5*time.Second)
-	logf("Services verified: Qdrant gRPC=%s, NornicDB gRPC=%s", qdrantAddr, nornicAddr)
+	if !*skipQdrant {
+		waitTCP(*qdrantAddr, 5*time.Second)
+	}
+	waitTCP(*nornicAddr, 5*time.Second)
+	if *skipQdrant {
+		logf("Services verified: NornicDB gRPC=%s", *nornicAddr)
+	} else {
+		logf("Services verified: Qdrant gRPC=%s, NornicDB gRPC=%s", *qdrantAddr, *nornicAddr)
+	}
 
 	spec := datasetSpec{
 		path:   *dataset,
@@ -70,17 +78,19 @@ func main() {
 	}
 	logf("Loading dataset into both targets: %s", spec.describe(*collection))
 	logf("Loading into NornicDB...")
-	nornicCount, err := loadDatasetIntoTarget(nornicAddr, *collection, spec, time.Duration(*loadTO)*time.Second)
+	nornicCount, err := loadDatasetIntoTarget(*nornicAddr, *collection, spec, time.Duration(*loadTO)*time.Second)
 	if err != nil {
 		fatalf("load nornicdb: %v", err)
 	}
 	logf("Loaded %d points into NornicDB", nornicCount)
-	logf("Loading into Qdrant...")
-	qdrantCount, err := loadDatasetIntoTarget(qdrantAddr, *collection, spec, time.Duration(*loadTO)*time.Second)
-	if err != nil {
-		fatalf("load qdrant: %v", err)
+	if !*skipQdrant {
+		logf("Loading into Qdrant...")
+		qdrantCount, err := loadDatasetIntoTarget(*qdrantAddr, *collection, spec, time.Duration(*loadTO)*time.Second)
+		if err != nil {
+			fatalf("load qdrant: %v", err)
+		}
+		logf("Loaded %d points into Qdrant", qdrantCount)
 	}
-	logf("Loaded %d points into Qdrant", qdrantCount)
 
 	queryVec := makeDeterministicQuery(*dim)
 
@@ -92,15 +102,18 @@ func main() {
 
 	logf("Running benchmark: NornicDB (Qdrant gRPC compat)")
 	nornicSum := runBenchmark("nornicdb", runCfg, func() (workerFn, func(), error) {
-		return newSearchWorker(nornicAddr, *collection, queryVec, uint64(*k), *hnswEf)
+		return newSearchWorker(*nornicAddr, *collection, queryVec, uint64(*k), *hnswEf)
 	})
 	printSummary("NornicDB", nornicSum)
 
-	logf("Running benchmark: Qdrant (Docker)")
-	qdrantSum := runBenchmark("qdrant", runCfg, func() (workerFn, func(), error) {
-		return newSearchWorker(qdrantAddr, *collection, queryVec, uint64(*k), *hnswEf)
-	})
-	printSummary("Qdrant", qdrantSum)
+	var qdrantSum summary
+	if !*skipQdrant {
+		logf("Running benchmark: Qdrant (Docker)")
+		qdrantSum = runBenchmark("qdrant", runCfg, func() (workerFn, func(), error) {
+			return newSearchWorker(*qdrantAddr, *collection, queryVec, uint64(*k), *hnswEf)
+		})
+		printSummary("Qdrant", qdrantSum)
+	}
 
 	csvPath := *outCSV
 	if !filepath.IsAbs(csvPath) {
@@ -113,7 +126,9 @@ func main() {
 	}
 	rows := []csvRow{
 		rowFromSummary("nornicdb", spec.pointsForCSV(), *dim, *k, *concurrent, nornicSum),
-		rowFromSummary("qdrant", spec.pointsForCSV(), *dim, *k, *concurrent, qdrantSum),
+	}
+	if !*skipQdrant {
+		rows = append(rows, rowFromSummary("qdrant", spec.pointsForCSV(), *dim, *k, *concurrent, qdrantSum))
 	}
 	if err := appendCSV(csvPath, rows); err != nil {
 		fatalf("write csv: %v", err)
