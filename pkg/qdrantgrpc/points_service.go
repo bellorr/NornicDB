@@ -64,9 +64,9 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
-	if !s.config.AllowVectorMutations {
-		return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
-	}
+	// if !s.config.AllowVectorMutations {
+	// 	return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
+	// }
 	if len(req.GetPoints()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "points are required")
 	}
@@ -644,9 +644,9 @@ func (s *PointsService) UpdateVectors(ctx context.Context, req *qpb.UpdatePointV
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
-	if !s.config.AllowVectorMutations {
-		return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
-	}
+	// if !s.config.AllowVectorMutations {
+	// 	return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
+	// }
 	if len(req.GetPoints()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "points are required")
 	}
@@ -713,9 +713,9 @@ func (s *PointsService) DeleteVectors(ctx context.Context, req *qpb.DeletePointV
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
-	if !s.config.AllowVectorMutations {
-		return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
-	}
+	// if !s.config.AllowVectorMutations {
+	// 	return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
+	// }
 	if req.PointsSelector == nil {
 		return nil, status.Error(codes.InvalidArgument, "points_selector is required")
 	}
