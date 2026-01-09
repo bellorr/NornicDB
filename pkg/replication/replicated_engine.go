@@ -1,0 +1,153 @@
+package replication
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
+)
+
+// ReplicatedEngine wraps a storage.Engine and routes write operations through a Replicator.
+//
+// Design:
+// - Reads are served locally from the embedded Engine.
+// - Writes are turned into replication Commands and applied via the Replicator.
+// - The embedded Engine is used only for reads; replicated writes are applied to the
+//   *inner* engine by the StorageAdapter on each node.
+//
+// This wrapper intentionally operates on the *base* storage (the engine that stores
+// fully-qualified IDs like "<db>:<id>") so multi-database isolation is preserved.
+type ReplicatedEngine struct {
+	storage.Engine
+
+	replicator Replicator
+	timeout   time.Duration
+}
+
+func NewReplicatedEngine(inner storage.Engine, replicator Replicator, timeout time.Duration) *ReplicatedEngine {
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	return &ReplicatedEngine{
+		Engine:     inner,
+		replicator: replicator,
+		timeout:    timeout,
+	}
+}
+
+func (e *ReplicatedEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {
+	if node == nil {
+		return "", fmt.Errorf("nil node")
+	}
+	data, err := json.Marshal(node)
+	if err != nil {
+		return "", fmt.Errorf("marshal node: %w", err)
+	}
+	if err := e.replicator.Apply(&Command{Type: CmdCreateNode, Data: data, Timestamp: time.Now()}, e.timeout); err != nil {
+		return "", err
+	}
+	return node.ID, nil
+}
+
+func (e *ReplicatedEngine) UpdateNode(node *storage.Node) error {
+	if node == nil {
+		return fmt.Errorf("nil node")
+	}
+	data, err := json.Marshal(node)
+	if err != nil {
+		return fmt.Errorf("marshal node: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdUpdateNode, Data: data, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) DeleteNode(id storage.NodeID) error {
+	return e.replicator.Apply(&Command{Type: CmdDeleteNode, Data: []byte(string(id)), Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) CreateEdge(edge *storage.Edge) error {
+	if edge == nil {
+		return fmt.Errorf("nil edge")
+	}
+	data, err := json.Marshal(edge)
+	if err != nil {
+		return fmt.Errorf("marshal edge: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdCreateEdge, Data: data, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) UpdateEdge(edge *storage.Edge) error {
+	if edge == nil {
+		return fmt.Errorf("nil edge")
+	}
+	data, err := json.Marshal(edge)
+	if err != nil {
+		return fmt.Errorf("marshal edge: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdUpdateEdge, Data: data, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) DeleteEdge(id storage.EdgeID) error {
+	payload, err := json.Marshal(struct {
+		EdgeID string `json:"edge_id"`
+	}{EdgeID: string(id)})
+	if err != nil {
+		return fmt.Errorf("marshal delete edge request: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdDeleteEdge, Data: payload, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) BulkCreateNodes(nodes []*storage.Node) error {
+	payload, err := json.Marshal(struct {
+		Nodes []*storage.Node `json:"nodes"`
+	}{Nodes: nodes})
+	if err != nil {
+		return fmt.Errorf("marshal bulk create nodes: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdBulkCreateNodes, Data: payload, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) BulkCreateEdges(edges []*storage.Edge) error {
+	payload, err := json.Marshal(struct {
+		Edges []*storage.Edge `json:"edges"`
+	}{Edges: edges})
+	if err != nil {
+		return fmt.Errorf("marshal bulk create edges: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdBulkCreateEdges, Data: payload, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) BulkDeleteNodes(ids []storage.NodeID) error {
+	payload, err := json.Marshal(struct {
+		IDs []storage.NodeID `json:"ids"`
+	}{IDs: ids})
+	if err != nil {
+		return fmt.Errorf("marshal bulk delete nodes: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdBulkDeleteNodes, Data: payload, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) BulkDeleteEdges(ids []storage.EdgeID) error {
+	payload, err := json.Marshal(struct {
+		IDs []storage.EdgeID `json:"ids"`
+	}{IDs: ids})
+	if err != nil {
+		return fmt.Errorf("marshal bulk delete edges: %w", err)
+	}
+	return e.replicator.Apply(&Command{Type: CmdBulkDeleteEdges, Data: payload, Timestamp: time.Now()}, e.timeout)
+}
+
+func (e *ReplicatedEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
+	payload, err := json.Marshal(struct {
+		Prefix string `json:"prefix"`
+	}{Prefix: prefix})
+	if err != nil {
+		return 0, 0, fmt.Errorf("marshal delete by prefix: %w", err)
+	}
+	if err := e.replicator.Apply(&Command{Type: CmdDeleteByPrefix, Data: payload, Timestamp: time.Now()}, e.timeout); err != nil {
+		return 0, 0, err
+	}
+	// Best-effort counts are not returned by the replication protocol today.
+	return 0, 0, nil
+}
+

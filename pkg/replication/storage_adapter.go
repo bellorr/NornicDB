@@ -28,6 +28,18 @@ type StorageAdapter struct {
 	walDir      string
 	walMu       sync.RWMutex // Protects wal and walPosition
 	walPosition atomic.Uint64
+
+	// In-memory WAL for fast streaming (avoids re-reading wal.log continuously).
+	memWALMu sync.RWMutex
+	memWAL   []*WALEntry // sorted by Position asc
+}
+
+type replicationWALRecord struct {
+	// Timestamp when the entry was created.
+	Timestamp int64 `json:"ts"`
+
+	// Command is the replicated command.
+	Command *Command `json:"cmd"`
 }
 
 // NewStorageAdapter creates a new storage adapter wrapping the given engine.
@@ -67,43 +79,18 @@ func NewStorageAdapterWithWAL(engine storage.Engine, walDir string) (*StorageAda
 	}
 
 	// Load existing WAL position
-	if err := adapter.loadWALPosition(); err != nil {
-		// Log error but continue - will start from position 0
-		// This allows recovery even if WAL is corrupted
-	}
+	_ = adapter.loadWALPosition()
 
 	return adapter, nil
 }
 
 // loadWALPosition loads the last WAL position from persistent storage.
 func (a *StorageAdapter) loadWALPosition() error {
-	walPath := filepath.Join(a.walDir, "wal.log")
-	entries, err := storage.ReadWALEntries(walPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			// No existing WAL - start fresh
-			return nil
-		}
-		return fmt.Errorf("failed to read WAL entries: %w", err)
+	// storage.WAL already recovers its own sequence on startup.
+	// Use that as the authoritative replication WAL position.
+	if a.wal != nil {
+		a.walPosition.Store(a.wal.Sequence())
 	}
-
-	if len(entries) == 0 {
-		return nil
-	}
-
-	// Find the highest position from WAL entries
-	// We need to deserialize each entry to get the replication WALEntry
-	maxPos := uint64(0)
-	for _, entry := range entries {
-		var replEntry WALEntry
-		if err := json.Unmarshal(entry.Data, &replEntry); err == nil {
-			if replEntry.Position > maxPos {
-				maxPos = replEntry.Position
-			}
-		}
-	}
-
-	a.walPosition.Store(maxPos)
 	return nil
 }
 
@@ -120,19 +107,30 @@ func (a *StorageAdapter) ApplyCommand(cmd *Command) error {
 	}
 
 	// Record in persistent WAL first (write-ahead logging)
-	pos := a.walPosition.Add(1)
-	entry := WALEntry{
-		Position:  pos,
+	record := replicationWALRecord{
 		Timestamp: cmd.Timestamp.UnixNano(),
 		Command:   cmd,
 	}
 
-	// Append to persistent WAL
-	// Use a custom operation type for replication WAL entries
-	// The WAL will marshal the entry automatically
-	if err := a.wal.Append(storage.OperationType("replication_command"), entry); err != nil {
+	// Append to persistent WAL.
+	// Note: Do not read wal.log to stream; use the in-memory WAL below. Reading
+	// wal.log races with buffered writes and is also O(N) per batch.
+	if err := a.wal.Append(storage.OperationType("replication_command"), record); err != nil {
 		return fmt.Errorf("failed to append to WAL: %w", err)
 	}
+
+	// Use the WAL's recovered/monotonic sequence as the replication position.
+	pos := a.wal.Sequence()
+	a.walPosition.Store(pos)
+
+	// Append to in-memory WAL for fast streaming.
+	a.memWALMu.Lock()
+	a.memWAL = append(a.memWAL, &WALEntry{
+		Position:  pos,
+		Timestamp: record.Timestamp,
+		Command:   cmd,
+	})
+	a.memWALMu.Unlock()
 
 	// Execute the command
 	switch cmd.Type {
@@ -144,6 +142,8 @@ func (a *StorageAdapter) ApplyCommand(cmd *Command) error {
 		return a.applyDeleteNode(cmd.Data)
 	case CmdCreateEdge:
 		return a.applyCreateEdge(cmd.Data)
+	case CmdUpdateEdge:
+		return a.applyUpdateEdge(cmd.Data)
 	case CmdDeleteEdge:
 		return a.applyDeleteEdge(cmd.Data)
 	case CmdSetProperty:
@@ -152,6 +152,16 @@ func (a *StorageAdapter) ApplyCommand(cmd *Command) error {
 		return a.applyBatchWrite(cmd.Data)
 	case CmdCypher:
 		return a.applyCypher(cmd.Data)
+	case CmdDeleteByPrefix:
+		return a.applyDeleteByPrefix(cmd.Data)
+	case CmdBulkCreateNodes:
+		return a.applyBulkCreateNodes(cmd.Data)
+	case CmdBulkCreateEdges:
+		return a.applyBulkCreateEdges(cmd.Data)
+	case CmdBulkDeleteNodes:
+		return a.applyBulkDeleteNodes(cmd.Data)
+	case CmdBulkDeleteEdges:
+		return a.applyBulkDeleteEdges(cmd.Data)
 	default:
 		return fmt.Errorf("unknown command type: %d", cmd.Type)
 	}
@@ -189,6 +199,14 @@ func (a *StorageAdapter) applyCreateEdge(data []byte) error {
 		return fmt.Errorf("unmarshal edge: %w", err)
 	}
 	return a.engine.CreateEdge(&edge)
+}
+
+func (a *StorageAdapter) applyUpdateEdge(data []byte) error {
+	var edge storage.Edge
+	if err := json.Unmarshal(data, &edge); err != nil {
+		return fmt.Errorf("unmarshal edge: %w", err)
+	}
+	return a.engine.UpdateEdge(&edge)
 }
 
 // applyDeleteEdge deletes an edge.
@@ -248,6 +266,60 @@ func (a *StorageAdapter) applyBatchWrite(data []byte) error {
 	return nil
 }
 
+func (a *StorageAdapter) applyDeleteByPrefix(data []byte) error {
+	var req struct {
+		Prefix string `json:"prefix"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return fmt.Errorf("unmarshal delete by prefix request: %w", err)
+	}
+	if req.Prefix == "" {
+		return fmt.Errorf("prefix is required")
+	}
+	_, _, err := a.engine.DeleteByPrefix(req.Prefix)
+	return err
+}
+
+func (a *StorageAdapter) applyBulkCreateNodes(data []byte) error {
+	var req struct {
+		Nodes []*storage.Node `json:"nodes"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return fmt.Errorf("unmarshal bulk create nodes: %w", err)
+	}
+	return a.engine.BulkCreateNodes(req.Nodes)
+}
+
+func (a *StorageAdapter) applyBulkCreateEdges(data []byte) error {
+	var req struct {
+		Edges []*storage.Edge `json:"edges"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return fmt.Errorf("unmarshal bulk create edges: %w", err)
+	}
+	return a.engine.BulkCreateEdges(req.Edges)
+}
+
+func (a *StorageAdapter) applyBulkDeleteNodes(data []byte) error {
+	var req struct {
+		IDs []storage.NodeID `json:"ids"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return fmt.Errorf("unmarshal bulk delete nodes: %w", err)
+	}
+	return a.engine.BulkDeleteNodes(req.IDs)
+}
+
+func (a *StorageAdapter) applyBulkDeleteEdges(data []byte) error {
+	var req struct {
+		IDs []storage.EdgeID `json:"ids"`
+	}
+	if err := json.Unmarshal(data, &req); err != nil {
+		return fmt.Errorf("unmarshal bulk delete edges: %w", err)
+	}
+	return a.engine.BulkDeleteEdges(req.IDs)
+}
+
 // applyCypher executes a Cypher command (for write queries).
 // The data should be a JSON object with "query" (string) and optional "params" (map[string]interface{}).
 func (a *StorageAdapter) applyCypher(data []byte) error {
@@ -280,6 +352,18 @@ func (a *StorageAdapter) applyCypher(data []byte) error {
 	return nil
 }
 
+// Close releases replication resources (WAL file handles/background goroutines).
+func (a *StorageAdapter) Close() error {
+	a.walMu.Lock()
+	defer a.walMu.Unlock()
+	if a.wal != nil {
+		err := a.wal.Close()
+		a.wal = nil
+		return err
+	}
+	return nil
+}
+
 // GetWALPosition returns the current WAL position.
 func (a *StorageAdapter) GetWALPosition() (uint64, error) {
 	return a.walPosition.Load(), nil
@@ -287,10 +371,38 @@ func (a *StorageAdapter) GetWALPosition() (uint64, error) {
 
 // GetWALEntries returns WAL entries starting from the given position.
 func (a *StorageAdapter) GetWALEntries(fromPosition uint64, maxEntries int) ([]*WALEntry, error) {
+	// Fast path: serve from in-memory WAL.
+	a.memWALMu.RLock()
+	mem := a.memWAL
+	a.memWALMu.RUnlock()
+
+	if len(mem) > 0 && fromPosition >= mem[0].Position {
+		// Binary search first entry with Position > fromPosition
+		lo, hi := 0, len(mem)
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if mem[mid].Position <= fromPosition {
+				lo = mid + 1
+			} else {
+				hi = mid
+			}
+		}
+		if lo >= len(mem) {
+			return []*WALEntry{}, nil
+		}
+		end := lo + maxEntries
+		if end > len(mem) {
+			end = len(mem)
+		}
+		entries := make([]*WALEntry, end-lo)
+		copy(entries, mem[lo:end])
+		return entries, nil
+	}
+
+	// Read from persistent WAL
 	a.walMu.RLock()
 	defer a.walMu.RUnlock()
 
-	// Read from persistent WAL
 	walPath := filepath.Join(a.walDir, "wal.log")
 	storageEntries, err := storage.ReadWALEntries(walPath)
 	if err != nil {
@@ -313,16 +425,31 @@ func (a *StorageAdapter) GetWALEntries(fromPosition uint64, maxEntries int) ([]*
 			continue
 		}
 
-		// Deserialize replication WALEntry from storage entry's Data field
-		// The Data field contains the JSON-marshaled replication.WALEntry
-		var replEntry WALEntry
-		if err := json.Unmarshal(storageEntry.Data, &replEntry); err != nil {
-			continue // Skip corrupted entries
+		// Prefer the current record format, but tolerate older WALs.
+		var (
+			ts  int64
+			cmd *Command
+		)
+		var rec replicationWALRecord
+		if err := json.Unmarshal(storageEntry.Data, &rec); err == nil && rec.Command != nil {
+			ts = rec.Timestamp
+			cmd = rec.Command
+		} else {
+			var old WALEntry
+			if err := json.Unmarshal(storageEntry.Data, &old); err != nil || old.Command == nil {
+				continue // Skip corrupted entries
+			}
+			ts = old.Timestamp
+			cmd = old.Command
 		}
 
-		// Filter by position
-		if replEntry.Position > fromPosition {
-			entries = append(entries, &replEntry)
+		pos := storageEntry.Sequence
+		if pos > fromPosition {
+			entries = append(entries, &WALEntry{
+				Position:  pos,
+				Timestamp: ts,
+				Command:   cmd,
+			})
 			if len(entries) >= maxEntries {
 				break
 			}
@@ -330,6 +457,32 @@ func (a *StorageAdapter) GetWALEntries(fromPosition uint64, maxEntries int) ([]*
 	}
 
 	return entries, nil
+}
+
+// PruneWALEntries drops in-memory WAL entries up to (and including) uptoPosition.
+// This keeps memory bounded while streaming and does not affect the persistent WAL.
+func (a *StorageAdapter) PruneWALEntries(uptoPosition uint64) {
+	a.memWALMu.Lock()
+	defer a.memWALMu.Unlock()
+	if len(a.memWAL) == 0 {
+		return
+	}
+	// Find first entry with Position > uptoPosition.
+	lo, hi := 0, len(a.memWAL)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		if a.memWAL[mid].Position <= uptoPosition {
+			lo = mid + 1
+		} else {
+			hi = mid
+		}
+	}
+	if lo == 0 {
+		return
+	}
+	// Drop prefix in-place to avoid allocating a new backing array.
+	copy(a.memWAL, a.memWAL[lo:])
+	a.memWAL = a.memWAL[:len(a.memWAL)-lo]
 }
 
 // WriteSnapshot writes a full snapshot to the given writer.
@@ -404,15 +557,6 @@ func (a *StorageAdapter) RestoreSnapshot(r SnapshotReader) error {
 // Engine returns the underlying storage engine.
 func (a *StorageAdapter) Engine() storage.Engine {
 	return a.engine
-}
-
-// Close closes the WAL and cleans up resources.
-// Should be called when the adapter is no longer needed.
-func (a *StorageAdapter) Close() error {
-	if a.wal != nil {
-		return a.wal.Close()
-	}
-	return nil
 }
 
 // Verify StorageAdapter implements Storage interface.

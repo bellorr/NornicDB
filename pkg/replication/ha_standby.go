@@ -698,6 +698,14 @@ func (r *HAStandbyReplicator) HandleFence(req *FenceRequest) (*FenceResponse, er
 	return &FenceResponse{Fenced: true}, nil
 }
 
+// HandlePromote handles an incoming promote request from the peer.
+// Today this is used as a lightweight coordination hook; the actual promotion
+// decision remains local (based on health/auto-failover config).
+func (r *HAStandbyReplicator) HandlePromote(req *PromoteRequest) (*PromoteResponse, error) {
+	_ = req
+	return &PromoteResponse{Ready: true}, nil
+}
+
 // Ensure HAStandbyReplicator implements Replicator.
 var _ Replicator = (*HAStandbyReplicator)(nil)
 
@@ -732,6 +740,11 @@ func (w *WALStreamer) AcknowledgePosition(pos uint64) {
 
 	if pos > w.lastAckedPos {
 		w.lastAckedPos = pos
+	}
+
+	// Allow storage to discard already-acknowledged in-memory WAL entries.
+	if pruner, ok := w.storage.(interface{ PruneWALEntries(uptoPosition uint64) }); ok {
+		pruner.PruneWALEntries(pos)
 	}
 }
 

@@ -130,6 +130,9 @@ const (
 	// CmdDeleteEdge deletes an edge.
 	CmdDeleteEdge
 
+	// CmdUpdateEdge updates an existing edge.
+	CmdUpdateEdge
+
 	// CmdSetProperty sets a property on a node.
 	CmdSetProperty
 
@@ -150,6 +153,21 @@ const (
 
 	// CmdAppendEntriesResponse is a Raft append entries response.
 	CmdAppendEntriesResponse
+
+	// CmdDeleteByPrefix deletes all nodes/edges under an ID prefix (e.g. database drop).
+	CmdDeleteByPrefix
+
+	// CmdBulkCreateNodes creates multiple nodes.
+	CmdBulkCreateNodes
+
+	// CmdBulkCreateEdges creates multiple edges.
+	CmdBulkCreateEdges
+
+	// CmdBulkDeleteNodes deletes multiple nodes.
+	CmdBulkDeleteNodes
+
+	// CmdBulkDeleteEdges deletes multiple edges.
+	CmdBulkDeleteEdges
 )
 
 // HealthStatus represents the health state of the replicator.

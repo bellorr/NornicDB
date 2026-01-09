@@ -157,6 +157,48 @@ type rpcRequest struct {
 	respCh  chan []byte
 }
 
+// HandleRaftVote handles an incoming RequestVote RPC via the cluster transport.
+func (r *RaftReplicator) HandleRaftVote(req *RaftVoteRequest) (*RaftVoteResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("nil vote request")
+	}
+	resp := r.handleVoteRequest(&VoteRequest{
+		Term:         req.Term,
+		CandidateID:  req.CandidateID,
+		LastLogIndex: req.LastLogIndex,
+		LastLogTerm:  req.LastLogTerm,
+	})
+	return &RaftVoteResponse{
+		Term:        resp.Term,
+		VoteGranted: resp.VoteGranted,
+		VoterID:     resp.VoterID,
+	}, nil
+}
+
+// HandleRaftAppendEntries handles an incoming AppendEntries RPC via the cluster transport.
+func (r *RaftReplicator) HandleRaftAppendEntries(req *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("nil append entries request")
+	}
+	resp := r.handleAppendEntriesRequest(&AppendEntriesRequest{
+		Term:         req.Term,
+		LeaderID:     req.LeaderID,
+		LeaderAddr:   req.LeaderAddr,
+		PrevLogIndex: req.PrevLogIndex,
+		PrevLogTerm:  req.PrevLogTerm,
+		Entries:      req.Entries,
+		LeaderCommit: req.LeaderCommit,
+	})
+	return &RaftAppendEntriesResponse{
+		Term:          resp.Term,
+		Success:       resp.Success,
+		MatchIndex:    resp.MatchIndex,
+		ConflictIndex: resp.ConflictIndex,
+		ConflictTerm:  resp.ConflictTerm,
+		ResponderID:   resp.ResponderID,
+	}, nil
+}
+
 // NewRaftReplicator creates a new Raft replicator.
 func NewRaftReplicator(config *Config, storage Storage) (*RaftReplicator, error) {
 	if err := config.Validate(); err != nil {

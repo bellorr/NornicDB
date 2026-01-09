@@ -142,6 +142,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/encryption"
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/replication"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -484,6 +485,11 @@ type DB struct {
 
 	// Background goroutine tracking
 	bgWg sync.WaitGroup
+
+	// Replication / HA (optional; enabled when NORNICDB_CLUSTER_MODE != standalone)
+	replicator         replication.Replicator
+	replicationAdapter *replication.StorageAdapter
+	replicationTrans   replication.Transport
 }
 
 // Open opens or creates a NornicDB database at the specified directory.
@@ -901,6 +907,16 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		// Track the underlying storage chain so Close() can release Badger directory locks.
 		db.baseStorage = baseStorage
 
+		// Optionally wrap base storage with replication.
+		//
+		// This uses the existing pkg/replication cluster protocol transport (port 7688)
+		// and routes ALL writes through a Replicator, while reads remain local.
+		baseStorage, err = db.maybeEnableReplication(baseStorage)
+		if err != nil {
+			_ = db.baseStorage.Close()
+			return nil, err
+		}
+
 		// Wrap base storage with NamespacedEngine for the default database ("nornic")
 		// This ensures everything uses namespaced storage - no direct base storage access
 		// Get default database name from global config (same as server does)
@@ -912,11 +928,19 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		db.storage = storage.NewNamespacedEngine(baseStorage, defaultDBName)
 		fmt.Printf("📦 Wrapped storage with namespace '%s' (all operations are namespaced)\n", defaultDBName)
 	} else {
-		baseStorage := storage.NewMemoryEngine()
+		var baseStorage storage.Engine = storage.NewMemoryEngine()
 		fmt.Println("⚠️  Using in-memory storage (data will not persist)")
 
 		// Track the underlying storage chain so Close() can cleanly shut down goroutines/locks.
 		db.baseStorage = baseStorage
+
+		// Optionally wrap base storage with replication.
+		replicated, err := db.maybeEnableReplication(baseStorage)
+		if err != nil {
+			_ = db.baseStorage.Close()
+			return nil, err
+		}
+		baseStorage = replicated
 
 		// Wrap in-memory storage with NamespacedEngine for consistency
 		// Get default database name from global config (same as server does)
@@ -1116,6 +1140,62 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	return db, nil
 }
 
+func (db *DB) maybeEnableReplication(base storage.Engine) (storage.Engine, error) {
+	mode := os.Getenv("NORNICDB_CLUSTER_MODE")
+	if mode == "" || mode == string(replication.ModeStandalone) {
+		return base, nil
+	}
+
+	replCfg := replication.LoadFromEnv()
+
+	// Keep replication state under the DB data dir unless explicitly overridden.
+	if os.Getenv("NORNICDB_CLUSTER_DATA_DIR") == "" {
+		if db.config != nil && db.config.DataDir != "" {
+			replCfg.DataDir = db.config.DataDir + "/replication"
+		} else {
+			replCfg.DataDir = "./data/replication"
+		}
+	}
+
+	adapter, err := replication.NewStorageAdapterWithWAL(base, replCfg.DataDir+"/wal")
+	if err != nil {
+		return nil, fmt.Errorf("replication: create storage adapter: %w", err)
+	}
+
+	replicator, err := replication.NewReplicator(replCfg, adapter)
+	if err != nil {
+		_ = adapter.Close()
+		return nil, fmt.Errorf("replication: create replicator: %w", err)
+	}
+
+	transport := replication.NewDefaultTransport(&replication.ClusterTransportConfig{
+		NodeID:   replCfg.NodeID,
+		BindAddr: replCfg.BindAddr,
+	})
+
+	// Wire transport into modes that support it.
+	if r, ok := replicator.(interface{ SetTransport(replication.Transport) }); ok {
+		r.SetTransport(transport)
+	}
+	// If we're using the default ClusterTransport, register message handlers for the replicator.
+	if ct, ok := transport.(*replication.ClusterTransport); ok {
+		replication.RegisterClusterHandlers(ct, replicator)
+	}
+
+	if err := replicator.Start(context.Background()); err != nil {
+		_ = transport.Close()
+		_ = replicator.Shutdown()
+		_ = adapter.Close()
+		return nil, fmt.Errorf("replication: start: %w", err)
+	}
+
+	db.replicator = replicator
+	db.replicationAdapter = adapter
+	db.replicationTrans = transport
+
+	return replication.NewReplicatedEngine(base, replicator, 30*time.Second), nil
+}
+
 // SetEmbedder configures the auto-embed queue with the given embedder.
 // This should be called by the server after creating a working embedder.
 // The embedder is shared with the MCP server and Cypher executor for consistency.
@@ -1290,6 +1370,23 @@ func (db *DB) closeInternal() error {
 	// Close embed queue gracefully (processes remaining batch)
 	if db.embedQueue != nil {
 		db.embedQueue.Close()
+	}
+
+	// Stop replication before closing storage.
+	if db.replicator != nil {
+		if err := db.replicator.Shutdown(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if db.replicationTrans != nil {
+		if err := db.replicationTrans.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if db.replicationAdapter != nil {
+		if err := db.replicationAdapter.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	// Close the underlying storage chain to release Badger directory locks and stop
