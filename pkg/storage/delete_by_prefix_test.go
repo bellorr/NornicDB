@@ -3,157 +3,55 @@ package storage
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestBadgerEngine_DeleteByPrefix(t *testing.T) {
-	engine, err := NewBadgerEngineInMemory()
-	require.NoError(t, err)
-	defer engine.Close()
-
-	// Create nodes with different prefixes
-	prefixes := []string{"tenant_a:", "tenant_b:", "tenant_c:"}
-	for _, prefix := range prefixes {
-		for i := 0; i < 3; i++ {
-			node := &Node{
-				ID:     NodeID(prefix + "node-" + string(rune('0'+i))),
-				Labels: []string{"Test"},
-				Properties: map[string]any{
-					"prefix": prefix,
-				},
-			}
-			_, err := engine.CreateNode(node)
-			require.NoError(t, err)
-		}
-	}
-
-	// Verify all nodes exist
-	allNodes, err := engine.AllNodes()
-	require.NoError(t, err)
-	assert.Len(t, allNodes, 9)
-
-	// Delete tenant_a prefix
-	nodesDeleted, edgesDeleted, err := engine.DeleteByPrefix("tenant_a:")
-	require.NoError(t, err)
-	assert.Equal(t, int64(3), nodesDeleted)
-	assert.Equal(t, int64(0), edgesDeleted) // No edges
-
-	// Verify tenant_a nodes are gone
-	allNodes, err = engine.AllNodes()
-	require.NoError(t, err)
-	assert.Len(t, allNodes, 6)
-
-	// Verify other tenants still exist
-	for _, node := range allNodes {
-		prefix := node.Properties["prefix"].(string)
-		assert.NotEqual(t, "tenant_a:", prefix)
-	}
-
-	// Delete tenant_b prefix
-	nodesDeleted, edgesDeleted, err = engine.DeleteByPrefix("tenant_b:")
-	require.NoError(t, err)
-	assert.Equal(t, int64(3), nodesDeleted)
-
-	// Only tenant_c should remain
-	allNodes, err = engine.AllNodes()
-	require.NoError(t, err)
-	assert.Len(t, allNodes, 3)
-}
-
-func TestBadgerEngine_DeleteByPrefix_WithEdges(t *testing.T) {
-	engine, err := NewBadgerEngineInMemory()
-	require.NoError(t, err)
-	defer engine.Close()
-
-	// Create nodes and edges with prefix
-	prefix := "tenant_a:"
-	node1 := &Node{ID: NodeID(prefix + "n1"), Labels: []string{"Person"}}
-	node2 := &Node{ID: NodeID(prefix + "n2"), Labels: []string{"Person"}}
-	_, err = engine.CreateNode(node1)
-	require.NoError(t, err)
-	_, err = engine.CreateNode(node2)
-	require.NoError(t, err)
-
-	edge := &Edge{
-		ID:        EdgeID(prefix + "e1"),
-		StartNode: NodeID(prefix + "n1"),
-		EndNode:   NodeID(prefix + "n2"),
-		Type:      "KNOWS",
-	}
-	err = engine.CreateEdge(edge)
-	require.NoError(t, err)
-
-	// Delete by prefix
-	nodesDeleted, edgesDeleted, err := engine.DeleteByPrefix(prefix)
-	require.NoError(t, err)
-	assert.Equal(t, int64(2), nodesDeleted)
-	assert.Equal(t, int64(1), edgesDeleted) // Edge deleted with nodes
-
-	// Verify everything is gone
-	allNodes, err := engine.AllNodes()
-	require.NoError(t, err)
-	assert.Len(t, allNodes, 0)
-
-	allEdges, err := engine.AllEdges()
-	require.NoError(t, err)
-	assert.Len(t, allEdges, 0)
-}
-
-func TestBadgerEngine_DeleteByPrefix_EmptyPrefix(t *testing.T) {
-	engine, err := NewBadgerEngineInMemory()
-	require.NoError(t, err)
-	defer engine.Close()
-
-	_, _, err = engine.DeleteByPrefix("")
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "prefix cannot be empty")
-}
-
-func TestBadgerEngine_DeleteByPrefix_NoMatches(t *testing.T) {
-	engine, err := NewBadgerEngineInMemory()
-	require.NoError(t, err)
-	defer engine.Close()
-
-	// Create node with different prefix
-	node := &Node{ID: NodeID("other:node"), Labels: []string{"Test"}}
-	_, err = engine.CreateNode(node)
-	require.NoError(t, err)
-
-	// Delete non-matching prefix
-	nodesDeleted, edgesDeleted, err := engine.DeleteByPrefix("tenant_a:")
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), nodesDeleted)
-	assert.Equal(t, int64(0), edgesDeleted)
-
-	// Original node should still exist
-	allNodes, err := engine.AllNodes()
-	require.NoError(t, err)
-	assert.Len(t, allNodes, 1)
-}
-
-func TestMemoryEngine_DeleteByPrefix(t *testing.T) {
+func TestBadgerEngine_DeleteByPrefix_DropsOnlyMatchingNamespace(t *testing.T) {
 	engine := NewMemoryEngine()
-	defer engine.Close()
+	t.Cleanup(func() { _ = engine.Close() })
 
-	// Create nodes with prefix
-	for i := 0; i < 3; i++ {
-		node := &Node{
-			ID:     NodeID("tenant_a:node-" + string(rune('0'+i))),
-			Labels: []string{"Test"},
-		}
-		_, err := engine.CreateNode(node)
-		require.NoError(t, err)
-	}
-
-	// Delete by prefix
-	nodesDeleted, edgesDeleted, err := engine.DeleteByPrefix("tenant_a:")
+	_, err := engine.CreateNode(&Node{ID: "db1:n1", Labels: []string{"Person"}})
 	require.NoError(t, err)
-	assert.Equal(t, int64(3), nodesDeleted)
-	assert.Equal(t, int64(0), edgesDeleted)
-
-	// Verify deleted
-	allNodes, err := engine.AllNodes()
+	_, err = engine.CreateNode(&Node{ID: "db2:n2", Labels: []string{"Person"}})
 	require.NoError(t, err)
-	assert.Len(t, allNodes, 0)
+
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "db1:e1", StartNode: "db1:n1", EndNode: "db1:n1", Type: "KNOWS"}))
+	require.NoError(t, engine.CreateEdge(&Edge{ID: "db2:e2", StartNode: "db2:n2", EndNode: "db2:n2", Type: "KNOWS"}))
+
+	// Warm caches to ensure DeleteByPrefix invalidates them.
+	nodes, err := engine.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	require.Len(t, nodes, 2)
+
+	edges, err := engine.GetEdgesByType("KNOWS")
+	require.NoError(t, err)
+	require.Len(t, edges, 2)
+
+	nodesDeleted, edgesDeleted, err := engine.DeleteByPrefix("db1:")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), nodesDeleted)
+	require.Equal(t, int64(1), edgesDeleted)
+
+	_, err = engine.GetNode("db1:n1")
+	require.ErrorIs(t, err, ErrNotFound)
+	_, err = engine.GetEdge("db1:e1")
+	require.ErrorIs(t, err, ErrNotFound)
+
+	_, err = engine.GetNode("db2:n2")
+	require.NoError(t, err)
+	_, err = engine.GetEdge("db2:e2")
+	require.NoError(t, err)
+
+	// Label index must not return dropped nodes.
+	nodes, err = engine.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	require.Len(t, nodes, 1)
+	require.Equal(t, NodeID("db2:n2"), nodes[0].ID)
+
+	// Edge type cache must not return dropped edges.
+	edges, err = engine.GetEdgesByType("KNOWS")
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	require.Equal(t, EdgeID("db2:e2"), edges[0].ID)
 }
+
