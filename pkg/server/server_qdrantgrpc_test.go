@@ -15,7 +15,7 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-func TestServer_QdrantGRPCFeatureFlag_StartsAndSharesDefaultDB(t *testing.T) {
+func TestServer_QdrantGRPCFeatureFlag_StartsAndCreatesCollectionDatabases(t *testing.T) {
 	server, authenticator := setupTestServer(t)
 
 	// Allow Qdrant clients to manage vectors by disabling NornicDB-managed embeddings.
@@ -83,14 +83,22 @@ func TestServer_QdrantGRPCFeatureFlag_StartsAndSharesDefaultDB(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Verify the point exists in the same default database the HTTP/Bolt/Cypher layer uses.
-	exec, err := server.getExecutorForDatabase(server.dbManager.DefaultDatabaseName())
+	// Verify the point exists in the collection database namespace.
+	exec, err := server.getExecutorForDatabase("grpc_col")
 	require.NoError(t, err)
 
-	res, err := exec.Execute(ctx, "MATCH (n:QdrantPoint:grpc_col) RETURN count(n) AS c", nil)
+	res, err := exec.Execute(ctx, "MATCH (n:QdrantPoint) RETURN count(n) AS c", nil)
 	require.NoError(t, err)
 	require.Len(t, res.Rows, 1)
 	require.Equal(t, int64(1), res.Rows[0][0])
+
+	// Sanity check: default database should not contain the collection points.
+	defaultExec, err := server.getExecutorForDatabase(server.dbManager.DefaultDatabaseName())
+	require.NoError(t, err)
+	defaultRes, err := defaultExec.Execute(ctx, "MATCH (n:QdrantPoint) RETURN count(n) AS c", nil)
+	require.NoError(t, err)
+	require.Len(t, defaultRes.Rows, 1)
+	require.Equal(t, int64(0), defaultRes.Rows[0][0])
 }
 
 func TestServer_QdrantGRPC_ManagedEmbeddings_DisablesVectorMutations(t *testing.T) {

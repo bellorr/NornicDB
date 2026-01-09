@@ -471,8 +471,8 @@ type Server struct {
 	graphqlHandler *graphql.Handler
 
 	// Qdrant-compatible gRPC server (optional; feature-flagged).
-	qdrantGRPCServer   *qdrantgrpc.Server
-	qdrantGRPCRegistry *qdrantgrpc.PersistentCollectionRegistry
+	qdrantGRPCServer      *qdrantgrpc.Server
+	qdrantCollectionStore qdrantgrpc.CollectionStore
 
 	httpServer *http.Server
 	listener   net.Listener

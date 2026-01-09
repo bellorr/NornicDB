@@ -7,27 +7,20 @@ import (
 	qpb "github.com/qdrant/go-client/qdrant"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-
-	"github.com/orneryd/nornicdb/pkg/search"
-	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // CollectionsService implements the Qdrant Collections gRPC service.
 type CollectionsService struct {
 	qpb.UnimplementedCollectionsServer
-	registry      CollectionRegistry
-	storage       storage.Engine
-	searchService *search.Service
-	vecIndex      *vectorIndexCache
+	collections CollectionStore
+	vecIndex    *vectorIndexCache
 }
 
 // NewCollectionsService creates a new Collections service.
-func NewCollectionsService(registry CollectionRegistry, store storage.Engine, searchService *search.Service, vecIndex *vectorIndexCache) *CollectionsService {
+func NewCollectionsService(collections CollectionStore, vecIndex *vectorIndexCache) *CollectionsService {
 	return &CollectionsService{
-		registry:      registry,
-		storage:       store,
-		searchService: searchService,
-		vecIndex:      vecIndex,
+		collections: collections,
+		vecIndex:    vecIndex,
 	}
 }
 
@@ -66,7 +59,7 @@ func (s *CollectionsService) Create(ctx context.Context, req *qpb.CreateCollecti
 	}
 
 	// Create collection
-	if err := s.registry.CreateCollection(ctx, req.CollectionName, dims, distance); err != nil {
+	if err := s.collections.Create(ctx, req.CollectionName, dims, distance); err != nil {
 		return nil, status.Errorf(codes.AlreadyExists, "failed to create collection: %v", err)
 	}
 
@@ -83,14 +76,14 @@ func (s *CollectionsService) Get(ctx context.Context, req *qpb.GetCollectionInfo
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
 
-	meta, err := s.registry.GetCollection(ctx, req.CollectionName)
+	meta, err := s.collections.GetMeta(ctx, req.CollectionName)
 	if err != nil {
 		return nil, status.Errorf(codes.NotFound, "collection not found: %v", err)
 	}
 
 	// Get point count
 	var pointsCount uint64
-	if count, err := s.registry.GetPointCount(ctx, req.CollectionName); err == nil {
+	if count, err := s.collections.PointCount(ctx, req.CollectionName); err == nil {
 		pointsCount = uint64(count)
 	}
 
@@ -148,7 +141,7 @@ func (s *CollectionsService) Get(ctx context.Context, req *qpb.GetCollectionInfo
 func (s *CollectionsService) List(ctx context.Context, req *qpb.ListCollectionsRequest) (*qpb.ListCollectionsResponse, error) {
 	start := time.Now()
 
-	names, err := s.registry.ListCollections(ctx)
+	names, err := s.collections.List(ctx)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to list collections: %v", err)
 	}
@@ -171,16 +164,12 @@ func (s *CollectionsService) Delete(ctx context.Context, req *qpb.DeleteCollecti
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
 
-	if err := s.registry.DeleteCollection(ctx, req.CollectionName); err != nil {
+	if err := s.collections.Drop(ctx, req.CollectionName); err != nil {
 		return nil, status.Errorf(codes.NotFound, "failed to delete collection: %v", err)
 	}
 
-	// Best-effort: remove points and search index entries for the collection.
-	// This is required for correctness/compatibility: in Qdrant, deleting a
-	// collection removes its points.
-	if s.storage != nil {
-		_ = deleteCollectionPoints(ctx, s.storage, s.searchService, req.CollectionName)
-	}
+	// Drop per-collection in-memory index cache (persistent storage already
+	// removed by collections.Drop.
 	if s.vecIndex != nil {
 		s.vecIndex.deleteCollection(req.CollectionName)
 	}
@@ -201,7 +190,7 @@ func (s *CollectionsService) Update(ctx context.Context, req *qpb.UpdateCollecti
 	}
 
 	// Verify collection exists
-	if !s.registry.CollectionExists(req.CollectionName) {
+	if !s.collections.Exists(req.CollectionName) {
 		return nil, status.Errorf(codes.NotFound, "collection %q not found", req.CollectionName)
 	}
 
@@ -221,7 +210,7 @@ func (s *CollectionsService) CollectionExists(ctx context.Context, req *qpb.Coll
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
 
-	exists := s.registry.CollectionExists(req.CollectionName)
+	exists := s.collections.Exists(req.CollectionName)
 
 	return &qpb.CollectionExistsResponse{
 		Result: &qpb.CollectionExists{Exists: exists},

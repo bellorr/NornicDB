@@ -52,14 +52,25 @@ func getClientIP(r *http.Request) string {
 }
 
 func hasPermission(roles []string, required auth.Permission) bool {
-	for _, roleStr := range roles {
-		role := auth.Role(roleStr)
+	for _, roleOrPerm := range roles {
+		roleOrPerm = strings.ToLower(strings.TrimSpace(roleOrPerm))
+		roleOrPerm = strings.TrimPrefix(roleOrPerm, "role_")
+
+		// Allow tokens that encode permissions directly (defensive for interop).
+		if auth.Permission(roleOrPerm) == required {
+			return true
+		}
+		if auth.Permission(roleOrPerm) == auth.PermAdmin {
+			return true
+		}
+
+		role := auth.Role(roleOrPerm)
 		perms, ok := auth.RolePermissions[role]
 		if !ok {
 			continue
 		}
 		for _, p := range perms {
-			if p == required {
+			if p == auth.PermAdmin || p == required {
 				return true
 			}
 		}

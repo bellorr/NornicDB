@@ -205,12 +205,12 @@ export function Header({
 
           <button
             type="button"
-            onClick={() => navigate("/collections")}
+            onClick={() => navigate("/databases")}
             className="flex items-center gap-2 px-3 py-1.5 rounded-lg text-sm font-medium transition-all bg-norse-shadow hover:bg-norse-rune text-norse-silver hover:text-white border border-norse-rune"
-            title="Manage Collections"
+            title="Manage Databases"
           >
             <Database className="w-4 h-4" />
-            <span>Collections</span>
+            <span>Databases</span>
           </button>
 
           <button
@@ -254,4 +254,3 @@ export function Header({
     </header>
   );
 }
-

@@ -1449,8 +1449,14 @@ func TestHasPermission(t *testing.T) {
 	}{
 		{"admin has all", []string{"admin"}, auth.PermAdmin, true},
 		{"admin has write", []string{"admin"}, auth.PermWrite, true},
+		{"admin perm implies write", []string{"admin"}, auth.PermDelete, true},
 		{"viewer has read", []string{"viewer"}, auth.PermRead, true},
 		{"viewer no write", []string{"viewer"}, auth.PermWrite, false},
+		{"perm token allowed", []string{"write"}, auth.PermWrite, true},
+		{"perm admin implies delete", []string{"admin"}, auth.PermDelete, true},
+		{"role casing normalized", []string{"Admin"}, auth.PermWrite, true},
+		{"role_ prefix normalized", []string{"ROLE_ADMIN"}, auth.PermWrite, true},
+		{"perm casing normalized", []string{"WRITE"}, auth.PermWrite, true},
 		{"empty roles", []string{}, auth.PermRead, false},
 		{"invalid role", []string{"invalid"}, auth.PermRead, false},
 	}

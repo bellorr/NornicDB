@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	qpb "github.com/qdrant/go-client/qdrant"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -16,16 +17,15 @@ func TestOfficialQdrantGRPC_BasicFlow(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := storage.NewMemoryEngine()
-	registry, err := NewPersistentCollectionRegistry(store)
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = registry.Close() })
 
 	cfg := DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
 	cfg.EnableReflection = false
 
-	srv, err := NewServer(cfg, store, registry, nil, nil)
+	srv, err := NewServerWithDatabaseManager(cfg, dbm, base, nil, nil)
 	require.NoError(t, err)
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Stop)
@@ -177,16 +177,15 @@ func TestOfficialQdrantGRPC_NamedVectorsRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	store := storage.NewMemoryEngine()
-	registry, err := NewPersistentCollectionRegistry(store)
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = registry.Close() })
 
 	cfg := DefaultConfig()
 	cfg.ListenAddr = "127.0.0.1:0"
 	cfg.EnableReflection = false
 
-	srv, err := NewServer(cfg, store, registry, nil, nil)
+	srv, err := NewServerWithDatabaseManager(cfg, dbm, base, nil, nil)
 	require.NoError(t, err)
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Stop)

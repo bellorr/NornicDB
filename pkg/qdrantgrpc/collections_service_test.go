@@ -4,15 +4,28 @@ import (
 	"context"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	qpb "github.com/qdrant/go-client/qdrant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
+func newTestCollectionStore(t *testing.T) (CollectionStore, *vectorIndexCache) {
+	t.Helper()
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	vec := newVectorIndexCache()
+	store, err := NewDatabaseCollectionStore(dbm, vec)
+	require.NoError(t, err)
+	return store, vec
+}
+
 func TestCollectionsService_Create(t *testing.T) {
 	ctx := context.Background()
-	registry := NewMemoryCollectionRegistry()
-	service := NewCollectionsService(registry, nil, nil, newVectorIndexCache())
+	collections, vec := newTestCollectionStore(t)
+	service := NewCollectionsService(collections, vec)
 
 	t.Run("create collection successfully", func(t *testing.T) {
 		req := &qpb.CreateCollection{
@@ -97,11 +110,11 @@ func TestCollectionsService_Create(t *testing.T) {
 
 func TestCollectionsService_Get(t *testing.T) {
 	ctx := context.Background()
-	registry := NewMemoryCollectionRegistry()
-	service := NewCollectionsService(registry, nil, nil, newVectorIndexCache())
+	collections, vec := newTestCollectionStore(t)
+	service := NewCollectionsService(collections, vec)
 
 	// Create a test collection first
-	_ = registry.CreateCollection(ctx, "my_collection", 512, qpb.Distance_Dot)
+	require.NoError(t, collections.Create(ctx, "my_collection", 512, qpb.Distance_Dot))
 
 	t.Run("get existing collection", func(t *testing.T) {
 		req := &qpb.GetCollectionInfoRequest{
@@ -146,8 +159,8 @@ func TestCollectionsService_Get(t *testing.T) {
 
 func TestCollectionsService_List(t *testing.T) {
 	ctx := context.Background()
-	registry := NewMemoryCollectionRegistry()
-	service := NewCollectionsService(registry, nil, nil, newVectorIndexCache())
+	collections, vec := newTestCollectionStore(t)
+	service := NewCollectionsService(collections, vec)
 
 	t.Run("list empty collections", func(t *testing.T) {
 		req := &qpb.ListCollectionsRequest{}
@@ -159,9 +172,9 @@ func TestCollectionsService_List(t *testing.T) {
 
 	t.Run("list multiple collections", func(t *testing.T) {
 		// Create some collections
-		_ = registry.CreateCollection(ctx, "collection_a", 128, qpb.Distance_Cosine)
-		_ = registry.CreateCollection(ctx, "collection_b", 256, qpb.Distance_Euclid)
-		_ = registry.CreateCollection(ctx, "collection_c", 512, qpb.Distance_Dot)
+		require.NoError(t, collections.Create(ctx, "collection_a", 128, qpb.Distance_Cosine))
+		require.NoError(t, collections.Create(ctx, "collection_b", 256, qpb.Distance_Euclid))
+		require.NoError(t, collections.Create(ctx, "collection_c", 512, qpb.Distance_Dot))
 
 		req := &qpb.ListCollectionsRequest{}
 
@@ -182,11 +195,11 @@ func TestCollectionsService_List(t *testing.T) {
 
 func TestCollectionsService_Delete(t *testing.T) {
 	ctx := context.Background()
-	registry := NewMemoryCollectionRegistry()
-	service := NewCollectionsService(registry, nil, nil, newVectorIndexCache())
+	collections, vec := newTestCollectionStore(t)
+	service := NewCollectionsService(collections, vec)
 
 	// Create a collection first
-	_ = registry.CreateCollection(ctx, "to_delete", 128, qpb.Distance_Cosine)
+	require.NoError(t, collections.Create(ctx, "to_delete", 128, qpb.Distance_Cosine))
 
 	t.Run("delete existing collection", func(t *testing.T) {
 		req := &qpb.DeleteCollection{
@@ -198,7 +211,7 @@ func TestCollectionsService_Delete(t *testing.T) {
 		assert.True(t, resp.Result)
 
 		// Verify it's gone
-		_, err = registry.GetCollection(ctx, "to_delete")
+		_, err = collections.GetMeta(ctx, "to_delete")
 		require.Error(t, err)
 	})
 
@@ -220,5 +233,3 @@ func TestCollectionsService_Delete(t *testing.T) {
 		require.Error(t, err)
 	})
 }
-
-// MemoryCollectionRegistry tests are in registry_test.go

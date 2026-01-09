@@ -80,7 +80,7 @@ export function QueryPanel({
   return (
     <div className="flex-1 flex flex-col p-4 gap-4">
       <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-        <div className="relative">
+        <div className="relative pb-32">
           <textarea
             ref={textareaRef}
             value={cypherQuery}
@@ -198,4 +198,3 @@ export function QueryPanel({
     </div>
   );
 }
-

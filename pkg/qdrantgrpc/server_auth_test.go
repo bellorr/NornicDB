@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	qpb "github.com/qdrant/go-client/qdrant"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
@@ -20,10 +21,9 @@ import (
 func TestQdrantGRPC_AuthAndRBAC(t *testing.T) {
 	t.Parallel()
 
-	store := storage.NewMemoryEngine()
-	registry, err := NewPersistentCollectionRegistry(store)
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = registry.Close() })
 
 	authStore := storage.NewMemoryEngine()
 	authCfg := auth.DefaultAuthConfig()
@@ -46,7 +46,7 @@ func TestQdrantGRPC_AuthAndRBAC(t *testing.T) {
 	cfg.ListenAddr = "127.0.0.1:0"
 	cfg.EnableReflection = false
 
-	srv, err := NewServer(cfg, store, registry, nil, authenticator)
+	srv, err := NewServerWithDatabaseManager(cfg, dbm, base, nil, authenticator)
 	require.NoError(t, err)
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Stop)

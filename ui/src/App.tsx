@@ -3,7 +3,7 @@ import { Login } from './pages/Login';
 import { Browser } from './pages/Browser';
 import { Security } from './pages/Security';
 import { AdminUsers } from './pages/AdminUsers';
-import { Collections } from './pages/Collections';
+import { Databases } from './pages/Databases';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
 // Base path from environment variable (set at build time)
@@ -30,9 +30,9 @@ function App() {
             <AdminUsers />
           </ProtectedRoute>
         } />
-        <Route path="/collections" element={
+        <Route path="/databases" element={
           <ProtectedRoute>
-            <Collections />
+            <Databases />
           </ProtectedRoute>
         } />
         <Route path="*" element={<Navigate to="/" replace />} />

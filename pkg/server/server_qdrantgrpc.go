@@ -11,6 +11,8 @@ import (
 	"github.com/orneryd/nornicdb/pkg/nornicgrpc"
 	nornicpb "github.com/orneryd/nornicdb/pkg/nornicgrpc/gen"
 	"github.com/orneryd/nornicdb/pkg/qdrantgrpc"
+	"github.com/orneryd/nornicdb/pkg/search"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"google.golang.org/grpc"
 )
 
@@ -44,6 +46,8 @@ func (s *Server) startQdrantGRPC() error {
 		return fmt.Errorf("qdrant grpc: failed to get search service for database %q: %w", dbName, err)
 	}
 
+	baseStorage := s.db.GetBaseStorageForManager()
+
 	cfg := qdrantgrpc.DefaultConfig()
 	if features.QdrantGRPCListenAddr != "" {
 		cfg.ListenAddr = features.QdrantGRPCListenAddr
@@ -75,7 +79,11 @@ func (s *Server) startQdrantGRPC() error {
 		cfg.MethodPermissions = overrides
 	}
 
-	grpcServer, registry, err := qdrantgrpc.NewServerWithPersistentRegistry(cfg, storageEngine, searchSvc, s.auth)
+	searchProvider := func(database string, store storage.Engine) (*search.Service, error) {
+		return s.db.GetOrCreateSearchService(database, store)
+	}
+
+	grpcServer, err := qdrantgrpc.NewServerWithDatabaseManager(cfg, s.dbManager, baseStorage, searchProvider, s.auth)
 	if err != nil {
 		return fmt.Errorf("qdrant grpc: failed to initialize server: %w", err)
 	}
@@ -91,24 +99,21 @@ func (s *Server) startQdrantGRPC() error {
 		searchSvc,
 	)
 	if err != nil {
-		registry.Close()
 		return fmt.Errorf("qdrant grpc: failed to init nornic search service: %w", err)
 	}
 
 	if err := grpcServer.RegisterAdditionalServices(func(gs *grpc.Server) {
 		nornicpb.RegisterNornicSearchServer(gs, nornicSearchSvc)
 	}); err != nil {
-		registry.Close()
 		return fmt.Errorf("qdrant grpc: failed to register nornic search service: %w", err)
 	}
 
 	if err := grpcServer.Start(); err != nil {
-		registry.Close()
 		return fmt.Errorf("qdrant grpc: failed to start: %w", err)
 	}
 
 	s.qdrantGRPCServer = grpcServer
-	s.qdrantGRPCRegistry = registry
+	s.qdrantCollectionStore = grpcServer.CollectionStore()
 
 	log.Printf("✓ Qdrant gRPC enabled (db=%s, addr=%s)", dbName, grpcServer.Addr())
 	return nil
@@ -143,8 +148,5 @@ func (s *Server) stopQdrantGRPC() {
 		s.qdrantGRPCServer.Stop()
 		s.qdrantGRPCServer = nil
 	}
-	if s.qdrantGRPCRegistry != nil {
-		s.qdrantGRPCRegistry.Close()
-		s.qdrantGRPCRegistry = nil
-	}
+	s.qdrantCollectionStore = nil
 }

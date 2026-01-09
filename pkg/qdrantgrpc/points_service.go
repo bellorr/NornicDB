@@ -20,21 +20,41 @@ import (
 // It stores points as NornicDB nodes and (optionally) indexes them via search.Service.
 type PointsService struct {
 	qpb.UnimplementedPointsServer
-	config        *Config
-	storage       storage.Engine
-	registry      CollectionRegistry
-	searchService *search.Service
-	vecIndex      *vectorIndexCache
+	config         *Config
+	collections    CollectionStore
+	searchProvider SearchServiceProvider
+	vecIndex       *vectorIndexCache
 }
 
-func NewPointsService(config *Config, store storage.Engine, registry CollectionRegistry, searchService *search.Service, vecIndex *vectorIndexCache) *PointsService {
+func NewPointsService(config *Config, collections CollectionStore, searchProvider SearchServiceProvider, vecIndex *vectorIndexCache) *PointsService {
 	return &PointsService{
-		config:        config,
-		storage:       store,
-		registry:      registry,
-		searchService: searchService,
-		vecIndex:      vecIndex,
+		config:         config,
+		collections:    collections,
+		searchProvider: searchProvider,
+		vecIndex:       vecIndex,
 	}
+}
+
+func (s *PointsService) openCollection(ctx context.Context, name string) (storage.Engine, *CollectionMeta, error) {
+	if s.collections == nil {
+		return nil, nil, status.Error(codes.Internal, "collection store not configured")
+	}
+	engine, meta, err := s.collections.Open(ctx, name)
+	if err != nil {
+		return nil, nil, status.Errorf(codes.NotFound, "collection not found: %v", err)
+	}
+	return engine, meta, nil
+}
+
+func (s *PointsService) getSearchService(database string, store storage.Engine) *search.Service {
+	if s.searchProvider == nil {
+		return nil
+	}
+	svc, err := s.searchProvider(database, store)
+	if err != nil {
+		return nil
+	}
+	return svc
 }
 
 // Upsert inserts or overwrites points. If a point exists, its payload/vectors are replaced.
@@ -54,9 +74,9 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 		return nil, status.Errorf(codes.InvalidArgument, "too many points: %d > %d", len(req.GetPoints()), s.config.MaxBatchPoints)
 	}
 
-	meta, err := s.registry.GetCollection(ctx, req.CollectionName)
+	store, meta, err := s.openCollection(ctx, req.CollectionName)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "collection not found: %v", err)
+		return nil, err
 	}
 
 	nodeIDs := make([]storage.NodeID, 0, len(req.Points))
@@ -64,10 +84,10 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 		if point == nil || point.Id == nil {
 			return nil, status.Error(codes.InvalidArgument, "point id is required")
 		}
-		nodeIDs = append(nodeIDs, pointIDToNodeID(req.CollectionName, point.Id))
+		nodeIDs = append(nodeIDs, pointIDToNodeID(point.Id))
 	}
 
-	existing, err := s.storage.BatchGetNodes(nodeIDs)
+	existing, err := store.BatchGetNodes(nodeIDs)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to read existing points: %v", err)
 	}
@@ -95,7 +115,7 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 		props := payloadToProperties(point.Payload)
 		node := &storage.Node{
 			ID:         nodeID,
-			Labels:     []string{QdrantPointLabel, req.CollectionName},
+			Labels:     []string{QdrantPointLabel, "Point"},
 			Properties: props,
 		}
 
@@ -130,23 +150,24 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 	}
 
 	if len(nodesToCreate) > 0 {
-		if err := s.storage.BulkCreateNodes(nodesToCreate); err != nil {
+		if err := store.BulkCreateNodes(nodesToCreate); err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to create points: %v", err)
 		}
 	}
 	for _, node := range nodesToUpdate {
-		if err := s.storage.UpdateNode(node); err != nil {
+		if err := store.UpdateNode(node); err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to update point %s: %v", node.ID, err)
 		}
 	}
 
-	if s.searchService != nil {
+	searchSvc := s.getSearchService(req.CollectionName, store)
+	if searchSvc != nil {
 		for _, node := range nodesToCreate {
-			_ = s.searchService.IndexNode(node)
+			_ = searchSvc.IndexNode(node)
 		}
 		for _, node := range nodesToUpdate {
-			_ = s.searchService.RemoveNode(node.ID)
-			_ = s.searchService.IndexNode(node)
+			_ = searchSvc.RemoveNode(node.ID)
+			_ = searchSvc.IndexNode(node)
 		}
 	}
 
@@ -194,6 +215,11 @@ func (s *PointsService) Get(ctx context.Context, req *qpb.GetPoints) (*qpb.GetRe
 		return nil, status.Error(codes.InvalidArgument, "ids are required")
 	}
 
+	store, _, err := s.openCollection(ctx, req.CollectionName)
+	if err != nil {
+		return nil, err
+	}
+
 	includeVectors, requestedVectorNames := withVectorsSelection(req.WithVectors)
 
 	results := make([]*qpb.RetrievedPoint, 0, len(req.Ids))
@@ -201,8 +227,8 @@ func (s *PointsService) Get(ctx context.Context, req *qpb.GetPoints) (*qpb.GetRe
 		if pid == nil {
 			continue
 		}
-		nodeID := pointIDToNodeID(req.CollectionName, pid)
-		node, err := s.storage.GetNode(nodeID)
+		nodeID := pointIDToNodeID(pid)
+		node, err := store.GetNode(nodeID)
 		if err != nil {
 			continue
 		}
@@ -233,24 +259,30 @@ func (s *PointsService) Delete(ctx context.Context, req *qpb.DeletePoints) (*qpb
 		return nil, status.Error(codes.InvalidArgument, "points selector is required")
 	}
 
-	nodeIDs, err := s.resolvePointsSelector(ctx, req.CollectionName, req.Points)
+	store, _, err := s.openCollection(ctx, req.CollectionName)
+	if err != nil {
+		return nil, err
+	}
+	searchSvc := s.getSearchService(req.CollectionName, store)
+
+	nodeIDs, err := s.resolvePointsSelector(ctx, store, req.Points)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, nodeID := range nodeIDs {
-		if s.searchService != nil {
-			_ = s.searchService.RemoveNode(nodeID)
+		if searchSvc != nil {
+			_ = searchSvc.RemoveNode(nodeID)
 		}
 		if s.vecIndex != nil {
-			node, err := s.storage.GetNode(nodeID)
+			node, err := store.GetNode(nodeID)
 			if err == nil {
 				s.vecIndex.deletePoint(req.CollectionName, string(nodeID), nodeVectorNames(node))
 			} else {
 				s.vecIndex.deletePoint(req.CollectionName, string(nodeID), nil)
 			}
 		}
-		_ = s.storage.DeleteNode(nodeID)
+		_ = store.DeleteNode(nodeID)
 	}
 
 	return &qpb.PointsOperationResponse{
@@ -266,37 +298,29 @@ func (s *PointsService) Count(ctx context.Context, req *qpb.CountPoints) (*qpb.C
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
 
-	if req.Filter != nil {
-		nodes, err := s.storage.GetNodesByLabel(req.CollectionName)
-		if err != nil {
-			if err == storage.ErrNotFound {
-				return &qpb.CountResponse{Result: &qpb.CountResult{Count: 0}, Time: time.Since(start).Seconds()}, nil
-			}
-			return nil, status.Errorf(codes.Internal, "failed to get points: %v", err)
-		}
-
-		count := uint64(0)
-		for _, node := range nodes {
-			if !isQdrantPointNode(node) {
-				continue
-			}
-			if matchesFilter(node, req.Filter) {
-				count++
-			}
-		}
-		return &qpb.CountResponse{
-			Result: &qpb.CountResult{Count: count},
-			Time:   time.Since(start).Seconds(),
-		}, nil
+	store, _, err := s.openCollection(ctx, req.CollectionName)
+	if err != nil {
+		return nil, err
 	}
 
-	count, err := s.registry.GetPointCount(ctx, req.CollectionName)
-	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "collection not found: %v", err)
+	nodes, err := store.GetNodesByLabel(QdrantPointLabel)
+	if err != nil && err != storage.ErrNotFound {
+		return nil, status.Errorf(codes.Internal, "failed to get points: %v", err)
+	}
+
+	count := uint64(0)
+	for _, node := range nodes {
+		if !isQdrantPointNode(node) {
+			continue
+		}
+		if req.Filter != nil && !matchesFilter(node, req.Filter) {
+			continue
+		}
+		count++
 	}
 
 	return &qpb.CountResponse{
-		Result: &qpb.CountResult{Count: uint64(count)},
+		Result: &qpb.CountResult{Count: count},
 		Time:   time.Since(start).Seconds(),
 	}, nil
 }
@@ -311,9 +335,9 @@ func (s *PointsService) Search(ctx context.Context, req *qpb.SearchPoints) (*qpb
 		return nil, status.Error(codes.InvalidArgument, "vector is required")
 	}
 
-	meta, err := s.registry.GetCollection(ctx, req.CollectionName)
+	store, meta, err := s.openCollection(ctx, req.CollectionName)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "collection not found: %v", err)
+		return nil, err
 	}
 	if len(req.Vector) != meta.Dimensions {
 		return nil, status.Errorf(codes.InvalidArgument, "vector dimension mismatch: got %d, expected %d", len(req.Vector), meta.Dimensions)
@@ -362,7 +386,8 @@ func (s *PointsService) Search(ctx context.Context, req *qpb.SearchPoints) (*qpb
 	includeVectors, requestedVectorNames := withVectorsSelection(req.WithVectors)
 	includePayload := req.WithPayload != nil
 
-	results := s.searchCollection(ctx, req.CollectionName, meta.Distance, vectorName, req.Vector, req.Filter, limit, offset, minSimilarity, ef)
+	searchSvc := s.getSearchService(req.CollectionName, store)
+	results := s.searchCollection(ctx, store, searchSvc, req.CollectionName, meta.Distance, vectorName, req.Vector, req.Filter, limit, offset, minSimilarity, ef)
 
 	out := make([]*qpb.ScoredPoint, 0, len(results))
 	for _, r := range results {
@@ -375,10 +400,10 @@ func (s *PointsService) Search(ctx context.Context, req *qpb.SearchPoints) (*qpb
 				nodeID = storage.NodeID(r.ID)
 			}
 		} else {
-			// Fast path for vecIndex results: IDs are compact "<id>" (no "qdrant:<collection>:" prefix).
+			// Fast path for vecIndex results: IDs are compact "<id>" (no "qdrant:point:" prefix).
 			pid = pointIDFromCompactString(r.ID)
 			if needNode {
-				nodeID = storage.NodeID(expandPointID(req.CollectionName, r.ID))
+				nodeID = storage.NodeID(expandPointID(r.ID))
 			}
 		}
 
@@ -388,7 +413,7 @@ func (s *PointsService) Search(ctx context.Context, req *qpb.SearchPoints) (*qpb
 		}
 
 		if needNode {
-			node, err := s.storage.GetNode(nodeID)
+			node, err := store.GetNode(nodeID)
 			if err == nil {
 				if includePayload {
 					sp.Payload = propertiesToPayload(withPayloadSelection(node.Properties, req.WithPayload))
@@ -422,11 +447,13 @@ func (s *PointsService) Scroll(ctx context.Context, req *qpb.ScrollPoints) (*qpb
 
 	includeVectors, requestedVectorNames := withVectorsSelection(req.WithVectors)
 
-	nodes, err := s.storage.GetNodesByLabel(req.CollectionName)
+	store, _, err := s.openCollection(ctx, req.CollectionName)
 	if err != nil {
-		if err == storage.ErrNotFound {
-			return &qpb.ScrollResponse{Result: nil, Time: time.Since(start).Seconds()}, nil
-		}
+		return nil, err
+	}
+
+	nodes, err := store.GetNodesByLabel(QdrantPointLabel)
+	if err != nil && err != storage.ErrNotFound {
 		return nil, status.Errorf(codes.Internal, "failed to get points: %v", err)
 	}
 
@@ -444,7 +471,7 @@ func (s *PointsService) Scroll(ctx context.Context, req *qpb.ScrollPoints) (*qpb
 
 	startIdx := 0
 	if req.Offset != nil {
-		offsetID := pointIDToNodeID(req.CollectionName, req.Offset)
+		offsetID := pointIDToNodeID(req.Offset)
 		for i, node := range points {
 			if node.ID == offsetID {
 				startIdx = i + 1
@@ -501,13 +528,18 @@ func (s *PointsService) updatePayload(ctx context.Context, req *qpb.SetPayloadPo
 		return nil, status.Error(codes.InvalidArgument, "payload is required")
 	}
 
-	nodeIDs, err := s.resolvePointsSelector(ctx, req.CollectionName, req.PointsSelector)
+	store, _, err := s.openCollection(ctx, req.CollectionName)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeIDs, err := s.resolvePointsSelector(ctx, store, req.PointsSelector)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, nodeID := range nodeIDs {
-		node, err := s.storage.GetNode(nodeID)
+		node, err := store.GetNode(nodeID)
 		if err != nil {
 			continue
 		}
@@ -523,7 +555,7 @@ func (s *PointsService) updatePayload(ctx context.Context, req *qpb.SetPayloadPo
 			}
 		}
 		node.UpdatedAt = time.Now()
-		_ = s.storage.UpdateNode(node)
+		_ = store.UpdateNode(node)
 	}
 
 	return &qpb.PointsOperationResponse{
@@ -542,13 +574,18 @@ func (s *PointsService) DeletePayload(ctx context.Context, req *qpb.DeletePayloa
 		return nil, status.Error(codes.InvalidArgument, "keys are required")
 	}
 
-	nodeIDs, err := s.resolvePointsSelector(ctx, req.CollectionName, req.PointsSelector)
+	store, _, err := s.openCollection(ctx, req.CollectionName)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeIDs, err := s.resolvePointsSelector(ctx, store, req.PointsSelector)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, nodeID := range nodeIDs {
-		node, err := s.storage.GetNode(nodeID)
+		node, err := store.GetNode(nodeID)
 		if err != nil {
 			continue
 		}
@@ -556,7 +593,7 @@ func (s *PointsService) DeletePayload(ctx context.Context, req *qpb.DeletePayloa
 			delete(node.Properties, k)
 		}
 		node.UpdatedAt = time.Now()
-		_ = s.storage.UpdateNode(node)
+		_ = store.UpdateNode(node)
 	}
 
 	return &qpb.PointsOperationResponse{
@@ -575,19 +612,24 @@ func (s *PointsService) ClearPayload(ctx context.Context, req *qpb.ClearPayloadP
 		return nil, status.Error(codes.InvalidArgument, "points selector is required")
 	}
 
-	nodeIDs, err := s.resolvePointsSelector(ctx, req.CollectionName, req.Points)
+	store, _, err := s.openCollection(ctx, req.CollectionName)
+	if err != nil {
+		return nil, err
+	}
+
+	nodeIDs, err := s.resolvePointsSelector(ctx, store, req.Points)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, nodeID := range nodeIDs {
-		node, err := s.storage.GetNode(nodeID)
+		node, err := store.GetNode(nodeID)
 		if err != nil {
 			continue
 		}
 		node.Properties = nil
 		node.UpdatedAt = time.Now()
-		_ = s.storage.UpdateNode(node)
+		_ = store.UpdateNode(node)
 	}
 
 	return &qpb.PointsOperationResponse{
@@ -609,21 +651,23 @@ func (s *PointsService) UpdateVectors(ctx context.Context, req *qpb.UpdatePointV
 		return nil, status.Error(codes.InvalidArgument, "points are required")
 	}
 
-	meta, err := s.registry.GetCollection(ctx, req.CollectionName)
+	store, meta, err := s.openCollection(ctx, req.CollectionName)
 	if err != nil {
-		return nil, status.Errorf(codes.NotFound, "collection not found: %v", err)
+		return nil, err
 	}
+	searchSvc := s.getSearchService(req.CollectionName, store)
 
 	for _, pv := range req.Points {
 		if pv == nil || pv.Id == nil || pv.Vectors == nil {
 			return nil, status.Error(codes.InvalidArgument, "point id and vectors are required")
 		}
 
-		nodeID := pointIDToNodeID(req.CollectionName, pv.Id)
-		node, err := s.storage.GetNode(nodeID)
+		nodeID := pointIDToNodeID(pv.Id)
+		node, err := store.GetNode(nodeID)
 		if err != nil {
 			continue
 		}
+		oldNames := nodeVectorNames(node)
 
 		names, vecs, err := extractVectors(pv.Vectors)
 		if err != nil {
@@ -637,11 +681,23 @@ func (s *PointsService) UpdateVectors(ctx context.Context, req *qpb.UpdatePointV
 
 		upsertNodeVectors(node, names, vecs)
 		node.UpdatedAt = time.Now()
-		_ = s.storage.UpdateNode(node)
+		_ = store.UpdateNode(node)
 
-		if s.searchService != nil {
-			_ = s.searchService.RemoveNode(node.ID)
-			_ = s.searchService.IndexNode(node)
+		if searchSvc != nil {
+			_ = searchSvc.RemoveNode(node.ID)
+			_ = searchSvc.IndexNode(node)
+		}
+		if s.vecIndex != nil {
+			newNames := nodeVectorNames(node)
+			vectors := make([][]float32, 0, len(newNames))
+			for _, name := range newNames {
+				vec, ok := nodeVectorByName(node, name)
+				if !ok {
+					continue
+				}
+				vectors = append(vectors, vec)
+			}
+			_ = s.vecIndex.replacePoint(req.CollectionName, meta.Dimensions, meta.Distance, string(node.ID), oldNames, newNames, vectors)
 		}
 	}
 
@@ -667,23 +723,42 @@ func (s *PointsService) DeleteVectors(ctx context.Context, req *qpb.DeletePointV
 		return nil, status.Error(codes.InvalidArgument, "vectors.names is required")
 	}
 
-	nodeIDs, err := s.resolvePointsSelector(ctx, req.CollectionName, req.PointsSelector)
+	store, meta, err := s.openCollection(ctx, req.CollectionName)
+	if err != nil {
+		return nil, err
+	}
+	searchSvc := s.getSearchService(req.CollectionName, store)
+
+	nodeIDs, err := s.resolvePointsSelector(ctx, store, req.PointsSelector)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, nodeID := range nodeIDs {
-		node, err := s.storage.GetNode(nodeID)
+		node, err := store.GetNode(nodeID)
 		if err != nil {
 			continue
 		}
+		oldNames := nodeVectorNames(node)
 		deleteNodeVectors(node, req.Vectors.Names)
 		node.UpdatedAt = time.Now()
-		_ = s.storage.UpdateNode(node)
+		_ = store.UpdateNode(node)
 
-		if s.searchService != nil {
-			_ = s.searchService.RemoveNode(node.ID)
-			_ = s.searchService.IndexNode(node)
+		if searchSvc != nil {
+			_ = searchSvc.RemoveNode(node.ID)
+			_ = searchSvc.IndexNode(node)
+		}
+		if s.vecIndex != nil {
+			newNames := nodeVectorNames(node)
+			vectors := make([][]float32, 0, len(newNames))
+			for _, name := range newNames {
+				vec, ok := nodeVectorByName(node, name)
+				if !ok {
+					continue
+				}
+				vectors = append(vectors, vec)
+			}
+			_ = s.vecIndex.replacePoint(req.CollectionName, meta.Dimensions, meta.Distance, string(node.ID), oldNames, newNames, vectors)
 		}
 	}
 
@@ -892,14 +967,10 @@ func (s *PointsService) CreateFieldIndex(ctx context.Context, req *qpb.CreateFie
 		return nil, status.Error(codes.InvalidArgument, "field_name is required")
 	}
 
-	if !s.registry.CollectionExists(req.CollectionName) {
-		return nil, status.Errorf(codes.NotFound, "collection %q not found", req.CollectionName)
+	if _, _, err := s.openCollection(ctx, req.CollectionName); err != nil {
+		return nil, err
 	}
-
-	schema := s.storage.GetSchema()
-	if schema != nil {
-		_ = schema.AddPropertyIndex(fmt.Sprintf("qdrant_%s_%s", req.CollectionName, req.FieldName), req.CollectionName, []string{req.FieldName})
-	}
+	// NornicDB schema indexes are managed internally; treat as a no-op.
 
 	return &qpb.PointsOperationResponse{
 		Result: &qpb.UpdateResult{Status: qpb.UpdateStatus_Completed},
@@ -917,8 +988,8 @@ func (s *PointsService) DeleteFieldIndex(ctx context.Context, req *qpb.DeleteFie
 		return nil, status.Error(codes.InvalidArgument, "field_name is required")
 	}
 
-	if !s.registry.CollectionExists(req.CollectionName) {
-		return nil, status.Errorf(codes.NotFound, "collection %q not found", req.CollectionName)
+	if _, _, err := s.openCollection(ctx, req.CollectionName); err != nil {
+		return nil, err
 	}
 
 	// NornicDB schema indexes are managed internally; treat as a no-op.
@@ -1023,8 +1094,12 @@ func (s *PointsService) vectorFromInput(ctx context.Context, collection string, 
 		if v.Id == nil {
 			return nil, status.Error(codes.InvalidArgument, "id is required")
 		}
-		nodeID := pointIDToNodeID(collection, v.Id)
-		node, err := s.storage.GetNode(nodeID)
+		store, _, err := s.openCollection(ctx, collection)
+		if err != nil {
+			return nil, err
+		}
+		nodeID := pointIDToNodeID(v.Id)
+		node, err := store.GetNode(nodeID)
 		if err != nil {
 			return nil, status.Errorf(codes.NotFound, "point not found: %v", err)
 		}
@@ -1059,12 +1134,17 @@ func (s *PointsService) recommendQueryVector(
 	positiveVectors []*qpb.Vector,
 	negativeVectors []*qpb.Vector,
 ) ([]float32, error) {
+	store, _, err := s.openCollection(ctx, collection)
+	if err != nil {
+		return nil, err
+	}
+
 	var vectorsPos [][]float32
 	for _, id := range positiveIDs {
 		if id == nil {
 			continue
 		}
-		node, err := s.storage.GetNode(pointIDToNodeID(collection, id))
+		node, err := store.GetNode(pointIDToNodeID(id))
 		if err != nil {
 			continue
 		}
@@ -1089,7 +1169,7 @@ func (s *PointsService) recommendQueryVector(
 		if id == nil {
 			continue
 		}
-		node, err := s.storage.GetNode(pointIDToNodeID(collection, id))
+		node, err := store.GetNode(pointIDToNodeID(id))
 		if err != nil {
 			continue
 		}
@@ -1183,7 +1263,7 @@ type searchResult struct {
 	Score float64
 }
 
-func (s *PointsService) searchCollection(ctx context.Context, collection string, dist qpb.Distance, vectorName string, queryVec []float32, filter *qpb.Filter, limit int, offset int, minScore float64, ef int) []searchResult {
+func (s *PointsService) searchCollection(ctx context.Context, store storage.Engine, searchSvc *search.Service, collection string, dist qpb.Distance, vectorName string, queryVec []float32, filter *qpb.Filter, limit int, offset int, minScore float64, ef int) []searchResult {
 	if s.vecIndex != nil {
 		// Request extra candidates only when we need to apply payload filters.
 		// For filter-free searches, returning exactly limit+offset avoids unnecessary
@@ -1216,7 +1296,7 @@ func (s *PointsService) searchCollection(ctx context.Context, collection string,
 
 			filtered := make([]searchResult, 0, len(cands))
 			for _, r := range cands {
-				node, err := s.storage.GetNode(storage.NodeID(expandPointID(collection, r.ID)))
+				node, err := store.GetNode(storage.NodeID(expandPointID(r.ID)))
 				if err != nil || !matchesFilter(node, filter) {
 					continue
 				}
@@ -1248,10 +1328,9 @@ func (s *PointsService) searchCollection(ctx context.Context, collection string,
 	}
 
 	// Try search service for default vector (uses unified pipeline with HNSW/k-means)
-	if s.searchService != nil && effectiveVectorName == "default" {
+	if searchSvc != nil && effectiveVectorName == "default" {
 		// Fast path: avoid per-candidate storage lookups for type filtering.
-		// Qdrant "collections" map to a stable node ID prefix: qdrant:<collection>:<id>.
-		prefix := fmt.Sprintf("qdrant:%s:", collection)
+		prefix := "qdrant:point:"
 
 		// Qdrant's score_threshold is optional; if not set, do not apply a threshold.
 		// Our search.Service defaults may otherwise prune results unexpectedly.
@@ -1271,7 +1350,7 @@ func (s *PointsService) searchCollection(ctx context.Context, collection string,
 			candidateLimit = s.config.MaxTopK * 10
 		}
 
-		cands, err := s.searchService.VectorSearchCandidates(ctx, queryVec, &search.SearchOptions{
+		cands, err := searchSvc.VectorSearchCandidates(ctx, queryVec, &search.SearchOptions{
 			Limit:         candidateLimit,
 			MinSimilarity: &minSimilarity,
 		})
@@ -1285,7 +1364,7 @@ func (s *PointsService) searchCollection(ctx context.Context, collection string,
 					continue
 				}
 				if filter != nil {
-					node, err := s.storage.GetNode(storage.NodeID(r.ID))
+					node, err := store.GetNode(storage.NodeID(r.ID))
 					if err != nil || !matchesFilter(node, filter) {
 						continue
 					}
@@ -1313,7 +1392,7 @@ func (s *PointsService) searchCollection(ctx context.Context, collection string,
 	// Brute-force fallback: scan all nodes and filter by label. This keeps the
 	// measured path comparable to the Bolt/Cypher vector procedure and avoids
 	// label-index iterator overhead on some storage backends under high concurrency.
-	nodes, err := s.storage.AllNodes()
+	nodes, err := store.AllNodes()
 	if err != nil {
 		return nil
 	}
@@ -1329,9 +1408,6 @@ func (s *PointsService) searchCollection(ctx context.Context, collection string,
 		}
 
 		if !isQdrantPointNode(node) {
-			continue
-		}
-		if !nodeHasLabel(node, collection) {
 			continue
 		}
 		if filter != nil && !matchesFilter(node, filter) {
@@ -1406,7 +1482,7 @@ func resolvePointIDs(sel *qpb.PointsSelector) ([]*qpb.PointId, error) {
 	}
 }
 
-func (s *PointsService) resolvePointsSelector(ctx context.Context, collection string, sel *qpb.PointsSelector) ([]storage.NodeID, error) {
+func (s *PointsService) resolvePointsSelector(ctx context.Context, store storage.Engine, sel *qpb.PointsSelector) ([]storage.NodeID, error) {
 	if sel == nil {
 		return nil, status.Error(codes.InvalidArgument, "points selector is required")
 	}
@@ -1419,15 +1495,12 @@ func (s *PointsService) resolvePointsSelector(ctx context.Context, collection st
 		}
 		out := make([]storage.NodeID, 0, len(ids))
 		for _, id := range ids {
-			out = append(out, pointIDToNodeID(collection, id))
+			out = append(out, pointIDToNodeID(id))
 		}
 		return out, nil
 	case *qpb.PointsSelector_Filter:
-		nodes, err := s.storage.GetNodesByLabel(collection)
-		if err != nil {
-			if err == storage.ErrNotFound {
-				return nil, nil
-			}
+		nodes, err := store.GetNodesByLabel(QdrantPointLabel)
+		if err != nil && err != storage.ErrNotFound {
 			return nil, status.Errorf(codes.Internal, "failed to scan points: %v", err)
 		}
 		out := make([]storage.NodeID, 0, len(nodes))
@@ -1449,7 +1522,7 @@ func sortNodesByID(nodes []*storage.Node) {
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
 }
 
-func pointIDToNodeID(collection string, pid *qpb.PointId) storage.NodeID {
+func pointIDToNodeID(pid *qpb.PointId) storage.NodeID {
 	idStr := ""
 	switch opt := pid.PointIdOptions.(type) {
 	case *qpb.PointId_Num:
@@ -1457,7 +1530,7 @@ func pointIDToNodeID(collection string, pid *qpb.PointId) storage.NodeID {
 	case *qpb.PointId_Uuid:
 		idStr = opt.Uuid
 	}
-	return storage.NodeID(fmt.Sprintf("qdrant:%s:%s", collection, idStr))
+	return storage.NodeID(fmt.Sprintf("qdrant:point:%s", idStr))
 }
 
 func nodeIDToPointID(id storage.NodeID) *qpb.PointId {
@@ -1482,7 +1555,7 @@ func pointIDFromCompactString(raw string) *qpb.PointId {
 }
 
 func splitNodeID(nodeID string) []string {
-	// Expected: qdrant:<collection>:<id>
+	// Expected: qdrant:point:<id>
 	parts := make([]string, 0, 3)
 	start := 0
 	for i := 0; i < len(nodeID); i++ {
@@ -1586,18 +1659,6 @@ func nodeVectorByName(node *storage.Node, vectorName string) ([]float32, bool) {
 		}
 	}
 	return nil, false
-}
-
-func nodeHasLabel(node *storage.Node, label string) bool {
-	if node == nil || label == "" {
-		return false
-	}
-	for _, l := range node.Labels {
-		if l == label {
-			return true
-		}
-	}
-	return false
 }
 
 func upsertNodeVectors(node *storage.Node, names []string, vectors [][]float32) {

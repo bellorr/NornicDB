@@ -38,7 +38,7 @@ func newUIHandler() (*uiHandler, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to read embedded root: %w", err)
 	}
-	
+
 	// Find the correct path (might be just "dist" or "ui/dist")
 	var distPath string
 	for _, entry := range entries {
@@ -50,7 +50,7 @@ func newUIHandler() (*uiHandler, error) {
 			break
 		}
 	}
-	
+
 	if distPath == "" {
 		return nil, fmt.Errorf("UI dist directory not found in embedded assets")
 	}

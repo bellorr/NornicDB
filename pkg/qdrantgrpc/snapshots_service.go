@@ -22,14 +22,14 @@ import (
 type SnapshotsService struct {
 	qpb.UnimplementedSnapshotsServer
 	config      *Config
-	storage     storage.Engine
-	registry    CollectionRegistry
+	collections CollectionStore
+	baseStorage storage.Engine
 	snapshotDir string
 }
 
 // NewSnapshotsService creates a new Snapshots service.
 // snapshotDir is the directory where snapshots will be stored.
-func NewSnapshotsService(config *Config, store storage.Engine, registry CollectionRegistry, snapshotDir string) *SnapshotsService {
+func NewSnapshotsService(config *Config, collections CollectionStore, baseStorage storage.Engine, snapshotDir string) *SnapshotsService {
 	if snapshotDir == "" {
 		snapshotDir = "./data/qdrant-snapshots"
 	}
@@ -38,8 +38,8 @@ func NewSnapshotsService(config *Config, store storage.Engine, registry Collecti
 
 	return &SnapshotsService{
 		config:      config,
-		storage:     store,
-		registry:    registry,
+		collections: collections,
+		baseStorage: baseStorage,
 		snapshotDir: snapshotDir,
 	}
 }
@@ -54,7 +54,7 @@ func (s *SnapshotsService) Create(ctx context.Context, req *qpb.CreateSnapshotRe
 	}
 
 	// Verify collection exists
-	if !s.registry.CollectionExists(req.CollectionName) {
+	if s.collections == nil || !s.collections.Exists(req.CollectionName) {
 		return nil, status.Errorf(codes.NotFound, "collection %q not found", req.CollectionName)
 	}
 
@@ -69,20 +69,19 @@ func (s *SnapshotsService) Create(ctx context.Context, req *qpb.CreateSnapshotRe
 	snapshotName := fmt.Sprintf("%s-%d.snapshot", req.CollectionName, timestamp.UnixNano())
 	snapshotPath := filepath.Join(collectionSnapshotDir, snapshotName)
 
-	// Get all points in the collection
-	nodes, err := s.storage.GetNodesByLabel(req.CollectionName)
+	store, _, err := s.collections.Open(ctx, req.CollectionName)
+	if err != nil {
+		return nil, status.Errorf(codes.NotFound, "collection %q not found", req.CollectionName)
+	}
+	nodes, err := store.GetNodesByLabel(QdrantPointLabel)
 	if err != nil && err != storage.ErrNotFound {
 		return nil, status.Errorf(codes.Internal, "failed to get collection points: %v", err)
 	}
 
-	// Filter to only Qdrant points
 	var qdrantPoints []*storage.Node
 	for _, node := range nodes {
-		for _, label := range node.Labels {
-			if label == QdrantPointLabel {
-				qdrantPoints = append(qdrantPoints, node)
-				break
-			}
+		if isQdrantPointNode(node) {
+			qdrantPoints = append(qdrantPoints, node)
 		}
 	}
 
@@ -127,7 +126,7 @@ func (s *SnapshotsService) List(ctx context.Context, req *qpb.ListSnapshotsReque
 	}
 
 	// Verify collection exists
-	if !s.registry.CollectionExists(req.CollectionName) {
+	if s.collections == nil || !s.collections.Exists(req.CollectionName) {
 		return nil, status.Errorf(codes.NotFound, "collection %q not found", req.CollectionName)
 	}
 
@@ -194,7 +193,7 @@ func (s *SnapshotsService) Delete(ctx context.Context, req *qpb.DeleteSnapshotRe
 	}
 
 	// Verify collection exists
-	if !s.registry.CollectionExists(req.CollectionName) {
+	if s.collections == nil || !s.collections.Exists(req.CollectionName) {
 		return nil, status.Errorf(codes.NotFound, "collection %q not found", req.CollectionName)
 	}
 
@@ -217,6 +216,10 @@ func (s *SnapshotsService) Delete(ctx context.Context, req *qpb.DeleteSnapshotRe
 func (s *SnapshotsService) CreateFull(ctx context.Context, req *qpb.CreateFullSnapshotRequest) (*qpb.CreateSnapshotResponse, error) {
 	start := time.Now()
 
+	if s.baseStorage == nil {
+		return nil, status.Error(codes.FailedPrecondition, "full snapshots require base storage")
+	}
+
 	// Create full snapshots directory
 	fullSnapshotDir := filepath.Join(s.snapshotDir, "full")
 	if err := os.MkdirAll(fullSnapshotDir, 0755); err != nil {
@@ -229,18 +232,18 @@ func (s *SnapshotsService) CreateFull(ctx context.Context, req *qpb.CreateFullSn
 	snapshotPath := filepath.Join(fullSnapshotDir, snapshotName)
 
 	// Try to use BadgerEngine.Backup if available
-	if badger, ok := s.storage.(interface{ Backup(string) error }); ok {
+	if badger, ok := s.baseStorage.(interface{ Backup(string) error }); ok {
 		if err := badger.Backup(snapshotPath); err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to create backup: %v", err)
 		}
 	} else {
 		// Fallback: export all nodes and edges as a snapshot
-		nodes, err := s.storage.AllNodes()
+		nodes, err := s.baseStorage.AllNodes()
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to get nodes: %v", err)
 		}
 
-		edges, err := s.storage.AllEdges()
+		edges, err := s.baseStorage.AllEdges()
 		if err != nil {
 			return nil, status.Errorf(codes.Internal, "failed to get edges: %v", err)
 		}

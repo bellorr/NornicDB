@@ -29,12 +29,12 @@ export function PropertyEditor({
     for (const [key, value] of Object.entries(properties)) {
       if (isReadOnlyProperty(key)) continue;
       const valueType =
-        typeof value === "string"
-          ? "string"
-          : typeof value === "number"
-          ? "number"
-          : typeof value === "boolean"
-          ? "boolean"
+          typeof value === "string"
+            ? "string"
+            : typeof value === "number"
+            ? "number"
+            : typeof value === "boolean"
+            ? "boolean"
           : "json";
       // For string type, use value directly (don't JSON.stringify to avoid double quotes)
       // For other types, use JSON.stringify for proper display
