@@ -72,7 +72,7 @@ docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-cpu
 
 # CPU Only (Windows/Linux) BYOM + no UI
-docker pull timothyswt/nornicdb-amd64-headless:latest
+docker pull timothyswt/nornicdb-amd64-cpu-headless:latest
 docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
   timothyswt/nornicdb-amd64-cpu-headless
 
