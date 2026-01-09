@@ -1548,8 +1548,13 @@ func nodeIDToPointID(id storage.NodeID) *qpb.PointId {
 
 func pointIDFromCompactString(raw string) *qpb.PointId {
 	// Qdrant PointId is either uint64 or UUID string.
-	if n, err := strconv.ParseUint(raw, 10, 64); err == nil {
-		return &qpb.PointId{PointIdOptions: &qpb.PointId_Num{Num: n}}
+	if len(raw) > 0 {
+		first := raw[0]
+		if first >= '0' && first <= '9' {
+			if n, err := strconv.ParseUint(raw, 10, 64); err == nil {
+				return &qpb.PointId{PointIdOptions: &qpb.PointId_Num{Num: n}}
+			}
+		}
 	}
 	return &qpb.PointId{PointIdOptions: &qpb.PointId_Uuid{Uuid: raw}}
 }
@@ -1712,6 +1717,17 @@ func withPayloadSelection(props map[string]any, selector *qpb.WithPayloadSelecto
 
 	// Strip internal keys.
 	clean := func() map[string]any {
+		hasInternal := false
+		for k := range props {
+			if len(k) >= 8 && k[:8] == "_qdrant_" {
+				hasInternal = true
+				break
+			}
+		}
+		if !hasInternal {
+			return props
+		}
+
 		out := make(map[string]any, len(props))
 		for k, v := range props {
 			if len(k) >= 8 && k[:8] == "_qdrant_" {
