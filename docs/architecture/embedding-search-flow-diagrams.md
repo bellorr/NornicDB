@@ -212,18 +212,16 @@ sequenceDiagram
 
 ```mermaid
 flowchart TB
-    subgraph REG["Collection Registry (pkg/qdrantgrpc)"]
-        Registry["PersistentCollectionRegistry"]
-        MetaNodes["Collection metadata nodes<br/>Label: _QdrantCollection"]
-        Registry --> MetaNodes
-        Meta1["name=documents<br/>dims=1024<br/>distance=cosine"]
-        Meta2["name=images<br/>dims=768<br/>distance=euclid"]
-        MetaNodes --> Meta1
-        MetaNodes --> Meta2
+    subgraph MDB["Database Manager (pkg/multidb)"]
+        DM["DatabaseManager"]
+        DBDocs["Database: documents<br/>(namespace: documents:)"]
+        DBImages["Database: images<br/>(namespace: images:)"]
+        DM --> DBDocs
+        DM --> DBImages
     end
 
     subgraph PTS["Points (stored as nodes)"]
-        Points["Point nodes<br/>Labels: QdrantPoint + {collectionName}"]
+        Points["Point nodes<br/>Labels: QdrantPoint, Point<br/>ID: qdrant:point:&lt;id&gt;"]
         P1["Point 1<br/>NamedEmbeddings: title, content"]
         P2["Point 2<br/>NamedEmbeddings: default"]
         Points --> P1
@@ -232,14 +230,16 @@ flowchart TB
 
     subgraph IDX["Vector indexing"]
         Index["search.Service vector index"]
-        IndexCache["qdrantgrpc vectorIndexCache<br/>(per-collection dims)"]
+        IndexCache["qdrantgrpc vectorIndexCache<br/>(per-db dims, per-db index)"]
         IndexCache --> Index
     end
 
-    Registry --> Points
+    DBDocs --> MetaDocs["_collection_meta<br/>Label: _CollectionMeta"]
+    DBImages --> MetaImages["_collection_meta<br/>Label: _CollectionMeta"]
+    DBDocs --> Points
     Points --> IndexCache
 
-    style Registry fill:#4a90e2,color:#fff
+    style DM fill:#4a90e2,color:#fff
     style Points fill:#50c878,color:#fff
     style Index fill:#ff6b6b,color:#fff
 ```

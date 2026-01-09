@@ -85,13 +85,29 @@ without changing the Cypher interface.
 
 The Qdrant gRPC layer stores points as nodes:
 
-- Collection metadata nodes:
-  - Label: `_QdrantCollection` (see `pkg/qdrantgrpc/registry.go`)
-- Point nodes:
-  - Labels: `QdrantPoint` and `{collectionName}` (see `pkg/qdrantgrpc/points_service.go`)
-  - Vectors: stored in `Node.NamedEmbeddings`
+- Qdrant **collection** → NornicDB **database** (namespace).
+  - Storage isolation is done via `multidb.DatabaseManager` + `storage.NamespacedEngine`.
+  - The Qdrant gRPC layer opens a namespaced engine for every request: `dbManager.GetStorage(collectionName)`.
+  - Collection metadata is persisted inside that database as a required node:
+    - Node ID: `_collection_meta`
+    - Label: `_CollectionMeta`
+    - Properties: `{dimensions: int, distance: int32(qdrant.Distance), schema_version: 1}`
+  - Implementation: `pkg/qdrantgrpc/collection_store.go`
+- Qdrant **point** → a node inside the collection/database namespace:
+  - Node ID: `qdrant:point:<raw-id>` (collection name is not embedded; namespace already scopes it)
+  - Labels: `QdrantPoint`, `Point`
+  - Payload → `node.Properties` (with internal `_qdrant_*` keys stripped from API output)
+  - Vectors → `Node.NamedEmbeddings` (single unnamed vector stored as `"default"`)
+  - Implementation: `pkg/qdrantgrpc/points_service.go`
 
 Qdrant vectors do not overwrite NornicDB-managed embeddings because managed embeddings are stored in `ChunkEmbeddings`.
+
+### Drop behavior (why DROP DATABASE is fast)
+
+Because collections are databases, deleting a collection is a database drop:
+
+- `DROP DATABASE <name>` / `DatabaseManager.DropDatabase(name)` deletes the namespace prefix `<name>:` via `storage.Engine.DeleteByPrefix`.
+- For Badger-backed engines, `DeleteByPrefix` is optimized to use Badger's prefix drop for db-scoped keyspaces and targeted cleanup for secondary indexes.
 
 ## Why this split matters
 

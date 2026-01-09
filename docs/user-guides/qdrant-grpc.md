@@ -76,16 +76,35 @@ export NORNICDB_EMBEDDING_ENABLED=false
 
 At a high level:
 
-- Qdrant **collection** → a named vector space/index in NornicDB (managed by the Qdrant gRPC compatibility layer)
-- Qdrant **point** → a NornicDB node carrying:
-  - ID (string/uuid/number mapped to NornicDB node ID)
-  - payload (mapped to node properties)
-  - vector(s) (stored as embeddings, indexed for vector search)
+- Qdrant **collection** → a NornicDB **database** (namespace).
+  - The Qdrant gRPC layer uses `DatabaseManager.GetStorage(collectionName)`; all point data lives under the namespace prefix `collectionName:`.
+  - A collection is considered “Qdrant-managed” if it contains `_collection_meta` (created by `CreateCollection`).
+- Qdrant **point** → a NornicDB node inside the collection/database namespace:
+  - Node ID: `qdrant:point:<raw-id>` (does not include the collection name)
+  - Labels: `QdrantPoint`, `Point`
+  - Payload: mapped to `node.Properties` (with internal `_qdrant_*` keys removed from responses)
+  - Vector(s): stored in `Node.NamedEmbeddings` and indexed for vector search
 
 NornicDB also supports **named vectors** in Qdrant:
 
 - Qdrant named vectors → `node.NamedEmbeddings[vectorName]`
 - This enables multiple independent embedding fields per point (e.g. `title` and `content`).
+
+### Cypher access (collection = database)
+
+Because collections are databases, you can query points with Cypher:
+
+```cypher
+USE my_vectors
+MATCH (p:QdrantPoint)
+RETURN count(p)
+```
+
+Dropping a collection is the same as dropping a database:
+
+```cypher
+DROP DATABASE `my_vectors`
+```
 
 ---
 
