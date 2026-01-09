@@ -183,6 +183,11 @@ func (db *DB) indexNodeFromEvent(node *storage.Node) {
 		log.Printf("⚠️ storage event had unprefixed node ID: %q", node.ID)
 		return
 	}
+	// Qdrant gRPC points are stored under a reserved sub-namespace and are indexed
+	// by the Qdrant vector index cache, not the hybrid search service.
+	if strings.HasPrefix(local, "qdrant:") {
+		return
+	}
 
 	svc, err := db.getOrCreateSearchService(dbName, nil)
 	if err != nil || svc == nil {

@@ -169,3 +169,24 @@ func TestSearchServices_ClusteringFlagUpgradesCachedService(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, svc.IsClusteringEnabled())
 }
+
+func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+
+	before := svc.EmbeddingCount()
+	db.indexNodeFromEvent(&storage.Node{
+		ID: storage.NodeID("nornic:qdrant:bench_col:1"),
+		NamedEmbeddings: map[string][]float32{
+			"default": {1, 0, 0},
+		},
+	})
+	after := svc.EmbeddingCount()
+	require.Equal(t, before, after)
+}

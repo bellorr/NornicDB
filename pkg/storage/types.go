@@ -942,7 +942,17 @@ func NodeNeedsEmbedding(node *Node) bool {
 		}
 	}
 
-	// Skip if already has embeddings (always stored in ChunkEmbeddings, even single chunk = array of 1)
+	// Skip if node already has user-provided named embeddings (e.g., Qdrant vectors).
+	// Managed embeddings are generated into ChunkEmbeddings by the embed worker.
+	if len(node.NamedEmbeddings) > 0 {
+		for _, emb := range node.NamedEmbeddings {
+			if len(emb) > 0 {
+				return false
+			}
+		}
+	}
+
+	// Skip if already has managed embeddings (ChunkEmbeddings).
 	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 		return false
 	}

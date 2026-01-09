@@ -110,11 +110,13 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 	if db.clusterTicker != nil {
 		return
 	}
-	db.clusterTicker = time.NewTicker(interval)
-	db.clusterTickerStop = make(chan struct{})
+	ticker := time.NewTicker(interval)
+	stopCh := make(chan struct{})
+	db.clusterTicker = ticker
+	db.clusterTickerStop = stopCh
 
 	db.bgWg.Add(1)
-	go func() {
+	go func(t *time.Ticker, stop <-chan struct{}) {
 		defer db.bgWg.Done()
 		log.Printf("🔬 K-means clustering timer started (interval: %v)", interval)
 
@@ -124,22 +126,29 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 		// Then run on timer
 		for {
 			select {
-			case <-db.clusterTickerStop:
+			case <-stop:
 				log.Printf("🔬 K-means clustering timer stopped")
 				return
-			case <-db.clusterTicker.C:
+			case <-t.C:
 				db.runClusteringOnceAllDatabases()
 			}
 		}
-	}()
+	}(ticker, stopCh)
 }
 
 // stopClusteringTimer stops the k-means clustering timer if running.
 func (db *DB) stopClusteringTimer() {
-	if db.clusterTicker != nil {
-		db.clusterTicker.Stop()
-		close(db.clusterTickerStop)
-		db.clusterTicker = nil
+	ticker := db.clusterTicker
+	stopCh := db.clusterTickerStop
+	if ticker == nil {
+		return
+	}
+	db.clusterTicker = nil
+	db.clusterTickerStop = nil
+
+	ticker.Stop()
+	if stopCh != nil {
+		close(stopCh)
 	}
 }
 
