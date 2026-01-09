@@ -161,6 +161,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -1003,10 +1004,28 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.rateLimiter.Stop()
 	}
 
-	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
+	if s.httpServer == nil {
+		return nil
 	}
-	return nil
+
+	// Hard-bound shutdown: even if net/http Shutdown fails to return at ctx deadline
+	// (e.g., a stuck handler or an internal deadlock), Stop must return so callers
+	// can exit deterministically.
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- s.httpServer.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+			_ = s.httpServer.Close()
+		}
+		return err
+	case <-ctx.Done():
+		_ = s.httpServer.Close()
+		return ctx.Err()
+	}
 }
 
 // Addr returns the server's listen address.

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -345,6 +346,56 @@ func TestHandleStatus(t *testing.T) {
 	// Verify that system database nodes are NOT included in the count
 	// (system database has metadata nodes that shouldn't be counted)
 	// The count should only include user databases
+}
+
+func TestServerStop_DeadlineExceededForcesClose(t *testing.T) {
+	// This test simulates an in-flight handler that takes too long, ensuring
+	// Server.Stop returns promptly when the shutdown context is exceeded.
+	cfg := DefaultConfig()
+	cfg.Headless = true
+
+	db, err := nornicdb.Open("", nornicdb.DefaultConfig())
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	s, err := New(db, nil, cfg)
+	require.NoError(t, err)
+
+	// Override the router with a handler that blocks past shutdown deadline.
+	started := make(chan struct{})
+	mux := http.NewServeMux()
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	})
+	s.httpServer = &http.Server{Handler: mux}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	s.listener = ln
+	go func() { _ = s.httpServer.Serve(ln) }()
+
+	// Issue a request that will be in-flight during shutdown.
+	go func() {
+		req, _ := http.NewRequest("GET", "http://"+ln.Addr().String()+"/status", nil)
+		// no auth wrapper; direct handler
+		_, _ = http.DefaultClient.Do(req)
+	}()
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	err = s.Stop(ctx)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// Ensure Stop returns promptly and listener is closed.
+	_, dialErr := net.DialTimeout("tcp", ln.Addr().String(), 50*time.Millisecond)
+	require.Error(t, dialErr)
 }
 
 // TestMetaField_NodeMetadata verifies that the meta field is properly populated
