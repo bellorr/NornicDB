@@ -31,7 +31,7 @@ RETURN alice
 **What this does:**
 - `CREATE` - Creates a new node
 - `(alice:Person ...)` - Variable name `alice`, label `Person`
-- `{name: ..., age: ...}` - Properties
+- `{name: ..., age: ...}` - Properties (see [Property Data Types](../user-guides/property-data-types.md) for all supported types)
 - `RETURN alice` - Returns the created node
 
 ## 2️⃣ Creating Multiple Nodes

@@ -149,7 +149,40 @@ func NewDatabaseManager(inner storage.Engine, config *Config) (*DatabaseManager,
 		return nil, fmt.Errorf("failed to load database metadata: %w", err)
 	}
 
-	// Ensure system and default databases exist
+	// If the underlying engine is read-only (e.g. HA standby), do not attempt
+	// to create/migrate metadata. Standby nodes should start quickly and serve
+	// reads/UI while replication catches them up.
+	readOnly := false
+	if leader, ok := inner.(interface{ IsLeader() bool }); ok && !leader.IsLeader() {
+		readOnly = true
+	}
+
+	// Ensure system and default databases exist (in-memory always; persisted only if writable).
+	if readOnly {
+		if _, exists := m.databases[m.config.SystemDatabase]; !exists {
+			m.databases[m.config.SystemDatabase] = &DatabaseInfo{
+				Name:      m.config.SystemDatabase,
+				CreatedAt: time.Now(),
+				Status:    "online",
+				Type:      "system",
+				IsDefault: false,
+				UpdatedAt: time.Now(),
+			}
+		}
+		if _, exists := m.databases[m.config.DefaultDatabase]; !exists {
+			m.databases[m.config.DefaultDatabase] = &DatabaseInfo{
+				Name:      m.config.DefaultDatabase,
+				CreatedAt: time.Now(),
+				Status:    "online",
+				Type:      "standard",
+				IsDefault: true,
+				UpdatedAt: time.Now(),
+			}
+		}
+		log.Printf("ℹ️  multidb: storage is read-only; skipping metadata writes and migrations")
+		return m, nil
+	}
+
 	if err := m.ensureSystemDatabases(); err != nil {
 		return nil, err
 	}

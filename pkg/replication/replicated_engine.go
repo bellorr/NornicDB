@@ -36,6 +36,16 @@ func NewReplicatedEngine(inner storage.Engine, replicator Replicator, timeout ti
 	}
 }
 
+// IsLeader reports whether this node can accept writes in the current replication mode.
+// This is a convenience for higher-level components (e.g. multidb startup) that need
+// to avoid performing metadata migrations on standby/followers.
+func (e *ReplicatedEngine) IsLeader() bool {
+	if e == nil || e.replicator == nil {
+		return true
+	}
+	return e.replicator.IsLeader()
+}
+
 func (e *ReplicatedEngine) CreateNode(node *storage.Node) (storage.NodeID, error) {
 	if node == nil {
 		return "", fmt.Errorf("nil node")
@@ -150,4 +160,3 @@ func (e *ReplicatedEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, ed
 	// Best-effort counts are not returned by the replication protocol today.
 	return 0, 0, nil
 }
-

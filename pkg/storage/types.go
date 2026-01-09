@@ -99,6 +99,7 @@ type EdgeID string
 //   - ID: Unique identifier (must be unique across all nodes)
 //   - Labels: Type tags like ["Person", "User"] (Neo4j :Person:User)
 //   - Properties: Key-value data (any JSON-serializable types)
+//     See docs/user-guides/property-data-types.md for complete type reference
 //
 // NornicDB Extensions (not exported to Neo4j):
 //   - CreatedAt: When the node was first created
