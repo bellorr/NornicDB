@@ -50,9 +50,9 @@ func (db *DB) Stats() DBStats {
 // Uses interface{} to avoid circular import with gpu package.
 // If clustering is already enabled (via feature flag), this upgrades it to use GPU.
 func (db *DB) SetGPUManager(manager interface{}) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.gpuManagerMu.Lock()
 	db.gpuManager = manager
+	db.gpuManagerMu.Unlock()
 
 	gpuMgr, _ := manager.(*gpu.Manager)
 
@@ -78,8 +78,8 @@ func (db *DB) SetGPUManager(manager interface{}) {
 // GetGPUManager returns the GPU manager if set.
 // Returns interface{} - caller must type assert to *gpu.Manager.
 func (db *DB) GetGPUManager() interface{} {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	db.gpuManagerMu.RLock()
+	defer db.gpuManagerMu.RUnlock()
 	return db.gpuManager
 }
 

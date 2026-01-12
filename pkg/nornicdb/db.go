@@ -459,6 +459,7 @@ type DB struct {
 	wal            *storage.WAL   // Write-ahead log for durability
 	decay          *decay.Manager
 	cypherExecutor *cypher.StorageExecutor
+	gpuManagerMu   sync.RWMutex
 	gpuManager     interface{} // *gpu.Manager - interface to avoid circular import
 
 	// Search services (per database) using pre-computed embeddings.

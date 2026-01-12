@@ -49,15 +49,15 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 		return nil, fmt.Errorf("search service not available for system database")
 	}
 
-	db.mu.RLock()
-	baseStorage := db.baseStorage
 	dims := db.embeddingDims
 	minSim := db.searchMinSimilarity
+
 	var gpuMgr *gpu.Manager
+	db.gpuManagerMu.RLock()
 	if m, ok := db.gpuManager.(*gpu.Manager); ok {
 		gpuMgr = m
 	}
-	db.mu.RUnlock()
+	db.gpuManagerMu.RUnlock()
 
 	db.searchServicesMu.RLock()
 	if entry, ok := db.searchServices[dbName]; ok {
@@ -79,10 +79,10 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	db.searchServicesMu.RUnlock()
 
 	if storageEngine == nil {
-		if baseStorage == nil {
+		if db.baseStorage == nil {
 			return nil, fmt.Errorf("search service unavailable: base storage is nil")
 		}
-		storageEngine = storage.NewNamespacedEngine(baseStorage, dbName)
+		storageEngine = storage.NewNamespacedEngine(db.baseStorage, dbName)
 	}
 
 	if dims <= 0 {
