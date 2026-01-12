@@ -247,7 +247,22 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				result.Columns[i] = item.expr
 			}
 
-			// Find the matching node for this return item
+			// Resolve the return expression against the created variables.
+			//
+			// The RETURN item may be:
+			// - variable: a
+			// - property access: a.name
+			// - function call: id(a), elementId(a), labels(a)
+			// - other expressions that reference a single variable
+			varName := extractVariableNameFromReturnItem(item.expr)
+			if varName != "" {
+				if node, ok := createdNodes[varName]; ok {
+					row[i] = e.resolveReturnItem(item, varName, node)
+					continue
+				}
+			}
+
+			// Fallback: keep previous prefix-based behavior.
 			for variable, node := range createdNodes {
 				if strings.HasPrefix(item.expr, variable) || item.expr == variable {
 					row[i] = e.resolveReturnItem(item, variable, node)
@@ -471,9 +486,20 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 
 			// Find the matching node for this return item
 			for variable, node := range createdNodes {
+				// Fast path: direct variable/property prefix match.
 				if strings.HasPrefix(item.expr, variable) || item.expr == variable {
 					row[i] = e.resolveReturnItem(item, variable, node)
 					break
+				}
+			}
+
+			// If not resolved by prefix match, try extracting the referenced variable
+			// (covers function calls like id(a), elementId(a), etc.).
+			if row[i] == nil {
+				if varName := extractVariableNameFromReturnItem(item.expr); varName != "" {
+					if node, ok := createdNodes[varName]; ok {
+						row[i] = e.resolveReturnItem(item, varName, node)
+					}
 				}
 			}
 		}
