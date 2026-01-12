@@ -498,6 +498,23 @@ func (e *StorageExecutor) evaluateReturnExprInContext(expr string, ctx map[strin
 		return val
 	}
 
+	// Build nodes and rels maps from context for function evaluation
+	nodes := make(map[string]*storage.Node)
+	rels := make(map[string]*storage.Edge)
+	for key, val := range ctx {
+		if node, ok := val.(*storage.Node); ok && node != nil {
+			nodes[key] = node
+		}
+		if edge, ok := val.(*storage.Edge); ok && edge != nil {
+			rels[key] = edge
+		}
+	}
+
+	// Handle function calls (e.g., id(a), elementId(a), labels(a))
+	if strings.Contains(expr, "(") {
+		return e.evaluateExpressionWithContext(expr, nodes, rels)
+	}
+
 	// Property access: node.property
 	if strings.Contains(expr, ".") {
 		parts := strings.SplitN(expr, ".", 2)

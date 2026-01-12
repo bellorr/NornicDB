@@ -33,6 +33,14 @@ func evalID(ctx Context, args []string) (interface{}, error) {
 	}
 	v, _ := ctx.Eval(inner)
 	switch vv := v.(type) {
+	case *storage.Node:
+		if vv != nil {
+			return string(vv.ID), nil
+		}
+	case *storage.Edge:
+		if vv != nil {
+			return string(vv.ID), nil
+		}
 	case interface{ GetID() string }:
 		return vv.GetID(), nil
 	}
