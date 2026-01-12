@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -195,7 +196,7 @@ func (r *HAStandbyReplicator) SetTransport(t Transport) {
 
 // Start initializes and starts the HA standby replicator.
 func (r *HAStandbyReplicator) Start(ctx context.Context) error {
-	if r.started.Load() {
+	if !r.started.CompareAndSwap(false, true) {
 		return nil
 	}
 
@@ -214,15 +215,16 @@ func (r *HAStandbyReplicator) Start(ctx context.Context) error {
 
 	if r.isPrimary.Load() {
 		if err := r.startPrimary(ctx); err != nil {
+			r.started.Store(false)
 			return fmt.Errorf("start primary: %w", err)
 		}
 	} else {
 		if err := r.startStandby(ctx); err != nil {
+			r.started.Store(false)
 			return fmt.Errorf("start standby: %w", err)
 		}
 	}
 
-	r.started.Store(true)
 	log.Printf("[HA] Started as %s, peer: %s", r.role, r.config.HAStandby.PeerAddr)
 
 	return nil
@@ -533,13 +535,23 @@ func (r *HAStandbyReplicator) Apply(cmd *Command, timeout time.Duration) error {
 		return ErrStandbyMode
 	}
 
+	traceWrites := os.Getenv("NORNICDB_CLUSTER_TRACE_WRITES") != ""
+	start := time.Now()
 	if err := r.storage.ApplyCommand(cmd); err != nil {
 		return err
 	}
+	applyDur := time.Since(start)
 
-	// Honor sync mode: optionally wait for standby acknowledgement.
+	// Honor write-ack mode: optionally wait for standby acknowledgement.
 	walPos, _ := r.storage.GetWALPosition()
-	return r.waitForReplicationAck(walPos, timeout)
+	ackStart := time.Now()
+	ackErr := r.waitForReplicationAck(walPos, timeout)
+	ackDur := time.Since(ackStart)
+	if traceWrites {
+		log.Printf("[HA Primary] Apply type=%d apply=%s ack=%s total=%s mode=%s wal=%d err=%v",
+			cmd.Type, applyDur, ackDur, time.Since(start), r.config.HAStandby.SyncMode, walPos, ackErr)
+	}
+	return ackErr
 }
 
 // ApplyBatch applies multiple commands.
@@ -552,33 +564,20 @@ func (r *HAStandbyReplicator) ApplyBatch(cmds []*Command, timeout time.Duration)
 	return nil
 }
 
-// waitForReplicationAck enforces the configured sync mode after a local apply.
-// For async mode, it returns immediately. For semi-sync/sync, it waits until the
+// waitForReplicationAck enforces the configured write-ack behavior after a local apply.
+// For async mode, it returns immediately. For quorum mode, it waits until the
 // standby has acknowledged WAL up to the target position or the timeout elapses.
 func (r *HAStandbyReplicator) waitForReplicationAck(target uint64, timeout time.Duration) error {
 	mode := r.config.HAStandby.SyncMode
-	if mode == "" {
-		mode = SyncAsync
-	}
-
 	if mode == SyncAsync || target == 0 || r.walStreamer == nil {
 		return nil
 	}
-
-	// Semi-sync: best-effort send without blocking the caller.
-	if mode == SyncSemiSync {
-		// Try to push pending WAL but return immediately.
-		go r.streamPendingWAL(context.Background())
+	if mode != SyncQuorum {
+		// Config validation should prevent this, but keep async semantics as a safe default.
 		return nil
 	}
 
-	// Unknown mode: treat as async but log for visibility.
-	if mode != SyncSync {
-		log.Printf("[HA Primary] Unknown sync mode %q, treating as async", mode)
-		return nil
-	}
-
-	// Sync: wait for ack up to timeout.
+	// Quorum: wait for ack up to timeout.
 	// Default timeout if caller did not supply one.
 	if timeout <= 0 {
 		// Use a conservative bound: 2x heartbeat interval or 500ms minimum.

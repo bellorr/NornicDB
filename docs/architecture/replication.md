@@ -25,7 +25,7 @@ NornicDB supports three replication modes to meet different availability and con
 │  MODE 1: HOT STANDBY (2 nodes)                                                 │
 │  ┌─────────────┐      WAL Stream      ┌─────────────┐                         │
 │  │   Primary   │ ──────────────────►  │   Standby   │                         │
-│  │  (writes)   │      (async/sync)    │  (failover) │                         │
+│  │  (writes)   │    (async/quorum)    │  (failover) │                         │
 │  └─────────────┘                      └─────────────┘                         │
 │                                                                                 │
 │  MODE 2: RAFT CLUSTER (3-5 nodes)                                              │
@@ -55,11 +55,12 @@ NornicDB supports three replication modes to meet different availability and con
 pkg/replication/
 ├── config.go           # Configuration loading and validation
 ├── replicator.go       # Core Replicator interface and factory
-├── transport.go        # ClusterTransport for node-to-node communication
+├── transport.go        # ClusterTransport over TCP (gob-framed messages)
 ├── ha_standby.go       # Hot Standby implementation
 ├── raft.go             # Raft consensus implementation
 ├── multi_region.go     # Multi-region coordinator
-├── wal.go              # WAL streaming primitives
+├── codec.go            # Gob codecs (node/edge payloads, helpers)
+├── handlers.go         # Cluster message dispatch/handler registration
 ├── chaos_test.go       # Chaos testing infrastructure
 ├── scenario_test.go    # E2E scenario tests
 └── replication_test.go # Unit tests
@@ -104,6 +105,13 @@ type Replicator interface {
     Shutdown() error
 }
 ```
+
+## Current Implementation Notes
+
+- **Transport**: `pkg/replication/transport.go` uses a plain TCP listener with framed **gob** messages for cluster RPCs (heartbeat, WAL batch, Raft messages).
+- **Payloads**: `pkg/replication/codec.go` defines replication-safe payloads for nodes/edges. Node payloads include embeddings (`NamedEmbeddings`, `ChunkEmbeddings`) so embeddings replicate in HA mode.
+- **Write Path**: the base storage engine is wrapped by `pkg/replication/replicated_engine.go`, which converts writes into `replication.Command` and routes them through the active `Replicator`.
+- **WAL Streaming**: `pkg/replication/storage_adapter.go` maintains a persistent WAL (restart/recovery) plus an in-memory WAL slice to avoid repeated full-file scans during streaming, and uses an async WAL write queue for lower per-write latency.
 
 ### Transport Interface
 
@@ -226,8 +234,7 @@ Client                  Primary                 Standby
 | Mode | Acknowledgment | Data Safety | Latency |
 |------|----------------|-------------|---------|
 | `async` | Primary only | Risk of data loss | Lowest |
-| `semi_sync` | Standby received | Minimal data loss | Medium |
-| `sync` | Standby persisted | No data loss | Highest |
+| `quorum` | Standby applied | Strongest | Highest |
 
 ### Failover Process
 

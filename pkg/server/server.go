@@ -483,6 +483,11 @@ type Server struct {
 	// OAuth manager for OAuth 2.0 authentication
 	oauthManager *auth.OAuthManager
 
+	// Cache for Basic auth results to avoid bcrypt+JWT work on every request.
+	// This materially improves throughput for Neo4j-compatible clients that
+	// send Basic auth on each request.
+	basicAuthCache *basicAuthCache
+
 	mu      sync.RWMutex
 	closed  atomic.Bool
 	started time.Time
@@ -885,6 +890,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		heimdallHandler: heimdallHandler,
 		graphqlHandler:  graphql.NewHandler(db, dbManager),
 		rateLimiter:     rateLimiter,
+		basicAuthCache:  newBasicAuthCache(1024, 30*time.Second),
 		searchServices:  make(map[string]*search.Service),
 	}
 

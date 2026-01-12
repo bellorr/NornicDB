@@ -78,7 +78,7 @@ Geographic distribution with async cross-region replication:
 - ✅ Per-region Raft clusters (strong local consistency)
 - ✅ Cross-region WAL streaming (async replication)  
 - ✅ Conflict resolution strategies (`last_write_wins`, `manual`)
-- ✅ Configurable cross-region sync modes (`async`, `semi_sync`)
+- ✅ Configurable cross-region sync modes (`async`, `quorum`)
 - ✅ Region failover and promotion
 
 ### Chaos Testing
@@ -114,5 +114,4 @@ See **[Clustering Guide](../user-guides/clustering.md#mode-3-multi-region)** for
 - **[Clustering Guide](../user-guides/clustering.md)** - Current clustering features
 - **[Replication Architecture](replication.md)** - Technical details
 - **[Scaling](../operations/scaling.md)** - Current scaling options
-
 

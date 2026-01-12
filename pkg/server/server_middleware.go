@@ -22,6 +22,8 @@ import (
 // Supports both Neo4j Basic Auth and Bearer JWT tokens.
 func (s *Server) withAuth(handler http.HandlerFunc, requiredPerm auth.Permission) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		traceAuth := os.Getenv("NORNICDB_TRACE_AUTH") != ""
+
 		// Check if auth is enabled
 		if s.auth == nil || !s.auth.IsSecurityEnabled() {
 			// Auth disabled - allow all
@@ -32,32 +34,79 @@ func (s *Server) withAuth(handler http.HandlerFunc, requiredPerm auth.Permission
 		var claims *auth.JWTClaims
 		var err error
 
-		// Try Basic Auth first (Neo4j compatibility)
 		authHeader := r.Header.Get("Authorization")
-		if strings.HasPrefix(authHeader, "Basic ") {
-			claims, err = s.handleBasicAuth(authHeader, r)
-		} else {
-			// Try Bearer/JWT token extraction
-			// Check both "nornicdb_token" (preferred) and "token" (legacy) cookies
-			cookieToken := getCookie(r, "nornicdb_token")
-			if cookieToken == "" {
-				cookieToken = getCookie(r, "token")
-			}
-			token := auth.ExtractToken(
-				authHeader,
-				r.Header.Get("X-API-Key"),
-				cookieToken,
-				r.URL.Query().Get("token"),
-				r.URL.Query().Get("api_key"),
-			)
 
-			if token == "" {
-				s.writeNeo4jError(w, http.StatusUnauthorized, "Neo.ClientError.Security.Unauthorized", "No authentication provided")
-				return
-			}
-
-			claims, err = s.auth.ValidateToken(token)
+		// Only treat Authorization as a token source when it's a Bearer token.
+		// (Basic auth uses the same header but is handled separately.)
+		bearerHeader := ""
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			bearerHeader = authHeader
 		}
+
+		// Prefer Bearer/JWT token extraction to avoid doing bcrypt on every request.
+		// This is especially important for the UI and any clients that can persist cookies.
+		// Check both "nornicdb_token" (preferred) and "token" (legacy) cookies.
+		cookieToken := getCookie(r, "nornicdb_token")
+		if cookieToken == "" {
+			cookieToken = getCookie(r, "token")
+		}
+		token := auth.ExtractToken(
+			bearerHeader,
+			r.Header.Get("X-API-Key"),
+			cookieToken,
+			r.URL.Query().Get("token"),
+			r.URL.Query().Get("api_key"),
+		)
+
+		if token != "" {
+			start := time.Now()
+			claims, err = s.auth.ValidateToken(token)
+			if traceAuth && r.URL.Path == "/graphql" {
+				fmt.Printf("[AUTH] %s %s validate_token=%v err=%v\n", r.Method, r.URL.Path, time.Since(start), err)
+			}
+		} else if strings.HasPrefix(authHeader, "Basic ") {
+			start := time.Now()
+
+			// Cache successful Basic auth results so clients that send Basic on every request
+			// (Neo4j compatibility) don't pay bcrypt+JWT generation each time.
+			if s.basicAuthCache != nil {
+				key := basicAuthCacheKey(authHeader)
+				if cached, ok := s.basicAuthCache.get(key); ok {
+					claims = cached
+					err = nil
+					if traceAuth && r.URL.Path == "/graphql" {
+						fmt.Printf("[AUTH] %s %s basic_auth_cache=%v err=%v\n", r.Method, r.URL.Path, time.Since(start), err)
+					}
+					goto doneAuth
+				}
+			}
+
+			var tokenResp *auth.TokenResponse
+			tokenResp, claims, err = s.handleBasicAuth(authHeader, r)
+			if err == nil && tokenResp != nil && tokenResp.AccessToken != "" {
+				// Help browsers / UI by issuing a cookie so future requests can use JWT.
+				http.SetCookie(w, &http.Cookie{
+					Name:     "nornicdb_token",
+					Value:    tokenResp.AccessToken,
+					Path:     "/",
+					HttpOnly: true,
+					Secure:   r.TLS != nil,
+					SameSite: http.SameSiteLaxMode,
+					MaxAge:   86400 * 7, // 7 days
+				})
+			}
+			if err == nil && s.basicAuthCache != nil && claims != nil {
+				s.basicAuthCache.set(basicAuthCacheKey(authHeader), claims)
+			}
+			if traceAuth && r.URL.Path == "/graphql" {
+				fmt.Printf("[AUTH] %s %s basic_auth=%v err=%v\n", r.Method, r.URL.Path, time.Since(start), err)
+			}
+		} else {
+			s.writeNeo4jError(w, http.StatusUnauthorized, "Neo.ClientError.Security.Unauthorized", "No authentication provided")
+			return
+		}
+
+	doneAuth:
 
 		if err != nil {
 			s.writeNeo4jError(w, http.StatusUnauthorized, "Neo.ClientError.Security.Unauthorized", err.Error())
@@ -79,24 +128,24 @@ func (s *Server) withAuth(handler http.HandlerFunc, requiredPerm auth.Permission
 }
 
 // handleBasicAuth handles Neo4j-compatible Basic authentication.
-func (s *Server) handleBasicAuth(authHeader string, r *http.Request) (*auth.JWTClaims, error) {
+func (s *Server) handleBasicAuth(authHeader string, r *http.Request) (*auth.TokenResponse, *auth.JWTClaims, error) {
 	encoded := strings.TrimPrefix(authHeader, "Basic ")
 	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil, fmt.Errorf("invalid basic auth encoding")
+		return nil, nil, fmt.Errorf("invalid basic auth encoding")
 	}
 
 	parts := strings.SplitN(string(decoded), ":", 2)
 	if len(parts) != 2 {
-		return nil, fmt.Errorf("invalid basic auth format")
+		return nil, nil, fmt.Errorf("invalid basic auth format")
 	}
 
 	username, password := parts[0], parts[1]
 
 	// Authenticate and get token
-	_, user, err := s.auth.Authenticate(username, password, getClientIP(r), r.UserAgent())
+	tokenResp, user, err := s.auth.Authenticate(username, password, getClientIP(r), r.UserAgent())
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Convert user to claims
@@ -105,12 +154,14 @@ func (s *Server) handleBasicAuth(authHeader string, r *http.Request) (*auth.JWTC
 		roles[i] = string(role)
 	}
 
-	return &auth.JWTClaims{
+	claims := &auth.JWTClaims{
 		Sub:      user.ID,
 		Username: user.Username,
 		Email:    user.Email,
 		Roles:    roles,
-	}, nil
+	}
+
+	return tokenResp, claims, nil
 }
 
 func (s *Server) corsMiddleware(next http.Handler) http.Handler {
