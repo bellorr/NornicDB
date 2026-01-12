@@ -21,6 +21,8 @@ import (
 // This is called only on engine startup to enable O(1) stats lookups.
 func (b *BadgerEngine) initializeCounts() error {
 	var nodeCount, edgeCount int64
+	namespaceNodeCounts := make(map[string]int64)
+	namespaceEdgeCounts := make(map[string]int64)
 
 	err := b.db.View(func(txn *badger.Txn) error {
 		// Count nodes
@@ -32,6 +34,13 @@ func (b *BadgerEngine) initializeCounts() error {
 		nodePrefix := []byte{prefixNode}
 		for nodeIt.Seek(nodePrefix); nodeIt.ValidForPrefix(nodePrefix); nodeIt.Next() {
 			nodeCount++
+			key := nodeIt.Item().Key()
+			if len(key) <= 1 {
+				continue
+			}
+			if ns, ok := namespacePrefixFromID(string(key[1:])); ok {
+				namespaceNodeCounts[ns]++
+			}
 		}
 
 		// Count edges
@@ -43,6 +52,13 @@ func (b *BadgerEngine) initializeCounts() error {
 		edgePrefix := []byte{prefixEdge}
 		for edgeIt.Seek(edgePrefix); edgeIt.ValidForPrefix(edgePrefix); edgeIt.Next() {
 			edgeCount++
+			key := edgeIt.Item().Key()
+			if len(key) <= 1 {
+				continue
+			}
+			if ns, ok := namespacePrefixFromID(string(key[1:])); ok {
+				namespaceEdgeCounts[ns]++
+			}
 		}
 
 		return nil
@@ -55,6 +71,10 @@ func (b *BadgerEngine) initializeCounts() error {
 	// Initialize atomic counters
 	b.nodeCount.Store(nodeCount)
 	b.edgeCount.Store(edgeCount)
+	b.namespaceCountsMu.Lock()
+	b.namespaceNodeCounts = namespaceNodeCounts
+	b.namespaceEdgeCounts = namespaceEdgeCounts
+	b.namespaceCountsMu.Unlock()
 
 	return nil
 }
@@ -64,29 +84,7 @@ func (b *BadgerEngine) NodeCount() (int64, error) {
 		return 0, err
 	}
 
-	// BUGFIX: The atomic counter gets out of sync when nodes are created via
-	// transactional writes that bypass the normal create path. Instead of
-	// trusting the counter, actually count nodes by scanning the prefix.
-	// This is still O(N) but uses key-only iteration which is fast.
-	var count int64
-	err := b.withView(func(txn *badger.Txn) error {
-		prefix := []byte{prefixNode}
-		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
-		defer it.Close()
-
-		for it.Rewind(); it.Valid(); it.Next() {
-			count++
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	// Sync the atomic counter with reality (fixes it for next time)
-	b.nodeCount.Store(count)
-
-	return count, nil
+	return b.nodeCount.Load(), nil
 }
 
 // NodeCountByPrefix counts nodes whose NodeID begins with the provided prefix.
@@ -98,6 +96,13 @@ func (b *BadgerEngine) NodeCountByPrefix(prefix string) (int64, error) {
 	if err := b.ensureOpen(); err != nil {
 		return 0, err
 	}
+
+	b.namespaceCountsMu.RLock()
+	if count, ok := b.namespaceNodeCounts[prefix]; ok {
+		b.namespaceCountsMu.RUnlock()
+		return count, nil
+	}
+	b.namespaceCountsMu.RUnlock()
 
 	var count int64
 	err := b.withView(func(txn *badger.Txn) error {
@@ -125,28 +130,7 @@ func (b *BadgerEngine) EdgeCount() (int64, error) {
 		return 0, err
 	}
 
-	// BUGFIX: The atomic counter gets out of sync when edges are created via
-	// transactional writes that bypass the normal create path. Instead of
-	// trusting the counter, actually count edges by scanning the prefix.
-	var count int64
-	err := b.withView(func(txn *badger.Txn) error {
-		prefix := []byte{prefixEdge}
-		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
-		defer it.Close()
-
-		for it.Rewind(); it.Valid(); it.Next() {
-			count++
-		}
-		return nil
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	// Sync the atomic counter with reality
-	b.edgeCount.Store(count)
-
-	return count, nil
+	return b.edgeCount.Load(), nil
 }
 
 // EdgeCountByPrefix counts edges whose EdgeID begins with the provided prefix.
@@ -155,6 +139,13 @@ func (b *BadgerEngine) EdgeCountByPrefix(prefix string) (int64, error) {
 	if err := b.ensureOpen(); err != nil {
 		return 0, err
 	}
+
+	b.namespaceCountsMu.RLock()
+	if count, ok := b.namespaceEdgeCounts[prefix]; ok {
+		b.namespaceCountsMu.RUnlock()
+		return count, nil
+	}
+	b.namespaceCountsMu.RUnlock()
 
 	var count int64
 	err := b.withView(func(txn *badger.Txn) error {
@@ -252,6 +243,13 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 				continue
 			}
 			nodeID := NodeID(key[1:])
+
+			// Never embed the system database; remove any stale/system entries.
+			if isSystemNamespaceID(string(nodeID)) {
+				_ = txn.Delete(pendingEmbedKey(nodeID))
+				removedNoLongerNeeds++
+				continue
+			}
 
 			// Verify node exists in the same transaction for consistency.
 			item, err := txn.Get(nodeKey(nodeID))
@@ -359,6 +357,13 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 			}
 			nodeID := NodeID(key[1:])
 
+			// Never embed the system database; remove from pending index if present.
+			if isSystemNamespaceID(string(nodeID)) {
+				txn.Delete(key)
+				removed++
+				continue
+			}
+
 			// Check if node exists and still needs embedding
 			// ALL node IDs must be prefixed - no unprefixed IDs allowed
 			keyToCheck := nodeKey(nodeID)
@@ -422,6 +427,9 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 				continue
 			}
 			nodeID := NodeID(key[1:])
+			if isSystemNamespaceID(string(nodeID)) {
+				continue
+			}
 
 			item.Value(func(val []byte) error {
 				node, err := decodeNodeWithEmbeddings(txn, val, nodeID)
@@ -523,8 +531,13 @@ func (b *BadgerEngine) StreamNodes(ctx context.Context, fn func(node *Node) erro
 			item := it.Item()
 			var node *Node
 			err := item.Value(func(val []byte) error {
+				key := item.Key()
+				if len(key) <= 1 {
+					return nil
+				}
+				nodeID := NodeID(key[1:])
 				var decErr error
-				node, decErr = decodeNode(val)
+				node, decErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decErr
 			})
 			if err != nil {
@@ -611,8 +624,13 @@ func (b *BadgerEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn f
 			item := it.Item()
 			var node *Node
 			err := item.Value(func(val []byte) error {
+				key := item.Key()
+				if len(key) <= 1 {
+					return nil
+				}
+				nodeID := NodeID(key[1:])
 				var decErr error
-				node, decErr = decodeNode(val)
+				node, decErr = decodeNodeWithEmbeddings(txn, val, nodeID)
 				return decErr
 			})
 			if err != nil {
@@ -623,6 +641,9 @@ func (b *BadgerEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn f
 
 			if len(chunk) >= chunkSize {
 				if err := fn(chunk); err != nil {
+					if err == ErrIterationStopped {
+						return nil
+					}
 					return err
 				}
 				// Reset chunk, reuse capacity
@@ -633,6 +654,9 @@ func (b *BadgerEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn f
 		// Process remaining nodes
 		if len(chunk) > 0 {
 			if err := fn(chunk); err != nil {
+				if err == ErrIterationStopped {
+					return nil
+				}
 				return err
 			}
 		}

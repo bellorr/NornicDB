@@ -18,7 +18,7 @@ export function SelectionToolbar({
   onClear,
   deleting = false,
 }: SelectionToolbarProps) {
-  if (selectedCount === 0) return null;
+  const hasSelection = selectedCount > 0;
 
   return (
     <div className="flex items-center gap-2 p-2 bg-norse-shadow border-b border-norse-rune">
@@ -28,8 +28,8 @@ export function SelectionToolbar({
       <button
         type="button"
         onClick={onDelete}
-        disabled={deleting}
-        className="flex items-center gap-1 px-3 py-1 text-sm bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded disabled:opacity-50"
+        disabled={!hasSelection || deleting}
+        className="flex items-center gap-1 px-3 py-1 text-sm bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded disabled:opacity-50 disabled:cursor-not-allowed"
       >
         <Trash2 className="w-4 h-4" />
         Delete
@@ -37,11 +37,11 @@ export function SelectionToolbar({
       <button
         type="button"
         onClick={onClear}
-        className="px-3 py-1 text-sm text-norse-silver hover:text-white"
+        disabled={!hasSelection}
+        className="px-3 py-1 text-sm text-norse-silver hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
       >
         Clear
       </button>
     </div>
   );
 }
-

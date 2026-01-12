@@ -81,6 +81,9 @@ type Operation struct {
 	NodeID  NodeID
 	Node    *Node // New state (for create/update) or nil
 	OldNode *Node // Old state (for update/delete rollback)
+	// For delete operations that cascade (e.g., DeleteNode deletes edges).
+	EdgesDeleted   int64
+	DeletedEdgeIDs []EdgeID
 
 	// For edge operations
 	EdgeID  EdgeID

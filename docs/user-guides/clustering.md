@@ -33,7 +33,7 @@ NornicDB supports multiple replication modes to meet different availability and 
 MODE 1: HOT STANDBY (2 nodes)
 ┌─────────────┐      WAL Stream      ┌─────────────┐
 │   Primary   │ ──────────────────►  │   Standby   │
-│  (writes)   │      (async/sync)    │  (failover) │
+│  (writes)   │    (async/quorum)    │  (failover) │
 └─────────────┘                      └─────────────┘
 
 MODE 2: RAFT CLUSTER (3-5 nodes)
@@ -116,7 +116,14 @@ MODE 3: MULTI-REGION (Raft clusters + cross-region HA)
 
 Hot Standby provides simple high availability with one primary node handling all writes and one standby node receiving replicated data.
 
-### Configuration Overview
+### Runbook Summary
+
+- Connect all **writes** (GraphQL/HTTP/Bolt/Qdrant gRPC) to the **primary** node.
+- The **standby is read-only** and applies replicated WAL batches from the primary.
+- There is currently **no automatic write forwarding** from standby to primary.
+- Replication traffic uses a **separate internal TCP port** (`NORNICDB_CLUSTER_BIND_ADDR`) and should not overlap with Bolt/HTTP/Qdrant gRPC ports.
+
+### Required Configuration
 
 | Variable                            | Primary        | Standby        | Description            |
 | ----------------------------------- | -------------- | -------------- | ---------------------- |
@@ -126,7 +133,7 @@ Hot Standby provides simple high availability with one primary node handling all
 | `NORNICDB_CLUSTER_HA_PEER_ADDR`     | `standby:7688` | `primary:7688` | Peer address           |
 | `NORNICDB_CLUSTER_HA_AUTO_FAILOVER` | `true`         | `true`         | Enable auto-failover   |
 
-### Docker Compose Setup
+### Deployment (Docker Compose)
 
 Create a `docker-compose.ha.yml`:
 
@@ -152,7 +159,7 @@ services:
       # HA Standby Configuration
       NORNICDB_CLUSTER_HA_ROLE: primary
       NORNICDB_CLUSTER_HA_PEER_ADDR: standby:7688
-      NORNICDB_CLUSTER_HA_SYNC_MODE: semi_sync
+      NORNICDB_CLUSTER_HA_SYNC_MODE: async
       NORNICDB_CLUSTER_HA_HEARTBEAT_MS: 1000
       NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT: 30s
       NORNICDB_CLUSTER_HA_AUTO_FAILOVER: "true"
@@ -182,7 +189,7 @@ services:
       # HA Standby Configuration
       NORNICDB_CLUSTER_HA_ROLE: standby
       NORNICDB_CLUSTER_HA_PEER_ADDR: primary:7688
-      NORNICDB_CLUSTER_HA_SYNC_MODE: semi_sync
+      NORNICDB_CLUSTER_HA_SYNC_MODE: async
       NORNICDB_CLUSTER_HA_HEARTBEAT_MS: 1000
       NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT: 30s
       NORNICDB_CLUSTER_HA_AUTO_FAILOVER: "true"
@@ -205,7 +212,7 @@ networks:
     driver: bridge
 ```
 
-### Starting the Cluster
+### Start / Stop
 
 ```bash
 # Start the HA cluster
@@ -218,15 +225,44 @@ docker compose -f docker-compose.ha.yml ps
 docker compose -f docker-compose.ha.yml logs -f
 ```
 
-### Sync Modes
+### Write Acknowledgment
 
 | Mode        | Description                 | Latency | Data Safety       |
 | ----------- | --------------------------- | ------- | ----------------- |
 | `async`     | Acknowledge immediately     | Lowest  | Risk of data loss |
-| `semi_sync` | Wait for standby to receive | Medium  | Minimal data loss |
-| `sync`      | Wait for standby to persist | Highest | No data loss      |
+| `quorum`    | Wait for standby to apply   | Highest | Strongest         |
 
-### Manual Failover
+`NORNICDB_CLUSTER_HA_SYNC_MODE` controls this behavior. Default is `async`.
+
+### Local Dev (Two Processes)
+
+Primary:
+```bash
+NORNICDB_CLUSTER_HA_SYNC_MODE=async go run ./cmd/nornicdb serve \
+  --data-dir /tmp/nornicdb-node1 \
+  --http-port 7474 --bolt-port 7687 \
+  --cluster-mode ha_standby \
+  --cluster-node-id node1 \
+  --cluster-bind-addr 127.0.0.1:9001 \
+  --cluster-advertise-addr 127.0.0.1:9001 \
+  --cluster-ha-role primary \
+  --cluster-ha-peer-addr 127.0.0.1:9002
+```
+
+Standby:
+```bash
+NORNICDB_CLUSTER_HA_SYNC_MODE=async go run ./cmd/nornicdb serve \
+  --data-dir /tmp/nornicdb-node2 \
+  --http-port 7475 --bolt-port 7688 \
+  --cluster-mode ha_standby \
+  --cluster-node-id node2 \
+  --cluster-bind-addr 127.0.0.1:9002 \
+  --cluster-advertise-addr 127.0.0.1:9002 \
+  --cluster-ha-role standby \
+  --cluster-ha-peer-addr 127.0.0.1:9001
+```
+
+### Failover (Manual)
 
 ```bash
 # Trigger manual failover (run on standby)
@@ -504,7 +540,7 @@ networks:
 | Mode        | Description                    | Latency | Consistency |
 | ----------- | ------------------------------ | ------- | ----------- |
 | `async`     | Fire-and-forget replication    | Lowest  | Eventual    |
-| `semi_sync` | Wait for remote acknowledgment | Higher  | Stronger    |
+| `quorum`    | Wait for remote acknowledgment | Higher  | Stronger    |
 
 ### Conflict Resolution Strategies
 
@@ -916,14 +952,14 @@ docker compose up -d
 
 #### Hot Standby
 
-| Variable                               | Default     | Description                             |
-| -------------------------------------- | ----------- | --------------------------------------- |
-| `NORNICDB_CLUSTER_HA_ROLE`             | -           | `primary` or `standby` (required)       |
-| `NORNICDB_CLUSTER_HA_PEER_ADDR`        | -           | Address of peer node (required)         |
-| `NORNICDB_CLUSTER_HA_SYNC_MODE`        | `semi_sync` | Sync mode: `async`, `semi_sync`, `sync` |
-| `NORNICDB_CLUSTER_HA_HEARTBEAT_MS`     | `1000`      | Heartbeat interval in ms                |
-| `NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT` | `30s`       | Time before failover                    |
-| `NORNICDB_CLUSTER_HA_AUTO_FAILOVER`    | `true`      | Enable automatic failover               |
+| Variable                               | Default | Description                             |
+| -------------------------------------- | ------- | --------------------------------------- |
+| `NORNICDB_CLUSTER_HA_ROLE`             | -       | `primary` or `standby` (required)       |
+| `NORNICDB_CLUSTER_HA_PEER_ADDR`        | -       | Address of peer node (required)         |
+| `NORNICDB_CLUSTER_HA_SYNC_MODE`        | `async` | Write ack mode: `async`, `quorum` |
+| `NORNICDB_CLUSTER_HA_HEARTBEAT_MS`     | `1000`  | Heartbeat interval in ms                |
+| `NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT` | `30s`   | Time before failover                    |
+| `NORNICDB_CLUSTER_HA_AUTO_FAILOVER`    | `true`  | Enable automatic failover               |
 
 #### Raft
 
@@ -943,7 +979,7 @@ docker compose up -d
 | ------------------------------------ | ----------------- | ---------------------------- |
 | `NORNICDB_CLUSTER_REGION_ID`         | -                 | Region identifier (required) |
 | `NORNICDB_CLUSTER_REMOTE_REGIONS`    | -                 | Remote region addresses      |
-| `NORNICDB_CLUSTER_CROSS_REGION_MODE` | `async`           | Cross-region sync mode       |
+| `NORNICDB_CLUSTER_CROSS_REGION_MODE` | `async`           | Cross-region sync mode: `async`, `quorum` |
 | `NORNICDB_CLUSTER_CONFLICT_STRATEGY` | `last_write_wins` | Conflict resolution          |
 
 ---
@@ -1154,13 +1190,14 @@ Trade-offs:
 Recommended: 100-1000 for HA, 64 for Raft (via RAFT_MAX_APPEND_ENTRIES)
 ```
 
-#### Sync Mode (`NORNICDB_CLUSTER_HA_SYNC_MODE`)
+#### Write Ack Mode (`NORNICDB_CLUSTER_HA_SYNC_MODE`)
 
 | Mode        | Acknowledgment    | Data Safety       | Latency |
 | ----------- | ----------------- | ----------------- | ------- |
 | `async`     | Primary only      | Risk of data loss | Lowest  |
-| `semi_sync` | Standby received  | Minimal data loss | Medium  |
-| `sync`      | Standby persisted | No data loss      | Highest |
+| `quorum`    | Standby applied   | Strongest         | Highest |
+
+Default is `async` for lowest write latency; opt into `quorum` only when you need replication-acknowledged writes.
 
 ### Consistency Levels
 

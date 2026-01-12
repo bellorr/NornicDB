@@ -3,13 +3,11 @@ package cypher
 import (
 	"context"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
-	"github.com/orneryd/nornicdb/pkg/vectorspace"
 )
 
 // ========================================
@@ -161,105 +159,31 @@ func (e *StorageExecutor) callDbIndexVectorQueryNodes(ctx context.Context, cyphe
 		}
 	}
 
-	// Get all nodes and filter to those with embeddings
-	nodes, err := e.storage.AllNodes()
+	svc := e.searchService
+	if svc == nil {
+		svc = search.NewService(e.storage)
+		e.searchService = svc
+	}
+
+	hits, err := svc.VectorQueryNodes(ctx, queryVector, search.VectorQuerySpec{
+		IndexName:  indexName,
+		Label:      targetLabel,
+		Property:   targetProperty,
+		Similarity: similarityFunc,
+		Limit:      k,
+	})
 	if err != nil {
 		return nil, err
 	}
 
-	// Collect nodes with embeddings and calculate similarities
-	type scoredNode struct {
-		node  *storage.Node
-		score float64
-	}
-	var scoredNodes []scoredNode
-
-	for _, node := range nodes {
-		// Check label filter if index specifies one
-		if targetLabel != "" {
-			hasLabel := false
-			for _, l := range node.Labels {
-				if l == targetLabel {
-					hasLabel = true
-					break
-				}
-			}
-			if !hasLabel {
-				continue
-			}
-		}
-
-		// Get embeddings - prefer named embeddings by property/vectorName, then property value, then chunks.
-		var embeddingsToCompare [][]float32
-		vectorName := targetProperty
-		if vectorName == "" {
-			vectorName = vectorspace.DefaultVectorName
-		}
-		if emb, ok := node.NamedEmbeddings[vectorName]; ok && len(emb) > 0 {
-			embeddingsToCompare = [][]float32{emb}
-		} else if targetProperty != "" {
-			if emb, ok := node.Properties[targetProperty]; ok {
-				if floatSlice := toFloat32Slice(emb); len(floatSlice) > 0 {
-					embeddingsToCompare = [][]float32{floatSlice}
-				}
-			}
-		}
-		// If no property embedding, use ChunkEmbeddings (always stored as array, even single chunk = array of 1)
-		if len(embeddingsToCompare) == 0 && len(node.ChunkEmbeddings) > 0 {
-			embeddingsToCompare = node.ChunkEmbeddings
-		}
-
-		if len(embeddingsToCompare) == 0 {
+	for _, hit := range hits {
+		node, err := e.storage.GetNode(storage.NodeID(hit.ID))
+		if err != nil || node == nil {
 			continue
 		}
-
-		// Calculate similarity against all chunk embeddings and use the best match
-		// This ensures we find the node even if query matches a later chunk better
-		var bestScore float64 = -1.0
-		for _, nodeEmbedding := range embeddingsToCompare {
-			// Skip if dimensions don't match
-			if len(nodeEmbedding) != len(queryVector) {
-				continue
-			}
-
-			// Calculate similarity for this chunk
-			var chunkScore float64
-			switch similarityFunc {
-			case "euclidean":
-				chunkScore = vector.EuclideanSimilarity(queryVector, nodeEmbedding)
-			case "dot":
-				chunkScore = vector.DotProduct(queryVector, nodeEmbedding)
-			default: // cosine
-				chunkScore = vector.CosineSimilarity(queryVector, nodeEmbedding)
-			}
-
-			// Keep the best score across all chunks
-			if chunkScore > bestScore {
-				bestScore = chunkScore
-			}
-		}
-
-		// Only add if we found a valid match (dimensions matched for at least one chunk)
-		if bestScore >= 0.0 {
-			scoredNodes = append(scoredNodes, scoredNode{node: node, score: bestScore})
-		}
-	}
-
-	// Sort by score descending
-	sort.Slice(scoredNodes, func(i, j int) bool {
-		return scoredNodes[i].score > scoredNodes[j].score
-	})
-
-	// Limit to k results
-	if k > 0 && len(scoredNodes) > k {
-		scoredNodes = scoredNodes[:k]
-	}
-
-	// Convert to result rows
-	for _, sn := range scoredNodes {
 		result.Rows = append(result.Rows, []interface{}{
-			sn.node,
-			sn.score,
+			node,
+			hit.Score,
 		})
 	}
 

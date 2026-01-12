@@ -240,6 +240,13 @@ type Service struct {
 	crossEncoder  *CrossEncoder
 	mu            sync.RWMutex
 
+	// cypherMetadata is a small, in-memory view of node embedding availability and labels.
+	// It allows Cypher-compatible vector queries to execute without scanning storage.
+	nodeLabels       map[string][]string          // nodeID -> labels
+	nodeNamedVector  map[string]map[string]string // nodeID -> vectorName -> vectorID
+	nodePropVector   map[string]map[string]string // nodeID -> propertyKey -> vectorID
+	nodeChunkVectors map[string][]string          // nodeID -> vectorIDs (main + chunks)
+
 	// HNSW index for approximate nearest neighbor search (optional, lazy-initialized)
 	hnswIndex           *HNSWIndex
 	hnswMu              sync.RWMutex
@@ -248,9 +255,20 @@ type Service struct {
 	hnswRebuildInFlight atomic.Bool
 	hnswLastRebuildUnix atomic.Int64
 
+	// Optional GPU-accelerated brute-force embedding index.
+	// When enabled, this is used as an exact vector-search backend.
+	gpuManager        *gpu.Manager
+	gpuEmbeddingIndex *gpu.EmbeddingIndex
+
 	// GPU k-means clustering for accelerated search (optional)
 	clusterIndex   *gpu.ClusterIndex
 	clusterEnabled bool
+	clusterUsesGPU bool
+
+	// Optional IVF-HNSW acceleration: build one HNSW per cluster to use centroids
+	// as a routing layer for CPU-only large datasets.
+	clusterHNSWMu sync.RWMutex
+	clusterHNSW   map[int]*HNSWIndex
 
 	// minEmbeddingsForClustering is the minimum number of embeddings needed
 	// before k-means clustering provides any benefit. Configurable via
@@ -378,7 +396,62 @@ func NewServiceWithDimensions(engine storage.Engine, dimensions int) *Service {
 		fulltextIndex:              NewFulltextIndex(),
 		minEmbeddingsForClustering: DefaultMinEmbeddingsForClustering,
 		defaultMinSimilarity:       -1, // -1 = not set, use SearchOptions default
+		nodeLabels:                 make(map[string][]string, 1024),
+		nodeNamedVector:            make(map[string]map[string]string, 1024),
+		nodePropVector:             make(map[string]map[string]string, 1024),
+		nodeChunkVectors:           make(map[string][]string, 1024),
 	}
+}
+
+// SetGPUManager enables GPU acceleration for exact brute-force vector search.
+//
+// This is independent from k-means clustering. When enabled, the vector pipeline
+// may choose GPU brute-force search (exact) for datasets where it outperforms HNSW.
+func (s *Service) SetGPUManager(manager *gpu.Manager) {
+	s.pipelineMu.Lock()
+	s.vectorPipeline = nil
+	s.pipelineMu.Unlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.gpuManager = manager
+	if manager == nil || !manager.IsEnabled() {
+		s.gpuEmbeddingIndex = nil
+		return
+	}
+
+	dimensions := 0
+	if s.vectorIndex != nil {
+		dimensions = s.vectorIndex.GetDimensions()
+	}
+	if dimensions <= 0 {
+		return
+	}
+
+	cfg := gpu.DefaultEmbeddingIndexConfig(dimensions)
+	cfg.GPUEnabled = true
+	cfg.AutoSync = true
+	cfg.BatchThreshold = 1000
+	gi := gpu.NewEmbeddingIndex(manager, cfg)
+
+	// Snapshot current vectors.
+	s.vectorIndex.mu.RLock()
+	ids := make([]string, 0, len(s.vectorIndex.vectors))
+	embs := make([][]float32, 0, len(s.vectorIndex.vectors))
+	for id, vec := range s.vectorIndex.vectors {
+		if len(vec) == 0 {
+			continue
+		}
+		ids = append(ids, id)
+		embs = append(embs, vec)
+	}
+	s.vectorIndex.mu.RUnlock()
+
+	_ = gi.AddBatch(ids, embs)
+	_ = gi.SyncToGPU()
+
+	s.gpuEmbeddingIndex = gi
 }
 
 // EnableClustering enables GPU k-means clustering for accelerated vector search.
@@ -407,6 +480,14 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// If clustering is already enabled, only rebuild when switching CPU<->GPU.
+	if s.clusterEnabled && s.clusterIndex != nil {
+		requestGPU := gpuManager != nil && gpuManager.IsEnabled()
+		if s.clusterUsesGPU == requestGPU {
+			return
+		}
+	}
+
 	if numClusters <= 0 {
 		numClusters = 100 // Default
 	}
@@ -428,6 +509,27 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 
 	s.clusterIndex = gpu.NewClusterIndex(gpuManager, embConfig, kmeansConfig)
 	s.clusterEnabled = true
+	s.clusterUsesGPU = gpuManager != nil && gpuManager.IsEnabled()
+
+	// Backfill embeddings from the current vector index so clustering can run
+	// immediately, even if indexes were built before clustering was enabled.
+	if s.vectorIndex != nil {
+		s.vectorIndex.mu.RLock()
+		ids := make([]string, 0, len(s.vectorIndex.vectors))
+		embs := make([][]float32, 0, len(s.vectorIndex.vectors))
+		for id, vec := range s.vectorIndex.vectors {
+			if len(vec) == 0 {
+				continue
+			}
+			copyVec := make([]float32, len(vec))
+			copy(copyVec, vec)
+			ids = append(ids, id)
+			embs = append(embs, copyVec)
+		}
+		s.vectorIndex.mu.RUnlock()
+
+		_ = s.clusterIndex.AddBatch(ids, embs) // Best effort
+	}
 
 	mode := "CPU"
 	if gpuManager != nil {
@@ -473,19 +575,20 @@ const DefaultMinEmbeddingsForClustering = 1000
 // be skipped silently as brute-force search is faster for small datasets.
 // Returns error only if clustering is not enabled or fails unexpectedly.
 func (s *Service) TriggerClustering() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	clusterIndex := s.clusterIndex
+	threshold := s.minEmbeddingsForClustering
+	s.mu.RUnlock()
 
-	if s.clusterIndex == nil {
+	if clusterIndex == nil {
 		log.Printf("[K-MEANS] ❌ SKIPPED | reason=not_enabled")
 		return fmt.Errorf("clustering not enabled - call EnableClustering() first")
 	}
 
-	embeddingCount := s.clusterIndex.Count()
-	threshold := s.minEmbeddingsForClustering
 	if threshold <= 0 {
 		threshold = DefaultMinEmbeddingsForClustering
 	}
+	embeddingCount := clusterIndex.Count()
 
 	// Skip clustering if too few embeddings - not worth the overhead
 	if embeddingCount < threshold {
@@ -497,15 +600,84 @@ func (s *Service) TriggerClustering() error {
 	log.Printf("[K-MEANS] 🔄 STARTING | embeddings=%d", embeddingCount)
 	startTime := time.Now()
 
-	if err := s.clusterIndex.Cluster(); err != nil {
+	if err := clusterIndex.Cluster(); err != nil {
 		log.Printf("[K-MEANS] ❌ FAILED | embeddings=%d error=%v", embeddingCount, err)
 		return fmt.Errorf("clustering failed: %w", err)
 	}
 
 	elapsed := time.Since(startTime)
-	stats := s.clusterIndex.ClusterStats()
+	stats := clusterIndex.ClusterStats()
 	log.Printf("[K-MEANS] ✅ COMPLETE | clusters=%d embeddings=%d iterations=%d duration=%v avg_cluster_size=%.1f",
 		stats.NumClusters, stats.EmbeddingCount, stats.Iterations, elapsed, stats.AvgClusterSize)
+
+	s.pipelineMu.Lock()
+	s.vectorPipeline = nil
+	s.pipelineMu.Unlock()
+
+	if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", true) {
+		if err := s.rebuildClusterHNSWIndexes(clusterIndex); err != nil {
+			log.Printf("[IVF-HNSW] ⚠️  build skipped: %v", err)
+		}
+	}
+
+	return nil
+}
+
+func (s *Service) rebuildClusterHNSWIndexes(clusterIndex *gpu.ClusterIndex) error {
+	if clusterIndex == nil || !clusterIndex.IsClustered() {
+		return fmt.Errorf("cluster index not clustered")
+	}
+
+	s.mu.RLock()
+	vi := s.vectorIndex
+	dims := 0
+	if vi != nil {
+		dims = vi.GetDimensions()
+	}
+	s.mu.RUnlock()
+	if vi == nil || dims <= 0 {
+		return fmt.Errorf("vector index unavailable")
+	}
+
+	minClusterSize := envInt("NORNICDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE", 200)
+	maxClusters := envInt("NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS", 1024)
+	numClusters := clusterIndex.NumClusters()
+	if numClusters <= 0 {
+		return fmt.Errorf("no clusters")
+	}
+	if numClusters > maxClusters {
+		numClusters = maxClusters
+	}
+
+	config := HNSWConfigFromEnv()
+	rebuilt := make(map[int]*HNSWIndex, numClusters)
+
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
+
+	for cid := 0; cid < numClusters; cid++ {
+		memberIDs := clusterIndex.GetClusterMemberIDsForCluster(cid)
+		if len(memberIDs) < minClusterSize {
+			continue
+		}
+		idx := NewHNSWIndex(dims, config)
+		for _, id := range memberIDs {
+			vec, ok := vi.vectors[id]
+			if !ok || len(vec) == 0 {
+				continue
+			}
+			_ = idx.Add(id, vec)
+		}
+		rebuilt[cid] = idx
+	}
+
+	s.clusterHNSWMu.Lock()
+	s.clusterHNSW = rebuilt
+	s.clusterHNSWMu.Unlock()
+
+	s.pipelineMu.Lock()
+	s.vectorPipeline = nil
+	s.pipelineMu.Unlock()
 	return nil
 }
 
@@ -618,6 +790,88 @@ func (s *Service) VectorIndexDimensions() int {
 	return s.vectorIndex.GetDimensions()
 }
 
+func firstVectorDimensions(node *storage.Node) int {
+	if node == nil {
+		return 0
+	}
+	if node.NamedEmbeddings != nil {
+		for _, emb := range node.NamedEmbeddings {
+			if len(emb) > 0 {
+				return len(emb)
+			}
+		}
+	}
+	if len(node.ChunkEmbeddings) > 0 {
+		for _, emb := range node.ChunkEmbeddings {
+			if len(emb) > 0 {
+				return len(emb)
+			}
+		}
+	}
+	if node.Properties != nil {
+		for _, value := range node.Properties {
+			vec := toFloat32SliceAny(value)
+			if len(vec) > 0 {
+				return len(vec)
+			}
+		}
+	}
+	return 0
+}
+
+func (s *Service) maybeAutoSetVectorDimensions(dimensions int) {
+	if s == nil || dimensions <= 0 {
+		return
+	}
+
+	s.mu.RLock()
+	currentDims := 0
+	currentCount := 0
+	if s.vectorIndex != nil {
+		currentDims = s.vectorIndex.GetDimensions()
+		currentCount = s.vectorIndex.Count()
+	}
+	s.mu.RUnlock()
+
+	// Only auto-adjust when the index is still empty (first embedding wins).
+	if currentCount > 0 || currentDims == dimensions {
+		return
+	}
+
+	// Lock order: pipelineMu -> mu -> hnswMu, matching pipeline construction paths.
+	s.pipelineMu.Lock()
+	s.vectorPipeline = nil
+	s.pipelineMu.Unlock()
+
+	s.mu.Lock()
+	if s.vectorIndex == nil {
+		s.vectorIndex = NewVectorIndex(dimensions)
+	} else if s.vectorIndex.Count() == 0 && s.vectorIndex.GetDimensions() != dimensions {
+		s.vectorIndex = NewVectorIndex(dimensions)
+	}
+
+	// Dimension changes invalidate all vector backends.
+	if s.gpuEmbeddingIndex != nil {
+		s.gpuEmbeddingIndex.Clear()
+		s.gpuEmbeddingIndex = nil
+	}
+	if s.clusterIndex != nil {
+		s.clusterIndex.Clear()
+	}
+	s.mu.Unlock()
+
+	s.clusterHNSWMu.Lock()
+	s.clusterHNSW = nil
+	s.clusterHNSWMu.Unlock()
+
+	s.hnswMu.Lock()
+	if s.hnswIndex != nil {
+		s.hnswIndex.Clear()
+		s.hnswIndex = nil
+	}
+	s.hnswMu.Unlock()
+}
+
 // ClearVectorIndex removes all embeddings from the vector index.
 // This is used when regenerating all embeddings to reset the index count.
 // Also frees memory from HNSW tombstones which can accumulate over time.
@@ -631,10 +885,21 @@ func (s *Service) ClearVectorIndex() {
 	if s.vectorIndex != nil {
 		s.vectorIndex.Clear()
 	}
+	if s.gpuEmbeddingIndex != nil {
+		s.gpuEmbeddingIndex.Clear()
+	}
 	if s.clusterIndex != nil {
 		s.clusterIndex.Clear()
 	}
+	clear(s.nodeLabels)
+	clear(s.nodeNamedVector)
+	clear(s.nodePropVector)
+	clear(s.nodeChunkVectors)
 	s.mu.Unlock()
+
+	s.clusterHNSWMu.Lock()
+	s.clusterHNSW = nil
+	s.clusterHNSWMu.Unlock()
 
 	// Also clear HNSW index if it exists (frees memory from tombstones).
 	// HNSW uses tombstones for deletes which never free memory, so explicit Clear() is required.
@@ -649,16 +914,76 @@ func (s *Service) ClearVectorIndex() {
 // IndexNode adds a node to all search indexes.
 // All embeddings are stored in ChunkEmbeddings (even single chunk = array of 1).
 func (s *Service) IndexNode(node *storage.Node) error {
+	s.maybeAutoSetVectorDimensions(firstVectorDimensions(node))
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Index all chunk embeddings (always stored in ChunkEmbeddings, even for single chunks)
+	nodeIDStr := string(node.ID)
+	if nodeIDStr != "" {
+		labelsCopy := make([]string, len(node.Labels))
+		copy(labelsCopy, node.Labels)
+		s.nodeLabels[nodeIDStr] = labelsCopy
+	}
+
+	// Index all embeddings: NamedEmbeddings and ChunkEmbeddings
 	// Strategy:
-	//   - Always index a "main" embedding at node.ID (using first chunk)
-	//   - For multi-chunk nodes, also index each chunk separately at "node-id-chunk-N"
-	// This allows both quick node-level search and granular chunk-level search
+	//   - NamedEmbeddings: Index each named vector at "node-id-named-{vectorName}"
+	//   - ChunkEmbeddings: Index main at node.ID, chunks at "node-id-chunk-N"
+	// This allows efficient indexed search for all embedding types
+	// Embeddings are stored in struct fields (opaque to users), not in properties
+
+	// Index NamedEmbeddings (each named vector gets its own index entry)
+	if len(node.NamedEmbeddings) > 0 {
+		for vectorName, embedding := range node.NamedEmbeddings {
+			if len(embedding) == 0 {
+				continue
+			}
+
+			// Index each named embedding with ID: "node-id-named-{vectorName}"
+			namedID := fmt.Sprintf("%s-named-%s", node.ID, vectorName)
+			if err := s.vectorIndex.Add(namedID, embedding); err != nil {
+				if err == ErrDimensionMismatch {
+					log.Printf("⚠️ IndexNode %s named[%s]: embedding dimension mismatch (got %d, expected %d)",
+						node.ID, vectorName, len(embedding), s.vectorIndex.dimensions)
+				}
+				continue
+			}
+
+			if s.nodeNamedVector[nodeIDStr] == nil {
+				s.nodeNamedVector[nodeIDStr] = make(map[string]string, len(node.NamedEmbeddings))
+			}
+			s.nodeNamedVector[nodeIDStr][vectorName] = namedID
+
+			if s.gpuEmbeddingIndex != nil {
+				_ = s.gpuEmbeddingIndex.Add(namedID, embedding) // Best effort
+			}
+
+			// Also add/update to HNSW index if it exists
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				_ = s.hnswIndex.Update(namedID, embedding) // Best effort
+			}
+			s.hnswMu.RUnlock()
+
+			// Also add to cluster index if enabled
+			if s.clusterIndex != nil {
+				_ = s.clusterIndex.Add(namedID, embedding) // Best effort
+			}
+		}
+	}
+
+	// Index ChunkEmbeddings (chunked documents)
+	// Strategy:
+	//   - Index a "main" embedding at node.ID (currently uses chunk 0 as a representative)
+	//   - For multi-chunk nodes, index every chunk separately at "node-id-chunk-N"
+	//
+	// Vector search uses ALL chunk vectors because we overfetch and then collapse
+	// chunk IDs back to a unique node ID. The "main" embedding is an additional
+	// node-level entry used by some call paths and for compatibility.
 	// Chunk embeddings are stored in struct field (opaque to users), not in properties
 	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
+		chunkIDs := make([]string, 0, len(node.ChunkEmbeddings)+1)
 		// Always index a main embedding at the node ID (using first chunk)
 		mainEmbedding := node.ChunkEmbeddings[0]
 		if err := s.vectorIndex.Add(string(node.ID), mainEmbedding); err != nil {
@@ -667,6 +992,11 @@ func (s *Service) IndexNode(node *storage.Node) error {
 					node.ID, len(mainEmbedding), s.vectorIndex.dimensions)
 			}
 		} else {
+			chunkIDs = append(chunkIDs, nodeIDStr) // main ID
+			if s.gpuEmbeddingIndex != nil {
+				_ = s.gpuEmbeddingIndex.Add(string(node.ID), mainEmbedding) // Best effort
+			}
+
 			// Also add/update to HNSW index if it exists (for large datasets)
 			s.hnswMu.RLock()
 			if s.hnswIndex != nil {
@@ -684,11 +1014,11 @@ func (s *Service) IndexNode(node *storage.Node) error {
 		// For multi-chunk nodes, also index each chunk separately with chunk suffix
 		// This allows granular search at the chunk level while maintaining node-level search
 		// Note: chunk 0 is indexed both as main (node.ID) and as chunk-0 for consistency
+		// ALL chunks are indexed in vectorIndex, HNSW, and clusterIndex for complete search coverage
 		if len(node.ChunkEmbeddings) > 1 {
 			for i, embedding := range node.ChunkEmbeddings {
 				if len(embedding) > 0 {
 					chunkID := fmt.Sprintf("%s-chunk-%d", node.ID, i)
-
 					if err := s.vectorIndex.Add(chunkID, embedding); err != nil {
 						if err == ErrDimensionMismatch {
 							log.Printf("⚠️ IndexNode %s chunk %d: embedding dimension mismatch (got %d, expected %d)",
@@ -697,12 +1027,50 @@ func (s *Service) IndexNode(node *storage.Node) error {
 						// Continue indexing other chunks even if one fails
 						continue
 					}
+					chunkIDs = append(chunkIDs, chunkID)
+
+					if s.gpuEmbeddingIndex != nil {
+						_ = s.gpuEmbeddingIndex.Add(chunkID, embedding) // Best effort
+					}
 
 					// Also add to cluster index if enabled
 					if s.clusterIndex != nil {
 						_ = s.clusterIndex.Add(chunkID, embedding) // Best effort
 					}
 				}
+			}
+		}
+		if len(chunkIDs) > 0 {
+			s.nodeChunkVectors[nodeIDStr] = chunkIDs
+		}
+	}
+
+	// Index vector-shaped property values for Cypher compatibility.
+	// These are indexed under IDs: "node-id-prop-{propertyKey}".
+	if node.Properties != nil {
+		for key, value := range node.Properties {
+			vec := toFloat32SliceAny(value)
+			if len(vec) == 0 || len(vec) != s.vectorIndex.dimensions {
+				continue
+			}
+			propID := fmt.Sprintf("%s-prop-%s", nodeIDStr, key)
+			if err := s.vectorIndex.Add(propID, vec); err != nil {
+				continue
+			}
+			if s.nodePropVector[nodeIDStr] == nil {
+				s.nodePropVector[nodeIDStr] = make(map[string]string, 4)
+			}
+			s.nodePropVector[nodeIDStr][key] = propID
+			if s.gpuEmbeddingIndex != nil {
+				_ = s.gpuEmbeddingIndex.Add(propID, vec) // Best effort
+			}
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				_ = s.hnswIndex.Update(propID, vec) // Best effort
+			}
+			s.hnswMu.RUnlock()
+			if s.clusterIndex != nil {
+				_ = s.clusterIndex.Add(propID, vec) // Best effort
 			}
 		}
 	}
@@ -726,6 +1094,9 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 
 	// Remove main embedding
 	s.vectorIndex.Remove(nodeIDStr)
+	if s.gpuEmbeddingIndex != nil {
+		_ = s.gpuEmbeddingIndex.Remove(nodeIDStr)
+	}
 	s.fulltextIndex.Remove(nodeIDStr)
 
 	// Also remove from HNSW index if it exists
@@ -740,19 +1111,70 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 		s.clusterIndex.Remove(nodeIDStr)
 	}
 
-	// Remove all chunk embeddings (they're indexed as "node-id-chunk-0", "node-id-chunk-1", etc.)
-	// We need to remove them by iterating and checking for chunk IDs
-	// Since we don't know how many chunks there are, we'll try removing up to 1000 chunks
-	// (reasonable limit - if a node has more than 1000 chunks, something is wrong)
-	for i := 0; i < 1000; i++ {
-		chunkID := fmt.Sprintf("%s-chunk-%d", nodeIDStr, i)
-		s.vectorIndex.Remove(chunkID)
-		if s.clusterIndex != nil {
-			s.clusterIndex.Remove(chunkID)
+	delete(s.nodeLabels, nodeIDStr)
+
+	// Remove property vectors tracked for Cypher compatibility.
+	if props := s.nodePropVector[nodeIDStr]; len(props) > 0 {
+		for _, propID := range props {
+			s.vectorIndex.Remove(propID)
+			if s.gpuEmbeddingIndex != nil {
+				_ = s.gpuEmbeddingIndex.Remove(propID)
+			}
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				s.hnswIndex.Remove(propID)
+			}
+			s.hnswMu.RUnlock()
+			if s.clusterIndex != nil {
+				s.clusterIndex.Remove(propID)
+			}
 		}
-		// Check if chunk existed - if not, we've removed all chunks
-		// Note: VectorIndex.Remove is idempotent, so this is safe
 	}
+	delete(s.nodePropVector, nodeIDStr)
+
+	// Remove all named embeddings (they're indexed as "node-id-named-{vectorName}")
+	if named := s.nodeNamedVector[nodeIDStr]; len(named) > 0 {
+		for _, namedID := range named {
+			s.vectorIndex.Remove(namedID)
+			if s.gpuEmbeddingIndex != nil {
+				_ = s.gpuEmbeddingIndex.Remove(namedID)
+			}
+
+			// Also remove from HNSW index if it exists
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				s.hnswIndex.Remove(namedID)
+			}
+			s.hnswMu.RUnlock()
+
+			if s.clusterIndex != nil {
+				s.clusterIndex.Remove(namedID)
+			}
+		}
+	}
+	delete(s.nodeNamedVector, nodeIDStr)
+
+	// Remove all chunk embeddings (they're indexed as "node-id-chunk-0", "node-id-chunk-1", etc.)
+	if chunkIDs := s.nodeChunkVectors[nodeIDStr]; len(chunkIDs) > 0 {
+		for _, chunkID := range chunkIDs {
+			s.vectorIndex.Remove(chunkID)
+			if s.gpuEmbeddingIndex != nil {
+				_ = s.gpuEmbeddingIndex.Remove(chunkID)
+			}
+
+			// Also remove from HNSW index if it exists
+			s.hnswMu.RLock()
+			if s.hnswIndex != nil {
+				s.hnswIndex.Remove(chunkID)
+			}
+			s.hnswMu.RUnlock()
+
+			if s.clusterIndex != nil {
+				s.clusterIndex.Remove(chunkID)
+			}
+		}
+	}
+	delete(s.nodeChunkVectors, nodeIDStr)
 
 	return nil
 }
@@ -888,51 +1310,40 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 
 // rrfHybridSearch performs Reciprocal Rank Fusion combining vector and BM25 results.
 func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding []float32, opts *SearchOptions) (*SearchResponse, error) {
+	// Avoid holding s.mu while interacting with the vector pipeline (pipelineMu),
+	// otherwise we can deadlock with writers that lock pipelineMu and then need s.mu.
+	// See: maybeAutoSetVectorDimensions(), ClearVectorIndex(), SetGPUManager().
 	s.mu.RLock()
-	defer s.mu.RUnlock()
+	crossEncoder := s.crossEncoder
+	fulltextIndex := s.fulltextIndex
+	s.mu.RUnlock()
 
 	// Get more candidates for better fusion
-	candidateLimit := opts.Limit * 2
+	vectorCandidateLimit := vectorOverfetchLimit(opts.Limit)
+	bm25CandidateLimit := opts.Limit * 2
+	if bm25CandidateLimit < 20 {
+		bm25CandidateLimit = 20
+	}
 
-	// Step 1: Vector search (use cluster-accelerated if available)
+	// Step 1: Vector search
 	var vectorResults []indexResult
-	var err error
-	searchStart := time.Now()
-	useClusteredSearch := s.clusterIndex != nil && s.clusterIndex.IsClustered()
-
-	if useClusteredSearch {
-		// Use k-means cluster-accelerated search
-		numClustersToSearch := 3
-		clusterResults, clusterErr := s.clusterIndex.SearchWithClusters(embedding, candidateLimit, numClustersToSearch)
-		if clusterErr == nil && len(clusterResults) > 0 {
-			// Convert gpu.SearchResult to indexResult
-			for _, r := range clusterResults {
-				vectorResults = append(vectorResults, indexResult{
-					ID:    r.ID,
-					Score: float64(r.Score),
-				})
-			}
-			log.Printf("[K-MEANS] 🔍 RRF_HYBRID | mode=clustered clusters_searched=%d candidates=%d duration=%v",
-				numClustersToSearch, len(vectorResults), time.Since(searchStart))
-		} else {
-			// Fall back to brute force on cluster search failure
-			vectorResults, err = s.vectorIndex.Search(ctx, embedding, candidateLimit, opts.GetMinSimilarity(0.5))
-			if err != nil {
-				return nil, err
-			}
-			log.Printf("[K-MEANS] 🔍 RRF_HYBRID | mode=brute_force_fallback reason=%v candidates=%d duration=%v",
-				clusterErr, len(vectorResults), time.Since(searchStart))
-		}
-	} else {
-		// Standard brute-force vector search
-		vectorResults, err = s.vectorIndex.Search(ctx, embedding, candidateLimit, opts.GetMinSimilarity(0.5))
-		if err != nil {
-			return nil, err
-		}
+	pipeline, pipelineErr := s.getOrCreateVectorPipeline()
+	if pipelineErr != nil {
+		return nil, pipelineErr
+	}
+	scored, searchErr := pipeline.Search(ctx, embedding, vectorCandidateLimit, opts.GetMinSimilarity(0.5))
+	if searchErr != nil {
+		return nil, searchErr
+	}
+	for _, r := range scored {
+		vectorResults = append(vectorResults, indexResult{ID: r.ID, Score: r.Score})
 	}
 
 	// Step 2: BM25 full-text search
-	bm25Results := s.fulltextIndex.Search(query, candidateLimit)
+	bm25Results := fulltextIndex.Search(query, bm25CandidateLimit)
+
+	// Collapse vector IDs back to unique node IDs.
+	vectorResults = collapseIndexResultsByNodeID(vectorResults)
 
 	// Step 3: Filter by type if specified
 	if len(opts.Types) > 0 {
@@ -946,9 +1357,13 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	// Step 5: Apply MMR diversification if enabled
 	searchMethod := "rrf_hybrid"
 	message := "Reciprocal Rank Fusion (Vector + BM25)"
-	if useClusteredSearch {
+	switch pipeline.candidateGen.(type) {
+	case *KMeansCandidateGen:
 		searchMethod = "rrf_hybrid_clustered"
-		message = "RRF (K-means Clustered Vector + BM25)"
+		message = "RRF (K-means routed vector + BM25)"
+	case *IVFHNSWCandidateGen:
+		searchMethod = "rrf_hybrid_ivf_hnsw"
+		message = "RRF (IVF-HNSW vector + BM25)"
 	}
 	if opts.MMREnabled && len(embedding) > 0 {
 		fusedResults = s.applyMMR(fusedResults, embedding, opts.Limit, opts.MMRLambda)
@@ -957,7 +1372,7 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	}
 
 	// Step 6: Cross-encoder reranking (optional Stage 2)
-	if opts.RerankEnabled && s.crossEncoder != nil && s.crossEncoder.Config().Enabled {
+	if opts.RerankEnabled && crossEncoder != nil && crossEncoder.Config().Enabled {
 		fusedResults = s.applyCrossEncoderRerank(ctx, query, fusedResults, opts)
 		if searchMethod == "rrf_hybrid" {
 			searchMethod = "rrf_hybrid+rerank"
@@ -1012,34 +1427,7 @@ func (s *Service) VectorSearchCandidates(ctx context.Context, embedding []float3
 		return nil, fmt.Errorf("vector search requires embedding")
 	}
 
-	// Try cluster-accelerated search first if available (preserves existing behavior)
-	s.mu.RLock()
-	useClusteredSearch := s.clusterIndex != nil && s.clusterIndex.IsClustered()
-	s.mu.RUnlock()
-
-	if useClusteredSearch {
-		candidateLimit := opts.Limit * 2
-		if candidateLimit <= 0 {
-			candidateLimit = 20
-		}
-		numClustersToSearch := 3
-		clusterResults, clusterErr := s.clusterIndex.SearchWithClusters(embedding, candidateLimit, numClustersToSearch)
-		if clusterErr == nil && len(clusterResults) > 0 {
-			results := make([]SearchCandidate, 0, len(clusterResults))
-			for _, r := range clusterResults {
-				results = append(results, SearchCandidate{ID: r.ID, Score: float64(r.Score)})
-			}
-			// Apply filters
-			if len(opts.Types) > 0 {
-				results = s.filterCandidatesByType(results, opts.Types)
-			}
-			if len(results) > opts.Limit && opts.Limit > 0 {
-				results = results[:opts.Limit]
-			}
-			return results, nil
-		}
-		// Fall through to pipeline if cluster search fails
-	}
+	candidateLimit := vectorOverfetchLimit(opts.Limit)
 
 	// Use unified vector search pipeline
 	pipeline, err := s.getOrCreateVectorPipeline()
@@ -1047,7 +1435,7 @@ func (s *Service) VectorSearchCandidates(ctx context.Context, embedding []float3
 		return nil, fmt.Errorf("failed to get vector pipeline: %w", err)
 	}
 
-	scored, err := pipeline.Search(ctx, embedding, opts.Limit, opts.GetMinSimilarity(0.5))
+	scored, err := pipeline.Search(ctx, embedding, candidateLimit, opts.GetMinSimilarity(0.5))
 	if err != nil {
 		return nil, err
 	}
@@ -1058,20 +1446,120 @@ func (s *Service) VectorSearchCandidates(ctx context.Context, embedding []float3
 		candidates[i] = SearchCandidate{ID: s.ID, Score: s.Score}
 	}
 
+	candidates = collapseCandidatesByNodeID(candidates)
+
 	// Apply type filters
 	if len(opts.Types) > 0 {
 		candidates = s.filterCandidatesByType(candidates, opts.Types)
 	}
 
+	if len(candidates) > opts.Limit && opts.Limit > 0 {
+		candidates = candidates[:opts.Limit]
+	}
+
 	return candidates, nil
+}
+
+func vectorOverfetchLimit(limit int) int {
+	// Vector IDs in the index may represent:
+	// - node IDs (main embedding)
+	// - chunk IDs ("nodeID-chunk-i")
+	// - named embedding IDs ("nodeID-named-name")
+	//
+	// We overfetch and then collapse back to unique node IDs.
+	if limit <= 0 {
+		return 20
+	}
+	over := limit * 10
+	if over < limit {
+		over = limit
+	}
+	// Keep worst-case work bounded for brute-force paths.
+	if over > 5000 {
+		return 5000
+	}
+	if over < 50 {
+		return 50
+	}
+	return over
+}
+
+func normalizeVectorResultIDToNodeID(id string) string {
+	// Chunk IDs are formatted as: "{nodeID}-chunk-{i}"
+	// Named IDs are formatted as: "{nodeID}-named-{vectorName}"
+	// Property-vector IDs are formatted as: "{nodeID}-prop-{propertyKey}"
+	//
+	// Node IDs can contain '-' (UUIDs etc.), so only treat these as suffixes when they match
+	// the known patterns (and for chunks: when the suffix is an integer).
+	if idx := strings.LastIndex(id, "-chunk-"); idx >= 0 {
+		suffix := id[idx+len("-chunk-"):]
+		if suffix != "" {
+			if _, err := strconv.Atoi(suffix); err == nil {
+				return id[:idx]
+			}
+		}
+	}
+	if idx := strings.LastIndex(id, "-named-"); idx >= 0 {
+		suffix := id[idx+len("-named-"):]
+		if suffix != "" {
+			return id[:idx]
+		}
+	}
+	if idx := strings.LastIndex(id, "-prop-"); idx >= 0 {
+		suffix := id[idx+len("-prop-"):]
+		if suffix != "" {
+			return id[:idx]
+		}
+	}
+	return id
+}
+
+func collapseCandidatesByNodeID(cands []SearchCandidate) []SearchCandidate {
+	if len(cands) == 0 {
+		return nil
+	}
+	best := make(map[string]float64, len(cands))
+	for _, c := range cands {
+		nodeID := normalizeVectorResultIDToNodeID(c.ID)
+		if prev, ok := best[nodeID]; !ok || c.Score > prev {
+			best[nodeID] = c.Score
+		}
+	}
+	out := make([]SearchCandidate, 0, len(best))
+	for id, score := range best {
+		out = append(out, SearchCandidate{ID: id, Score: score})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out
+}
+
+func collapseIndexResultsByNodeID(results []indexResult) []indexResult {
+	if len(results) == 0 {
+		return nil
+	}
+	best := make(map[string]float64, len(results))
+	for _, r := range results {
+		nodeID := normalizeVectorResultIDToNodeID(r.ID)
+		if prev, ok := best[nodeID]; !ok || r.Score > prev {
+			best[nodeID] = r.Score
+		}
+	}
+	out := make([]indexResult, 0, len(best))
+	for id, score := range best {
+		out = append(out, indexResult{ID: id, Score: score})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Score > out[j].Score })
+	return out
 }
 
 // getOrCreateVectorPipeline returns the vector search pipeline, creating it if needed.
 //
 // The pipeline uses auto strategy selection:
-//   - K-means routing for very large datasets with clustering enabled (N > 100K, optimal)
-//   - Brute-force for small datasets (N < NSmallMax)
-//   - HNSW for large datasets (N >= NSmallMax, no clustering)
+//   - GPU brute-force (exact) when enabled and within configured thresholds
+//   - Cluster routing when clustered (GPU ScoreSubset when GPU enabled but full brute is out-of-range;
+//     otherwise CPU IVF-HNSW when available, else CPU k-means routing)
+//   - CPU brute-force for small datasets (N < NSmallMax)
+//   - Global HNSW for large datasets (N >= NSmallMax, no clustering)
 func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 	s.pipelineMu.RLock()
 	if s.vectorPipeline != nil {
@@ -1096,17 +1584,46 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 	// Auto strategy: choose candidate generator based on dataset size and clustering
 	var candidateGen CandidateGenerator
 
-	// Check if k-means clustering is available and clustered (optimal for very large N)
-	useKMeans := s.clusterIndex != nil && s.clusterIndex.IsClustered()
+	gpuEnabled := s.gpuManager != nil && s.gpuManager.IsEnabled() && s.gpuEmbeddingIndex != nil
+	gpuMinN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 20000)
+	gpuMaxN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 250000)
 
-	if useKMeans {
-		// Very large dataset with clustering: use k-means routing
-		// K-means is optimal for N > 100K where cluster routing provides significant speedup
-		numClustersToSearch := 3 // Default: search 3 nearest clusters
-		candidateGen = NewKMeansCandidateGen(s.clusterIndex, s.vectorIndex, numClustersToSearch)
+	// Prefer GPU brute-force (exact) when enabled and within configured thresholds.
+	// This path is exact and typically highest-throughput within its tuned N range.
+	if gpuEnabled && vectorCount >= gpuMinN && vectorCount <= gpuMaxN {
+		candidateGen = NewGPUBruteForceCandidateGen(s.gpuEmbeddingIndex)
 	} else if vectorCount < NSmallMax {
-		// Small dataset: use brute-force
+		// Small dataset: use brute-force on CPU (exact).
+		// Even if clustering is available, centroid routing reduces recall and adds overhead at small N.
 		candidateGen = NewBruteForceCandidateGen(s.vectorIndex)
+	} else if s.clusterIndex != nil && s.clusterIndex.IsClustered() {
+		// If clustering is enabled and clusters are built, use centroid routing on CPU
+		// (GPU subset scoring when GPU is enabled but full brute is out-of-range, else IVF-HNSW when available,
+		// else CPU k-means candidate generation).
+		numClustersToSearch := 3 // Default: search 3 nearest clusters
+
+		// When GPU is enabled but full brute-force is not selected (e.g. N too large),
+		// still use k-means centroids to route and score only the cluster subset.
+		// ScoreSubset uses GPU when possible and falls back to CPU gracefully.
+		if gpuEnabled && vectorCount > gpuMaxN {
+			candidateGen = NewGPUKMeansCandidateGen(s.clusterIndex, numClustersToSearch)
+		} else {
+			if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", true) && !gpuEnabled {
+				s.clusterHNSWMu.RLock()
+				hasClusterHNSW := len(s.clusterHNSW) > 0
+				s.clusterHNSWMu.RUnlock()
+				if hasClusterHNSW {
+					candidateGen = NewIVFHNSWCandidateGen(s.clusterIndex, func(clusterID int) *HNSWIndex {
+						s.clusterHNSWMu.RLock()
+						defer s.clusterHNSWMu.RUnlock()
+						return s.clusterHNSW[clusterID]
+					}, numClustersToSearch)
+				}
+			}
+			if candidateGen == nil {
+				candidateGen = NewKMeansCandidateGen(s.clusterIndex, s.vectorIndex, numClustersToSearch)
+			}
+		}
 	} else {
 		// Large dataset: use HNSW (lazy-initialize if needed)
 		hnswIndex, err := s.getOrCreateHNSWIndex(dimensions)
@@ -1117,7 +1634,13 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 	}
 
 	// Exact scoring defaults to SIMD CPU scoring.
-	exactScorer := NewCPUExactScorer(s.vectorIndex)
+	var exactScorer ExactScorer
+	switch candidateGen.(type) {
+	case *GPUBruteForceCandidateGen, *GPUKMeansCandidateGen:
+		exactScorer = &IdentityExactScorer{}
+	default:
+		exactScorer = NewCPUExactScorer(s.vectorIndex)
+	}
 
 	s.vectorPipeline = NewVectorSearchPipeline(candidateGen, exactScorer)
 	return s.vectorPipeline, nil
@@ -1317,6 +1840,18 @@ func envFloat(key string, fallback float64) float64 {
 		return fallback
 	}
 	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return fallback
+	}
+	return v
+}
+
+func envInt(key string, fallback int) int {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return fallback
+	}
+	v, err := strconv.Atoi(raw)
 	if err != nil {
 		return fallback
 	}
@@ -1728,47 +2263,48 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 	defer s.mu.RUnlock()
 
 	var results []indexResult
-	var err error
 	searchMethod := "vector"
 	message := "Vector similarity search (cosine)"
 	searchStart := time.Now()
+	candidateLimit := vectorOverfetchLimit(opts.Limit)
 
-	// Use cluster-accelerated search if available and has been clustered
-	if s.clusterIndex != nil && s.clusterIndex.IsClustered() {
-		// Search using k-means clusters (much faster for large datasets)
-		numClustersToSearch := 3
-		clusterResults, clusterErr := s.clusterIndex.SearchWithClusters(embedding, opts.Limit*2, numClustersToSearch)
-		if clusterErr == nil && len(clusterResults) > 0 {
-			// Convert gpu.SearchResult to indexResult
-			for _, r := range clusterResults {
-				results = append(results, indexResult{
-					ID:    r.ID,
-					Score: float64(r.Score),
-				})
-			}
-			searchMethod = "vector_clustered"
-			message = "GPU k-means cluster-accelerated vector search"
-			log.Printf("[K-MEANS] 🔍 SEARCH | mode=clustered clusters_searched=%d candidates=%d duration=%v",
-				numClustersToSearch, len(results), time.Since(searchStart))
-		} else {
-			// Fall back to brute force
-			results, err = s.vectorIndex.Search(ctx, embedding, opts.Limit*2, opts.GetMinSimilarity(0.5))
-			log.Printf("[K-MEANS] 🔍 SEARCH | mode=brute_force_fallback reason=%v candidates=%d duration=%v",
-				clusterErr, len(results), time.Since(searchStart))
-		}
-	} else {
-		// Standard brute-force vector search
-		results, err = s.vectorIndex.Search(ctx, embedding, opts.Limit*2, opts.GetMinSimilarity(0.5))
-		// Only log if clustering is enabled but not yet clustered (helps debugging)
-		if s.clusterEnabled && s.clusterIndex != nil {
-			log.Printf("[K-MEANS] 🔍 SEARCH | mode=brute_force reason=not_yet_clustered candidates=%d duration=%v",
-				len(results), time.Since(searchStart))
-		}
+	pipeline, pipelineErr := s.getOrCreateVectorPipeline()
+	if pipelineErr != nil {
+		return nil, pipelineErr
+	}
+	scored, searchErr := pipeline.Search(ctx, embedding, candidateLimit, opts.GetMinSimilarity(0.5))
+	if searchErr != nil {
+		return nil, searchErr
+	}
+	for _, r := range scored {
+		results = append(results, indexResult{ID: r.ID, Score: r.Score})
 	}
 
-	if err != nil {
-		return nil, err
+	switch pipeline.candidateGen.(type) {
+	case *KMeansCandidateGen:
+		searchMethod = "vector_clustered"
+		message = "K-means routed vector search"
+	case *IVFHNSWCandidateGen:
+		searchMethod = "vector_ivf_hnsw"
+		message = "IVF-HNSW (centroid routing + per-cluster HNSW)"
+	case *GPUBruteForceCandidateGen:
+		searchMethod = "vector_gpu_brute"
+		message = "GPU brute-force vector search (exact)"
+	case *HNSWCandidateGen:
+		searchMethod = "vector_hnsw"
+		message = "HNSW approximate nearest neighbor search"
+	case *BruteForceCandidateGen:
+		searchMethod = "vector_brute"
+		message = "CPU brute-force vector search (exact)"
 	}
+
+	if s.clusterEnabled && s.clusterIndex != nil {
+		log.Printf("[K-MEANS] 🔍 SEARCH | mode=%s candidates=%d duration=%v",
+			searchMethod, len(results), time.Since(searchStart))
+	}
+
+	// Collapse vector IDs back to unique node IDs.
+	results = collapseIndexResultsByNodeID(results)
 
 	if len(opts.Types) > 0 {
 		results = s.filterByType(results, opts.Types)
@@ -1987,15 +2523,7 @@ func (s *Service) enrichIndexResults(indexResults []indexResult, limit int) []Se
 			break
 		}
 
-		// Map chunk ID back to original node ID
-		nodeIDStr := ir.ID
-		if strings.Contains(nodeIDStr, "-chunk-") {
-			// Extract original node ID by removing "-chunk-N" suffix
-			parts := strings.Split(nodeIDStr, "-chunk-")
-			if len(parts) > 0 {
-				nodeIDStr = parts[0]
-			}
-		}
+		nodeIDStr := normalizeVectorResultIDToNodeID(ir.ID)
 
 		// Skip if we've already added this node (from a different chunk)
 		if seenNodes[nodeIDStr] {

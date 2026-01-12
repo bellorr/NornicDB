@@ -142,6 +142,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/encryption"
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/orneryd/nornicdb/pkg/replication"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
@@ -458,6 +459,7 @@ type DB struct {
 	wal            *storage.WAL   // Write-ahead log for durability
 	decay          *decay.Manager
 	cypherExecutor *cypher.StorageExecutor
+	gpuManagerMu   sync.RWMutex
 	gpuManager     interface{} // *gpu.Manager - interface to avoid circular import
 
 	// Search services (per database) using pre-computed embeddings.
@@ -484,6 +486,11 @@ type DB struct {
 
 	// Background goroutine tracking
 	bgWg sync.WaitGroup
+
+	// Replication / HA (optional; enabled when NORNICDB_CLUSTER_MODE != standalone)
+	replicator         replication.Replicator
+	replicationAdapter *replication.StorageAdapter
+	replicationTrans   replication.Transport
 }
 
 // Open opens or creates a NornicDB database at the specified directory.
@@ -901,6 +908,16 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		// Track the underlying storage chain so Close() can release Badger directory locks.
 		db.baseStorage = baseStorage
 
+		// Optionally wrap base storage with replication.
+		//
+		// This uses the existing pkg/replication cluster protocol transport (port 7688)
+		// and routes ALL writes through a Replicator, while reads remain local.
+		baseStorage, err = db.maybeEnableReplication(baseStorage)
+		if err != nil {
+			_ = db.baseStorage.Close()
+			return nil, err
+		}
+
 		// Wrap base storage with NamespacedEngine for the default database ("nornic")
 		// This ensures everything uses namespaced storage - no direct base storage access
 		// Get default database name from global config (same as server does)
@@ -912,11 +929,19 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		db.storage = storage.NewNamespacedEngine(baseStorage, defaultDBName)
 		fmt.Printf("📦 Wrapped storage with namespace '%s' (all operations are namespaced)\n", defaultDBName)
 	} else {
-		baseStorage := storage.NewMemoryEngine()
+		var baseStorage storage.Engine = storage.NewMemoryEngine()
 		fmt.Println("⚠️  Using in-memory storage (data will not persist)")
 
 		// Track the underlying storage chain so Close() can cleanly shut down goroutines/locks.
 		db.baseStorage = baseStorage
+
+		// Optionally wrap base storage with replication.
+		replicated, err := db.maybeEnableReplication(baseStorage)
+		if err != nil {
+			_ = db.baseStorage.Close()
+			return nil, err
+		}
+		baseStorage = replicated
 
 		// Wrap in-memory storage with NamespacedEngine for consistency
 		// Get default database name from global config (same as server does)
@@ -995,6 +1020,10 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		db.inferenceServices = make(map[string]*inference.Engine)
 		// Eagerly create default DB inference for parity with prior behavior.
 		if _, err := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage); err != nil {
+			db.mu.Lock()
+			db.closed = true
+			db.mu.Unlock()
+			_ = db.closeInternal()
 			return nil, fmt.Errorf("init inference: %w", err)
 		}
 	}
@@ -1020,6 +1049,17 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	db.searchMinSimilarity = config.SearchMinSimilarity
 	db.searchServices = make(map[string]*dbSearchService)
 	log.Printf("🔍 Search services enabled (lazy per-database init, %d-dimension vector index)", embeddingDims)
+
+	// Wire Cypher vector procedures through the unified search service.
+	// This preserves Neo4j/Cypher interface compatibility while centralizing the
+	// implementation in the core search layer.
+	if db.cypherExecutor != nil {
+		if svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage); err == nil {
+			db.cypherExecutor.SetSearchService(svc)
+		} else {
+			fmt.Printf("⚠️  Search service unavailable for Cypher executor: %v\n", err)
+		}
+	}
 
 	// Wire up storage event callbacks to keep search indexes synchronized
 	// Storage is the single source of truth - it notifies when changes happen
@@ -1087,8 +1127,14 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		} else {
 			fmt.Println("✅ Search indexes built from existing data")
 
-			// Trigger k-means clustering if enabled
-			db.runClusteringOnceAllDatabases()
+			// If the clustering timer is active, it already runs immediately on startup.
+			// Avoid duplicating work by triggering clustering here only when there's no timer.
+			db.mu.RLock()
+			timerActive := db.clusterTicker != nil
+			db.mu.RUnlock()
+			if !timerActive {
+				db.runClusteringOnceAllDatabases()
+			}
 		}
 	}()
 
@@ -1097,6 +1143,62 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	// between search embeddings and auto-embed.
 
 	return db, nil
+}
+
+func (db *DB) maybeEnableReplication(base storage.Engine) (storage.Engine, error) {
+	mode := os.Getenv("NORNICDB_CLUSTER_MODE")
+	if mode == "" || mode == string(replication.ModeStandalone) {
+		return base, nil
+	}
+
+	replCfg := replication.LoadFromEnv()
+
+	// Keep replication state under the DB data dir unless explicitly overridden.
+	if os.Getenv("NORNICDB_CLUSTER_DATA_DIR") == "" {
+		if db.config != nil && db.config.DataDir != "" {
+			replCfg.DataDir = db.config.DataDir + "/replication"
+		} else {
+			replCfg.DataDir = "./data/replication"
+		}
+	}
+
+	adapter, err := replication.NewStorageAdapterWithWAL(base, replCfg.DataDir+"/wal")
+	if err != nil {
+		return nil, fmt.Errorf("replication: create storage adapter: %w", err)
+	}
+
+	replicator, err := replication.NewReplicator(replCfg, adapter)
+	if err != nil {
+		_ = adapter.Close()
+		return nil, fmt.Errorf("replication: create replicator: %w", err)
+	}
+
+	transport := replication.NewDefaultTransport(&replication.ClusterTransportConfig{
+		NodeID:   replCfg.NodeID,
+		BindAddr: replCfg.BindAddr,
+	})
+
+	// Wire transport into modes that support it.
+	if r, ok := replicator.(interface{ SetTransport(replication.Transport) }); ok {
+		r.SetTransport(transport)
+	}
+	// If we're using the default ClusterTransport, register message handlers for the replicator.
+	if ct, ok := transport.(*replication.ClusterTransport); ok {
+		replication.RegisterClusterHandlers(ct, replicator)
+	}
+
+	if err := replicator.Start(context.Background()); err != nil {
+		_ = transport.Close()
+		_ = replicator.Shutdown()
+		_ = adapter.Close()
+		return nil, fmt.Errorf("replication: start: %w", err)
+	}
+
+	db.replicator = replicator
+	db.replicationAdapter = adapter
+	db.replicationTrans = transport
+
+	return replication.NewReplicatedEngine(base, replicator, 30*time.Second), nil
 }
 
 // SetEmbedder configures the auto-embed queue with the given embedder.
@@ -1108,11 +1210,11 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	if db.baseStorage == nil {
 		// baseStorage is required for correctness (it’s the only engine that can see all namespaces).
 		// If this ever happens, initialization order is broken.
+		db.mu.Unlock()
 		panic("nornicdb: baseStorage is nil in SetEmbedder")
 	}
 
@@ -1127,6 +1229,7 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 		db.embedQueue.SetEmbedder(embedder)
 		log.Printf("🧠 Embed worker activated with %s (%d dims)",
 			embedder.Model(), embedder.Dimensions())
+		db.mu.Unlock()
 		return
 	}
 
@@ -1141,12 +1244,14 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 		db.indexNodeFromEvent(node)
 	})
 
-	// Start timer-based k-means clustering instead of trigger-based
-	// This runs clustering on a schedule (default every 15 minutes) rather than after each batch
+	// Start timer-based k-means clustering instead of trigger-based.
+	// Compute decision under lock, but start the timer outside the lock.
+	var startClusterTimer bool
+	var clusterInterval time.Duration
 	if nornicConfig.IsGPUClusteringEnabled() {
-		interval := db.config.KmeansClusterInterval
-		if interval > 0 {
-			db.startClusteringTimer(interval)
+		clusterInterval = db.config.KmeansClusterInterval
+		if clusterInterval > 0 {
+			startClusterTimer = true
 		} else {
 			log.Printf("🔬 K-means clustering enabled (manual trigger only, no timer)")
 		}
@@ -1162,6 +1267,12 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 
 	log.Printf("🧠 Auto-embed queue started using %s (%d dims)",
 		embedder.Model(), embedder.Dimensions())
+
+	db.mu.Unlock()
+
+	if startClusterTimer {
+		db.startClusteringTimer(clusterInterval)
+	}
 }
 
 // LoadFromExport loads data from a Mimir JSON export directory.
@@ -1245,12 +1356,12 @@ func (db *DB) GetBaseStorageForManager() storage.Engine {
 
 func (db *DB) Close() error {
 	db.mu.Lock()
-	defer db.mu.Unlock()
-
 	if db.closed {
+		db.mu.Unlock()
 		return nil
 	}
 	db.closed = true
+	db.mu.Unlock()
 
 	return db.closeInternal()
 }
@@ -1273,6 +1384,23 @@ func (db *DB) closeInternal() error {
 	// Close embed queue gracefully (processes remaining batch)
 	if db.embedQueue != nil {
 		db.embedQueue.Close()
+	}
+
+	// Stop replication before closing storage.
+	if db.replicator != nil {
+		if err := db.replicator.Shutdown(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if db.replicationTrans != nil {
+		if err := db.replicationTrans.Close(); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	if db.replicationAdapter != nil {
+		if err := db.replicationAdapter.Close(); err != nil {
+			errs = append(errs, err)
+		}
 	}
 
 	// Close the underlying storage chain to release Badger directory locks and stop

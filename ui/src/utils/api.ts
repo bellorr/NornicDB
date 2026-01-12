@@ -54,35 +54,22 @@ export interface CypherResponse {
   }>;
 }
 
-export interface Collection {
+export interface DatabaseInfo {
   name: string;
-  info: {
-    status: string;
-    points_count: number;
-    vectors_count: number;
-    config: {
-      params: {
-        vectors: {
-          size: number;
-          distance: string;
-        };
-      };
-    };
-  };
+  status: string;
+  default: boolean;
+  nodeCount: number;
+  edgeCount: number;
 }
 
-export interface CollectionInfo {
-  status: string;
-  points_count: number;
-  indexed_vectors_count: number;
-  config: {
-    params: {
-      vectors: {
-        size: number;
-        distance: string;
-      };
-    };
-  };
+export interface DatabaseRow {
+  [key: string]: unknown;
+  name: string;
+  type?: string;
+  access?: string;
+  role?: string;
+  status?: string;
+  default?: boolean;
 }
 
 interface DiscoveryResponse {
@@ -216,7 +203,7 @@ class NornicDBClient {
   async executeCypher(statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
     // Get default database name (will fetch from discovery endpoint if not cached)
     const dbName = await this.getDefaultDatabase();
-    const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+    const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -225,6 +212,110 @@ class NornicDBClient {
       }),
     });
     return await res.json();
+  }
+
+  async executeCypherOnDatabase(dbName: string, statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
+    const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({
+        statements: [{ statement, parameters }],
+      }),
+    });
+    return await res.json();
+  }
+
+  async executeSystemCypher(statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
+    return this.executeCypherOnDatabase('system', statement, parameters);
+  }
+
+  async getDatabaseInfo(name: string): Promise<DatabaseInfo> {
+    const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(name)}`, {
+      method: 'GET',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+    });
+
+    if (!res.ok) {
+      const error = await res.json().catch(() => ({ message: 'Failed to get database info' }));
+      throw new Error(error.message || 'Failed to get database info');
+    }
+    return await res.json();
+  }
+
+  private parseCypherRows<T extends Record<string, unknown>>(resp: CypherResponse): T[] {
+    const result = resp.results?.[0];
+    const columns = result?.columns || [];
+    const data = result?.data || [];
+    return data.map((d) => {
+      const row = d.row || [];
+      const out: Record<string, unknown> = {};
+      for (let i = 0; i < columns.length; i++) {
+        out[columns[i]] = row[i];
+      }
+      return out as T;
+    });
+  }
+
+  async listDatabases(): Promise<DatabaseInfo[]> {
+    const resp = await this.executeSystemCypher('SHOW DATABASES');
+    if (resp.errors && resp.errors.length > 0) {
+      throw new Error(resp.errors.map((e) => e.message).join('; '));
+    }
+
+    const rows = this.parseCypherRows<DatabaseRow>(resp);
+    const names = rows
+      .map((r) => (typeof r.name === 'string' ? r.name : ''))
+      .filter((n) => n && n !== 'system');
+
+    const infos = await Promise.all(
+      names.map(async (name) => {
+        try {
+          return await this.getDatabaseInfo(name);
+        } catch {
+          return null;
+        }
+      }),
+    );
+
+    return infos.filter((x): x is DatabaseInfo => Boolean(x));
+  }
+
+  private quoteCypherIdentifier(identifier: string): string {
+    // Cypher uses backticks for identifier quoting; escape embedded backticks by doubling them.
+    // Example: db name `a`b` => `a``b`
+    return `\`${identifier.split('`').join('``')}\``;
+  }
+
+  private validateDatabaseName(name: string): string {
+    const trimmed = name.trim();
+    if (!trimmed) {
+      throw new Error('Database name is required');
+    }
+    if (trimmed.includes(':')) {
+      throw new Error("Database name cannot include ':'");
+    }
+    if (trimmed.startsWith('_')) {
+      throw new Error("Database name cannot start with '_'");
+    }
+    return trimmed;
+  }
+
+  async createDatabase(name: string): Promise<void> {
+    const dbName = this.validateDatabaseName(name);
+    const resp = await this.executeSystemCypher(`CREATE DATABASE ${this.quoteCypherIdentifier(dbName)}`);
+    if (resp.errors && resp.errors.length > 0) {
+      throw new Error(resp.errors.map((e) => e.message).join('; '));
+    }
+  }
+
+  async dropDatabase(name: string): Promise<void> {
+    const dbName = this.validateDatabaseName(name);
+    const resp = await this.executeSystemCypher(`DROP DATABASE ${this.quoteCypherIdentifier(dbName)}`);
+    if (resp.errors && resp.errors.length > 0) {
+      throw new Error(resp.errors.map((e) => e.message).join('; '));
+    }
   }
 
   async deleteNodes(nodeIds: string[]): Promise<{ success: boolean; deleted: number; errors: string[] }> {
@@ -237,7 +328,7 @@ class NornicDBClient {
     try {
       // First, verify the nodes exist before deleting (safety check)
       const verifyStatement = `MATCH (n) WHERE id(n) IN $ids RETURN id(n) as nodeId, elementId(n) as elementId`;
-      const verifyRes = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+      const verifyRes = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -279,7 +370,7 @@ class NornicDBClient {
       const statement = `MATCH (n) WHERE id(n) IN $ids DETACH DELETE n RETURN count(n) as deleted`;
       const parameters = { ids: nodeIds };
 
-      const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+      const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -362,7 +453,7 @@ class NornicDBClient {
     const statement = `MATCH (n) WHERE id(n) = $nodeId OR n.id = $nodeId SET ${setParts.join(', ')} RETURN n`;
     
     try {
-      const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+      const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -389,86 +480,6 @@ class NornicDBClient {
     }
   }
 
-  // ============================================================================
-  // Collections API (Qdrant-compatible)
-  // ============================================================================
-
-  /**
-   * List all collections
-   */
-  async listCollections(): Promise<Collection[]> {
-    const res = await fetch(`${BASE_PATH}/api/collections`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-    });
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ status: { error: 'Failed to list collections' } }));
-      throw new Error(error.status?.error || 'Failed to list collections');
-    }
-
-    const data = await res.json();
-    return data.result?.collections || [];
-  }
-
-  /**
-   * Get collection information
-   */
-  async getCollection(name: string): Promise<CollectionInfo> {
-    const res = await fetch(`${BASE_PATH}/api/collections/${encodeURIComponent(name)}`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-    });
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ status: { error: 'Failed to get collection' } }));
-      throw new Error(error.status?.error || 'Failed to get collection');
-    }
-
-    const data = await res.json();
-    return data.result;
-  }
-
-  /**
-   * Create a new collection
-   */
-  async createCollection(name: string, size: number, distance: 'Cosine' | 'Euclidean' | 'Dot'): Promise<void> {
-    const res = await fetch(`${BASE_PATH}/api/collections`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        name,
-        vectors: {
-          size,
-          distance,
-        },
-      }),
-    });
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ status: { error: 'Failed to create collection' } }));
-      throw new Error(error.status?.error || 'Failed to create collection');
-    }
-  }
-
-  /**
-   * Delete a collection
-   */
-  async deleteCollection(name: string): Promise<void> {
-    const res = await fetch(`${BASE_PATH}/api/collections/${encodeURIComponent(name)}`, {
-      method: 'DELETE',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-    });
-
-    if (!res.ok) {
-      const error = await res.json().catch(() => ({ status: { error: 'Failed to delete collection' } }));
-      throw new Error(error.status?.error || 'Failed to delete collection');
-    }
-  }
 }
 
 export const api = new NornicDBClient();

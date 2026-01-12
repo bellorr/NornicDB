@@ -258,20 +258,21 @@ func (v *bruteVectorIndex) search(ctx context.Context, query []float32, limit in
 }
 
 func compactPointID(collection, pointID string) string {
-	// Point nodes are stored as "qdrant:<collection>:<id>".
-	prefix := "qdrant:" + collection + ":"
+	_ = collection
+	// Point nodes are stored as "qdrant:point:<id>" within the collection namespace.
+	const prefix = "qdrant:point:"
 	if strings.HasPrefix(pointID, prefix) {
 		return pointID[len(prefix):]
 	}
 	return pointID
 }
 
-func expandPointID(collection, compact string) string {
+func expandPointID(compact string) string {
 	// Avoid double-prefixing in case some callers use non-standard IDs.
 	if strings.HasPrefix(compact, "qdrant:") {
 		return compact
 	}
-	return "qdrant:" + collection + ":" + compact
+	return "qdrant:point:" + compact
 }
 
 type hnswVectorIndex struct {

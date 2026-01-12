@@ -139,6 +139,21 @@ Features:
 	serveCmd.Flags().Bool("headless", getEnvBool("NORNICDB_HEADLESS", false), "Disable web UI and browser-related endpoints")
 	// Base path for reverse proxy deployment
 	serveCmd.Flags().String("base-path", getEnvStr("NORNICDB_BASE_PATH", ""), "Base URL path for reverse proxy deployment (e.g., /nornicdb)")
+
+	// Replication / HA (pkg/replication). These map to NORNICDB_CLUSTER_* env vars.
+	serveCmd.Flags().String("cluster-mode", getEnvStr("NORNICDB_CLUSTER_MODE", ""), "Cluster mode: standalone|ha_standby|raft|multi_region (empty disables clustering)")
+	serveCmd.Flags().String("cluster-node-id", getEnvStr("NORNICDB_CLUSTER_NODE_ID", ""), "Cluster node ID (empty auto-generates)")
+	serveCmd.Flags().String("cluster-bind-addr", getEnvStr("NORNICDB_CLUSTER_BIND_ADDR", ""), "Cluster bind address for replication protocol (e.g., 127.0.0.1:7688)")
+	serveCmd.Flags().String("cluster-advertise-addr", getEnvStr("NORNICDB_CLUSTER_ADVERTISE_ADDR", ""), "Cluster advertise address (defaults to bind addr)")
+	serveCmd.Flags().String("cluster-data-dir", getEnvStr("NORNICDB_CLUSTER_DATA_DIR", ""), "Cluster state directory (defaults to <data-dir>/replication)")
+
+	// HA standby
+	serveCmd.Flags().String("cluster-ha-role", getEnvStr("NORNICDB_CLUSTER_HA_ROLE", ""), "HA standby role: primary|standby")
+	serveCmd.Flags().String("cluster-ha-peer-addr", getEnvStr("NORNICDB_CLUSTER_HA_PEER_ADDR", ""), "HA standby peer cluster address (host:port)")
+
+	// Raft
+	serveCmd.Flags().Bool("cluster-raft-bootstrap", getEnvBool("NORNICDB_CLUSTER_RAFT_BOOTSTRAP", false), "Raft bootstrap (true for first node in a new cluster)")
+	serveCmd.Flags().String("cluster-raft-peers", getEnvStr("NORNICDB_CLUSTER_RAFT_PEERS", ""), "Raft peers (format: node2:host2:7688,node3:host3:7688)")
 	rootCmd.AddCommand(serveCmd)
 
 	// Init command
@@ -242,6 +257,39 @@ func runServe(cmd *cobra.Command, args []string) error {
 	logQueries, _ := cmd.Flags().GetBool("log-queries")
 	headless, _ := cmd.Flags().GetBool("headless")
 	basePath, _ := cmd.Flags().GetString("base-path")
+
+	// Apply cluster flags as env vars so pkg/replication (and nornicdb.Open) can pick them up.
+	// This keeps the replication config source-of-truth in NORNICDB_CLUSTER_* while providing a CLI UX.
+	setEnvIfChanged := func(flagName, envName, value string) {
+		if cmd.Flags().Changed(flagName) && value != "" {
+			_ = os.Setenv(envName, value)
+		}
+	}
+	setEnvIfChangedBool := func(flagName, envName string, value bool) {
+		if cmd.Flags().Changed(flagName) {
+			_ = os.Setenv(envName, fmt.Sprintf("%t", value))
+		}
+	}
+
+	clusterMode, _ := cmd.Flags().GetString("cluster-mode")
+	clusterNodeID, _ := cmd.Flags().GetString("cluster-node-id")
+	clusterBindAddr, _ := cmd.Flags().GetString("cluster-bind-addr")
+	clusterAdvertiseAddr, _ := cmd.Flags().GetString("cluster-advertise-addr")
+	clusterDataDir, _ := cmd.Flags().GetString("cluster-data-dir")
+	clusterHARole, _ := cmd.Flags().GetString("cluster-ha-role")
+	clusterHAPeerAddr, _ := cmd.Flags().GetString("cluster-ha-peer-addr")
+	clusterRaftBootstrap, _ := cmd.Flags().GetBool("cluster-raft-bootstrap")
+	clusterRaftPeers, _ := cmd.Flags().GetString("cluster-raft-peers")
+
+	setEnvIfChanged("cluster-mode", "NORNICDB_CLUSTER_MODE", clusterMode)
+	setEnvIfChanged("cluster-node-id", "NORNICDB_CLUSTER_NODE_ID", clusterNodeID)
+	setEnvIfChanged("cluster-bind-addr", "NORNICDB_CLUSTER_BIND_ADDR", clusterBindAddr)
+	setEnvIfChanged("cluster-advertise-addr", "NORNICDB_CLUSTER_ADVERTISE_ADDR", clusterAdvertiseAddr)
+	setEnvIfChanged("cluster-data-dir", "NORNICDB_CLUSTER_DATA_DIR", clusterDataDir)
+	setEnvIfChanged("cluster-ha-role", "NORNICDB_CLUSTER_HA_ROLE", clusterHARole)
+	setEnvIfChanged("cluster-ha-peer-addr", "NORNICDB_CLUSTER_HA_PEER_ADDR", clusterHAPeerAddr)
+	setEnvIfChangedBool("cluster-raft-bootstrap", "NORNICDB_CLUSTER_RAFT_BOOTSTRAP", clusterRaftBootstrap)
+	setEnvIfChanged("cluster-raft-peers", "NORNICDB_CLUSTER_RAFT_PEERS", clusterRaftPeers)
 
 	// Apply memory configuration FIRST (before heavy allocations)
 	// First, try to load from config file, then fall back to environment variables

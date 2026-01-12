@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	qpb "github.com/qdrant/go-client/qdrant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -13,9 +14,12 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
-func setupSnapshotsTest(t *testing.T) (*SnapshotsService, *PointsService, *PersistentCollectionRegistry, string, func()) {
-	store := storage.NewMemoryEngine()
-	registry, err := NewPersistentCollectionRegistry(store)
+func setupSnapshotsTest(t *testing.T) (*SnapshotsService, *PointsService, CollectionStore, string, func()) {
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
+	require.NoError(t, err)
+	vecIndex := newVectorIndexCache()
+	collections, err := NewDatabaseCollectionStore(dbm, vecIndex)
 	require.NoError(t, err)
 
 	snapshotDir := t.TempDir()
@@ -29,12 +33,12 @@ func setupSnapshotsTest(t *testing.T) (*SnapshotsService, *PointsService, *Persi
 		SnapshotDir:          snapshotDir,
 	}
 
-	snapshotsService := NewSnapshotsService(config, store, registry, snapshotDir)
-	pointsService := NewPointsService(config, store, registry, nil, newVectorIndexCache())
+	snapshotsService := NewSnapshotsService(config, collections, base, snapshotDir)
+	pointsService := NewPointsService(config, collections, nil, vecIndex)
 
 	// Create test collection
 	ctx := context.Background()
-	err = registry.CreateCollection(ctx, "test_collection", 4, qpb.Distance_Cosine)
+	err = collections.Create(ctx, "test_collection", 4, qpb.Distance_Cosine)
 	require.NoError(t, err)
 
 	// Add some test points
@@ -64,10 +68,10 @@ func setupSnapshotsTest(t *testing.T) (*SnapshotsService, *PointsService, *Persi
 	require.NoError(t, err)
 
 	cleanup := func() {
-		store.Close()
+		base.Close()
 	}
 
-	return snapshotsService, pointsService, registry, snapshotDir, cleanup
+	return snapshotsService, pointsService, collections, snapshotDir, cleanup
 }
 
 func TestSnapshotsService_Create(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	qpb "github.com/qdrant/go-client/qdrant"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,14 +12,16 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
-func setupPointsService(t *testing.T) (*PointsService, CollectionRegistry, storage.Engine) {
+func setupPointsService(t *testing.T) (*PointsService, CollectionStore, storage.Engine) {
 	t.Helper()
 
 	ctx := context.Background()
-	store := storage.NewMemoryEngine()
-	registry, err := NewPersistentCollectionRegistry(store)
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = registry.Close() })
+	vecIndex := newVectorIndexCache()
+	collections, err := NewDatabaseCollectionStore(dbm, vecIndex)
+	require.NoError(t, err)
 
 	cfg := DefaultConfig()
 	cfg.AllowVectorMutations = true
@@ -28,10 +31,10 @@ func setupPointsService(t *testing.T) (*PointsService, CollectionRegistry, stora
 		return []float32{1, 0, 0, 0}, nil
 	}
 
-	err = registry.CreateCollection(ctx, "test_vectors", 4, qpb.Distance_Cosine)
+	err = collections.Create(ctx, "test_vectors", 4, qpb.Distance_Cosine)
 	require.NoError(t, err)
 
-	return NewPointsService(cfg, store, registry, nil, newVectorIndexCache()), registry, store
+	return NewPointsService(cfg, collections, nil, vecIndex), collections, base
 }
 
 func TestPointsService_UpsertGetDeleteCountSearch(t *testing.T) {
@@ -178,9 +181,9 @@ type recordingVectorIndex struct {
 	lastEf int
 }
 
-func (r *recordingVectorIndex) dimensions() int         { return r.dim }
-func (r *recordingVectorIndex) distance() qpb.Distance  { return r.dist }
-func (r *recordingVectorIndex) remove(id string)        { _ = id }
+func (r *recordingVectorIndex) dimensions() int        { return r.dim }
+func (r *recordingVectorIndex) distance() qpb.Distance { return r.dist }
+func (r *recordingVectorIndex) remove(id string)       { _ = id }
 func (r *recordingVectorIndex) upsert(id string, vec []float32) {
 	_ = id
 	_ = vec
@@ -271,7 +274,7 @@ func TestAverageVectors(t *testing.T) {
 	t.Run("skips mismatched dimensions", func(t *testing.T) {
 		vectors := [][]float32{
 			{1.0, 2.0, 3.0},
-			{4.0, 5.0},        // Wrong dimension - should be skipped
+			{4.0, 5.0}, // Wrong dimension - should be skipped
 			{7.0, 8.0, 9.0},
 			{10.0, 11.0, 12.0, 13.0}, // Wrong dimension - should be skipped
 		}
@@ -284,8 +287,8 @@ func TestAverageVectors(t *testing.T) {
 
 	t.Run("all vectors have mismatched dimensions", func(t *testing.T) {
 		vectors := [][]float32{
-			{1.0, 2.0, 3.0},   // First vector determines dimension (3)
-			{4.0, 5.0},        // Wrong dimension - skipped
+			{1.0, 2.0, 3.0},      // First vector determines dimension (3)
+			{4.0, 5.0},           // Wrong dimension - skipped
 			{6.0, 7.0, 8.0, 9.0}, // Wrong dimension - skipped
 		}
 		// First vector determines dimension (3), but only first vector matches
@@ -297,9 +300,9 @@ func TestAverageVectors(t *testing.T) {
 
 	t.Run("no vectors match reference dimension", func(t *testing.T) {
 		vectors := [][]float32{
-			{1.0, 2.0, 3.0},   // First vector determines dimension (3)
-			{4.0, 5.0},        // Wrong dimension - skipped
-			{6.0, 7.0},        // Wrong dimension - skipped
+			{1.0, 2.0, 3.0}, // First vector determines dimension (3)
+			{4.0, 5.0},      // Wrong dimension - skipped
+			{6.0, 7.0},      // Wrong dimension - skipped
 		}
 		// First vector determines dimension (3), but no other vectors match
 		// Only the first vector matches, so it's averaged by itself
@@ -328,9 +331,9 @@ func TestAverageVectors(t *testing.T) {
 		// This test demonstrates the bug fix: if we have 3 vectors but only 2 match,
 		// we should divide by 2, not 3
 		vectors := [][]float32{
-			{1.0, 2.0, 3.0},   // First vector determines dimension (3) - included
-			{10.0, 20.0},      // Wrong dimension - skipped
-			{4.0, 5.0, 6.0},   // Included
+			{1.0, 2.0, 3.0}, // First vector determines dimension (3) - included
+			{10.0, 20.0},    // Wrong dimension - skipped
+			{4.0, 5.0, 6.0}, // Included
 		}
 		result := averageVectors(vectors)
 		require.NotNil(t, result)

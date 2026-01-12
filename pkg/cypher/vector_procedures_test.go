@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/vectorspace"
 	"github.com/stretchr/testify/assert"
@@ -160,6 +161,76 @@ func TestVectorIndexQueryNodes_PrefersNamedEmbeddingsOverPropertyAndFallsBack(t 
 	assert.True(t, strings.HasSuffix(gotIDs[3], "doc-both"))
 
 	// Ensure ordering reflects the precedence and expected similarity ordering.
+	require.Greater(t, gotScores[0], gotScores[1])
+	require.Greater(t, gotScores[1], gotScores[2])
+	require.Greater(t, gotScores[2], gotScores[3])
+}
+
+func TestVectorIndexQueryNodes_WithUnifiedSearchService_PreservesCypherSemantics(t *testing.T) {
+	base := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(base, "nornic")
+	exec := NewStorageExecutor(store)
+	exec.SetSearchService(search.NewService(store))
+	ctx := context.Background()
+
+	makeID := func(raw string) storage.NodeID {
+		return storage.NodeID(storage.EnsureDatabasePrefix("nornic", raw))
+	}
+	mustCreate := func(n *storage.Node) {
+		_, err := store.CreateNode(n)
+		require.NoError(t, err)
+	}
+
+	mustCreate(&storage.Node{
+		ID:              makeID("doc-named"),
+		Labels:          []string{"Doc"},
+		Properties:      map[string]interface{}{"title": "not a vector"},
+		NamedEmbeddings: map[string][]float32{"title": {1, 0, 0}},
+	})
+	mustCreate(&storage.Node{
+		ID:         makeID("doc-prop"),
+		Labels:     []string{"Doc"},
+		Properties: map[string]interface{}{"title": []float64{0.8, 0.2, 0}},
+	})
+	mustCreate(&storage.Node{
+		ID:              makeID("doc-chunk"),
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{{0.5, 0.5, 0}},
+	})
+	mustCreate(&storage.Node{
+		ID:              makeID("doc-both"),
+		Labels:          []string{"Doc"},
+		Properties:      map[string]interface{}{"title": []float64{1, 0, 0}},
+		NamedEmbeddings: map[string][]float32{"title": {0, 1, 0}},
+	})
+	mustCreate(&storage.Node{
+		ID:              makeID("other-label"),
+		Labels:          []string{"Other"},
+		NamedEmbeddings: map[string][]float32{"title": {1, 0, 0}},
+	})
+
+	_, err := exec.Execute(ctx, "CREATE VECTOR INDEX title_idx FOR (n:Doc) ON (n.title) OPTIONS {indexConfig: {`vector.dimensions`: 3, `vector.similarity_function`: 'cosine'}}", nil)
+	require.NoError(t, err)
+
+	result, err := exec.Execute(ctx, "CALL db.index.vector.queryNodes('title_idx', 10, [1,0,0]) YIELD node, score", nil)
+	require.NoError(t, err)
+	require.Len(t, result.Rows, 4)
+
+	gotIDs := make([]string, 0, len(result.Rows))
+	gotScores := make([]float64, 0, len(result.Rows))
+	for _, row := range result.Rows {
+		n, ok := row[0].(*storage.Node)
+		require.True(t, ok)
+		gotIDs = append(gotIDs, string(n.ID))
+		score, ok := row[1].(float64)
+		require.True(t, ok)
+		gotScores = append(gotScores, score)
+	}
+
+	assert.True(t, strings.HasSuffix(gotIDs[0], "doc-named"))
+	assert.True(t, strings.HasSuffix(gotIDs[1], "doc-prop"))
+	assert.True(t, strings.HasSuffix(gotIDs[2], "doc-chunk"))
+	assert.True(t, strings.HasSuffix(gotIDs[3], "doc-both"))
 	require.Greater(t, gotScores[0], gotScores[1])
 	require.Greater(t, gotScores[1], gotScores[2])
 	require.Greater(t, gotScores[2], gotScores[3])

@@ -50,31 +50,36 @@ func (db *DB) Stats() DBStats {
 // Uses interface{} to avoid circular import with gpu package.
 // If clustering is already enabled (via feature flag), this upgrades it to use GPU.
 func (db *DB) SetGPUManager(manager interface{}) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
+	db.gpuManagerMu.Lock()
 	db.gpuManager = manager
+	db.gpuManagerMu.Unlock()
 
-	// If clustering is enabled and GPU manager is provided, upgrade all cached
-	// per-database search services to GPU-accelerated mode.
-	if manager != nil && nornicConfig.IsGPUClusteringEnabled() {
-		if gpuMgr, ok := manager.(*gpu.Manager); ok {
-			db.searchServicesMu.RLock()
-			for _, entry := range db.searchServices {
-				if entry != nil && entry.svc != nil && entry.svc.IsClusteringEnabled() {
-					entry.svc.EnableClustering(gpuMgr, 100)
-				}
-			}
-			db.searchServicesMu.RUnlock()
-			fmt.Println("🚀 K-means clustering upgraded to GPU-accelerated mode (all databases)")
+	gpuMgr, _ := manager.(*gpu.Manager)
+
+	// Upgrade all cached per-database search services.
+	db.searchServicesMu.RLock()
+	for _, entry := range db.searchServices {
+		if entry == nil || entry.svc == nil {
+			continue
 		}
+		entry.svc.SetGPUManager(gpuMgr)
+
+		if gpuMgr != nil && nornicConfig.IsGPUClusteringEnabled() && entry.svc.IsClusteringEnabled() {
+			entry.svc.EnableClustering(gpuMgr, 100)
+		}
+	}
+	db.searchServicesMu.RUnlock()
+
+	if gpuMgr != nil {
+		fmt.Println("🚀 GPU acceleration enabled for search services (all databases)")
 	}
 }
 
 // GetGPUManager returns the GPU manager if set.
 // Returns interface{} - caller must type assert to *gpu.Manager.
 func (db *DB) GetGPUManager() interface{} {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
+	db.gpuManagerMu.RLock()
+	defer db.gpuManagerMu.RUnlock()
 	return db.gpuManager
 }
 
@@ -102,11 +107,19 @@ func (db *DB) TriggerSearchClustering() error {
 // can cause performance issues when embeddings are created frequently.
 // Runs immediately on startup, then every interval thereafter (skipping if no changes).
 func (db *DB) startClusteringTimer(interval time.Duration) {
-	db.clusterTicker = time.NewTicker(interval)
-	db.clusterTickerStop = make(chan struct{})
-
+	db.mu.Lock()
+	if db.clusterTicker != nil || db.closed {
+		db.mu.Unlock()
+		return
+	}
+	ticker := time.NewTicker(interval)
+	stopCh := make(chan struct{})
+	db.clusterTicker = ticker
+	db.clusterTickerStop = stopCh
 	db.bgWg.Add(1)
-	go func() {
+	db.mu.Unlock()
+
+	go func(t *time.Ticker, stop <-chan struct{}) {
 		defer db.bgWg.Done()
 		log.Printf("🔬 K-means clustering timer started (interval: %v)", interval)
 
@@ -116,22 +129,32 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 		// Then run on timer
 		for {
 			select {
-			case <-db.clusterTickerStop:
+			case <-stop:
 				log.Printf("🔬 K-means clustering timer stopped")
 				return
-			case <-db.clusterTicker.C:
+			case <-t.C:
 				db.runClusteringOnceAllDatabases()
 			}
 		}
-	}()
+	}(ticker, stopCh)
 }
 
 // stopClusteringTimer stops the k-means clustering timer if running.
 func (db *DB) stopClusteringTimer() {
-	if db.clusterTicker != nil {
-		db.clusterTicker.Stop()
-		close(db.clusterTickerStop)
-		db.clusterTicker = nil
+	db.mu.Lock()
+	ticker := db.clusterTicker
+	stopCh := db.clusterTickerStop
+	if ticker == nil {
+		db.mu.Unlock()
+		return
+	}
+	db.clusterTicker = nil
+	db.clusterTickerStop = nil
+	db.mu.Unlock()
+
+	ticker.Stop()
+	if stopCh != nil {
+		close(stopCh)
 	}
 }
 

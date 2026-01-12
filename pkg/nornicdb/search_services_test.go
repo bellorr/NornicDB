@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
@@ -107,4 +108,85 @@ func TestSearchServices_ResetDropsCache(t *testing.T) {
 	_, exists = db.searchServices["db2"]
 	db.searchServicesMu.RUnlock()
 	require.False(t, exists)
+}
+
+func TestSearchServices_ClusteringRunnerInitializesKnownNamespaces(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringEnabled()
+	t.Cleanup(cleanup)
+
+	cfg := DefaultConfig()
+	cfg.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Create a node in a second database without touching the search service cache.
+	db2Storage := storage.NewNamespacedEngine(db.baseStorage, "db2")
+	_, err = db2Storage.CreateNode(&storage.Node{
+		ID:     storage.NodeID("beta"),
+		Labels: []string{"Doc"},
+		Properties: map[string]any{
+			"content": "world beta",
+		},
+		ChunkEmbeddings: [][]float32{{0.4, 0.5, 0.6}},
+	})
+	require.NoError(t, err)
+
+	// The clustering runner should discover db2 and initialize a search service for it.
+	db.runClusteringOnceAllDatabases()
+
+	db.searchServicesMu.RLock()
+	_, db2Exists := db.searchServices["db2"]
+	_, systemExists := db.searchServices["system"]
+	db.searchServicesMu.RUnlock()
+
+	require.True(t, db2Exists)
+	require.False(t, systemExists)
+}
+
+func TestSearchServices_ClusteringFlagUpgradesCachedService(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringDisabled()
+	t.Cleanup(cleanup)
+
+	cfg := DefaultConfig()
+	cfg.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Create service while clustering is disabled.
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+	require.False(t, svc.IsClusteringEnabled())
+
+	// Enable clustering and run the clustering runner; it should upgrade the cached service.
+	enable := featureflags.WithGPUClusteringEnabled()
+	t.Cleanup(enable)
+
+	db.runClusteringOnceAllDatabases()
+
+	svc, err = db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+	require.True(t, svc.IsClusteringEnabled())
+}
+
+func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
+	require.NoError(t, err)
+
+	before := svc.EmbeddingCount()
+	db.indexNodeFromEvent(&storage.Node{
+		ID: storage.NodeID("nornic:qdrant:bench_col:1"),
+		NamedEmbeddings: map[string][]float32{
+			"default": {1, 0, 0},
+		},
+	})
+	after := svc.EmbeddingCount()
+	require.Equal(t, before, after)
 }

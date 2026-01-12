@@ -357,7 +357,10 @@ func (e *StorageExecutor) executeCreateDatabase(ctx context.Context, cypher stri
 	}
 
 	// Extract database name (trim whitespace)
-	dbName := strings.TrimSpace(cypher[startPos:dbNameEnd])
+	dbName, err := unquoteBacktickIdentifier(strings.TrimSpace(cypher[startPos:dbNameEnd]))
+	if err != nil {
+		return nil, err
+	}
 	if dbName == "" {
 		return nil, fmt.Errorf("invalid CREATE DATABASE syntax: database name cannot be empty")
 	}
@@ -380,7 +383,7 @@ func (e *StorageExecutor) executeCreateDatabase(ctx context.Context, cypher stri
 	}
 
 	// Create database
-	err := e.dbManager.CreateDatabase(dbName)
+	err = e.dbManager.CreateDatabase(dbName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create database '%s': %w", dbName, err)
 	}
@@ -466,7 +469,10 @@ func (e *StorageExecutor) executeDropDatabase(ctx context.Context, cypher string
 	}
 
 	// Extract database name (trim whitespace)
-	dbName := strings.TrimSpace(cypher[startPos:dbNameEnd])
+	dbName, err := unquoteBacktickIdentifier(strings.TrimSpace(cypher[startPos:dbNameEnd]))
+	if err != nil {
+		return nil, err
+	}
 	if dbName == "" {
 		return nil, fmt.Errorf("invalid DROP DATABASE syntax: database name cannot be empty")
 	}
@@ -489,7 +495,7 @@ func (e *StorageExecutor) executeDropDatabase(ctx context.Context, cypher string
 	}
 
 	// Drop database
-	err := e.dbManager.DropDatabase(dbName)
+	err = e.dbManager.DropDatabase(dbName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to drop database '%s': %w", dbName, err)
 	}

@@ -137,19 +137,16 @@ import (
 )
 
 func main() {
-    // Create persistent storage (Badger for production)
-    store, err := storage.NewBadgerEngine("./data")
+    // Create persistent base storage (Badger for production)
+    base, err := storage.NewBadgerEngine("./data")
     if err != nil {
         log.Fatal(err)
     }
-    defer store.Close()
-    
-    // Create search service for unified indexing
-    searchSvc := search.NewService(store)
-    defer searchSvc.Close()
-    
-    // Build indexes from existing data
-    if err := searchSvc.BuildIndexes(ctx); err != nil {
+    defer base.Close()
+
+    // Create database manager (collections map to database namespaces)
+    dbManager, err := multidb.NewDatabaseManager(base, nil)
+    if err != nil {
         log.Fatal(err)
     }
     
@@ -157,12 +154,11 @@ func main() {
     config := qdrantgrpc.DefaultConfig()
     config.ListenAddr = ":6334"
     
-    // Create server with persistent registry and search service
-    server, registry, err := qdrantgrpc.NewServerWithPersistentRegistry(config, store, searchSvc)
+    // Create server (collections = databases; no migration/back-compat)
+    server, err := qdrantgrpc.NewServerWithDatabaseManager(config, dbManager, base, nil, nil)
     if err != nil {
         log.Fatal(err)
     }
-    defer registry.Close()
     
     if err := server.Start(); err != nil {
         log.Fatal(err)
@@ -359,8 +355,8 @@ The Qdrant gRPC package is a **thin translation layer** that maps Qdrant RPCs to
 | Point | Node with `QdrantPoint` + collection labels |
 | PointId | NodeID: `qdrant:{collection}:{id}` |
 | Payload | Node.Properties |
-| Vector(s) | `Node.ChunkEmbeddings` (named vectors preserved via internal name→index mapping) |
-| Named Vectors | Node.ChunkEmbeddings[N] (future) |
+| Vector(s) | `Node.NamedEmbeddings` (Qdrant unnamed vector stored under key `"default"`) |
+| Named Vectors | `Node.NamedEmbeddings[name]` |
 | Filter | In-memory property filter |
 
 ### Key Benefits

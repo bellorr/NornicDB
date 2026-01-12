@@ -21,6 +21,17 @@ func TestNodeNeedsEmbedding(t *testing.T) {
 		assert.False(t, NodeNeedsEmbedding(node))
 	})
 
+	t.Run("node with named embeddings returns false", func(t *testing.T) {
+		node := &Node{
+			ID:     "test-1b",
+			Labels: []string{"Point"},
+			NamedEmbeddings: map[string][]float32{
+				"default": {0.1, 0.2, 0.3},
+			},
+		}
+		assert.False(t, NodeNeedsEmbedding(node))
+	})
+
 	t.Run("node without embedding returns true", func(t *testing.T) {
 		node := &Node{
 			ID:         "test-2",

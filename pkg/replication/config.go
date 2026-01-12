@@ -25,7 +25,7 @@
 //
 //	NORNICDB_CLUSTER_HA_ROLE=primary|standby
 //	NORNICDB_CLUSTER_HA_PEER_ADDR=standby-host:7688
-//	NORNICDB_CLUSTER_HA_SYNC_MODE=async|semi_sync|sync
+//	NORNICDB_CLUSTER_HA_SYNC_MODE=async|quorum
 //	NORNICDB_CLUSTER_HA_HEARTBEAT_MS=1000
 //	NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT=30s
 //	NORNICDB_CLUSTER_HA_AUTO_FAILOVER=true
@@ -43,7 +43,7 @@
 //
 //	NORNICDB_CLUSTER_REGION_ID=us-east
 //	NORNICDB_CLUSTER_REMOTE_REGIONS=eu-west:coord1:7688,ap-south:coord2:7688
-//	NORNICDB_CLUSTER_CROSS_REGION_MODE=async|semi_sync
+//	NORNICDB_CLUSTER_CROSS_REGION_MODE=async|quorum
 //
 // Example Usage:
 //
@@ -135,13 +135,9 @@ const (
 	// Lowest latency, but potential data loss on failure.
 	SyncAsync SyncMode = "async"
 
-	// SyncSemiSync waits for at least one replica to receive (not persist) the write.
-	// Balanced latency and durability.
-	SyncSemiSync SyncMode = "semi_sync"
-
-	// SyncSync waits for all replicas to persist the write before acknowledging.
+	// SyncQuorum waits until the replica acknowledges it has applied the write.
 	// Highest durability, highest latency.
-	SyncSync SyncMode = "sync"
+	SyncQuorum SyncMode = "quorum"
 )
 
 // ConsistencyLevel defines read/write consistency requirements.
@@ -423,7 +419,7 @@ func DefaultConfig() *Config {
 		DataDir:       "./data/replication",
 
 		HAStandby: HAStandbyConfig{
-			SyncMode:            SyncSemiSync,
+			SyncMode:            SyncAsync,
 			HeartbeatInterval:   1000 * time.Millisecond,
 			FailoverTimeout:     30 * time.Second,
 			AutoFailover:        true,
@@ -490,7 +486,7 @@ func LoadFromEnv() *Config {
 	// HA Standby settings
 	config.HAStandby.Role = getEnv("NORNICDB_CLUSTER_HA_ROLE", "")
 	config.HAStandby.PeerAddr = getEnv("NORNICDB_CLUSTER_HA_PEER_ADDR", "")
-	config.HAStandby.SyncMode = SyncMode(getEnv("NORNICDB_CLUSTER_HA_SYNC_MODE", string(SyncSemiSync)))
+	config.HAStandby.SyncMode = SyncMode(getEnv("NORNICDB_CLUSTER_HA_SYNC_MODE", string(SyncAsync)))
 	config.HAStandby.HeartbeatInterval = getEnvDurationMs("NORNICDB_CLUSTER_HA_HEARTBEAT_MS", 1000)
 	config.HAStandby.FailoverTimeout = getEnvDuration("NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT", 30*time.Second)
 	config.HAStandby.AutoFailover = getEnvBool("NORNICDB_CLUSTER_HA_AUTO_FAILOVER", true)
@@ -559,6 +555,12 @@ func (c *Config) Validate() error {
 		if c.HAStandby.PeerAddr == "" {
 			return fmt.Errorf("ha_standby mode requires NORNICDB_CLUSTER_HA_PEER_ADDR")
 		}
+		if c.HAStandby.SyncMode == "" {
+			c.HAStandby.SyncMode = SyncAsync
+		}
+		if c.HAStandby.SyncMode != SyncAsync && c.HAStandby.SyncMode != SyncQuorum {
+			return fmt.Errorf("invalid HA sync mode: %s (must be 'async' or 'quorum')", c.HAStandby.SyncMode)
+		}
 
 	case ModeRaft:
 		if c.Raft.Bootstrap && len(c.Raft.Peers) == 0 {
@@ -570,6 +572,12 @@ func (c *Config) Validate() error {
 	case ModeMultiRegion:
 		if c.MultiRegion.RegionID == "" {
 			return fmt.Errorf("multi_region mode requires NORNICDB_CLUSTER_REGION_ID")
+		}
+		if c.MultiRegion.CrossRegionSyncMode == "" {
+			c.MultiRegion.CrossRegionSyncMode = SyncAsync
+		}
+		if c.MultiRegion.CrossRegionSyncMode != SyncAsync && c.MultiRegion.CrossRegionSyncMode != SyncQuorum {
+			return fmt.Errorf("invalid cross-region sync mode: %s (must be 'async' or 'quorum')", c.MultiRegion.CrossRegionSyncMode)
 		}
 
 	default:

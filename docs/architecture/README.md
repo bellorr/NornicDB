@@ -5,6 +5,7 @@
 ## 📚 Documentation
 
 - **[System Design](system-design.md)** - High-level architecture overview
+- **[Embedding Search](embedding-search.md)** - Embedding storage model and search paths
 - **[Replication](replication.md)** - Clustering and replication internals
 - **[Clustering Roadmap](clustering-roadmap.md)** - Future sharding and scaling plans
 - **[Plugin System](plugin-system.md)** - Extensibility architecture

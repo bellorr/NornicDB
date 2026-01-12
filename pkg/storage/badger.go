@@ -93,6 +93,12 @@ type BadgerEngine struct {
 	nodeCount atomic.Int64
 	edgeCount atomic.Int64
 
+	// Cached per-namespace counts for O(1) multi-database stats.
+	// Keys are namespace prefixes like "nornic:".
+	namespaceCountsMu   sync.RWMutex
+	namespaceNodeCounts map[string]int64
+	namespaceEdgeCounts map[string]int64
+
 	// Event callbacks for external coordination (search indexes, caches, etc.)
 	// These are fired AFTER storage operations succeed
 	onNodeCreated NodeEventCallback
@@ -496,6 +502,8 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 
 	engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
 	engine.edgeTypeCache = make(map[string][]*Edge, engine.edgeTypeCacheMaxTypes)
+	engine.namespaceNodeCounts = make(map[string]int64)
+	engine.namespaceEdgeCounts = make(map[string]int64)
 
 	// Initialize cached counts by scanning existing data (one-time cost)
 	// This enables O(1) stats lookups instead of O(N) scans on every request

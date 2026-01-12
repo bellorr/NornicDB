@@ -99,6 +99,7 @@ type EdgeID string
 //   - ID: Unique identifier (must be unique across all nodes)
 //   - Labels: Type tags like ["Person", "User"] (Neo4j :Person:User)
 //   - Properties: Key-value data (any JSON-serializable types)
+//     See docs/user-guides/property-data-types.md for complete type reference
 //
 // NornicDB Extensions (not exported to Neo4j):
 //   - CreatedAt: When the node was first created
@@ -424,6 +425,15 @@ type Engine interface {
 type PrefixStatsEngine interface {
 	NodeCountByPrefix(prefix string) (int64, error)
 	EdgeCountByPrefix(prefix string) (int64, error)
+}
+
+// NamespaceLister is an optional extension interface that reports the known
+// database namespaces stored in an engine.
+//
+// Returned values are unqualified namespace names (e.g., "nornic", "db2"),
+// not ID prefixes (e.g., "nornic:").
+type NamespaceLister interface {
+	ListNamespaces() []string
 }
 
 // NodeEventCallback is called when storage operations complete successfully.
@@ -933,7 +943,17 @@ func NodeNeedsEmbedding(node *Node) bool {
 		}
 	}
 
-	// Skip if already has embeddings (always stored in ChunkEmbeddings, even single chunk = array of 1)
+	// Skip if node already has user-provided named embeddings (e.g., Qdrant vectors).
+	// Managed embeddings are generated into ChunkEmbeddings by the embed worker.
+	if len(node.NamedEmbeddings) > 0 {
+		for _, emb := range node.NamedEmbeddings {
+			if len(emb) > 0 {
+				return false
+			}
+		}
+	}
+
+	// Skip if already has managed embeddings (ChunkEmbeddings).
 	if len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0 {
 		return false
 	}

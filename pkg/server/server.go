@@ -161,6 +161,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -470,8 +471,8 @@ type Server struct {
 	graphqlHandler *graphql.Handler
 
 	// Qdrant-compatible gRPC server (optional; feature-flagged).
-	qdrantGRPCServer   *qdrantgrpc.Server
-	qdrantGRPCRegistry *qdrantgrpc.PersistentCollectionRegistry
+	qdrantGRPCServer      *qdrantgrpc.Server
+	qdrantCollectionStore qdrantgrpc.CollectionStore
 
 	httpServer *http.Server
 	listener   net.Listener
@@ -481,6 +482,11 @@ type Server struct {
 
 	// OAuth manager for OAuth 2.0 authentication
 	oauthManager *auth.OAuthManager
+
+	// Cache for Basic auth results to avoid bcrypt+JWT work on every request.
+	// This materially improves throughput for Neo4j-compatible clients that
+	// send Basic auth on each request.
+	basicAuthCache *basicAuthCache
 
 	mu      sync.RWMutex
 	closed  atomic.Bool
@@ -884,6 +890,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		heimdallHandler: heimdallHandler,
 		graphqlHandler:  graphql.NewHandler(db, dbManager),
 		rateLimiter:     rateLimiter,
+		basicAuthCache:  newBasicAuthCache(1024, 30*time.Second),
 		searchServices:  make(map[string]*search.Service),
 	}
 
@@ -1003,10 +1010,28 @@ func (s *Server) Stop(ctx context.Context) error {
 		s.rateLimiter.Stop()
 	}
 
-	if s.httpServer != nil {
-		return s.httpServer.Shutdown(ctx)
+	if s.httpServer == nil {
+		return nil
 	}
-	return nil
+
+	// Hard-bound shutdown: even if net/http Shutdown fails to return at ctx deadline
+	// (e.g., a stuck handler or an internal deadlock), Stop must return so callers
+	// can exit deterministically.
+	shutdownDone := make(chan error, 1)
+	go func() {
+		shutdownDone <- s.httpServer.Shutdown(ctx)
+	}()
+
+	select {
+	case err := <-shutdownDone:
+		if err != nil && (errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled)) {
+			_ = s.httpServer.Close()
+		}
+		return err
+	case <-ctx.Done():
+		_ = s.httpServer.Close()
+		return ctx.Err()
+	}
 }
 
 // Addr returns the server's listen address.

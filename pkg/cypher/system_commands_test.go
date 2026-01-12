@@ -293,6 +293,24 @@ func TestSystemCommands_DropDatabase(t *testing.T) {
 	})
 }
 
+func TestSystemCommands_BacktickQuotedDatabaseNames(t *testing.T) {
+	ctx := context.Background()
+
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+
+	mockDBM := newMockDatabaseManager()
+	mockDBM.CreateDatabase("nornic")
+	exec.SetDatabaseManager(mockDBM)
+
+	_, err := exec.Execute(ctx, "CREATE DATABASE `bench_col`", nil)
+	require.NoError(t, err)
+
+	_, err = exec.Execute(ctx, "DROP DATABASE `bench_col`", nil)
+	require.NoError(t, err)
+}
+
 func TestSystemCommands_ShowDatabases(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 

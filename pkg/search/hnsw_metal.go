@@ -12,9 +12,14 @@ import (
 // This is much faster than individual dot products when Metal is available.
 // For small batches (< 100), CPU SIMD may be faster due to GPU overhead.
 func (h *HNSWIndex) batchScoreCandidatesMetal(normalizedQuery []float32, candidateIDs []uint32, minSim32 float32) ([]ANNResult, error) {
-	// Use Metal for batches >= 50 candidates (lower threshold for better GPU utilization)
-	// For smaller batches, CPU SIMD is faster due to GPU overhead
-	if !simd.MetalAvailable() || len(candidateIDs) < 50 {
+	// Metal has non-trivial per-call overhead (dispatch + buffer setup). For typical HNSW
+	// efSearch values (100-1000), CPU SIMD is faster on most machines.
+	//
+	// To avoid throughput regressions, Metal scoring is opt-in via threshold:
+	//   - NORNICDB_VECTOR_HNSW_METAL_MIN_CANDIDATES <= 0 disables Metal
+	//   - Otherwise, Metal is only used when len(candidateIDs) >= threshold
+	threshold := envInt("NORNICDB_VECTOR_HNSW_METAL_MIN_CANDIDATES", 0)
+	if threshold <= 0 || !simd.MetalAvailable() || len(candidateIDs) < threshold {
 		// Fall back to CPU for small batches or when Metal unavailable
 		return h.batchScoreCandidatesCPU(normalizedQuery, candidateIDs, minSim32)
 	}

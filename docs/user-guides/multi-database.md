@@ -10,6 +10,13 @@ Multi-database support enables:
 - **Neo4j 4.x compatibility** - works with existing Neo4j drivers and tools
 - **Shared storage backend** - efficient resource usage
 
+## Qdrant gRPC collections
+
+NornicDB’s Qdrant-compatible gRPC API maps **collections to databases** (namespace isolation).
+
+- Guide: `docs/user-guides/qdrant-grpc.md`
+- Architecture: `docs/architecture/qdrant-collection-to-database-diagrams.md`
+
 ## Default Database
 
 By default, NornicDB uses **`"nornic"`** as the default database name (Neo4j uses `"neo4j"`).

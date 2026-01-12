@@ -54,12 +54,15 @@ NornicDB can run in two modes:
 
 1) **NornicDB-managed embeddings** (`NORNICDB_EMBEDDING_ENABLED=true`)
 - NornicDB owns embedding generation and storage.
-- Qdrant “vector mutation” RPCs (e.g. Upsert/UpdateVectors/DeleteVectors) may be rejected with `FailedPrecondition` to avoid conflicting sources of truth.
+- Qdrant “vector mutation” RPCs (e.g. Upsert/UpdateVectors/DeleteVectors) may be rejected with `FailedPrecondition` as a policy choice (to avoid multiple external writers).
 - Qdrant **text queries** via `Points.Query` are supported (NornicDB embeds the query).
 
 2) **Client-managed vectors** (`NORNICDB_EMBEDDING_ENABLED=false`)
 - Your Qdrant client owns vectors and can upsert/update/delete vectors normally.
 - Best fit when you want to use Qdrant SDKs “as-is”.
+
+Note: Qdrant vectors are stored in `Node.NamedEmbeddings`, while NornicDB-managed embeddings are stored in `Node.ChunkEmbeddings`, so the two embedding systems do not overwrite each other.
+For the internal details, see `docs/architecture/embedding-search.md`.
 
 If you want to use Qdrant SDKs for ingestion, set:
 
@@ -73,16 +76,35 @@ export NORNICDB_EMBEDDING_ENABLED=false
 
 At a high level:
 
-- Qdrant **collection** → a named vector space/index in NornicDB (managed by the Qdrant gRPC compatibility layer)
-- Qdrant **point** → a NornicDB node carrying:
-  - ID (string/uuid/number mapped to NornicDB node ID)
-  - payload (mapped to node properties)
-  - vector(s) (stored as embeddings, indexed for vector search)
+- Qdrant **collection** → a NornicDB **database** (namespace).
+  - The Qdrant gRPC layer uses `DatabaseManager.GetStorage(collectionName)`; all point data lives under the namespace prefix `collectionName:`.
+  - A collection is considered “Qdrant-managed” if it contains `_collection_meta` (created by `CreateCollection`).
+- Qdrant **point** → a NornicDB node inside the collection/database namespace:
+  - Node ID: `qdrant:point:<raw-id>` (does not include the collection name)
+  - Labels: `QdrantPoint`, `Point`
+  - Payload: mapped to `node.Properties` (with internal `_qdrant_*` keys removed from responses)
+  - Vector(s): stored in `Node.NamedEmbeddings` and indexed for vector search
 
 NornicDB also supports **named vectors** in Qdrant:
 
 - Qdrant named vectors → `node.NamedEmbeddings[vectorName]`
 - This enables multiple independent embedding fields per point (e.g. `title` and `content`).
+
+### Cypher access (collection = database)
+
+Because collections are databases, you can query points with Cypher:
+
+```cypher
+USE my_vectors
+MATCH (p:QdrantPoint)
+RETURN count(p)
+```
+
+Dropping a collection is the same as dropping a database:
+
+```cypher
+DROP DATABASE `my_vectors`
+```
 
 ---
 
@@ -244,4 +266,3 @@ This typically means NornicDB-managed embeddings are enabled. If you want the cl
 ```bash
 export NORNICDB_EMBEDDING_ENABLED=false
 ```
-

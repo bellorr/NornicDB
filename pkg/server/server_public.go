@@ -53,29 +53,61 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	stats := s.Stats()
 
-	// Calculate stats across all user databases (excluding system)
-	// This matches the logic in handleAdminStats for consistency
+	// Calculate stats across all user databases (excluding system).
+	// Prefer the base storage cached per-namespace counters for O(1) lookups,
+	// and fall back to dbManager-based aggregation if needed.
 	var totalNodeCount, totalEdgeCount int64
 	databaseCount := 0
-	if s.dbManager != nil {
-		databases := s.dbManager.ListDatabases()
-		databaseCount = len(databases)
 
+	if base := s.db.GetBaseStorageForManager(); base != nil {
+		if lister, ok := base.(interface{ ListNamespaces() []string }); ok {
+			if statsEngine, ok := base.(interface {
+				NodeCountByPrefix(prefix string) (int64, error)
+				EdgeCountByPrefix(prefix string) (int64, error)
+			}); ok {
+				namespaces := lister.ListNamespaces()
+				for _, ns := range namespaces {
+					select {
+					case <-r.Context().Done():
+						return
+					default:
+					}
+					if ns == "" || ns == "system" {
+						continue
+					}
+					databaseCount++
+					prefix := ns + ":"
+					if n, err := statsEngine.NodeCountByPrefix(prefix); err == nil {
+						totalNodeCount += n
+					}
+					if e, err := statsEngine.EdgeCountByPrefix(prefix); err == nil {
+						totalEdgeCount += e
+					}
+				}
+			}
+		}
+	}
+
+	// Fallback: use dbManager to aggregate.
+	if databaseCount == 0 && s.dbManager != nil {
+		databases := s.dbManager.ListDatabases()
 		for _, dbInfo := range databases {
+			select {
+			case <-r.Context().Done():
+				return
+			default:
+			}
 			dbName := dbInfo.Name
-			// Skip system database from totals (it contains metadata)
 			if dbName == "system" {
 				continue
 			}
-
-			storage, err := s.dbManager.GetStorage(dbName)
+			engine, err := s.dbManager.GetStorage(dbName)
 			if err != nil {
 				continue
 			}
-
-			nodeCount, _ := storage.NodeCount()
-			edgeCount, _ := storage.EdgeCount()
-
+			databaseCount++
+			nodeCount, _ := engine.NodeCount()
+			edgeCount, _ := engine.EdgeCount()
 			totalNodeCount += nodeCount
 			totalEdgeCount += edgeCount
 		}

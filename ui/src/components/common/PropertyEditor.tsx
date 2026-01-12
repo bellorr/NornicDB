@@ -28,17 +28,22 @@ export function PropertyEditor({
     > = {};
     for (const [key, value] of Object.entries(properties)) {
       if (isReadOnlyProperty(key)) continue;
-      props[key] = {
-        key,
-        value: JSON.stringify(value),
-        type:
+      const valueType =
           typeof value === "string"
             ? "string"
             : typeof value === "number"
             ? "number"
             : typeof value === "boolean"
             ? "boolean"
-            : "json",
+          : "json";
+      // For string type, use value directly (don't JSON.stringify to avoid double quotes)
+      // For other types, use JSON.stringify for proper display
+      const displayValue =
+        valueType === "string" ? (value as string) : JSON.stringify(value);
+      props[key] = {
+        key,
+        value: displayValue,
+        type: valueType,
       };
     }
     return props;
@@ -79,7 +84,10 @@ export function PropertyEditor({
       ...editedProps,
       [newPropKey]: {
         key: newPropKey,
-        value: JSON.stringify(parsedValue),
+        value:
+          newPropType === "string"
+            ? newPropValue
+            : JSON.stringify(parsedValue),
         type: newPropType,
       },
     });
@@ -311,4 +319,3 @@ export function PropertyEditor({
     </div>
   );
 }
-

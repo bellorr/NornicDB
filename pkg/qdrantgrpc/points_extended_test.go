@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	qpb "github.com/qdrant/go-client/qdrant"
 	"github.com/stretchr/testify/require"
 
@@ -14,10 +15,12 @@ func setupExtendedPointsService(t *testing.T) (*PointsService, storage.Engine) {
 	t.Helper()
 
 	ctx := context.Background()
-	store := storage.NewMemoryEngine()
-	registry, err := NewPersistentCollectionRegistry(store)
+	base := storage.NewMemoryEngine()
+	dbm, err := multidb.NewDatabaseManager(base, nil)
 	require.NoError(t, err)
-	t.Cleanup(func() { _ = registry.Close() })
+	vecIndex := newVectorIndexCache()
+	collections, err := NewDatabaseCollectionStore(dbm, vecIndex)
+	require.NoError(t, err)
 
 	cfg := DefaultConfig()
 	cfg.AllowVectorMutations = true
@@ -27,9 +30,9 @@ func setupExtendedPointsService(t *testing.T) (*PointsService, storage.Engine) {
 		return []float32{0.5, 0.5, 0, 0}, nil
 	}
 
-	require.NoError(t, registry.CreateCollection(ctx, "test_collection", 4, qpb.Distance_Cosine))
+	require.NoError(t, collections.Create(ctx, "test_collection", 4, qpb.Distance_Cosine))
 
-	svc := NewPointsService(cfg, store, registry, nil, newVectorIndexCache())
+	svc := NewPointsService(cfg, collections, nil, vecIndex)
 
 	_, err = svc.Upsert(ctx, &qpb.UpsertPoints{
 		CollectionName: "test_collection",
@@ -71,7 +74,7 @@ func setupExtendedPointsService(t *testing.T) (*PointsService, storage.Engine) {
 	})
 	require.NoError(t, err)
 
-	return svc, store
+	return svc, base
 }
 
 func TestPointsService_PayloadOps(t *testing.T) {
@@ -173,7 +176,7 @@ func TestPointsService_VectorOps_NamedVectors(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// Deleted vector "b" must not be accessible via NamedEmbeddings fallback.
+	// Deleted vector "b" must not be accessible.
 	searchResp, err = svc.Search(ctx, &qpb.SearchPoints{
 		CollectionName: "test_collection",
 		Vector:         []float32{0, 1, 0, 0},

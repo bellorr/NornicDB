@@ -4,12 +4,14 @@
 //
 // NornicDB cluster communication uses a hybrid approach:
 //
-// 1. **Bolt Protocol (Port 7687)** - Used for:
-//   - Write forwarding from followers to leader
-//   - Query routing in the cluster
-//   - Existing Neo4j driver compatibility
+// 1. **Client Bolt Protocol (default port 7687)** - Used for:
+//   - Neo4j driver compatibility for client queries
 //
-// 2. **Cluster Protocol (Port 7688)** - Used for:
+//   Note: automatic "write forwarding" over Bolt (follower/standby -> leader/primary)
+//   is not implemented yet. Today, clients should connect to the leader/primary for
+//   writes (followers/standby will reject writes with ErrNotLeader).
+//
+// 2. **Cluster Protocol (default port 7688)** - Used for:
 //   - Raft consensus (RequestVote, AppendEntries)
 //   - WAL streaming for HA standby
 //   - Heartbeats and health checks
@@ -31,7 +33,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -73,9 +74,9 @@ const (
 
 // ClusterMessage is the on-wire format for cluster communication.
 type ClusterMessage struct {
-	Type    ClusterMessageType `json:"t"`
-	NodeID  string             `json:"n,omitempty"`
-	Payload json.RawMessage    `json:"p,omitempty"`
+	Type    ClusterMessageType
+	NodeID  string
+	Payload []byte
 }
 
 // ClusterTransport handles cluster-to-cluster communication.
@@ -128,8 +129,24 @@ func DefaultClusterTransportConfig() *ClusterTransportConfig {
 
 // NewClusterTransport creates a cluster transport.
 func NewClusterTransport(config *ClusterTransportConfig) *ClusterTransport {
+	defaults := DefaultClusterTransportConfig()
 	if config == nil {
-		config = DefaultClusterTransportConfig()
+		config = defaults
+	} else {
+		// Fill unset values with sensible defaults to avoid accidental "0 means no timeouts"
+		// behavior, which can lead to hangs/timeouts that are hard to debug.
+		if config.DialTimeout == 0 {
+			config.DialTimeout = defaults.DialTimeout
+		}
+		if config.ReadTimeout == 0 {
+			config.ReadTimeout = defaults.ReadTimeout
+		}
+		if config.WriteTimeout == 0 {
+			config.WriteTimeout = defaults.WriteTimeout
+		}
+		if config.MaxMsgSize == 0 {
+			config.MaxMsgSize = defaults.MaxMsgSize
+		}
 	}
 	return &ClusterTransport{
 		nodeID:       config.NodeID,
@@ -165,11 +182,17 @@ func (t *ClusterTransport) Connect(ctx context.Context, addr string) (PeerConnec
 	}
 	t.mu.RUnlock()
 
-	// Dial with timeout
-	dialCtx, cancel := context.WithTimeout(ctx, t.dialTimeout)
+	// Dial with timeout (also set Dialer.Timeout so the net stack doesn't hang
+	// if a caller passes a context without a deadline).
+	dialTimeout := t.dialTimeout
+	if dialTimeout <= 0 {
+		dialTimeout = 5 * time.Second
+	}
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
 	defer cancel()
 
 	var d net.Dialer
+	d.Timeout = dialTimeout
 	netConn, err := d.DialContext(dialCtx, "tcp", addr)
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", addr, err)
@@ -216,9 +239,12 @@ func (t *ClusterTransport) Listen(ctx context.Context, addr string, handler Conn
 
 	t.mu.Lock()
 	t.listener = listener
+	// If an ephemeral port was requested (or the caller passes an empty addr in tests),
+	// record the actual bound address for later dials/diagnostics.
+	t.bindAddr = listener.Addr().String()
 	t.mu.Unlock()
 
-	log.Printf("[Cluster] Listening on %s", addr)
+	log.Printf("[Cluster] Listening on %s", listener.Addr().String())
 
 	for {
 		select {
@@ -247,70 +273,32 @@ func (t *ClusterTransport) Listen(ctx context.Context, addr string, handler Conn
 		}
 
 		t.wg.Add(1)
-		go t.handleIncoming(ctx, netConn)
+		go t.handleIncoming(ctx, netConn, handler)
 	}
 }
 
-func (t *ClusterTransport) handleIncoming(ctx context.Context, netConn net.Conn) {
+func (t *ClusterTransport) handleIncoming(ctx context.Context, netConn net.Conn, onConnect ConnectionHandler) {
 	defer t.wg.Done()
-	defer netConn.Close()
 
 	remoteAddr := netConn.RemoteAddr().String()
 	log.Printf("[Cluster] Accepted connection from %s", remoteAddr)
 
-	reader := bufio.NewReader(netConn)
-	writer := bufio.NewWriter(netConn)
+	// Treat inbound connections the same as outbound ones so they can both:
+	// 1) serve incoming requests via registered handlers
+	// 2) be used to send requests back to the peer (e.g., fencing during failover)
+	conn := t.createConnection(remoteAddr, netConn)
 
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-t.closeCh:
-			return
-		default:
-		}
+	t.mu.Lock()
+	t.connections[remoteAddr] = conn
+	t.mu.Unlock()
 
-		// Read message
-		netConn.SetReadDeadline(time.Now().Add(t.readTimeout))
-		msg, err := readClusterMessage(reader, t.maxMsgSize)
-		if err != nil {
-			if err != io.EOF && !t.closed.Load() {
-				if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-					log.Printf("[Cluster] Read error from %s: %v", remoteAddr, err)
-				}
-			}
-			return
-		}
-
-		// Find handler
-		t.mu.RLock()
-		handler, ok := t.handlers[msg.Type]
-		t.mu.RUnlock()
-
-		if !ok {
-			log.Printf("[Cluster] No handler for message type %d", msg.Type)
-			continue
-		}
-
-		// Handle message
-		resp, err := handler(ctx, msg.NodeID, msg)
-		if err != nil {
-			log.Printf("[Cluster] Handler error: %v", err)
-			continue
-		}
-
-		if resp != nil {
-			netConn.SetWriteDeadline(time.Now().Add(t.writeTimeout))
-			if err := writeClusterMessage(writer, resp); err != nil {
-				log.Printf("[Cluster] Write error to %s: %v", remoteAddr, err)
-				return
-			}
-			if err := writer.Flush(); err != nil {
-				log.Printf("[Cluster] Flush error to %s: %v", remoteAddr, err)
-				return
-			}
-		}
+	if onConnect != nil {
+		onConnect(conn)
 	}
+
+	conn.wg.Add(1)
+	go conn.readLoopWithContext(ctx)
+	conn.wg.Wait()
 }
 
 // Close shuts down the transport.
@@ -360,6 +348,9 @@ func (c *ClusterConnection) sendRPC(ctx context.Context, msg *ClusterMessage) (*
 	if !c.connected.Load() {
 		return nil, errors.New("not connected")
 	}
+	if msg.NodeID == "" && c.transport != nil && c.transport.nodeID != "" {
+		msg.NodeID = c.transport.nodeID
+	}
 
 	// Create response channel
 	c.rpcMu.Lock()
@@ -400,15 +391,34 @@ func (c *ClusterConnection) sendRPC(ctx context.Context, msg *ClusterMessage) (*
 }
 
 func (c *ClusterConnection) readLoop() {
+	c.readLoopWithContext(context.Background())
+}
+
+func (c *ClusterConnection) readLoopWithContext(ctx context.Context) {
 	defer c.wg.Done()
 	c.connected.Store(true)
 	defer func() {
 		c.connected.Store(false)
 		close(c.closeCh)
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
 	}()
 
 	for {
-		c.conn.SetReadDeadline(time.Now().Add(c.readTimeout))
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.transport.closeCh:
+			return
+		default:
+		}
+
+		readTimeout := c.readTimeout
+		if readTimeout <= 0 {
+			readTimeout = 30 * time.Second
+		}
+		c.conn.SetReadDeadline(time.Now().Add(readTimeout))
 		msg, err := readClusterMessage(c.reader, c.maxMsgSize)
 		if err != nil {
 			if err != io.EOF {
@@ -419,25 +429,74 @@ func (c *ClusterConnection) readLoop() {
 			return
 		}
 
-		// Dispatch to pending RPC
+		// Dispatch to pending RPC (single outstanding RPC per connection is expected today).
 		c.rpcMu.Lock()
+		var (
+			deliverCh chan *ClusterMessage
+			deliverID uint64
+		)
 		for id, ch := range c.pendingRPCs {
-			select {
-			case ch <- msg:
-			default:
-			}
-			delete(c.pendingRPCs, id)
+			deliverCh = ch
+			deliverID = id
 			break
 		}
+		if deliverCh != nil {
+			select {
+			case deliverCh <- msg:
+			default:
+			}
+			delete(c.pendingRPCs, deliverID)
+			c.rpcMu.Unlock()
+			continue
+		}
 		c.rpcMu.Unlock()
+
+		// No pending RPC: treat as inbound request.
+		if c.transport == nil {
+			continue
+		}
+
+		c.transport.mu.RLock()
+		handler, ok := c.transport.handlers[msg.Type]
+		c.transport.mu.RUnlock()
+		if !ok {
+			log.Printf("[Cluster] No handler for message type %d", msg.Type)
+			continue
+		}
+
+		resp, err := handler(ctx, msg.NodeID, msg)
+		if err != nil {
+			log.Printf("[Cluster] Handler error: %v", err)
+			continue
+		}
+		if resp == nil {
+			continue
+		}
+
+		c.mu.Lock()
+		writeTimeout := c.writeTimeout
+		if writeTimeout <= 0 {
+			writeTimeout = 10 * time.Second
+		}
+		c.conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+		werr := writeClusterMessage(c.writer, resp)
+		if werr == nil {
+			werr = c.writer.Flush()
+		}
+		c.mu.Unlock()
+
+		if werr != nil {
+			log.Printf("[Cluster] Write error to %s: %v", c.addr, werr)
+			return
+		}
 	}
 }
 
 // SendWALBatch sends WAL entries to the peer.
 func (c *ClusterConnection) SendWALBatch(ctx context.Context, entries []*WALEntry) (*WALBatchResponse, error) {
-	payload, err := json.Marshal(entries)
+	payload, err := encodeGob(entries)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -451,17 +510,17 @@ func (c *ClusterConnection) SendWALBatch(ctx context.Context, entries []*WALEntr
 	}
 
 	var result WALBatchResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendHeartbeat sends a heartbeat to the peer.
 func (c *ClusterConnection) SendHeartbeat(ctx context.Context, req *HeartbeatRequest) (*HeartbeatResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -475,17 +534,17 @@ func (c *ClusterConnection) SendHeartbeat(ctx context.Context, req *HeartbeatReq
 	}
 
 	var result HeartbeatResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendFence sends a fence request to the peer.
 func (c *ClusterConnection) SendFence(ctx context.Context, req *FenceRequest) (*FenceResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -499,17 +558,17 @@ func (c *ClusterConnection) SendFence(ctx context.Context, req *FenceRequest) (*
 	}
 
 	var result FenceResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendPromote sends a promote request to the peer.
 func (c *ClusterConnection) SendPromote(ctx context.Context, req *PromoteRequest) (*PromoteResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -523,17 +582,17 @@ func (c *ClusterConnection) SendPromote(ctx context.Context, req *PromoteRequest
 	}
 
 	var result PromoteResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendRaftVote sends a Raft vote request to the peer.
 func (c *ClusterConnection) SendRaftVote(ctx context.Context, req *RaftVoteRequest) (*RaftVoteResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -547,17 +606,17 @@ func (c *ClusterConnection) SendRaftVote(ctx context.Context, req *RaftVoteReque
 	}
 
 	var result RaftVoteResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendRaftAppendEntries sends Raft append entries to the peer.
 func (c *ClusterConnection) SendRaftAppendEntries(ctx context.Context, req *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -571,8 +630,8 @@ func (c *ClusterConnection) SendRaftAppendEntries(ctx context.Context, req *Raft
 	}
 
 	var result RaftAppendEntriesResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
@@ -597,7 +656,7 @@ func (c *ClusterConnection) IsConnected() bool {
 // Wire protocol helpers
 
 func writeClusterMessage(w *bufio.Writer, msg *ClusterMessage) error {
-	data, err := json.Marshal(msg)
+	data, err := encodeGob(msg)
 	if err != nil {
 		return err
 	}
@@ -630,7 +689,7 @@ func readClusterMessage(r *bufio.Reader, maxSize int) (*ClusterMessage, error) {
 	}
 
 	var msg ClusterMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
+	if err := decodeGob(data, &msg); err != nil {
 		return nil, err
 	}
 

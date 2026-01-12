@@ -245,9 +245,9 @@ func (b *BadgerEngine) DeleteEdge(id EdgeID) error {
 	// Invalidate only this edge type (not entire cache)
 	if err == nil {
 		if edgeType != "" {
-			b.cacheOnEdgeDeleted(edgeType)
+			b.cacheOnEdgeDeleted(id, edgeType)
 		} else {
-			b.cacheOnEdgesDeleted(1)
+			b.cacheOnEdgesDeleted([]EdgeID{id})
 		}
 
 		// Notify listeners (e.g., graph analyzers) about the deleted edge
@@ -299,9 +299,25 @@ func (b *BadgerEngine) deleteEdgeInTxn(txn *badger.Txn, id EdgeID) error {
 func (b *BadgerEngine) deleteNodeInTxn(txn *badger.Txn, id NodeID) (edgesDeleted int64, deletedEdgeIDs []EdgeID, err error) {
 	key := nodeKey(id)
 
+	// CRITICAL: Delete separately stored embeddings FIRST, before checking if node exists.
+	// This ensures embeddings are cleaned up even if the node record is missing or corrupted.
+	embPrefix := embeddingPrefix(id)
+	opts := badger.DefaultIteratorOptions
+	opts.Prefix = embPrefix
+	it := txn.NewIterator(opts)
+	defer it.Close()
+	for it.Rewind(); it.Valid(); it.Next() {
+		if err := txn.Delete(it.Item().Key()); err != nil {
+			return 0, nil, fmt.Errorf("failed to delete embedding chunk: %w", err)
+		}
+	}
+
 	// Get node for label cleanup
 	item, err := txn.Get(key)
 	if err == badger.ErrKeyNotFound {
+		// Node doesn't exist, but we've already cleaned up embeddings above.
+		// Also clean up pending embeddings index.
+		txn.Delete(pendingEmbedKey(id))
 		return 0, nil, ErrNotFound
 	}
 	if err != nil {
@@ -343,6 +359,9 @@ func (b *BadgerEngine) deleteNodeInTxn(txn *badger.Txn, id NodeID) (edgesDeleted
 	}
 	edgesDeleted += inCount
 	deletedEdgeIDs = append(deletedEdgeIDs, inIDs...)
+
+	// Remove from pending embeddings index (if present)
+	txn.Delete(pendingEmbedKey(id))
 
 	// Delete the node
 	return edgesDeleted, deletedEdgeIDs, txn.Delete(key)
@@ -395,8 +414,14 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 		}
 
 		// Notify listeners (e.g., search service) for each deleted node
-		for _, id := range deletedNodeIDs {
-			b.notifyNodeDeleted(id)
+		// Use async notifications to avoid blocking bulk deletes (e.g., collection deletion)
+		// The search service can handle these notifications in the background
+		if len(deletedNodeIDs) > 0 {
+			go func(ids []NodeID) {
+				for _, id := range ids {
+					b.notifyNodeDeleted(id)
+				}
+			}(deletedNodeIDs)
 		}
 	}
 
@@ -436,7 +461,7 @@ func (b *BadgerEngine) BulkDeleteEdges(ids []EdgeID) error {
 
 	// Invalidate edge type cache on successful bulk delete and update count
 	if err == nil && deletedCount > 0 {
-		b.cacheOnEdgesDeleted(deletedCount)
+		b.cacheOnEdgesDeleted(deletedIDs)
 
 		// Notify listeners (e.g., graph analyzers) for each deleted edge
 		for _, id := range deletedIDs {

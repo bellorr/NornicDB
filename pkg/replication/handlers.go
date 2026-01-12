@@ -1,0 +1,149 @@
+package replication
+
+import (
+	"context"
+	"fmt"
+)
+
+// RegisterClusterHandlers wires a Replicator's handler methods into a ClusterTransport.
+// This is intentionally transport-specific because other Transport implementations may
+// not support message-type dispatch.
+func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
+	if t == nil || r == nil {
+		return
+	}
+
+	type walBatchHandler interface {
+		HandleWALBatch(entries []*WALEntry) (*WALBatchResponse, error)
+	}
+	if h, ok := r.(walBatchHandler); ok {
+		t.RegisterHandler(ClusterMsgWALBatch, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
+			_ = nodeID
+			var entries []*WALEntry
+			if err := decodeGob(msg.Payload, &entries); err != nil {
+				return nil, fmt.Errorf("decode wal batch: %w", err)
+			}
+			resp, err := h.HandleWALBatch(entries)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := encodeGob(resp)
+			if err != nil {
+				return nil, fmt.Errorf("encode wal batch resp: %w", err)
+			}
+			return &ClusterMessage{Type: ClusterMsgWALBatchResponse, Payload: payload}, nil
+		})
+	}
+
+	type heartbeatHandler interface {
+		HandleHeartbeat(req *HeartbeatRequest) (*HeartbeatResponse, error)
+	}
+	if h, ok := r.(heartbeatHandler); ok {
+		t.RegisterHandler(ClusterMsgHeartbeat, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
+			_ = nodeID
+			var req HeartbeatRequest
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode heartbeat: %w", err)
+			}
+			resp, err := h.HandleHeartbeat(&req)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := encodeGob(resp)
+			if err != nil {
+				return nil, fmt.Errorf("encode heartbeat resp: %w", err)
+			}
+			return &ClusterMessage{Type: ClusterMsgHeartbeatResponse, Payload: payload}, nil
+		})
+	}
+
+	type fenceHandler interface {
+		HandleFence(req *FenceRequest) (*FenceResponse, error)
+	}
+	if h, ok := r.(fenceHandler); ok {
+		t.RegisterHandler(ClusterMsgFence, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
+			_ = nodeID
+			var req FenceRequest
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode fence: %w", err)
+			}
+			resp, err := h.HandleFence(&req)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := encodeGob(resp)
+			if err != nil {
+				return nil, fmt.Errorf("encode fence resp: %w", err)
+			}
+			return &ClusterMessage{Type: ClusterMsgFenceResponse, Payload: payload}, nil
+		})
+	}
+
+	type promoteHandler interface {
+		HandlePromote(req *PromoteRequest) (*PromoteResponse, error)
+	}
+	if h, ok := r.(promoteHandler); ok {
+		t.RegisterHandler(ClusterMsgPromote, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
+			_ = nodeID
+			var req PromoteRequest
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode promote: %w", err)
+			}
+			resp, err := h.HandlePromote(&req)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := encodeGob(resp)
+			if err != nil {
+				return nil, fmt.Errorf("encode promote resp: %w", err)
+			}
+			return &ClusterMessage{Type: ClusterMsgPromoteResponse, Payload: payload}, nil
+		})
+	}
+
+	type raftVoteHandler interface {
+		HandleRaftVote(req *RaftVoteRequest) (*RaftVoteResponse, error)
+	}
+	if h, ok := r.(raftVoteHandler); ok {
+		t.RegisterHandler(ClusterMsgVoteRequest, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
+			_ = ctx
+			_ = nodeID
+			var req RaftVoteRequest
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode raft vote: %w", err)
+			}
+			resp, err := h.HandleRaftVote(&req)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := encodeGob(resp)
+			if err != nil {
+				return nil, fmt.Errorf("encode raft vote resp: %w", err)
+			}
+			return &ClusterMessage{Type: ClusterMsgVoteResponse, Payload: payload}, nil
+		})
+	}
+
+	type raftAppendHandler interface {
+		HandleRaftAppendEntries(req *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error)
+	}
+	if h, ok := r.(raftAppendHandler); ok {
+		t.RegisterHandler(ClusterMsgAppendEntries, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
+			_ = ctx
+			_ = nodeID
+			var req RaftAppendEntriesRequest
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode raft append: %w", err)
+			}
+			resp, err := h.HandleRaftAppendEntries(&req)
+			if err != nil {
+				return nil, err
+			}
+			payload, err := encodeGob(resp)
+			if err != nil {
+				return nil, fmt.Errorf("encode raft append resp: %w", err)
+			}
+			return &ClusterMessage{Type: ClusterMsgAppendEntriesResponse, Payload: payload}, nil
+		})
+	}
+}

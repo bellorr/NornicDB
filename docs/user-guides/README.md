@@ -18,6 +18,7 @@
 - **[GraphQL API](graphql.md)** - GraphQL queries, mutations, and real-time subscriptions
 - **[Cypher Queries](cypher-queries.md)** - Complete Cypher language guide
 - **[Graph Traversal](graph-traversal.md)** - Path queries and pattern matching
+- **[Property Data Types](property-data-types.md)** - Complete reference for all supported property types
 - **[Data Import/Export](data-import-export.md)** - Neo4j compatibility
 
 ### Operations

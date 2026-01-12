@@ -25,10 +25,10 @@
 //
 // # Data Model Mapping
 //
-//   - Qdrant Collection → Collection metadata in registry
-//   - Qdrant Point → NornicDB Node with embeddings in ChunkEmbeddings (supports named vectors)
+//   - Qdrant Collection → NornicDB database namespace (collection = database)
+//   - Qdrant Point → NornicDB Node with embeddings in NamedEmbeddings (supports named vectors)
 //   - Qdrant Payload → NornicDB Node properties
-//   - Qdrant PointId → NornicDB NodeID (prefixed: qdrant:<collection>:<id>)
+//   - Qdrant PointId → NornicDB NodeID (prefixed: qdrant:point:<id>, scoped by database namespace)
 //
 // # Feature Flag
 //
@@ -79,6 +79,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/orneryd/nornicdb/pkg/auth"
+	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	qpb "github.com/qdrant/go-client/qdrant"
@@ -153,6 +154,10 @@ type Config struct {
 	MethodPermissions map[string]auth.Permission
 }
 
+// SearchServiceProvider returns a search service configured for the provided database namespace.
+// When nil, Qdrant point writes still persist but do not update NornicDB search indexes.
+type SearchServiceProvider func(database string, store storage.Engine) (*search.Service, error)
+
 // DefaultConfig returns sensible defaults for the Qdrant gRPC server.
 func DefaultConfig() *Config {
 	return &Config{
@@ -175,9 +180,9 @@ func DefaultConfig() *Config {
 // Server is the Qdrant-compatible gRPC server.
 type Server struct {
 	config        *Config
-	storage       storage.Engine
-	registry      CollectionRegistry
-	searchService *search.Service
+	collections   CollectionStore
+	baseStorage   storage.Engine
+	searchService SearchServiceProvider
 	vecIndex      *vectorIndexCache
 	authenticator *auth.Authenticator // Authentication for gRPC requests
 
@@ -195,35 +200,37 @@ type contextKeyClaims struct{}
 //
 // Parameters:
 //   - config: Server configuration (use DefaultConfig() for sensible defaults)
-//   - store: NornicDB storage engine for persisting points
-//   - registry: Collection registry for managing collection metadata
-//   - searchService: NornicDB search service for unified vector indexing (can be nil)
+//   - collections: Collection store (maps collections to database namespaces)
+//   - baseStorage: Base storage engine (un-namespaced); used for full snapshots/backups
+//   - searchProvider: Optional per-database search service provider
 //   - authenticator: Authentication for gRPC requests (can be nil if auth disabled)
 //
-// If searchService is nil, points are still stored but not indexed for search.
-// For production use, always provide a search.Service.
-//
 // Returns the server instance ready to Start().
-func NewServer(config *Config, store storage.Engine, registry CollectionRegistry, searchService *search.Service, authenticator *auth.Authenticator) (*Server, error) {
+func NewServer(config *Config, collections CollectionStore, baseStorage storage.Engine, searchProvider SearchServiceProvider, authenticator *auth.Authenticator) (*Server, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
-	if store == nil {
-		return nil, fmt.Errorf("storage engine required")
-	}
-	if registry == nil {
-		return nil, fmt.Errorf("collection registry required")
+	if collections == nil {
+		return nil, fmt.Errorf("collection store required")
 	}
 
 	return &Server{
 		config:        config,
-		storage:       store,
-		registry:      registry,
-		searchService: searchService,
+		collections:   collections,
+		baseStorage:   baseStorage,
+		searchService: searchProvider,
 		vecIndex:      newVectorIndexCache(),
 		authenticator: authenticator,
 		register:      nil,
 	}, nil
+}
+
+// CollectionStore returns the configured collection store.
+func (s *Server) CollectionStore() CollectionStore {
+	if s == nil {
+		return nil
+	}
+	return s.collections
 }
 
 // RegisterAdditionalServices registers additional gRPC services on the same server.
@@ -285,13 +292,13 @@ func (s *Server) Start() error {
 
 	s.grpcServer = grpc.NewServer(opts...)
 
-	collectionsService := NewCollectionsService(s.registry, s.storage, s.searchService, s.vecIndex)
+	collectionsService := NewCollectionsService(s.collections, s.vecIndex)
 	qpb.RegisterCollectionsServer(s.grpcServer, collectionsService)
 
-	pointsService := NewPointsService(s.config, s.storage, s.registry, s.searchService, s.vecIndex)
+	pointsService := NewPointsService(s.config, s.collections, s.searchService, s.vecIndex)
 	qpb.RegisterPointsServer(s.grpcServer, pointsService)
 
-	snapshotsService := NewSnapshotsService(s.config, s.storage, s.registry, s.config.SnapshotDir)
+	snapshotsService := NewSnapshotsService(s.config, s.collections, s.baseStorage, s.config.SnapshotDir)
 	qpb.RegisterSnapshotsServer(s.grpcServer, snapshotsService)
 
 	for _, fn := range s.register {
@@ -665,21 +672,24 @@ func (a *authServerStream) Context() context.Context {
 //	}
 //	defer registry.Close()
 //	srv.Start()
-func NewServerWithPersistentRegistry(config *Config, store storage.Engine, searchService *search.Service, authenticator *auth.Authenticator) (*Server, *PersistentCollectionRegistry, error) {
-	if store == nil {
-		return nil, nil, fmt.Errorf("storage engine required")
+//
+// NewServerWithDatabaseManager wires a Qdrant gRPC server against NornicDB's DatabaseManager.
+//
+// Collections are created as database namespaces and must contain the required _collection_meta node.
+func NewServerWithDatabaseManager(config *Config, dbManager *multidb.DatabaseManager, baseStorage storage.Engine, searchProvider SearchServiceProvider, authenticator *auth.Authenticator) (*Server, error) {
+	if dbManager == nil {
+		return nil, fmt.Errorf("db manager required")
 	}
-
-	registry, err := NewPersistentCollectionRegistry(store)
+	vecIndex := newVectorIndexCache()
+	collections, err := NewDatabaseCollectionStore(dbManager, vecIndex)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create collection registry: %w", err)
+		return nil, err
 	}
-
-	server, err := NewServer(config, store, registry, searchService, authenticator)
+	srv, err := NewServer(config, collections, baseStorage, searchProvider, authenticator)
 	if err != nil {
-		registry.Close()
-		return nil, nil, err
+		return nil, err
 	}
-
-	return server, registry, nil
+	// Ensure server and store share the same index cache.
+	srv.vecIndex = vecIndex
+	return srv, nil
 }

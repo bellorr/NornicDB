@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -195,7 +196,7 @@ func (r *HAStandbyReplicator) SetTransport(t Transport) {
 
 // Start initializes and starts the HA standby replicator.
 func (r *HAStandbyReplicator) Start(ctx context.Context) error {
-	if r.started.Load() {
+	if !r.started.CompareAndSwap(false, true) {
 		return nil
 	}
 
@@ -204,17 +205,26 @@ func (r *HAStandbyReplicator) Start(ctx context.Context) error {
 		r.transport = NewDefaultTransport(nil)
 	}
 
+	log.Printf("[HA] Starting in role=%s peer=%s sync_mode=%s wal_batch_size=%d wal_batch_timeout=%s",
+		r.config.HAStandby.Role,
+		r.config.HAStandby.PeerAddr,
+		r.config.HAStandby.SyncMode,
+		r.config.HAStandby.WALBatchSize,
+		r.config.HAStandby.WALBatchTimeout,
+	)
+
 	if r.isPrimary.Load() {
 		if err := r.startPrimary(ctx); err != nil {
+			r.started.Store(false)
 			return fmt.Errorf("start primary: %w", err)
 		}
 	} else {
 		if err := r.startStandby(ctx); err != nil {
+			r.started.Store(false)
 			return fmt.Errorf("start standby: %w", err)
 		}
 	}
 
-	r.started.Store(true)
 	log.Printf("[HA] Started as %s, peer: %s", r.role, r.config.HAStandby.PeerAddr)
 
 	return nil
@@ -380,6 +390,17 @@ func (r *HAStandbyReplicator) sendHeartbeat(ctx context.Context) {
 func (r *HAStandbyReplicator) listenForPrimary(ctx context.Context) {
 	defer r.wg.Done()
 
+	// Tie listener lifetime to shutdown signal as well as parent context.
+	listenCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-r.stopCh:
+			cancel()
+		case <-listenCtx.Done():
+		}
+	}()
+
 	handler := func(conn PeerConnection) {
 		r.mu.Lock()
 		r.primaryConn = conn
@@ -390,8 +411,8 @@ func (r *HAStandbyReplicator) listenForPrimary(ctx context.Context) {
 		log.Printf("[HA Standby] Primary connected")
 	}
 
-	if err := r.transport.Listen(ctx, r.config.BindAddr, handler); err != nil {
-		if ctx.Err() == nil {
+	if err := r.transport.Listen(listenCtx, r.config.BindAddr, handler); err != nil {
+		if listenCtx.Err() == nil {
 			log.Printf("[HA Standby] Listen error: %v", err)
 		}
 	}
@@ -514,7 +535,23 @@ func (r *HAStandbyReplicator) Apply(cmd *Command, timeout time.Duration) error {
 		return ErrStandbyMode
 	}
 
-	return r.storage.ApplyCommand(cmd)
+	traceWrites := os.Getenv("NORNICDB_CLUSTER_TRACE_WRITES") != ""
+	start := time.Now()
+	if err := r.storage.ApplyCommand(cmd); err != nil {
+		return err
+	}
+	applyDur := time.Since(start)
+
+	// Honor write-ack mode: optionally wait for standby acknowledgement.
+	walPos, _ := r.storage.GetWALPosition()
+	ackStart := time.Now()
+	ackErr := r.waitForReplicationAck(walPos, timeout)
+	ackDur := time.Since(ackStart)
+	if traceWrites {
+		log.Printf("[HA Primary] Apply type=%d apply=%s ack=%s total=%s mode=%s wal=%d err=%v",
+			cmd.Type, applyDur, ackDur, time.Since(start), r.config.HAStandby.SyncMode, walPos, ackErr)
+	}
+	return ackErr
 }
 
 // ApplyBatch applies multiple commands.
@@ -525,6 +562,53 @@ func (r *HAStandbyReplicator) ApplyBatch(cmds []*Command, timeout time.Duration)
 		}
 	}
 	return nil
+}
+
+// waitForReplicationAck enforces the configured write-ack behavior after a local apply.
+// For async mode, it returns immediately. For quorum mode, it waits until the
+// standby has acknowledged WAL up to the target position or the timeout elapses.
+func (r *HAStandbyReplicator) waitForReplicationAck(target uint64, timeout time.Duration) error {
+	mode := r.config.HAStandby.SyncMode
+	if mode == SyncAsync || target == 0 || r.walStreamer == nil {
+		return nil
+	}
+	if mode != SyncQuorum {
+		// Config validation should prevent this, but keep async semantics as a safe default.
+		return nil
+	}
+
+	// Quorum: wait for ack up to timeout.
+	// Default timeout if caller did not supply one.
+	if timeout <= 0 {
+		// Use a conservative bound: 2x heartbeat interval or 500ms minimum.
+		timeout = r.config.HAStandby.HeartbeatInterval * 2
+		if timeout == 0 {
+			timeout = 500 * time.Millisecond
+		} else if timeout < 250*time.Millisecond {
+			timeout = 250 * time.Millisecond
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if r.walStreamer.LastAcked() >= target {
+			return nil
+		}
+
+		// Proactively attempt to send any pending WAL to reduce wait time.
+		r.streamPendingWAL(ctx)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("replication ack timeout (mode=%s, target=%d): %w", mode, target, ctx.Err())
+		case <-ticker.C:
+		}
+	}
 }
 
 // IsLeader returns true if this is the primary.
@@ -698,6 +782,14 @@ func (r *HAStandbyReplicator) HandleFence(req *FenceRequest) (*FenceResponse, er
 	return &FenceResponse{Fenced: true}, nil
 }
 
+// HandlePromote handles an incoming promote request from the peer.
+// Today this is used as a lightweight coordination hook; the actual promotion
+// decision remains local (based on health/auto-failover config).
+func (r *HAStandbyReplicator) HandlePromote(req *PromoteRequest) (*PromoteResponse, error) {
+	_ = req
+	return &PromoteResponse{Ready: true}, nil
+}
+
 // Ensure HAStandbyReplicator implements Replicator.
 var _ Replicator = (*HAStandbyReplicator)(nil)
 
@@ -733,6 +825,18 @@ func (w *WALStreamer) AcknowledgePosition(pos uint64) {
 	if pos > w.lastAckedPos {
 		w.lastAckedPos = pos
 	}
+
+	// Allow storage to discard already-acknowledged in-memory WAL entries.
+	if pruner, ok := w.storage.(interface{ PruneWALEntries(uptoPosition uint64) }); ok {
+		pruner.PruneWALEntries(pos)
+	}
+}
+
+// LastAcked returns the last acknowledged WAL position.
+func (w *WALStreamer) LastAcked() uint64 {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.lastAckedPos
 }
 
 // WALApplier applies WAL entries to storage.

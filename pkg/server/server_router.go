@@ -1,8 +1,11 @@
 package server
 
 import (
+	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/security"
@@ -25,7 +28,6 @@ func (s *Server) buildRouter() http.Handler {
 	s.registerMCPRoutes(mux)
 	s.registerHeimdallRoutes(mux)
 	s.registerGraphQLRoutes(mux)
-	s.registerCollectionsRoutes(mux)
 
 	return s.wrapWithMiddleware(mux)
 }
@@ -238,6 +240,12 @@ func (s *Server) registerGraphQLRoutes(mux *http.ServeMux) {
 
 	// GraphQL endpoint - read access required for queries
 	mux.HandleFunc("/graphql", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		if os.Getenv("NORNICDB_TRACE_GRAPHQL") != "" {
+			start := time.Now()
+			s.graphqlHandler.ServeHTTP(w, r)
+			fmt.Printf("[GRAPHQL] %s %s %v\n", r.Method, r.URL.Path, time.Since(start))
+			return
+		}
 		s.graphqlHandler.ServeHTTP(w, r)
 	}, auth.PermRead))
 
