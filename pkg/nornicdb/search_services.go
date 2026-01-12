@@ -264,11 +264,10 @@ func (db *DB) runClusteringOnceAllDatabases() {
 			continue
 		}
 
-		currentCount := entry.svc.EmbeddingCount()
-
 		// Serialize clustering per database to avoid duplicate work when multiple
 		// triggers fire concurrently (startup hooks, manual triggers, timer ticks).
 		entry.clusterMu.Lock()
+		currentCount := entry.svc.EmbeddingCount()
 		if currentCount == entry.lastClusteredEmbedCount && entry.lastClusteredEmbedCount > 0 {
 			entry.clusterMu.Unlock()
 			continue

@@ -1020,6 +1020,10 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		db.inferenceServices = make(map[string]*inference.Engine)
 		// Eagerly create default DB inference for parity with prior behavior.
 		if _, err := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage); err != nil {
+			db.mu.Lock()
+			db.closed = true
+			db.mu.Unlock()
+			_ = db.closeInternal()
 			return nil, fmt.Errorf("init inference: %w", err)
 		}
 	}
