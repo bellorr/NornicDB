@@ -49,6 +49,16 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 		return nil, fmt.Errorf("search service not available for system database")
 	}
 
+	db.mu.RLock()
+	baseStorage := db.baseStorage
+	dims := db.embeddingDims
+	minSim := db.searchMinSimilarity
+	var gpuMgr *gpu.Manager
+	if m, ok := db.gpuManager.(*gpu.Manager); ok {
+		gpuMgr = m
+	}
+	db.mu.RUnlock()
+
 	db.searchServicesMu.RLock()
 	if entry, ok := db.searchServices[dbName]; ok {
 		svc := entry.svc
@@ -59,8 +69,8 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 		// in which case they need to be upgraded in place.
 		if svc != nil && featureflags.IsGPUClusteringEnabled() && !svc.IsClusteringEnabled() {
 			var mgr *gpu.Manager
-			if m, ok := db.gpuManager.(*gpu.Manager); ok && m != nil && m.IsEnabled() {
-				mgr = m
+			if gpuMgr != nil && gpuMgr.IsEnabled() {
+				mgr = gpuMgr
 			}
 			svc.EnableClustering(mgr, 100)
 		}
@@ -69,30 +79,29 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	db.searchServicesMu.RUnlock()
 
 	if storageEngine == nil {
-		if db.baseStorage == nil {
+		if baseStorage == nil {
 			return nil, fmt.Errorf("search service unavailable: base storage is nil")
 		}
-		storageEngine = storage.NewNamespacedEngine(db.baseStorage, dbName)
+		storageEngine = storage.NewNamespacedEngine(baseStorage, dbName)
 	}
 
-	dims := db.embeddingDims
 	if dims <= 0 {
 		dims = 1024
 	}
 	svc := search.NewServiceWithDimensions(storageEngine, dims)
-	svc.SetDefaultMinSimilarity(db.searchMinSimilarity)
+	svc.SetDefaultMinSimilarity(minSim)
 
 	// Enable GPU brute-force search if a GPU manager is configured.
-	if mgr, ok := db.gpuManager.(*gpu.Manager); ok {
-		svc.SetGPUManager(mgr)
+	if gpuMgr != nil {
+		svc.SetGPUManager(gpuMgr)
 	}
 
 	// Enable per-database clustering if the feature flag is enabled.
 	// Each Service maintains its own cluster index and must cluster independently.
 	if featureflags.IsGPUClusteringEnabled() {
 		var mgr *gpu.Manager
-		if m, ok := db.gpuManager.(*gpu.Manager); ok && m != nil && m.IsEnabled() {
-			mgr = m
+		if gpuMgr != nil && gpuMgr.IsEnabled() {
+			mgr = gpuMgr
 		}
 		svc.EnableClustering(mgr, 100)
 	}

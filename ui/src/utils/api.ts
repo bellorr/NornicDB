@@ -203,7 +203,7 @@ class NornicDBClient {
   async executeCypher(statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
     // Get default database name (will fetch from discovery endpoint if not cached)
     const dbName = await this.getDefaultDatabase();
-    const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+    const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
@@ -282,6 +282,12 @@ class NornicDBClient {
     return infos.filter((x): x is DatabaseInfo => Boolean(x));
   }
 
+  private quoteCypherIdentifier(identifier: string): string {
+    // Cypher uses backticks for identifier quoting; escape embedded backticks by doubling them.
+    // Example: db name `a`b` => `a``b`
+    return `\`${identifier.split('`').join('``')}\``;
+  }
+
   private validateDatabaseName(name: string): string {
     const trimmed = name.trim();
     if (!trimmed) {
@@ -298,7 +304,7 @@ class NornicDBClient {
 
   async createDatabase(name: string): Promise<void> {
     const dbName = this.validateDatabaseName(name);
-    const resp = await this.executeSystemCypher(`CREATE DATABASE \`${dbName}\``);
+    const resp = await this.executeSystemCypher(`CREATE DATABASE ${this.quoteCypherIdentifier(dbName)}`);
     if (resp.errors && resp.errors.length > 0) {
       throw new Error(resp.errors.map((e) => e.message).join('; '));
     }
@@ -306,7 +312,7 @@ class NornicDBClient {
 
   async dropDatabase(name: string): Promise<void> {
     const dbName = this.validateDatabaseName(name);
-    const resp = await this.executeSystemCypher(`DROP DATABASE \`${dbName}\``);
+    const resp = await this.executeSystemCypher(`DROP DATABASE ${this.quoteCypherIdentifier(dbName)}`);
     if (resp.errors && resp.errors.length > 0) {
       throw new Error(resp.errors.map((e) => e.message).join('; '));
     }
@@ -322,7 +328,7 @@ class NornicDBClient {
     try {
       // First, verify the nodes exist before deleting (safety check)
       const verifyStatement = `MATCH (n) WHERE id(n) IN $ids RETURN id(n) as nodeId, elementId(n) as elementId`;
-      const verifyRes = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+      const verifyRes = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -364,7 +370,7 @@ class NornicDBClient {
       const statement = `MATCH (n) WHERE id(n) IN $ids DETACH DELETE n RETURN count(n) as deleted`;
       const parameters = { ids: nodeIds };
 
-      const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+      const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -447,7 +453,7 @@ class NornicDBClient {
     const statement = `MATCH (n) WHERE id(n) = $nodeId OR n.id = $nodeId SET ${setParts.join(', ')} RETURN n`;
     
     try {
-      const res = await fetch(`${BASE_PATH}/db/${dbName}/tx/commit`, {
+      const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',

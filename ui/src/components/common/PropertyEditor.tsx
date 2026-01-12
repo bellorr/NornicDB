@@ -84,7 +84,10 @@ export function PropertyEditor({
       ...editedProps,
       [newPropKey]: {
         key: newPropKey,
-        value: JSON.stringify(parsedValue),
+        value:
+          newPropType === "string"
+            ? newPropValue
+            : JSON.stringify(parsedValue),
         type: newPropType,
       },
     });
@@ -316,4 +319,3 @@ export function PropertyEditor({
     </div>
   );
 }
-

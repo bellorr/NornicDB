@@ -107,15 +107,18 @@ func (db *DB) TriggerSearchClustering() error {
 // can cause performance issues when embeddings are created frequently.
 // Runs immediately on startup, then every interval thereafter (skipping if no changes).
 func (db *DB) startClusteringTimer(interval time.Duration) {
-	if db.clusterTicker != nil {
+	db.mu.Lock()
+	if db.clusterTicker != nil || db.closed {
+		db.mu.Unlock()
 		return
 	}
 	ticker := time.NewTicker(interval)
 	stopCh := make(chan struct{})
 	db.clusterTicker = ticker
 	db.clusterTickerStop = stopCh
-
 	db.bgWg.Add(1)
+	db.mu.Unlock()
+
 	go func(t *time.Ticker, stop <-chan struct{}) {
 		defer db.bgWg.Done()
 		log.Printf("🔬 K-means clustering timer started (interval: %v)", interval)
@@ -138,13 +141,16 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 
 // stopClusteringTimer stops the k-means clustering timer if running.
 func (db *DB) stopClusteringTimer() {
+	db.mu.Lock()
 	ticker := db.clusterTicker
 	stopCh := db.clusterTickerStop
 	if ticker == nil {
+		db.mu.Unlock()
 		return
 	}
 	db.clusterTicker = nil
 	db.clusterTickerStop = nil
+	db.mu.Unlock()
 
 	ticker.Stop()
 	if stopCh != nil {

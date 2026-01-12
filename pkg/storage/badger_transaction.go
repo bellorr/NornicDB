@@ -471,24 +471,24 @@ func (tx *BadgerTransaction) Commit() error {
 	// Apply cache/count updates and fire callbacks after commit.
 	// This keeps cached stats O(1) and ensures external systems (e.g. search indexes)
 	// observe transactional writes the same way as non-transactional writes.
-		for _, op := range tx.operations {
-			switch op.Type {
-			case OpCreateNode:
-				tx.engine.cacheOnNodeCreated(op.Node)
-				tx.engine.notifyNodeCreated(op.Node)
-			case OpUpdateNode:
-				tx.engine.cacheOnNodeUpdated(op.Node)
-				tx.engine.notifyNodeUpdated(op.Node)
-			case OpDeleteNode:
-				tx.engine.cacheOnNodeDeleted(op.NodeID, op.EdgesDeleted)
-				for _, edgeID := range op.DeletedEdgeIDs {
-					tx.engine.notifyEdgeDeleted(edgeID)
-				}
-				tx.engine.notifyNodeDeleted(op.NodeID)
-			case OpCreateEdge:
-				tx.engine.cacheOnEdgeCreated(op.Edge)
-				tx.engine.notifyEdgeCreated(op.Edge)
-			case OpUpdateEdge:
+	for _, op := range tx.operations {
+		switch op.Type {
+		case OpCreateNode:
+			tx.engine.cacheOnNodeCreated(op.Node)
+			tx.engine.notifyNodeCreated(op.Node)
+		case OpUpdateNode:
+			tx.engine.cacheOnNodeUpdated(op.Node)
+			tx.engine.notifyNodeUpdated(op.Node)
+		case OpDeleteNode:
+			tx.engine.cacheOnNodeDeleted(op.NodeID, op.EdgesDeleted)
+			for _, edgeID := range op.DeletedEdgeIDs {
+				tx.engine.notifyEdgeDeleted(edgeID)
+			}
+			tx.engine.notifyNodeDeleted(op.NodeID)
+		case OpCreateEdge:
+			tx.engine.cacheOnEdgeCreated(op.Edge)
+			tx.engine.notifyEdgeCreated(op.Edge)
+		case OpUpdateEdge:
 			oldType := ""
 			if op.OldEdge != nil {
 				oldType = op.OldEdge.Type

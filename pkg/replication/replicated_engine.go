@@ -97,8 +97,9 @@ func (e *ReplicatedEngine) UpdateEdge(edge *storage.Edge) error {
 }
 
 func (e *ReplicatedEngine) DeleteEdge(id storage.EdgeID) error {
+	// Gob payload; JSON tags are unnecessary/confusing here.
 	payload, err := encodeGob(struct {
-		EdgeID string `json:"edge_id"`
+		EdgeID string
 	}{EdgeID: string(id)})
 	if err != nil {
 		return fmt.Errorf("encode delete edge request: %w", err)

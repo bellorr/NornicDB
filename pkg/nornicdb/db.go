@@ -1205,11 +1205,11 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	}
 
 	db.mu.Lock()
-	defer db.mu.Unlock()
 
 	if db.baseStorage == nil {
 		// baseStorage is required for correctness (it’s the only engine that can see all namespaces).
 		// If this ever happens, initialization order is broken.
+		db.mu.Unlock()
 		panic("nornicdb: baseStorage is nil in SetEmbedder")
 	}
 
@@ -1224,6 +1224,7 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 		db.embedQueue.SetEmbedder(embedder)
 		log.Printf("🧠 Embed worker activated with %s (%d dims)",
 			embedder.Model(), embedder.Dimensions())
+		db.mu.Unlock()
 		return
 	}
 
@@ -1238,12 +1239,14 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 		db.indexNodeFromEvent(node)
 	})
 
-	// Start timer-based k-means clustering instead of trigger-based
-	// This runs clustering on a schedule (default every 15 minutes) rather than after each batch
+	// Start timer-based k-means clustering instead of trigger-based.
+	// Compute decision under lock, but start the timer outside the lock.
+	var startClusterTimer bool
+	var clusterInterval time.Duration
 	if nornicConfig.IsGPUClusteringEnabled() {
-		interval := db.config.KmeansClusterInterval
-		if interval > 0 {
-			db.startClusteringTimer(interval)
+		clusterInterval = db.config.KmeansClusterInterval
+		if clusterInterval > 0 {
+			startClusterTimer = true
 		} else {
 			log.Printf("🔬 K-means clustering enabled (manual trigger only, no timer)")
 		}
@@ -1259,6 +1262,12 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 
 	log.Printf("🧠 Auto-embed queue started using %s (%d dims)",
 		embedder.Model(), embedder.Dimensions())
+
+	db.mu.Unlock()
+
+	if startClusterTimer {
+		db.startClusteringTimer(clusterInterval)
+	}
 }
 
 // LoadFromExport loads data from a Mimir JSON export directory.
