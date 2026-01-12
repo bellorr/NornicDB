@@ -717,6 +717,105 @@ func TestHAStandbyReplicator_Primary_Apply(t *testing.T) {
 	replicator.Shutdown()
 }
 
+func TestHAStandbyReplicator_Primary_Apply_SyncAck(t *testing.T) {
+	storage := NewMockStorage()
+	transport := NewMockTransport()
+
+	config := DefaultConfig()
+	config.Mode = ModeHAStandby
+	config.NodeID = "primary-1"
+	config.HAStandby.Role = "primary"
+	config.HAStandby.PeerAddr = "standby-1:7688"
+	config.HAStandby.SyncMode = SyncSync
+	config.HAStandby.WALBatchTimeout = 20 * time.Millisecond
+	config.HAStandby.HeartbeatInterval = 10 * time.Millisecond
+
+	replicator, err := NewHAStandbyReplicator(config, storage)
+	require.NoError(t, err)
+	replicator.SetTransport(transport)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	t.Cleanup(func() { _ = transport.Close() })
+	t.Cleanup(func() { _ = replicator.Shutdown() })
+
+	require.NoError(t, replicator.Start(ctx))
+
+	// Wait for primary to establish standby connection.
+	require.Eventually(t, func() bool {
+		replicator.mu.RLock()
+		defer replicator.mu.RUnlock()
+		return replicator.standbyConn != nil && replicator.standbyConn.IsConnected()
+	}, 500*time.Millisecond, 10*time.Millisecond)
+
+	cmd := &Command{
+		Type: CmdCreateNode,
+		Data: []byte("test-sync"),
+	}
+
+	start := time.Now()
+	err = replicator.Apply(cmd, 500*time.Millisecond)
+	require.NoError(t, err)
+	assert.Equal(t, 1, storage.GetApplyCount())
+	assert.Less(t, time.Since(start), 500*time.Millisecond)
+
+	// The mock standby should have received the WAL batch.
+	replicator.mu.RLock()
+	mockConn, _ := transport.connections[config.HAStandby.PeerAddr]
+	replicator.mu.RUnlock()
+	require.NotNil(t, mockConn)
+	assert.GreaterOrEqual(t, mockConn.walBatchCalls, 1)
+}
+
+func TestHAStandbyReplicator_Primary_Apply_SemiSyncDoesNotBlock(t *testing.T) {
+	storage := NewMockStorage()
+	transport := NewMockTransport()
+
+	config := DefaultConfig()
+	config.Mode = ModeHAStandby
+	config.NodeID = "primary-1"
+	config.HAStandby.Role = "primary"
+	config.HAStandby.PeerAddr = "standby-1:7688"
+	config.HAStandby.SyncMode = SyncSemiSync
+
+	replicator, err := NewHAStandbyReplicator(config, storage)
+	require.NoError(t, err)
+	replicator.SetTransport(transport)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(func() { cancel(); _ = transport.Close(); _ = replicator.Shutdown() })
+
+	require.NoError(t, replicator.Start(ctx))
+
+	// Ensure connection exists.
+	require.Eventually(t, func() bool {
+		replicator.mu.RLock()
+		defer replicator.mu.RUnlock()
+		return replicator.standbyConn != nil && replicator.standbyConn.IsConnected()
+	}, 500*time.Millisecond, 10*time.Millisecond)
+
+	cmd := &Command{
+		Type: CmdCreateNode,
+		Data: []byte("semi-sync"),
+	}
+
+	start := time.Now()
+	err = replicator.Apply(cmd, 5*time.Second)
+	require.NoError(t, err)
+	assert.Equal(t, 1, storage.GetApplyCount())
+	assert.Less(t, time.Since(start), 100*time.Millisecond)
+
+	replicator.mu.RLock()
+	mockConn, _ := transport.connections[config.HAStandby.PeerAddr]
+	replicator.mu.RUnlock()
+	require.NotNil(t, mockConn)
+	require.Eventually(t, func() bool {
+		mockConn.mu.RLock()
+		defer mockConn.mu.RUnlock()
+		return mockConn.walBatchCalls >= 1
+	}, 500*time.Millisecond, 20*time.Millisecond)
+}
+
 func TestHAStandbyReplicator_Standby_Apply_Rejected(t *testing.T) {
 	storage := NewMockStorage()
 	transport := NewMockTransport()

@@ -2,7 +2,6 @@ package replication
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +14,27 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func encodeNodeForTest(t *testing.T, node *storage.Node) []byte {
+	t.Helper()
+	data, err := encodeNodePayload(node)
+	require.NoError(t, err)
+	return data
+}
+
+func encodeEdgeForTest(t *testing.T, edge *storage.Edge) []byte {
+	t.Helper()
+	data, err := encodeEdgePayload(edge)
+	require.NoError(t, err)
+	return data
+}
+
+func encodeGobForTest(t *testing.T, v any) []byte {
+	t.Helper()
+	data, err := encodeGob(v)
+	require.NoError(t, err)
+	return data
+}
 
 // setupTestAdapter creates a StorageAdapter with a temporary WAL directory.
 func setupTestAdapter(t *testing.T) (*StorageAdapter, string) {
@@ -104,7 +124,7 @@ func TestStorageAdapter_LoadWALPosition(t *testing.T) {
 		// Apply some commands
 		for i := 0; i < 5; i++ {
 			node := &storage.Node{ID: storage.NodeID(fmt.Sprintf("recovery-n%d", i)), Labels: []string{"Test"}}
-			data, _ := json.Marshal(node)
+			data := encodeNodeForTest(t, node)
 			cmd := &Command{
 				Type:      CmdCreateNode,
 				Data:      data,
@@ -113,6 +133,9 @@ func TestStorageAdapter_LoadWALPosition(t *testing.T) {
 			err := adapter1.ApplyCommand(cmd)
 			require.NoError(t, err)
 		}
+
+		// Flush WAL to ensure all async writes complete
+		require.NoError(t, adapter1.FlushWAL())
 
 		pos1, err := adapter1.GetWALPosition()
 		require.NoError(t, err)
@@ -130,7 +153,7 @@ func TestStorageAdapter_LoadWALPosition(t *testing.T) {
 
 		// Next command should be position 6
 		node := &storage.Node{ID: storage.NodeID("n2"), Labels: []string{"Test"}}
-		data, _ := json.Marshal(node)
+		data := encodeNodeForTest(t, node)
 		cmd := &Command{
 			Type:      CmdCreateNode,
 			Data:      data,
@@ -138,6 +161,9 @@ func TestStorageAdapter_LoadWALPosition(t *testing.T) {
 		}
 		err = adapter2.ApplyCommand(cmd)
 		require.NoError(t, err)
+
+		// Flush WAL to ensure async write completes
+		require.NoError(t, adapter2.FlushWAL())
 
 		pos3, err := adapter2.GetWALPosition()
 		require.NoError(t, err)
@@ -175,7 +201,7 @@ func TestStorageAdapter_ApplyCommand(t *testing.T) {
 		defer adapter.Close()
 
 		node := &storage.Node{ID: storage.NodeID("n1"), Labels: []string{"Test"}}
-		data, _ := json.Marshal(node)
+		data := encodeNodeForTest(t, node)
 		cmd := &Command{
 			Type:      CmdCreateNode,
 			Data:      data,
@@ -185,8 +211,8 @@ func TestStorageAdapter_ApplyCommand(t *testing.T) {
 		err := adapter.ApplyCommand(cmd)
 		require.NoError(t, err)
 
-		// Wait for WAL sync
-		time.Sleep(150 * time.Millisecond)
+		// Flush WAL to ensure async write completes
+		require.NoError(t, adapter.FlushWAL())
 
 		// Verify WAL file exists
 		walPath := filepath.Join(walDir, "wal.log")
@@ -220,55 +246,51 @@ func TestStorageAdapter_ApplyCommand(t *testing.T) {
 		}{
 			{"CreateNode", CmdCreateNode, func() []byte {
 				node := &storage.Node{ID: storage.NodeID("n1"), Labels: []string{"Test"}}
-				data, _ := json.Marshal(node)
-				return data
+				return encodeNodeForTest(t, node)
 			}()},
 			{"UpdateNode", CmdUpdateNode, func() []byte {
 				node := &storage.Node{ID: storage.NodeID("n1"), Labels: []string{"Updated"}}
-				data, _ := json.Marshal(node)
-				return data
+				return encodeNodeForTest(t, node)
 			}()},
-			{"DeleteNode", CmdDeleteNode, []byte("n1")},
+			{"DeleteNode", CmdDeleteNode, encodeGobForTest(t, struct {
+				NodeID string
+			}{NodeID: "n1"})},
 			{"CreateEdge", CmdCreateEdge, func() []byte {
 				edge := &storage.Edge{ID: storage.EdgeID("e1"), StartNode: storage.NodeID("n1"), EndNode: storage.NodeID("n2"), Type: "KNOWS"}
-				data, _ := json.Marshal(edge)
-				return data
+				return encodeEdgeForTest(t, edge)
 			}()},
 			{"DeleteEdge", CmdDeleteEdge, func() []byte {
 				req := struct {
-					EdgeID string `json:"edge_id"`
+					EdgeID string
 				}{EdgeID: "e1"}
-				data, _ := json.Marshal(req)
-				return data
+				return encodeGobForTest(t, req)
 			}()},
 			{"SetProperty", CmdSetProperty, func() []byte {
 				req := struct {
-					NodeID string      `json:"node_id"`
-					Key    string      `json:"key"`
-					Value  interface{} `json:"value"`
+					NodeID string
+					Key    string
+					Value  interface{}
 				}{NodeID: "n1", Key: "name", Value: "Alice"}
-				data, _ := json.Marshal(req)
-				return data
+				return encodeGobForTest(t, req)
 			}()},
 			{"BatchWrite", CmdBatchWrite, func() []byte {
+				nodeBytes := encodeNodeForTest(t, &storage.Node{ID: storage.NodeID("batch-n1")})
 				batch := struct {
-					Nodes []*storage.Node `json:"nodes"`
-					Edges []*storage.Edge `json:"edges"`
+					Nodes [][]byte
+					Edges [][]byte
 				}{
-					Nodes: []*storage.Node{{ID: storage.NodeID("batch-n1")}},
+					Nodes: [][]byte{nodeBytes},
 				}
-				data, _ := json.Marshal(batch)
-				return data
+				return encodeGobForTest(t, batch)
 			}()},
 			{"Cypher", CmdCypher, func() []byte {
 				cypherCmd := struct {
-					Query  string                 `json:"query"`
-					Params map[string]interface{} `json:"params,omitempty"`
+					Query  string
+					Params map[string]interface{}
 				}{
 					Query: "CREATE (n:Person {name: 'Alice'})",
 				}
-				data, _ := json.Marshal(cypherCmd)
-				return data
+				return encodeGobForTest(t, cypherCmd)
 			}()},
 		}
 
@@ -341,7 +363,7 @@ func TestStorageAdapter_GetWALEntries(t *testing.T) {
 		// Apply multiple commands
 		for i := 0; i < 5; i++ {
 			node := &storage.Node{ID: storage.NodeID(fmt.Sprintf("n%d", i)), Labels: []string{"Test"}}
-			data, _ := json.Marshal(node)
+			data := encodeNodeForTest(t, node)
 			cmd := &Command{
 				Type:      CmdCreateNode,
 				Data:      data,
@@ -370,7 +392,7 @@ func TestStorageAdapter_GetWALEntries(t *testing.T) {
 		// Apply 10 commands
 		for i := 0; i < 10; i++ {
 			node := &storage.Node{ID: storage.NodeID(fmt.Sprintf("n%d", i)), Labels: []string{"Test"}}
-			data, _ := json.Marshal(node)
+			data := encodeNodeForTest(t, node)
 			cmd := &Command{
 				Type:      CmdCreateNode,
 				Data:      data,
@@ -401,7 +423,7 @@ func TestStorageAdapter_GetWALEntries(t *testing.T) {
 
 		for i := 0; i < 3; i++ {
 			node := &storage.Node{ID: storage.NodeID(fmt.Sprintf("n%d", i)), Labels: []string{"Test"}}
-			data, _ := json.Marshal(node)
+			data := encodeNodeForTest(t, node)
 			cmd := &Command{
 				Type:      CmdCreateNode,
 				Data:      data,
@@ -469,7 +491,7 @@ func TestStorageAdapter_GetWALPosition(t *testing.T) {
 
 		for i := uint64(1); i <= 5; i++ {
 			node := &storage.Node{ID: storage.NodeID("n" + string(rune(i))), Labels: []string{"Test"}}
-			data, _ := json.Marshal(node)
+			data := encodeNodeForTest(t, node)
 			cmd := &Command{
 				Type:      CmdCreateNode,
 				Data:      data,
@@ -477,6 +499,9 @@ func TestStorageAdapter_GetWALPosition(t *testing.T) {
 			}
 			err := adapter.ApplyCommand(cmd)
 			require.NoError(t, err)
+
+			// Flush WAL to ensure async write completes
+			require.NoError(t, adapter.FlushWAL())
 
 			pos, err := adapter.GetWALPosition()
 			require.NoError(t, err)
@@ -491,13 +516,12 @@ func TestStorageAdapter_ApplyCypher(t *testing.T) {
 		defer adapter.Close()
 
 		cypherCmd := struct {
-			Query  string                 `json:"query"`
-			Params map[string]interface{} `json:"params,omitempty"`
+			Query  string
+			Params map[string]interface{}
 		}{
 			Query: "CREATE (n:Person {name: 'Alice'})",
 		}
-		data, err := json.Marshal(cypherCmd)
-		require.NoError(t, err)
+		data := encodeGobForTest(t, cypherCmd)
 
 		cmd := &Command{
 			Type:      CmdCypher,
@@ -505,12 +529,12 @@ func TestStorageAdapter_ApplyCypher(t *testing.T) {
 			Timestamp: time.Now(),
 		}
 
-		err = adapter.ApplyCommand(cmd)
+		err := adapter.ApplyCommand(cmd)
 		require.NoError(t, err)
 
 		// Verify node was created - check all nodes since ID generation may vary
-		nodes, err := adapter.engine.AllNodes()
-		require.NoError(t, err)
+		nodes, listErr := adapter.engine.AllNodes()
+		require.NoError(t, listErr)
 		require.Len(t, nodes, 1)
 		assert.Equal(t, "Alice", nodes[0].Properties["name"])
 		assert.Contains(t, nodes[0].Labels, "Person")
@@ -521,8 +545,8 @@ func TestStorageAdapter_ApplyCypher(t *testing.T) {
 		defer adapter.Close()
 
 		cypherCmd := struct {
-			Query  string                 `json:"query"`
-			Params map[string]interface{} `json:"params,omitempty"`
+			Query  string
+			Params map[string]interface{}
 		}{
 			Query: "CREATE (n:Person {name: $name, age: $age})",
 			Params: map[string]interface{}{
@@ -530,8 +554,7 @@ func TestStorageAdapter_ApplyCypher(t *testing.T) {
 				"age":  30,
 			},
 		}
-		data, err := json.Marshal(cypherCmd)
-		require.NoError(t, err)
+		data := encodeGobForTest(t, cypherCmd)
 
 		cmd := &Command{
 			Type:      CmdCypher,
@@ -539,7 +562,7 @@ func TestStorageAdapter_ApplyCypher(t *testing.T) {
 			Timestamp: time.Now(),
 		}
 
-		err = adapter.ApplyCommand(cmd)
+		err := adapter.ApplyCommand(cmd)
 		require.NoError(t, err)
 	})
 
@@ -548,12 +571,11 @@ func TestStorageAdapter_ApplyCypher(t *testing.T) {
 		defer adapter.Close()
 
 		cypherCmd := struct {
-			Query string `json:"query"`
+			Query string
 		}{
 			Query: "",
 		}
-		data, err := json.Marshal(cypherCmd)
-		require.NoError(t, err)
+		data := encodeGobForTest(t, cypherCmd)
 
 		cmd := &Command{
 			Type:      CmdCypher,
@@ -561,7 +583,7 @@ func TestStorageAdapter_ApplyCypher(t *testing.T) {
 			Timestamp: time.Now(),
 		}
 
-		err = adapter.ApplyCommand(cmd)
+		err := adapter.ApplyCommand(cmd)
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "cypher query is empty")
 	})
@@ -607,7 +629,6 @@ func TestStorageAdapter_SetExecutor(t *testing.T) {
 
 		baseEngine := storage.NewMemoryEngine()
 
-
 		engine := storage.NewNamespacedEngine(baseEngine, "test")
 		executor := cypher.NewStorageExecutor(engine)
 
@@ -633,7 +654,7 @@ func TestStorageAdapter_ConcurrentAccess(t *testing.T) {
 					// Use unique node IDs to avoid conflicts
 					nodeID := storage.NodeID(fmt.Sprintf("n-%d-%d", id, j))
 					node := &storage.Node{ID: nodeID, Labels: []string{"Test"}}
-					data, _ := json.Marshal(node)
+					data := encodeNodeForTest(t, node)
 					cmd := &Command{
 						Type:      CmdCreateNode,
 						Data:      data,
@@ -646,6 +667,9 @@ func TestStorageAdapter_ConcurrentAccess(t *testing.T) {
 		}
 
 		wg.Wait()
+
+		// Flush WAL to ensure all async writes complete
+		require.NoError(t, adapter.FlushWAL())
 
 		// Verify all commands were applied
 		pos, err := adapter.GetWALPosition()
@@ -660,7 +684,7 @@ func TestStorageAdapter_ConcurrentAccess(t *testing.T) {
 		// Apply some commands first
 		for i := 0; i < 10; i++ {
 			node := &storage.Node{ID: storage.NodeID("n1"), Labels: []string{"Test"}}
-			data, _ := json.Marshal(node)
+			data := encodeNodeForTest(t, node)
 			cmd := &Command{
 				Type:      CmdCreateNode,
 				Data:      data,
@@ -697,7 +721,7 @@ func TestStorageAdapter_WriteSnapshot(t *testing.T) {
 		// Apply some commands
 		for i := 0; i < 3; i++ {
 			node := &storage.Node{ID: storage.NodeID("n1"), Labels: []string{"Test"}}
-			data, _ := json.Marshal(node)
+			data := encodeNodeForTest(t, node)
 			cmd := &Command{
 				Type:      CmdCreateNode,
 				Data:      data,
@@ -706,16 +730,19 @@ func TestStorageAdapter_WriteSnapshot(t *testing.T) {
 			adapter.ApplyCommand(cmd)
 		}
 
+		// Flush WAL to ensure all async writes complete
+		require.NoError(t, adapter.FlushWAL())
+
 		var buf bytes.Buffer
 		err := adapter.WriteSnapshot(&buf)
 		require.NoError(t, err)
 
 		var snapshot struct {
-			WALPosition uint64          `json:"wal_position"`
-			Nodes       []*storage.Node `json:"nodes"`
-			Edges       []*storage.Edge `json:"edges"`
+			WALPosition uint64
+			Nodes       []*storage.Node
+			Edges       []*storage.Edge
 		}
-		err = json.Unmarshal(buf.Bytes(), &snapshot)
+		err = decodeGob(buf.Bytes(), &snapshot)
 		require.NoError(t, err)
 		assert.Equal(t, uint64(3), snapshot.WALPosition)
 	})
@@ -727,9 +754,9 @@ func TestStorageAdapter_RestoreSnapshot(t *testing.T) {
 		defer adapter.Close()
 
 		snapshot := struct {
-			WALPosition uint64          `json:"wal_position"`
-			Nodes       []*storage.Node `json:"nodes"`
-			Edges       []*storage.Edge `json:"edges"`
+			WALPosition uint64
+			Nodes       []*storage.Node
+			Edges       []*storage.Edge
 		}{
 			WALPosition: 5,
 			Nodes: []*storage.Node{
@@ -737,21 +764,20 @@ func TestStorageAdapter_RestoreSnapshot(t *testing.T) {
 			},
 		}
 
-		data, err := json.Marshal(snapshot)
-		require.NoError(t, err)
+		data := encodeGobForTest(t, snapshot)
 
 		reader := bytes.NewReader(data)
-		err = adapter.RestoreSnapshot(reader)
+		err := adapter.RestoreSnapshot(reader)
 		require.NoError(t, err)
 
 		// Verify WAL position restored
-		pos, err := adapter.GetWALPosition()
-		require.NoError(t, err)
+		pos, posErr := adapter.GetWALPosition()
+		require.NoError(t, posErr)
 		assert.Equal(t, uint64(5), pos)
 
 		// Verify nodes restored
-		node, err := adapter.engine.GetNode(storage.NodeID("n1"))
-		require.NoError(t, err)
+		node, getErr := adapter.engine.GetNode(storage.NodeID("n1"))
+		require.NoError(t, getErr)
 		assert.Equal(t, []string{"Test"}, node.Labels)
 	})
 }

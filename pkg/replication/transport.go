@@ -33,7 +33,6 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -75,9 +74,9 @@ const (
 
 // ClusterMessage is the on-wire format for cluster communication.
 type ClusterMessage struct {
-	Type    ClusterMessageType `json:"t"`
-	NodeID  string             `json:"n,omitempty"`
-	Payload json.RawMessage    `json:"p,omitempty"`
+	Type    ClusterMessageType
+	NodeID  string
+	Payload []byte
 }
 
 // ClusterTransport handles cluster-to-cluster communication.
@@ -495,9 +494,9 @@ func (c *ClusterConnection) readLoopWithContext(ctx context.Context) {
 
 // SendWALBatch sends WAL entries to the peer.
 func (c *ClusterConnection) SendWALBatch(ctx context.Context, entries []*WALEntry) (*WALBatchResponse, error) {
-	payload, err := json.Marshal(entries)
+	payload, err := encodeGob(entries)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -511,17 +510,17 @@ func (c *ClusterConnection) SendWALBatch(ctx context.Context, entries []*WALEntr
 	}
 
 	var result WALBatchResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendHeartbeat sends a heartbeat to the peer.
 func (c *ClusterConnection) SendHeartbeat(ctx context.Context, req *HeartbeatRequest) (*HeartbeatResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -535,17 +534,17 @@ func (c *ClusterConnection) SendHeartbeat(ctx context.Context, req *HeartbeatReq
 	}
 
 	var result HeartbeatResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendFence sends a fence request to the peer.
 func (c *ClusterConnection) SendFence(ctx context.Context, req *FenceRequest) (*FenceResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -559,17 +558,17 @@ func (c *ClusterConnection) SendFence(ctx context.Context, req *FenceRequest) (*
 	}
 
 	var result FenceResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendPromote sends a promote request to the peer.
 func (c *ClusterConnection) SendPromote(ctx context.Context, req *PromoteRequest) (*PromoteResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -583,17 +582,17 @@ func (c *ClusterConnection) SendPromote(ctx context.Context, req *PromoteRequest
 	}
 
 	var result PromoteResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendRaftVote sends a Raft vote request to the peer.
 func (c *ClusterConnection) SendRaftVote(ctx context.Context, req *RaftVoteRequest) (*RaftVoteResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -607,17 +606,17 @@ func (c *ClusterConnection) SendRaftVote(ctx context.Context, req *RaftVoteReque
 	}
 
 	var result RaftVoteResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
 
 // SendRaftAppendEntries sends Raft append entries to the peer.
 func (c *ClusterConnection) SendRaftAppendEntries(ctx context.Context, req *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error) {
-	payload, err := json.Marshal(req)
+	payload, err := encodeGob(req)
 	if err != nil {
-		return nil, fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("encode: %w", err)
 	}
 
 	msg := &ClusterMessage{
@@ -631,8 +630,8 @@ func (c *ClusterConnection) SendRaftAppendEntries(ctx context.Context, req *Raft
 	}
 
 	var result RaftAppendEntriesResponse
-	if err := json.Unmarshal(resp.Payload, &result); err != nil {
-		return nil, fmt.Errorf("unmarshal: %w", err)
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
 }
@@ -657,7 +656,7 @@ func (c *ClusterConnection) IsConnected() bool {
 // Wire protocol helpers
 
 func writeClusterMessage(w *bufio.Writer, msg *ClusterMessage) error {
-	data, err := json.Marshal(msg)
+	data, err := encodeGob(msg)
 	if err != nil {
 		return err
 	}
@@ -690,7 +689,7 @@ func readClusterMessage(r *bufio.Reader, maxSize int) (*ClusterMessage, error) {
 	}
 
 	var msg ClusterMessage
-	if err := json.Unmarshal(data, &msg); err != nil {
+	if err := decodeGob(data, &msg); err != nil {
 		return nil, err
 	}
 

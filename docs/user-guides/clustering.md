@@ -152,7 +152,7 @@ services:
       # HA Standby Configuration
       NORNICDB_CLUSTER_HA_ROLE: primary
       NORNICDB_CLUSTER_HA_PEER_ADDR: standby:7688
-      NORNICDB_CLUSTER_HA_SYNC_MODE: semi_sync
+      NORNICDB_CLUSTER_HA_SYNC_MODE: async
       NORNICDB_CLUSTER_HA_HEARTBEAT_MS: 1000
       NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT: 30s
       NORNICDB_CLUSTER_HA_AUTO_FAILOVER: "true"
@@ -182,7 +182,7 @@ services:
       # HA Standby Configuration
       NORNICDB_CLUSTER_HA_ROLE: standby
       NORNICDB_CLUSTER_HA_PEER_ADDR: primary:7688
-      NORNICDB_CLUSTER_HA_SYNC_MODE: semi_sync
+      NORNICDB_CLUSTER_HA_SYNC_MODE: async
       NORNICDB_CLUSTER_HA_HEARTBEAT_MS: 1000
       NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT: 30s
       NORNICDB_CLUSTER_HA_AUTO_FAILOVER: "true"
@@ -916,14 +916,14 @@ docker compose up -d
 
 #### Hot Standby
 
-| Variable                               | Default     | Description                             |
-| -------------------------------------- | ----------- | --------------------------------------- |
-| `NORNICDB_CLUSTER_HA_ROLE`             | -           | `primary` or `standby` (required)       |
-| `NORNICDB_CLUSTER_HA_PEER_ADDR`        | -           | Address of peer node (required)         |
-| `NORNICDB_CLUSTER_HA_SYNC_MODE`        | `semi_sync` | Sync mode: `async`, `semi_sync`, `sync` |
-| `NORNICDB_CLUSTER_HA_HEARTBEAT_MS`     | `1000`      | Heartbeat interval in ms                |
-| `NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT` | `30s`       | Time before failover                    |
-| `NORNICDB_CLUSTER_HA_AUTO_FAILOVER`    | `true`      | Enable automatic failover               |
+| Variable                               | Default | Description                             |
+| -------------------------------------- | ------- | --------------------------------------- |
+| `NORNICDB_CLUSTER_HA_ROLE`             | -       | `primary` or `standby` (required)       |
+| `NORNICDB_CLUSTER_HA_PEER_ADDR`        | -       | Address of peer node (required)         |
+| `NORNICDB_CLUSTER_HA_SYNC_MODE`        | `async` | Sync mode: `async`, `semi_sync`, `sync` |
+| `NORNICDB_CLUSTER_HA_HEARTBEAT_MS`     | `1000`  | Heartbeat interval in ms                |
+| `NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT` | `30s`   | Time before failover                    |
+| `NORNICDB_CLUSTER_HA_AUTO_FAILOVER`    | `true`  | Enable automatic failover               |
 
 #### Raft
 
@@ -1161,6 +1161,8 @@ Recommended: 100-1000 for HA, 64 for Raft (via RAFT_MAX_APPEND_ENTRIES)
 | `async`     | Primary only      | Risk of data loss | Lowest  |
 | `semi_sync` | Standby received  | Minimal data loss | Medium  |
 | `sync`      | Standby persisted | No data loss      | Highest |
+
+Default is `async` for lowest write latency; opt into `semi_sync` or `sync` only when you need stronger write durability guarantees.
 
 ### Consistency Levels
 

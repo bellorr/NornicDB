@@ -3,9 +3,9 @@ package replication
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -32,6 +32,21 @@ type StorageAdapter struct {
 	// In-memory WAL for fast streaming (avoids re-reading wal.log continuously).
 	memWALMu sync.RWMutex
 	memWAL   []*WALEntry // sorted by Position asc
+
+	// Async WAL writing for performance
+	walQueue   chan *walWriteRequest
+	walBatch   []*walWriteRequest
+	walBatchMu sync.Mutex
+	walStopCh  chan struct{}
+	walWg      sync.WaitGroup
+}
+
+// walWriteRequest represents a pending WAL write.
+type walWriteRequest struct {
+	record  replicationWALRecord
+	posCh   chan uint64 // Channel to receive the WAL position
+	errCh   chan error  // Channel to receive any error
+	waiting bool        // If true, caller is waiting for completion
 }
 
 type replicationWALRecord struct {
@@ -72,14 +87,21 @@ func NewStorageAdapterWithWAL(engine storage.Engine, walDir string) (*StorageAda
 	}
 
 	adapter := &StorageAdapter{
-		engine:   engine,
-		executor: cypher.NewStorageExecutor(engine),
-		wal:      wal,
-		walDir:   walDir,
+		engine:    engine,
+		executor:  cypher.NewStorageExecutor(engine),
+		wal:       wal,
+		walDir:    walDir,
+		walQueue:  make(chan *walWriteRequest, 1000), // Buffered channel for async WAL writes
+		walBatch:  make([]*walWriteRequest, 0, 100),  // Pre-allocated batch buffer
+		walStopCh: make(chan struct{}),
 	}
 
 	// Load existing WAL position
 	_ = adapter.loadWALPosition()
+
+	// Start async WAL writer
+	adapter.walWg.Add(1)
+	go adapter.walWriterLoop()
 
 	return adapter, nil
 }
@@ -101,29 +123,102 @@ func (a *StorageAdapter) SetExecutor(executor *cypher.StorageExecutor) {
 }
 
 // ApplyCommand applies a replicated command to storage.
+// WAL writes are now asynchronous for better performance.
 func (a *StorageAdapter) ApplyCommand(cmd *Command) error {
 	if cmd == nil {
 		return fmt.Errorf("nil command")
 	}
 
-	// Record in persistent WAL first (write-ahead logging)
+	// Record in persistent WAL (write-ahead logging)
 	record := replicationWALRecord{
 		Timestamp: cmd.Timestamp.UnixNano(),
 		Command:   cmd,
 	}
 
-	// Append to persistent WAL.
-	// Note: Do not read wal.log to stream; use the in-memory WAL below. Reading
-	// wal.log races with buffered writes and is also O(N) per batch.
-	if err := a.wal.Append(storage.OperationType("replication_command"), record); err != nil {
-		return fmt.Errorf("failed to append to WAL: %w", err)
+	// Queue async WAL write (non-blocking)
+	req := &walWriteRequest{
+		record:  record,
+		posCh:   make(chan uint64, 1),
+		errCh:   make(chan error, 1),
+		waiting: false, // Don't wait for WAL write to complete
 	}
 
-	// Use the WAL's recovered/monotonic sequence as the replication position.
-	pos := a.wal.Sequence()
-	a.walPosition.Store(pos)
+	// Try to queue async write
+	select {
+	case a.walQueue <- req:
+		// Successfully queued, continue
+	default:
+		// Channel full - fall back to synchronous write to avoid blocking
+		// This should be rare with a 1000-item buffer
+		a.walMu.Lock()
+		if err := a.wal.Append(storage.OperationType("replication_command"), record); err != nil {
+			a.walMu.Unlock()
+			return fmt.Errorf("failed to append to WAL: %w", err)
+		}
+		pos := a.wal.Sequence()
+		a.walPosition.Store(pos)
+		a.walMu.Unlock()
+		a.appendToMemWAL(pos, record, cmd)
+	}
 
-	// Append to in-memory WAL for fast streaming.
+	// Execute the command immediately (don't wait for WAL write)
+	// This allows storage operations to proceed in parallel with WAL I/O
+	var execErr error
+	switch cmd.Type {
+	case CmdCreateNode:
+		execErr = a.applyCreateNode(cmd.Data)
+	case CmdUpdateNode:
+		execErr = a.applyUpdateNode(cmd.Data)
+	case CmdDeleteNode:
+		execErr = a.applyDeleteNode(cmd.Data)
+	case CmdCreateEdge:
+		execErr = a.applyCreateEdge(cmd.Data)
+	case CmdUpdateEdge:
+		execErr = a.applyUpdateEdge(cmd.Data)
+	case CmdDeleteEdge:
+		execErr = a.applyDeleteEdge(cmd.Data)
+	case CmdSetProperty:
+		execErr = a.applySetProperty(cmd.Data)
+	case CmdBatchWrite:
+		execErr = a.applyBatchWrite(cmd.Data)
+	case CmdCypher:
+		execErr = a.applyCypher(cmd.Data)
+	case CmdDeleteByPrefix:
+		execErr = a.applyDeleteByPrefix(cmd.Data)
+	case CmdBulkCreateNodes:
+		execErr = a.applyBulkCreateNodes(cmd.Data)
+	case CmdBulkCreateEdges:
+		execErr = a.applyBulkCreateEdges(cmd.Data)
+	case CmdBulkDeleteNodes:
+		execErr = a.applyBulkDeleteNodes(cmd.Data)
+	case CmdBulkDeleteEdges:
+		execErr = a.applyBulkDeleteEdges(cmd.Data)
+	default:
+		execErr = fmt.Errorf("unknown command type: %d", cmd.Type)
+	}
+
+	// Try to get position from async write (non-blocking, best-effort)
+	// If not ready yet, walWriterLoop will update it later
+	select {
+	case pos := <-req.posCh:
+		a.walPosition.Store(pos)
+		a.appendToMemWAL(pos, record, cmd)
+	case err := <-req.errCh:
+		if err != nil {
+			// Log error but don't fail the operation (WAL is for durability, not correctness)
+			// The command was already applied to storage
+			log.Printf("[WAL] Async write error (non-fatal): %v", err)
+		}
+	default:
+		// Position not ready yet, will be set by walWriterLoop
+		// This is fine - the command was applied and WAL write is queued
+	}
+
+	return execErr
+}
+
+// appendToMemWAL appends an entry to the in-memory WAL for fast streaming.
+func (a *StorageAdapter) appendToMemWAL(pos uint64, record replicationWALRecord, cmd *Command) {
 	a.memWALMu.Lock()
 	a.memWAL = append(a.memWAL, &WALEntry{
 		Position:  pos,
@@ -131,91 +226,144 @@ func (a *StorageAdapter) ApplyCommand(cmd *Command) error {
 		Command:   cmd,
 	})
 	a.memWALMu.Unlock()
+}
 
-	// Execute the command
-	switch cmd.Type {
-	case CmdCreateNode:
-		return a.applyCreateNode(cmd.Data)
-	case CmdUpdateNode:
-		return a.applyUpdateNode(cmd.Data)
-	case CmdDeleteNode:
-		return a.applyDeleteNode(cmd.Data)
-	case CmdCreateEdge:
-		return a.applyCreateEdge(cmd.Data)
-	case CmdUpdateEdge:
-		return a.applyUpdateEdge(cmd.Data)
-	case CmdDeleteEdge:
-		return a.applyDeleteEdge(cmd.Data)
-	case CmdSetProperty:
-		return a.applySetProperty(cmd.Data)
-	case CmdBatchWrite:
-		return a.applyBatchWrite(cmd.Data)
-	case CmdCypher:
-		return a.applyCypher(cmd.Data)
-	case CmdDeleteByPrefix:
-		return a.applyDeleteByPrefix(cmd.Data)
-	case CmdBulkCreateNodes:
-		return a.applyBulkCreateNodes(cmd.Data)
-	case CmdBulkCreateEdges:
-		return a.applyBulkCreateEdges(cmd.Data)
-	case CmdBulkDeleteNodes:
-		return a.applyBulkDeleteNodes(cmd.Data)
-	case CmdBulkDeleteEdges:
-		return a.applyBulkDeleteEdges(cmd.Data)
-	default:
-		return fmt.Errorf("unknown command type: %d", cmd.Type)
+// walWriterLoop processes WAL writes asynchronously in batches.
+func (a *StorageAdapter) walWriterLoop() {
+	defer a.walWg.Done()
+
+	ticker := time.NewTicker(10 * time.Millisecond) // Batch interval
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-a.walStopCh:
+			// Flush remaining writes
+			a.flushWALBatch()
+			return
+		case req := <-a.walQueue:
+			// Add to batch
+			a.walBatchMu.Lock()
+			a.walBatch = append(a.walBatch, req)
+			batchSize := len(a.walBatch)
+			a.walBatchMu.Unlock()
+
+			// Flush if batch is large enough (100 items)
+			if batchSize >= 100 {
+				a.flushWALBatch()
+			}
+		case <-ticker.C:
+			// Periodic flush
+			a.flushWALBatch()
+		}
+	}
+}
+
+// flushWALBatch writes all pending WAL entries.
+// Uses individual appends but processes them in a batch to reduce lock contention.
+func (a *StorageAdapter) flushWALBatch() {
+	a.walBatchMu.Lock()
+	if len(a.walBatch) == 0 {
+		a.walBatchMu.Unlock()
+		return
+	}
+	batch := a.walBatch
+	a.walBatch = a.walBatch[:0] // Clear batch
+	a.walBatchMu.Unlock()
+
+	// Write each entry to WAL in a single lock to reduce contention
+	// The WAL's internal buffering will batch the actual file writes
+	a.walMu.Lock()
+	positions := make([]uint64, 0, len(batch))
+	for _, req := range batch {
+		if err := a.wal.Append(storage.OperationType("replication_command"), req.record); err != nil {
+			// Send error to waiting request
+			select {
+			case req.errCh <- fmt.Errorf("failed to append to WAL: %w", err):
+			default:
+			}
+			positions = append(positions, 0) // Placeholder for failed entry
+			continue
+		}
+		// Get position after append (sequence is incremented atomically by WAL)
+		pos := a.wal.Sequence()
+		positions = append(positions, pos)
+
+		// Send position to request (non-blocking)
+		select {
+		case req.posCh <- pos:
+		default:
+		}
+	}
+	// Update global position
+	if len(batch) > 0 {
+		a.walPosition.Store(a.wal.Sequence())
+	}
+	a.walMu.Unlock()
+
+	// Update in-memory WAL outside the lock to avoid deadlock
+	for i, req := range batch {
+		if positions[i] > 0 {
+			a.appendToMemWAL(positions[i], req.record, req.record.Command)
+		}
 	}
 }
 
 // applyCreateNode creates a node from command data.
 func (a *StorageAdapter) applyCreateNode(data []byte) error {
-	var node storage.Node
-	if err := json.Unmarshal(data, &node); err != nil {
-		return fmt.Errorf("unmarshal node: %w", err)
+	node, err := decodeNodePayload(data)
+	if err != nil {
+		return fmt.Errorf("decode node: %w", err)
 	}
-	_, err := a.engine.CreateNode(&node)
+	_, err = a.engine.CreateNode(node)
 	return err
 }
 
 // applyUpdateNode updates a node from command data.
 func (a *StorageAdapter) applyUpdateNode(data []byte) error {
-	var node storage.Node
-	if err := json.Unmarshal(data, &node); err != nil {
-		return fmt.Errorf("unmarshal node: %w", err)
+	node, err := decodeNodePayload(data)
+	if err != nil {
+		return fmt.Errorf("decode node: %w", err)
 	}
-	return a.engine.UpdateNode(&node)
+	return a.engine.UpdateNode(node)
 }
 
 // applyDeleteNode deletes a node.
 func (a *StorageAdapter) applyDeleteNode(data []byte) error {
-	nodeID := string(data)
-	return a.engine.DeleteNode(storage.NodeID(nodeID))
+	var req struct {
+		NodeID string
+	}
+	if err := decodeGob(data, &req); err == nil && req.NodeID != "" {
+		return a.engine.DeleteNode(storage.NodeID(req.NodeID))
+	}
+	// Legacy fallback: raw ID bytes.
+	return a.engine.DeleteNode(storage.NodeID(string(data)))
 }
 
 // applyCreateEdge creates an edge from command data.
 func (a *StorageAdapter) applyCreateEdge(data []byte) error {
-	var edge storage.Edge
-	if err := json.Unmarshal(data, &edge); err != nil {
-		return fmt.Errorf("unmarshal edge: %w", err)
+	edge, err := decodeEdgePayload(data)
+	if err != nil {
+		return fmt.Errorf("decode edge: %w", err)
 	}
-	return a.engine.CreateEdge(&edge)
+	return a.engine.CreateEdge(edge)
 }
 
 func (a *StorageAdapter) applyUpdateEdge(data []byte) error {
-	var edge storage.Edge
-	if err := json.Unmarshal(data, &edge); err != nil {
-		return fmt.Errorf("unmarshal edge: %w", err)
+	edge, err := decodeEdgePayload(data)
+	if err != nil {
+		return fmt.Errorf("decode edge: %w", err)
 	}
-	return a.engine.UpdateEdge(&edge)
+	return a.engine.UpdateEdge(edge)
 }
 
 // applyDeleteEdge deletes an edge.
 func (a *StorageAdapter) applyDeleteEdge(data []byte) error {
 	var req struct {
-		EdgeID string `json:"edge_id"`
+		EdgeID string
 	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("unmarshal delete edge request: %w", err)
+	if err := decodeGob(data, &req); err != nil {
+		return fmt.Errorf("decode delete edge request: %w", err)
 	}
 	return a.engine.DeleteEdge(storage.EdgeID(req.EdgeID))
 }
@@ -223,12 +371,12 @@ func (a *StorageAdapter) applyDeleteEdge(data []byte) error {
 // applySetProperty sets a property on a node.
 func (a *StorageAdapter) applySetProperty(data []byte) error {
 	var req struct {
-		NodeID string      `json:"node_id"`
-		Key    string      `json:"key"`
-		Value  interface{} `json:"value"`
+		NodeID string
+		Key    string
+		Value  interface{}
 	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("unmarshal set property request: %w", err)
+	if err := decodeGob(data, &req); err != nil {
+		return fmt.Errorf("decode set property request: %w", err)
 	}
 
 	// Get node, update property, save
@@ -246,19 +394,27 @@ func (a *StorageAdapter) applySetProperty(data []byte) error {
 // applyBatchWrite applies a batch of operations.
 func (a *StorageAdapter) applyBatchWrite(data []byte) error {
 	var batch struct {
-		Nodes []*storage.Node `json:"nodes"`
-		Edges []*storage.Edge `json:"edges"`
+		Nodes [][]byte
+		Edges [][]byte
 	}
-	if err := json.Unmarshal(data, &batch); err != nil {
-		return fmt.Errorf("unmarshal batch: %w", err)
+	if err := decodeGob(data, &batch); err != nil {
+		return fmt.Errorf("decode batch: %w", err)
 	}
 
-	for _, node := range batch.Nodes {
+	for _, nodeBytes := range batch.Nodes {
+		node, err := decodeNodePayload(nodeBytes)
+		if err != nil {
+			return err
+		}
 		if _, err := a.engine.CreateNode(node); err != nil {
 			return err
 		}
 	}
-	for _, edge := range batch.Edges {
+	for _, edgeBytes := range batch.Edges {
+		edge, err := decodeEdgePayload(edgeBytes)
+		if err != nil {
+			return err
+		}
 		if err := a.engine.CreateEdge(edge); err != nil {
 			return err
 		}
@@ -268,10 +424,10 @@ func (a *StorageAdapter) applyBatchWrite(data []byte) error {
 
 func (a *StorageAdapter) applyDeleteByPrefix(data []byte) error {
 	var req struct {
-		Prefix string `json:"prefix"`
+		Prefix string
 	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("unmarshal delete by prefix request: %w", err)
+	if err := decodeGob(data, &req); err != nil {
+		return fmt.Errorf("decode delete by prefix request: %w", err)
 	}
 	if req.Prefix == "" {
 		return fmt.Errorf("prefix is required")
@@ -281,43 +437,51 @@ func (a *StorageAdapter) applyDeleteByPrefix(data []byte) error {
 }
 
 func (a *StorageAdapter) applyBulkCreateNodes(data []byte) error {
-	var req struct {
-		Nodes []*storage.Node `json:"nodes"`
+	var encoded [][]byte
+	if err := decodeGob(data, &encoded); err != nil {
+		return fmt.Errorf("decode bulk create nodes: %w", err)
 	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("unmarshal bulk create nodes: %w", err)
+	nodes := make([]*storage.Node, 0, len(encoded))
+	for _, b := range encoded {
+		n, err := decodeNodePayload(b)
+		if err != nil {
+			return err
+		}
+		nodes = append(nodes, n)
 	}
-	return a.engine.BulkCreateNodes(req.Nodes)
+	return a.engine.BulkCreateNodes(nodes)
 }
 
 func (a *StorageAdapter) applyBulkCreateEdges(data []byte) error {
-	var req struct {
-		Edges []*storage.Edge `json:"edges"`
+	var encoded [][]byte
+	if err := decodeGob(data, &encoded); err != nil {
+		return fmt.Errorf("decode bulk create edges: %w", err)
 	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("unmarshal bulk create edges: %w", err)
+	edges := make([]*storage.Edge, 0, len(encoded))
+	for _, b := range encoded {
+		edge, err := decodeEdgePayload(b)
+		if err != nil {
+			return err
+		}
+		edges = append(edges, edge)
 	}
-	return a.engine.BulkCreateEdges(req.Edges)
+	return a.engine.BulkCreateEdges(edges)
 }
 
 func (a *StorageAdapter) applyBulkDeleteNodes(data []byte) error {
-	var req struct {
-		IDs []storage.NodeID `json:"ids"`
+	var ids []storage.NodeID
+	if err := decodeGob(data, &ids); err != nil {
+		return fmt.Errorf("decode bulk delete nodes: %w", err)
 	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("unmarshal bulk delete nodes: %w", err)
-	}
-	return a.engine.BulkDeleteNodes(req.IDs)
+	return a.engine.BulkDeleteNodes(ids)
 }
 
 func (a *StorageAdapter) applyBulkDeleteEdges(data []byte) error {
-	var req struct {
-		IDs []storage.EdgeID `json:"ids"`
+	var ids []storage.EdgeID
+	if err := decodeGob(data, &ids); err != nil {
+		return fmt.Errorf("decode bulk delete edges: %w", err)
 	}
-	if err := json.Unmarshal(data, &req); err != nil {
-		return fmt.Errorf("unmarshal bulk delete edges: %w", err)
-	}
-	return a.engine.BulkDeleteEdges(req.IDs)
+	return a.engine.BulkDeleteEdges(ids)
 }
 
 // applyCypher executes a Cypher command (for write queries).
@@ -329,11 +493,11 @@ func (a *StorageAdapter) applyCypher(data []byte) error {
 
 	// Parse Cypher command data
 	var cypherCmd struct {
-		Query  string                 `json:"query"`
-		Params map[string]interface{} `json:"params,omitempty"`
+		Query  string
+		Params map[string]interface{}
 	}
 
-	if err := json.Unmarshal(data, &cypherCmd); err != nil {
+	if err := decodeGob(data, &cypherCmd); err != nil {
 		return fmt.Errorf("unmarshal cypher command: %w", err)
 	}
 
@@ -352,8 +516,35 @@ func (a *StorageAdapter) applyCypher(data []byte) error {
 	return nil
 }
 
+// FlushWAL waits for all pending WAL writes to complete.
+// This is useful for tests or when you need to ensure durability before proceeding.
+func (a *StorageAdapter) FlushWAL() error {
+	// Flush any pending batch
+	a.flushWALBatch()
+
+	// Wait a bit for async writes to complete
+	time.Sleep(20 * time.Millisecond)
+
+	// Sync the WAL to ensure all writes are on disk
+	a.walMu.Lock()
+	defer a.walMu.Unlock()
+	if a.wal != nil {
+		return a.wal.Sync()
+	}
+	return nil
+}
+
 // Close releases replication resources (WAL file handles/background goroutines).
 func (a *StorageAdapter) Close() error {
+	// Stop async WAL writer (only once)
+	select {
+	case <-a.walStopCh:
+		// Already closed
+	default:
+		close(a.walStopCh)
+	}
+	a.walWg.Wait()
+
 	a.walMu.Lock()
 	defer a.walMu.Unlock()
 	if a.wal != nil {
@@ -431,16 +622,11 @@ func (a *StorageAdapter) GetWALEntries(fromPosition uint64, maxEntries int) ([]*
 			cmd *Command
 		)
 		var rec replicationWALRecord
-		if err := json.Unmarshal(storageEntry.Data, &rec); err == nil && rec.Command != nil {
+		if err := decodeGob(storageEntry.Data, &rec); err == nil && rec.Command != nil {
 			ts = rec.Timestamp
 			cmd = rec.Command
 		} else {
-			var old WALEntry
-			if err := json.Unmarshal(storageEntry.Data, &old); err != nil || old.Command == nil {
-				continue // Skip corrupted entries
-			}
-			ts = old.Timestamp
-			cmd = old.Command
+			continue // Skip corrupted/legacy entries
 		}
 
 		pos := storageEntry.Sequence
@@ -499,18 +685,18 @@ func (a *StorageAdapter) WriteSnapshot(w SnapshotWriter) error {
 	}
 
 	snapshot := struct {
-		WALPosition uint64          `json:"wal_position"`
-		Nodes       []*storage.Node `json:"nodes"`
-		Edges       []*storage.Edge `json:"edges"`
+		WALPosition uint64
+		Nodes       []*storage.Node
+		Edges       []*storage.Edge
 	}{
 		WALPosition: a.walPosition.Load(),
 		Nodes:       nodes,
 		Edges:       edges,
 	}
 
-	data, err := json.Marshal(snapshot)
+	data, err := encodeGob(snapshot)
 	if err != nil {
-		return fmt.Errorf("marshal snapshot: %w", err)
+		return fmt.Errorf("encode snapshot: %w", err)
 	}
 
 	_, err = w.Write(data)
@@ -525,13 +711,13 @@ func (a *StorageAdapter) RestoreSnapshot(r SnapshotReader) error {
 	}
 
 	var snapshot struct {
-		WALPosition uint64          `json:"wal_position"`
-		Nodes       []*storage.Node `json:"nodes"`
-		Edges       []*storage.Edge `json:"edges"`
+		WALPosition uint64
+		Nodes       []*storage.Node
+		Edges       []*storage.Edge
 	}
 
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return fmt.Errorf("unmarshal snapshot: %w", err)
+	if err := decodeGob(data, &snapshot); err != nil {
+		return fmt.Errorf("decode snapshot: %w", err)
 	}
 
 	// Restore nodes

@@ -1,7 +1,6 @@
 package replication
 
 import (
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -50,9 +49,9 @@ func (e *ReplicatedEngine) CreateNode(node *storage.Node) (storage.NodeID, error
 	if node == nil {
 		return "", fmt.Errorf("nil node")
 	}
-	data, err := json.Marshal(node)
+	data, err := encodeNodePayload(node)
 	if err != nil {
-		return "", fmt.Errorf("marshal node: %w", err)
+		return "", fmt.Errorf("encode node: %w", err)
 	}
 	if err := e.replicator.Apply(&Command{Type: CmdCreateNode, Data: data, Timestamp: time.Now()}, e.timeout); err != nil {
 		return "", err
@@ -64,9 +63,9 @@ func (e *ReplicatedEngine) UpdateNode(node *storage.Node) error {
 	if node == nil {
 		return fmt.Errorf("nil node")
 	}
-	data, err := json.Marshal(node)
+	data, err := encodeNodePayload(node)
 	if err != nil {
-		return fmt.Errorf("marshal node: %w", err)
+		return fmt.Errorf("encode node: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdUpdateNode, Data: data, Timestamp: time.Now()}, e.timeout)
 }
@@ -79,9 +78,9 @@ func (e *ReplicatedEngine) CreateEdge(edge *storage.Edge) error {
 	if edge == nil {
 		return fmt.Errorf("nil edge")
 	}
-	data, err := json.Marshal(edge)
+	data, err := encodeEdgePayload(edge)
 	if err != nil {
-		return fmt.Errorf("marshal edge: %w", err)
+		return fmt.Errorf("encode edge: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdCreateEdge, Data: data, Timestamp: time.Now()}, e.timeout)
 }
@@ -90,69 +89,77 @@ func (e *ReplicatedEngine) UpdateEdge(edge *storage.Edge) error {
 	if edge == nil {
 		return fmt.Errorf("nil edge")
 	}
-	data, err := json.Marshal(edge)
+	data, err := encodeEdgePayload(edge)
 	if err != nil {
-		return fmt.Errorf("marshal edge: %w", err)
+		return fmt.Errorf("encode edge: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdUpdateEdge, Data: data, Timestamp: time.Now()}, e.timeout)
 }
 
 func (e *ReplicatedEngine) DeleteEdge(id storage.EdgeID) error {
-	payload, err := json.Marshal(struct {
+	payload, err := encodeGob(struct {
 		EdgeID string `json:"edge_id"`
 	}{EdgeID: string(id)})
 	if err != nil {
-		return fmt.Errorf("marshal delete edge request: %w", err)
+		return fmt.Errorf("encode delete edge request: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdDeleteEdge, Data: payload, Timestamp: time.Now()}, e.timeout)
 }
 
 func (e *ReplicatedEngine) BulkCreateNodes(nodes []*storage.Node) error {
-	payload, err := json.Marshal(struct {
-		Nodes []*storage.Node `json:"nodes"`
-	}{Nodes: nodes})
+	encoded := make([][]byte, 0, len(nodes))
+	for _, n := range nodes {
+		data, err := encodeNodePayload(n)
+		if err != nil {
+			return fmt.Errorf("encode node: %w", err)
+		}
+		encoded = append(encoded, data)
+	}
+	payload, err := encodeGob(encoded)
 	if err != nil {
-		return fmt.Errorf("marshal bulk create nodes: %w", err)
+		return fmt.Errorf("encode bulk create nodes: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdBulkCreateNodes, Data: payload, Timestamp: time.Now()}, e.timeout)
 }
 
 func (e *ReplicatedEngine) BulkCreateEdges(edges []*storage.Edge) error {
-	payload, err := json.Marshal(struct {
-		Edges []*storage.Edge `json:"edges"`
-	}{Edges: edges})
+	encoded := make([][]byte, 0, len(edges))
+	for _, edge := range edges {
+		data, err := encodeEdgePayload(edge)
+		if err != nil {
+			return fmt.Errorf("encode edge: %w", err)
+		}
+		encoded = append(encoded, data)
+	}
+	payload, err := encodeGob(encoded)
 	if err != nil {
-		return fmt.Errorf("marshal bulk create edges: %w", err)
+		return fmt.Errorf("encode bulk create edges: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdBulkCreateEdges, Data: payload, Timestamp: time.Now()}, e.timeout)
 }
 
 func (e *ReplicatedEngine) BulkDeleteNodes(ids []storage.NodeID) error {
-	payload, err := json.Marshal(struct {
-		IDs []storage.NodeID `json:"ids"`
-	}{IDs: ids})
+	payload, err := encodeGob(ids)
 	if err != nil {
-		return fmt.Errorf("marshal bulk delete nodes: %w", err)
+		return fmt.Errorf("encode bulk delete nodes: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdBulkDeleteNodes, Data: payload, Timestamp: time.Now()}, e.timeout)
 }
 
 func (e *ReplicatedEngine) BulkDeleteEdges(ids []storage.EdgeID) error {
-	payload, err := json.Marshal(struct {
-		IDs []storage.EdgeID `json:"ids"`
-	}{IDs: ids})
+	payload, err := encodeGob(ids)
 	if err != nil {
-		return fmt.Errorf("marshal bulk delete edges: %w", err)
+		return fmt.Errorf("encode bulk delete edges: %w", err)
 	}
 	return e.replicator.Apply(&Command{Type: CmdBulkDeleteEdges, Data: payload, Timestamp: time.Now()}, e.timeout)
 }
 
 func (e *ReplicatedEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
-	payload, err := json.Marshal(struct {
+	payload, err := encodeGob(struct {
 		Prefix string `json:"prefix"`
 	}{Prefix: prefix})
 	if err != nil {
-		return 0, 0, fmt.Errorf("marshal delete by prefix: %w", err)
+		return 0, 0, fmt.Errorf("encode delete by prefix: %w", err)
 	}
 	if err := e.replicator.Apply(&Command{Type: CmdDeleteByPrefix, Data: payload, Timestamp: time.Now()}, e.timeout); err != nil {
 		return 0, 0, err

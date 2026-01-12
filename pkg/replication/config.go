@@ -423,7 +423,7 @@ func DefaultConfig() *Config {
 		DataDir:       "./data/replication",
 
 		HAStandby: HAStandbyConfig{
-			SyncMode:            SyncSemiSync,
+			SyncMode:            SyncAsync,
 			HeartbeatInterval:   1000 * time.Millisecond,
 			FailoverTimeout:     30 * time.Second,
 			AutoFailover:        true,
@@ -490,7 +490,7 @@ func LoadFromEnv() *Config {
 	// HA Standby settings
 	config.HAStandby.Role = getEnv("NORNICDB_CLUSTER_HA_ROLE", "")
 	config.HAStandby.PeerAddr = getEnv("NORNICDB_CLUSTER_HA_PEER_ADDR", "")
-	config.HAStandby.SyncMode = SyncMode(getEnv("NORNICDB_CLUSTER_HA_SYNC_MODE", string(SyncSemiSync)))
+	config.HAStandby.SyncMode = SyncMode(getEnv("NORNICDB_CLUSTER_HA_SYNC_MODE", string(SyncAsync)))
 	config.HAStandby.HeartbeatInterval = getEnvDurationMs("NORNICDB_CLUSTER_HA_HEARTBEAT_MS", 1000)
 	config.HAStandby.FailoverTimeout = getEnvDuration("NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT", 30*time.Second)
 	config.HAStandby.AutoFailover = getEnvBool("NORNICDB_CLUSTER_HA_AUTO_FAILOVER", true)

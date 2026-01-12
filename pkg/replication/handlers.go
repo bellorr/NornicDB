@@ -2,7 +2,6 @@ package replication
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 )
 
@@ -21,16 +20,16 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 		t.RegisterHandler(ClusterMsgWALBatch, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
 			_ = nodeID
 			var entries []*WALEntry
-			if err := json.Unmarshal(msg.Payload, &entries); err != nil {
-				return nil, fmt.Errorf("unmarshal wal batch: %w", err)
+			if err := decodeGob(msg.Payload, &entries); err != nil {
+				return nil, fmt.Errorf("decode wal batch: %w", err)
 			}
 			resp, err := h.HandleWALBatch(entries)
 			if err != nil {
 				return nil, err
 			}
-			payload, err := json.Marshal(resp)
+			payload, err := encodeGob(resp)
 			if err != nil {
-				return nil, fmt.Errorf("marshal wal batch resp: %w", err)
+				return nil, fmt.Errorf("encode wal batch resp: %w", err)
 			}
 			return &ClusterMessage{Type: ClusterMsgWALBatchResponse, Payload: payload}, nil
 		})
@@ -43,16 +42,16 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 		t.RegisterHandler(ClusterMsgHeartbeat, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
 			_ = nodeID
 			var req HeartbeatRequest
-			if err := json.Unmarshal(msg.Payload, &req); err != nil {
-				return nil, fmt.Errorf("unmarshal heartbeat: %w", err)
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode heartbeat: %w", err)
 			}
 			resp, err := h.HandleHeartbeat(&req)
 			if err != nil {
 				return nil, err
 			}
-			payload, err := json.Marshal(resp)
+			payload, err := encodeGob(resp)
 			if err != nil {
-				return nil, fmt.Errorf("marshal heartbeat resp: %w", err)
+				return nil, fmt.Errorf("encode heartbeat resp: %w", err)
 			}
 			return &ClusterMessage{Type: ClusterMsgHeartbeatResponse, Payload: payload}, nil
 		})
@@ -65,16 +64,16 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 		t.RegisterHandler(ClusterMsgFence, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
 			_ = nodeID
 			var req FenceRequest
-			if err := json.Unmarshal(msg.Payload, &req); err != nil {
-				return nil, fmt.Errorf("unmarshal fence: %w", err)
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode fence: %w", err)
 			}
 			resp, err := h.HandleFence(&req)
 			if err != nil {
 				return nil, err
 			}
-			payload, err := json.Marshal(resp)
+			payload, err := encodeGob(resp)
 			if err != nil {
-				return nil, fmt.Errorf("marshal fence resp: %w", err)
+				return nil, fmt.Errorf("encode fence resp: %w", err)
 			}
 			return &ClusterMessage{Type: ClusterMsgFenceResponse, Payload: payload}, nil
 		})
@@ -87,16 +86,16 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 		t.RegisterHandler(ClusterMsgPromote, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
 			_ = nodeID
 			var req PromoteRequest
-			if err := json.Unmarshal(msg.Payload, &req); err != nil {
-				return nil, fmt.Errorf("unmarshal promote: %w", err)
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode promote: %w", err)
 			}
 			resp, err := h.HandlePromote(&req)
 			if err != nil {
 				return nil, err
 			}
-			payload, err := json.Marshal(resp)
+			payload, err := encodeGob(resp)
 			if err != nil {
-				return nil, fmt.Errorf("marshal promote resp: %w", err)
+				return nil, fmt.Errorf("encode promote resp: %w", err)
 			}
 			return &ClusterMessage{Type: ClusterMsgPromoteResponse, Payload: payload}, nil
 		})
@@ -110,16 +109,16 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 			_ = ctx
 			_ = nodeID
 			var req RaftVoteRequest
-			if err := json.Unmarshal(msg.Payload, &req); err != nil {
-				return nil, fmt.Errorf("unmarshal raft vote: %w", err)
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode raft vote: %w", err)
 			}
 			resp, err := h.HandleRaftVote(&req)
 			if err != nil {
 				return nil, err
 			}
-			payload, err := json.Marshal(resp)
+			payload, err := encodeGob(resp)
 			if err != nil {
-				return nil, fmt.Errorf("marshal raft vote resp: %w", err)
+				return nil, fmt.Errorf("encode raft vote resp: %w", err)
 			}
 			return &ClusterMessage{Type: ClusterMsgVoteResponse, Payload: payload}, nil
 		})
@@ -133,19 +132,18 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 			_ = ctx
 			_ = nodeID
 			var req RaftAppendEntriesRequest
-			if err := json.Unmarshal(msg.Payload, &req); err != nil {
-				return nil, fmt.Errorf("unmarshal raft append: %w", err)
+			if err := decodeGob(msg.Payload, &req); err != nil {
+				return nil, fmt.Errorf("decode raft append: %w", err)
 			}
 			resp, err := h.HandleRaftAppendEntries(&req)
 			if err != nil {
 				return nil, err
 			}
-			payload, err := json.Marshal(resp)
+			payload, err := encodeGob(resp)
 			if err != nil {
-				return nil, fmt.Errorf("marshal raft append resp: %w", err)
+				return nil, fmt.Errorf("encode raft append resp: %w", err)
 			}
 			return &ClusterMessage{Type: ClusterMsgAppendEntriesResponse, Payload: payload}, nil
 		})
 	}
 }
-
