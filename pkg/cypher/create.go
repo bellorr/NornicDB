@@ -56,6 +56,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 
 	// First, create all nodes
 	createdNodes := make(map[string]*storage.Node)
+	createdEdges := make(map[string]*storage.Edge)
 	for _, nodePatternStr := range nodePatterns {
 		nodePatternStr = strings.TrimSpace(nodePatternStr)
 		if nodePatternStr == "" {
@@ -191,6 +192,15 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 			// Parse relationship type and properties
 			relType, relProps := e.parseRelationshipTypeAndProps(relStr)
 
+			// Extract relationship variable if present (e.g., "r:TYPE" -> "r").
+			relVar := ""
+			if colonIdx := strings.Index(relStr, ":"); colonIdx > 0 {
+				relVar = strings.TrimSpace(relStr[:colonIdx])
+			} else if !strings.Contains(relStr, "{") {
+				// No colon and no props - entire string might be variable
+				relVar = strings.TrimSpace(relStr)
+			}
+
 			// SECURITY: Validate relationship type
 			if relType != "" && !isValidIdentifier(relType) {
 				return nil, fmt.Errorf("invalid relationship type: %q (must be alphanumeric starting with letter or underscore)", relType)
@@ -220,6 +230,9 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 			if err := e.storage.CreateEdge(edge); err != nil {
 				return nil, fmt.Errorf("failed to create relationship: %w", err)
 			}
+			if relVar != "" {
+				createdEdges[relVar] = edge
+			}
 			result.Stats.RelationshipsCreated++
 
 			// If there's more chain to process, continue with target as new source
@@ -245,6 +258,33 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				result.Columns[i] = item.alias
 			} else {
 				result.Columns[i] = item.expr
+			}
+
+			// Relationship variables first (RETURN r, r.prop, id(r), type(r), ...)
+			//
+			// This matches Neo4j expectations that `r` is returned as a relationship
+			// structure and can be used in functions like id(r)/type(r).
+			if varName := extractVariableNameFromReturnItem(item.expr); varName != "" {
+				if edge, ok := createdEdges[varName]; ok && edge != nil {
+					// Direct relationship reference.
+					if item.expr == varName {
+						row[i] = edge
+						continue
+					}
+					// Relationship property access: r.someProp
+					if strings.HasPrefix(item.expr, varName+".") {
+						propName := strings.TrimSpace(item.expr[len(varName)+1:])
+						if v, ok := edge.Properties[propName]; ok {
+							row[i] = v
+						} else {
+							row[i] = nil
+						}
+						continue
+					}
+					// Functions over relationships (id(r), type(r), properties(r), ...)
+					row[i] = e.evaluateExpressionWithContext(item.expr, createdNodes, createdEdges)
+					continue
+				}
 			}
 
 			// Resolve the return expression against the created variables.
