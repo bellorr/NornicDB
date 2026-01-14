@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 var packstreamZero8 [8]byte
@@ -535,7 +536,7 @@ func encodeNodeInto(dst []byte, nodeId any, labels any, props map[string]any) []
 	case int:
 		dst = encodePackStreamIntInto(dst, int64(idVal))
 	case string:
-		dst = encodePackStreamIntInto(dst, hashStringToInt64(idVal))
+		dst = encodePackStreamIntInto(dst, util.HashStringToInt64(idVal))
 	default:
 		dst = encodePackStreamIntInto(dst, 0)
 	}
@@ -605,7 +606,7 @@ func encodeStorageNodeInto(dst []byte, node *storage.Node) []byte {
 	dst = append(dst, 0xB3, 0x4E)
 
 	// Field 1: Node ID (as int64)
-	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(node.ID)))
+	dst = encodePackStreamIntInto(dst, util.HashStringToInt64(string(node.ID)))
 
 	// Field 2: Labels (list of strings)
 	labels := node.Labels
@@ -654,11 +655,11 @@ func encodeStorageEdgeInto(dst []byte, edge *storage.Edge) []byte {
 	dst = append(dst, 0xB5, 0x52)
 
 	// Field 1: Relationship ID (as int64)
-	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(edge.ID)))
+	dst = encodePackStreamIntInto(dst, util.HashStringToInt64(string(edge.ID)))
 	// Field 2: Start Node ID (as int64)
-	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(edge.StartNode)))
+	dst = encodePackStreamIntInto(dst, util.HashStringToInt64(string(edge.StartNode)))
 	// Field 3: End Node ID (as int64)
-	dst = encodePackStreamIntInto(dst, hashStringToInt64(string(edge.EndNode)))
+	dst = encodePackStreamIntInto(dst, util.HashStringToInt64(string(edge.EndNode)))
 	// Field 4: Relationship Type (string)
 	dst = encodePackStreamStringInto(dst, edge.Type)
 
@@ -683,45 +684,6 @@ func encodeStorageEdgeInto(dst []byte, edge *storage.Edge) []byte {
 	return dst
 }
 
-// hashStringToInt64 converts a string ID to an int64 for Neo4j Bolt protocol compatibility.
-// NornicDB uses string IDs (UUIDs or custom strings), but Bolt protocol expects int64 IDs.
-// This function uses FNV-1a hash algorithm for deterministic conversion with good distribution.
-//
-// FNV-1a (Fowler-Noll-Vo) is a fast, non-cryptographic hash function that:
-//   - Produces deterministic results (same input = same output)
-//   - Has good distribution (fewer collisions than simple multiplicative hashing)
-//   - Is fast and suitable for high-frequency operations
-//
-// The hash uses FNV-1a 64-bit variant with offset basis 14695981039346656037.
-//
-// Example:
-//
-//	hashStringToInt64("user-123") => 1234567890123456789
-//	hashStringToInt64("user-123") => 1234567890123456789 (same result)
-func hashStringToInt64(s string) int64 {
-	// FNV-1a 64-bit hash
-	// Use uint64 for calculation to avoid overflow, then convert to int64
-	const offsetBasis uint64 = 14695981039346656037
-	const prime uint64 = 1099511628211
-
-	hash := offsetBasis
-	// FNV-1a processes bytes in order: hash ^= byte; hash *= prime
-	// Byte order is significant - reversing produces different hash values
-	for i := 0; i < len(s); i++ {
-		hash ^= uint64(s[i])
-		hash *= prime
-	}
-
-	// Convert to int64 and ensure positive value (Bolt protocol expects non-negative int64)
-	result := int64(hash)
-	if result < 0 {
-		// If the high bit is set, mask it to ensure positive
-		result = result & 0x7FFFFFFFFFFFFFFF
-	}
-
-	return result
-}
-
 // encodeNode encodes a node as a proper Bolt Node structure (signature 0x4E).
 // This makes nodes compatible with Neo4j drivers that expect Node instances with .properties.
 // Format: STRUCT(3 fields, signature 0x4E) + id + labels + properties
@@ -734,14 +696,14 @@ func encodeNode(nodeId any, labels any, nodeMap map[string]any) []byte {
 	var id int64
 	switch v := nodeId.(type) {
 	case string:
-		id = hashStringToInt64(v)
+		id = util.HashStringToInt64(v)
 	case int64:
 		id = v
 	case int:
 		id = int64(v)
 	default:
 		// Fallback: convert to string and hash
-		id = hashStringToInt64(fmt.Sprintf("%v", v))
+		id = util.HashStringToInt64(fmt.Sprintf("%v", v))
 	}
 	buf = append(buf, encodePackStreamInt(id)...)
 
@@ -780,7 +742,7 @@ func encodeStorageNode(node *storage.Node) []byte {
 
 	// Field 1: Node ID (as int64 for Neo4j compatibility)
 	// Convert string ID to int64 using deterministic hash function
-	id := hashStringToInt64(string(node.ID))
+	id := util.HashStringToInt64(string(node.ID))
 	buf = append(buf, encodePackStreamInt(id)...)
 
 	// Field 2: Labels (list of strings)
@@ -809,17 +771,17 @@ func encodeStorageEdge(edge *storage.Edge) []byte {
 
 	// Field 1: Relationship ID (as int64)
 	// Convert string ID to int64 using deterministic hash function
-	id := hashStringToInt64(string(edge.ID))
+	id := util.HashStringToInt64(string(edge.ID))
 	buf = append(buf, encodePackStreamInt(id)...)
 
 	// Field 2: Start Node ID (as int64)
 	// Convert string ID to int64 using deterministic hash function
-	startId := hashStringToInt64(string(edge.StartNode))
+	startId := util.HashStringToInt64(string(edge.StartNode))
 	buf = append(buf, encodePackStreamInt(startId)...)
 
 	// Field 3: End Node ID (as int64)
 	// Convert string ID to int64 using deterministic hash function
-	endId := hashStringToInt64(string(edge.EndNode))
+	endId := util.HashStringToInt64(string(edge.EndNode))
 	buf = append(buf, encodePackStreamInt(endId)...)
 
 	// Field 4: Relationship Type (string)

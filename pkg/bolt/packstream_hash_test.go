@@ -3,6 +3,8 @@ package bolt
 import (
 	"hash/fnv"
 	"testing"
+
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // TestHashStringToInt64_FNV1aCorrectness verifies that hashStringToInt64
@@ -51,7 +53,7 @@ func TestHashStringToInt64_FNV1aCorrectness(t *testing.T) {
 			expectedUint64 := h.Sum64()
 
 			// Calculate using our implementation
-			got := hashStringToInt64(tt.input)
+			got := util.HashStringToInt64(tt.input)
 
 			// Our implementation masks the high bit to ensure positive int64
 			// So we compare the lower 63 bits (the actual hash computation)
@@ -62,13 +64,13 @@ func TestHashStringToInt64_FNV1aCorrectness(t *testing.T) {
 			}
 
 			if gotUint64 != expectedMasked {
-				t.Errorf("hashStringToInt64(%q) = %d (masked: %d), expected masked %d (original: %d)",
+				t.Errorf("util.HashStringToInt64(%q) = %d (masked: %d), expected masked %d (original: %d)",
 					tt.input, got, gotUint64, expectedMasked, expectedUint64)
 			}
 
 			// Verify result is always positive (Bolt protocol requirement)
 			if got < 0 {
-				t.Errorf("hashStringToInt64(%q) returned negative value: %d", tt.input, got)
+				t.Errorf("util.HashStringToInt64(%q) returned negative value: %d", tt.input, got)
 			}
 		})
 	}
@@ -88,7 +90,7 @@ func TestHashStringToInt64_ByteOrderMatters(t *testing.T) {
 
 	hashes := make(map[string]int64)
 	for _, tc := range testCases {
-		hashes[tc.name] = hashStringToInt64(tc.input)
+		hashes[tc.name] = util.HashStringToInt64(tc.input)
 	}
 
 	// Different strings should produce different hashes
@@ -97,8 +99,8 @@ func TestHashStringToInt64_ByteOrderMatters(t *testing.T) {
 	}
 
 	// Same input should produce same hash (deterministic)
-	hash1 := hashStringToInt64("abc")
-	hash2 := hashStringToInt64("abc")
+	hash1 := util.HashStringToInt64("abc")
+	hash2 := util.HashStringToInt64("abc")
 	if hash1 != hash2 {
 		t.Errorf("Same input produced different hashes: %d != %d", hash1, hash2)
 	}
@@ -116,13 +118,12 @@ func TestHashStringToInt64_Deterministic(t *testing.T) {
 	}
 
 	for _, input := range inputs {
-		hash1 := hashStringToInt64(input)
-		hash2 := hashStringToInt64(input)
-		hash3 := hashStringToInt64(input)
+		hash1 := util.HashStringToInt64(input)
+		hash2 := util.HashStringToInt64(input)
+		hash3 := util.HashStringToInt64(input)
 
 		if hash1 != hash2 || hash2 != hash3 {
-			t.Errorf("hashStringToInt64(%q) is not deterministic: %d, %d, %d", input, hash1, hash2, hash3)
+			t.Errorf("util.HashStringToInt64(%q) is not deterministic: %d, %d, %d", input, hash1, hash2, hash3)
 		}
 	}
 }
-

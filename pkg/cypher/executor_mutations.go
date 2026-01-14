@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // ========================================
@@ -241,7 +242,7 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				// Extract what we're counting: count(n), count(r), count(*)
 				inner := strings.TrimSpace(item.expr[6 : len(item.expr)-1]) // Remove "count(" and ")"
 				upperInner := strings.ToUpper(inner)
-				
+
 				if upperInner == "*" {
 					// count(*) - return sum of nodes and relationships (Neo4j compatibility)
 					// Neo4j: count(*) in DELETE returns total entities (nodes + relationships)
@@ -1900,6 +1901,22 @@ func (e *StorageExecutor) evaluateInnerWhere(node *storage.Node, variable, where
 			// Compare node ID with expected value
 			expectedVal := e.parseValue(right)
 			actualId := string(node.ID)
+
+			// Support both string and integer comparisons for Bolt protocol compatibility
+			// If expected value is an integer (from Bolt Node structure), hash the string ID and compare
+			if expectedInt, ok := expectedVal.(int64); ok {
+				actualHash := util.HashStringToInt64(actualId)
+				switch op {
+				case "=":
+					return actualHash == expectedInt
+				case "<>", "!=":
+					return actualHash != expectedInt
+				default:
+					return true
+				}
+			}
+
+			// String comparison (original behavior)
 			switch op {
 			case "=":
 				return e.compareEqual(actualId, expectedVal)

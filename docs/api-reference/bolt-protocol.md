@@ -107,6 +107,29 @@ This is the “message layer” (handshake/query/streaming), included here for c
 - `db` in `RUN` extras map is honored.
 - `:USE <db>` Cypher directive is supported.
 
+## Node ID Handling
+
+NornicDB uses string IDs (UUIDs) internally, but Bolt protocol returns nodes with integer IDs for Neo4j compatibility. The integer ID is a deterministic hash of the string ID using FNV-1a algorithm.
+
+**Using integer IDs in queries:**
+
+You can use the integer ID from a Bolt Node structure directly in Cypher queries:
+
+```cypher
+// Get node from Bolt (returns integer ID in Node structure)
+// node.id = 1234567890123456789
+
+// Use integer ID in WHERE clause - works automatically
+MATCH (n) WHERE id(n) = 1234567890123456789 RETURN n
+
+// String IDs also work (original behavior)
+MATCH (n) WHERE id(n) = 'db846409-03af-45a7-9e0f-b21cf1842ae2' RETURN n
+```
+
+The `id()` function automatically detects whether you're comparing with an integer (from Bolt) or a string (native NornicDB ID) and handles both cases correctly.
+
+**Note:** The hash is one-way - you cannot convert an integer ID back to the original string ID. Use `elementId()` to get the full string ID format (`4:nornicdb:uuid`).
+
 ## Known limits / differences
 - Neo4j native temporal/spatial types are not currently encoded as Bolt temporal structs; `time.Time` is currently encoded as an integer (Unix millis) for a stable scalar representation.
 - Bolt routing tables are not yet advertised; in HA standby, connect writes to the primary.
