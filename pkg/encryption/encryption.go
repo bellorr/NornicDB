@@ -145,10 +145,10 @@ type KeyManager struct {
 // # Key Rotation Strategy
 //
 // Keys are versioned and rotated based on the configured interval:
-//   1. New keys are generated with sequential version IDs
-//   2. Old keys remain available for decryption of legacy data
-//   3. Expired keys beyond retention count are automatically cleaned up
-//   4. Each encrypted value stores its key version for transparent decryption
+//  1. New keys are generated with sequential version IDs
+//  2. Old keys remain available for decryption of legacy data
+//  3. Expired keys beyond retention count are automatically cleaned up
+//  4. Each encrypted value stores its key version for transparent decryption
 //
 // # Compliance Features
 //
@@ -532,7 +532,7 @@ type Encryptor struct {
 //   - AES-256-GCM authenticated encryption with automatic key versioning
 //   - Transparent passthrough when encryption is disabled
 //   - Base64 encoding for storage compatibility
-//   - Field-level encryption with format preservation
+//   - Full At-Rest encryption
 //   - Integration with KeyManager for automatic key rotation
 //
 // # Encryption Features
@@ -764,17 +764,17 @@ type Encryptor struct {
 //
 // When you want to protect a secret message, you put it in the envelope (encrypt),
 // and the envelope sealer:
-//   1. Stamps a version number on the outside (key version)
-//   2. Puts your message inside with a special seal (encryption)
-//   3. Adds a tamper-proof tape (authentication tag)
-//   4. Converts it to a code you can write down (base64)
+//  1. Stamps a version number on the outside (key version)
+//  2. Puts your message inside with a special seal (encryption)
+//  3. Adds a tamper-proof tape (authentication tag)
+//  4. Converts it to a code you can write down (base64)
 //
 // When you want to read the message, you give the envelope to the sealer (decrypt),
 // and it:
-//   1. Reads the version number to know which key to use
-//   2. Checks the tamper-proof tape (fails if anyone modified it)
-//   3. Opens the envelope with the right key
-//   4. Gives you back the original message
+//  1. Reads the version number to know which key to use
+//  2. Checks the tamper-proof tape (fails if anyone modified it)
+//  3. Opens the envelope with the right key
+//  4. Gives you back the original message
 //
 // If encryption is disabled (like in development), the envelope sealer just
 // wraps your message in clear plastic instead of an opaque envelope - you can
@@ -797,7 +797,7 @@ func NewEncryptor(km *KeyManager, enabled bool) *Encryptor {
 //
 // # Key Derivation Process
 //
-// Password → PBKDF2(password, salt, iterations) → AES-256 key
+// # Password → PBKDF2(password, salt, iterations) → AES-256 key
 //
 // Parameters:
 //   - Password: Master password (should be high-entropy)
@@ -1042,10 +1042,10 @@ func NewEncryptor(km *KeyManager, enabled bool) *Encryptor {
 // key that fits exactly into a lock (the encryption algorithm).
 //
 // NewEncryptorWithPassword is like a key-making machine:
-//   1. You give it your password (any length, any characters)
-//   2. It mixes it with a secret ingredient called "salt" (unique per installation)
-//   3. It stirs the mixture 600,000 times (to make it really hard to guess)
-//   4. Out comes a perfectly-sized key that fits the lock!
+//  1. You give it your password (any length, any characters)
+//  2. It mixes it with a secret ingredient called "salt" (unique per installation)
+//  3. It stirs the mixture 600,000 times (to make it really hard to guess)
+//  4. Out comes a perfectly-sized key that fits the lock!
 //
 // The salt is important because:
 //   - Two people with the same password get different keys (different salts)
@@ -1371,9 +1371,9 @@ func decrypt(data []byte, key *Key) ([]byte, error) {
 //   - How many times to blend (iterations)
 //
 // The blender:
-//   1. Mixes everything together
-//   2. Blends it thousands of times (600,000!)
-//   3. Produces exactly 32 bytes of perfect key material
+//  1. Mixes everything together
+//  2. Blends it thousands of times (600,000!)
+//  3. Produces exactly 32 bytes of perfect key material
 //
 // Why blend so many times?
 //   - It takes ~100ms for you (barely noticeable)

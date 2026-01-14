@@ -16,7 +16,7 @@
 ### Encryption
 - **AES-256-GCM** encryption at rest
 - **TLS 1.3** for data in transit
-- **Field-level encryption** for sensitive data
+- **Full At-Rest encryption** for sensitive data
 - **Key rotation** support
 
 [Encryption guide →](encryption.md)

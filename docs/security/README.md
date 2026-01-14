@@ -56,7 +56,7 @@ See **[Query Cache Security](query-cache-security.md)** for full details.
 
 ### Data Protection
 
-- **Field-Level Encryption** - AES-256-GCM encryption
+- **Full At-Rest Encryption** - AES-256-GCM encryption
 - **TLS/HTTPS** - Required in production mode
 - **Audit Logging** - Complete operation history
 

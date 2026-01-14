@@ -103,7 +103,6 @@ Welcome to **NornicDB** - A production-ready graph database with GPU acceleratio
 - **Security Middleware** - CSRF/SSRF/XSS protection on all HTTP endpoints
 - **WAL Auto-Compaction** - Automatic snapshots prevent unbounded disk growth
 - GDPR, HIPAA, SOC2 compliance
-- Field-level encryption
 - RBAC and audit logging
 - ACID transactions
 

@@ -30,7 +30,7 @@ NornicDB provides features to help organizations achieve SOC2 compliance for the
 
 | Criteria | Requirement | NornicDB Feature |
 |----------|-------------|------------------|
-| C1.1 | Confidential data identification | Field-level encryption |
+| C1.1 | Confidential data identification | Full encryption |
 | C1.2 | Confidential data disposal | Secure deletion |
 
 ### Processing Integrity (PI1)
