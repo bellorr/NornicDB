@@ -8,6 +8,8 @@ import (
 )
 
 func TestClusterTransport_HeartbeatRoundTrip(t *testing.T) {
+	t.Parallel()
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -53,6 +55,8 @@ func TestClusterTransport_HeartbeatRoundTrip(t *testing.T) {
 	}
 	defer conn.Close()
 
+	waitForConnected(t, conn, 2*time.Second)
+
 	// Ensure RPC path works end-to-end (request routed to handler and response read back).
 	_, err = conn.SendHeartbeat(ctx, &HeartbeatRequest{
 		NodeID:      "client-1",
@@ -66,4 +70,17 @@ func TestClusterTransport_HeartbeatRoundTrip(t *testing.T) {
 	if !handled.Load() {
 		t.Fatalf("expected heartbeat handler to run")
 	}
+}
+
+func waitForConnected(t *testing.T, conn PeerConnection, timeout time.Duration) {
+	t.Helper()
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if conn.IsConnected() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("connection did not become ready")
 }

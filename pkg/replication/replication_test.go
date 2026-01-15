@@ -368,7 +368,7 @@ func TestDefaultConfig(t *testing.T) {
 	config := DefaultConfig()
 
 	assert.Equal(t, ModeStandalone, config.Mode)
-	assert.Equal(t, "0.0.0.0:7688", config.BindAddr)
+	assert.Equal(t, "0.0.0.0:7000", config.BindAddr)
 	assert.NotEmpty(t, config.HAStandby.HeartbeatInterval)
 	assert.NotEmpty(t, config.HAStandby.FailoverTimeout)
 	assert.True(t, config.HAStandby.AutoFailover)
@@ -389,7 +389,7 @@ func TestLoadFromEnv_HAStandby(t *testing.T) {
 	t.Setenv("NORNICDB_CLUSTER_MODE", "ha_standby")
 	t.Setenv("NORNICDB_CLUSTER_NODE_ID", "primary-1")
 	t.Setenv("NORNICDB_CLUSTER_HA_ROLE", "primary")
-	t.Setenv("NORNICDB_CLUSTER_HA_PEER_ADDR", "standby-1:7688")
+	t.Setenv("NORNICDB_CLUSTER_HA_PEER_ADDR", "standby-1:7000")
 	t.Setenv("NORNICDB_CLUSTER_HA_AUTO_FAILOVER", "true")
 	t.Setenv("NORNICDB_CLUSTER_HA_HEARTBEAT_MS", "500")
 	t.Setenv("NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT", "15s")
@@ -399,7 +399,7 @@ func TestLoadFromEnv_HAStandby(t *testing.T) {
 	assert.Equal(t, ModeHAStandby, config.Mode)
 	assert.Equal(t, "primary-1", config.NodeID)
 	assert.Equal(t, "primary", config.HAStandby.Role)
-	assert.Equal(t, "standby-1:7688", config.HAStandby.PeerAddr)
+	assert.Equal(t, "standby-1:7000", config.HAStandby.PeerAddr)
 	assert.True(t, config.HAStandby.AutoFailover)
 	assert.Equal(t, 500*time.Millisecond, config.HAStandby.HeartbeatInterval)
 	assert.Equal(t, 15*time.Second, config.HAStandby.FailoverTimeout)
@@ -409,7 +409,7 @@ func TestLoadFromEnv_Raft(t *testing.T) {
 	t.Setenv("NORNICDB_CLUSTER_MODE", "raft")
 	t.Setenv("NORNICDB_CLUSTER_NODE_ID", "node-1")
 	t.Setenv("NORNICDB_CLUSTER_RAFT_BOOTSTRAP", "true")
-	t.Setenv("NORNICDB_CLUSTER_RAFT_PEERS", "node-2:host2:7688,node-3:host3:7688")
+	t.Setenv("NORNICDB_CLUSTER_RAFT_PEERS", "node-2:host2:7000,node-3:host3:7000")
 	t.Setenv("NORNICDB_CLUSTER_RAFT_ELECTION_TIMEOUT", "2s")
 
 	config := LoadFromEnv()
@@ -419,7 +419,7 @@ func TestLoadFromEnv_Raft(t *testing.T) {
 	assert.True(t, config.Raft.Bootstrap)
 	assert.Len(t, config.Raft.Peers, 2)
 	assert.Equal(t, "node-2", config.Raft.Peers[0].ID)
-	assert.Equal(t, "host2:7688", config.Raft.Peers[0].Addr)
+	assert.Equal(t, "host2:7000", config.Raft.Peers[0].Addr)
 	assert.Equal(t, 2*time.Second, config.Raft.ElectionTimeout)
 }
 
@@ -434,7 +434,7 @@ func TestConfig_Validate_Standalone(t *testing.T) {
 func TestConfig_Validate_HAStandby_MissingRole(t *testing.T) {
 	config := DefaultConfig()
 	config.Mode = ModeHAStandby
-	config.HAStandby.PeerAddr = "peer:7688"
+	config.HAStandby.PeerAddr = "peer:7000"
 
 	err := config.Validate()
 	assert.Error(t, err)
@@ -456,7 +456,7 @@ func TestConfig_Validate_HAStandby_Valid(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "test-node"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 
 	err := config.Validate()
 	assert.NoError(t, err)
@@ -475,24 +475,24 @@ func TestParsePeers(t *testing.T) {
 		},
 		{
 			name:  "single with id",
-			input: "node-2:host2:7688",
+			input: "node-2:host2:7000",
 			expected: []PeerConfig{
-				{ID: "node-2", Addr: "host2:7688"},
+				{ID: "node-2", Addr: "host2:7000"},
 			},
 		},
 		{
 			name:  "single without id",
-			input: "host2:7688",
+			input: "host2:7000",
 			expected: []PeerConfig{
-				{ID: "peer-1", Addr: "host2:7688"},
+				{ID: "peer-1", Addr: "host2:7000"},
 			},
 		},
 		{
 			name:  "multiple",
-			input: "node-2:host2:7688,node-3:host3:7688",
+			input: "node-2:host2:7000,node-3:host3:7000",
 			expected: []PeerConfig{
-				{ID: "node-2", Addr: "host2:7688"},
-				{ID: "node-3", Addr: "host3:7688"},
+				{ID: "node-2", Addr: "host2:7000"},
+				{ID: "node-3", Addr: "host3:7000"},
 			},
 		},
 	}
@@ -625,7 +625,7 @@ func TestHAStandbyReplicator_Primary_Start(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby-1:7688"
+	config.HAStandby.PeerAddr = "standby-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -659,7 +659,7 @@ func TestHAStandbyReplicator_Standby_Start(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "standby-1"
 	config.HAStandby.Role = "standby"
-	config.HAStandby.PeerAddr = "primary-1:7688"
+	config.HAStandby.PeerAddr = "primary-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -672,7 +672,7 @@ func TestHAStandbyReplicator_Standby_Start(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, replicator.IsLeader())
-	assert.Equal(t, "primary-1:7688", replicator.LeaderAddr())
+	assert.Equal(t, "primary-1:7000", replicator.LeaderAddr())
 
 	health := replicator.Health()
 	assert.Equal(t, "standby", health.Role)
@@ -692,7 +692,7 @@ func TestHAStandbyReplicator_Primary_Apply(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby-1:7688"
+	config.HAStandby.PeerAddr = "standby-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -725,7 +725,7 @@ func TestHAStandbyReplicator_Primary_Apply_SyncAck(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby-1:7688"
+	config.HAStandby.PeerAddr = "standby-1:7000"
 	config.HAStandby.SyncMode = SyncQuorum
 	config.HAStandby.WALBatchTimeout = 20 * time.Millisecond
 	config.HAStandby.HeartbeatInterval = 10 * time.Millisecond
@@ -775,7 +775,7 @@ func TestHAStandbyReplicator_Standby_Apply_Rejected(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "standby-1"
 	config.HAStandby.Role = "standby"
-	config.HAStandby.PeerAddr = "primary-1:7688"
+	config.HAStandby.PeerAddr = "primary-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -808,7 +808,7 @@ func TestHAStandbyReplicator_HandleWALBatch(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "standby-1"
 	config.HAStandby.Role = "standby"
-	config.HAStandby.PeerAddr = "primary-1:7688"
+	config.HAStandby.PeerAddr = "primary-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -843,7 +843,7 @@ func TestHAStandbyReplicator_HandleHeartbeat(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "standby-1"
 	config.HAStandby.Role = "standby"
-	config.HAStandby.PeerAddr = "primary-1:7688"
+	config.HAStandby.PeerAddr = "primary-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -880,7 +880,7 @@ func TestHAStandbyReplicator_HandleFence(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby-1:7688"
+	config.HAStandby.PeerAddr = "standby-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -917,7 +917,7 @@ func TestHAStandbyReplicator_Promote(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "standby-1"
 	config.HAStandby.Role = "standby"
-	config.HAStandby.PeerAddr = "primary-1:7688"
+	config.HAStandby.PeerAddr = "primary-1:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -1157,7 +1157,7 @@ func TestNewReplicator_HAStandby(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "test"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "peer:7688"
+	config.HAStandby.PeerAddr = "peer:7000"
 
 	replicator, err := NewReplicator(config, storage)
 	require.NoError(t, err)
@@ -1304,7 +1304,7 @@ func TestE2E_HAStandby_Failover(t *testing.T) {
 	primaryConfig.Mode = ModeHAStandby
 	primaryConfig.NodeID = "primary-1"
 	primaryConfig.HAStandby.Role = "primary"
-	primaryConfig.HAStandby.PeerAddr = "standby-1:7688"
+	primaryConfig.HAStandby.PeerAddr = "standby-1:7000"
 	primaryConfig.HAStandby.FailoverTimeout = 100 * time.Millisecond
 	primaryConfig.HAStandby.HeartbeatInterval = 50 * time.Millisecond
 
@@ -1320,7 +1320,7 @@ func TestE2E_HAStandby_Failover(t *testing.T) {
 	standbyConfig.Mode = ModeHAStandby
 	standbyConfig.NodeID = "standby-1"
 	standbyConfig.HAStandby.Role = "standby"
-	standbyConfig.HAStandby.PeerAddr = "primary-1:7688"
+	standbyConfig.HAStandby.PeerAddr = "primary-1:7000"
 	standbyConfig.HAStandby.FailoverTimeout = 100 * time.Millisecond
 	standbyConfig.HAStandby.HeartbeatInterval = 50 * time.Millisecond
 	standbyConfig.HAStandby.AutoFailover = true
@@ -1392,7 +1392,7 @@ func TestE2E_StandaloneToHA_Migration(t *testing.T) {
 	haConfig.Mode = ModeHAStandby
 	haConfig.NodeID = "node-1"
 	haConfig.HAStandby.Role = "primary"
-	haConfig.HAStandby.PeerAddr = "standby:7688"
+	haConfig.HAStandby.PeerAddr = "standby:7000"
 
 	transport := NewMockTransport()
 	ha, err := NewHAStandbyReplicator(haConfig, storage)
@@ -1450,7 +1450,7 @@ func TestConfig_Validate_Raft_WithPeersAllowed(t *testing.T) {
 	config.Mode = ModeRaft
 	config.NodeID = "node-2"
 	config.Raft.Bootstrap = false
-	config.Raft.Peers = []PeerConfig{{ID: "node-1", Addr: "leader:7688"}}
+	config.Raft.Peers = []PeerConfig{{ID: "node-1", Addr: "leader:7000"}}
 
 	err := config.Validate()
 	assert.NoError(t, err)
@@ -1483,7 +1483,7 @@ func TestConfig_Validate_TLS_EnabledMissingCert(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "node-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.TLS.Enabled = true
 	config.TLS.CertFile = ""
 	config.TLS.KeyFile = "/path/to/key"
@@ -1498,7 +1498,7 @@ func TestConfig_Validate_TLS_EnabledMissingKey(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "node-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.TLS.Enabled = true
 	config.TLS.CertFile = "/path/to/cert"
 	config.TLS.KeyFile = ""
@@ -1513,7 +1513,7 @@ func TestConfig_Validate_TLS_VerifyClientMissingCA(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "node-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.TLS.Enabled = true
 	config.TLS.CertFile = "/path/to/cert"
 	config.TLS.KeyFile = "/path/to/key"
@@ -1530,7 +1530,7 @@ func TestConfig_Validate_TLS_InvalidMinVersion(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "node-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.TLS.Enabled = true
 	config.TLS.CertFile = "/path/to/cert"
 	config.TLS.KeyFile = "/path/to/key"
@@ -1551,7 +1551,7 @@ func TestNewHAStandbyReplicator_FailsWithBadConfig(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "" // Missing required field
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.Error(t, err)
@@ -1592,7 +1592,7 @@ func TestNewReplicator_FailsWithInvalidHARole(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "node-1"
 	config.HAStandby.Role = "master" // Invalid - must be "primary" or "standby"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 
 	replicator, err := NewReplicator(config, storage)
 	require.Error(t, err)
@@ -1610,13 +1610,13 @@ func TestHAStandby_StartFailsWhenPeerUnreachable(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "unreachable-host:7688"
+	config.HAStandby.PeerAddr = "unreachable-host:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err) // Creation succeeds
 
 	// Use a transport that fails to connect
-	failingTransport := &FailingTransport{connectError: fmt.Errorf("connection refused: unreachable-host:7688")}
+	failingTransport := &FailingTransport{connectError: fmt.Errorf("connection refused: unreachable-host:7000")}
 	replicator.SetTransport(failingTransport)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -1644,7 +1644,7 @@ func TestRaft_StartFailsWhenCannotFormQuorum(t *testing.T) {
 	config.NodeID = "node-1"
 	config.Raft.Bootstrap = false
 	config.Raft.Peers = []PeerConfig{
-		{ID: "leader", Addr: "unreachable-leader:7688"},
+		{ID: "leader", Addr: "unreachable-leader:7000"},
 	}
 	config.Raft.ElectionTimeout = 500 * time.Millisecond // Fast timeout for test
 
@@ -1712,7 +1712,7 @@ func TestConfig_Validate_AllValidHARoles(t *testing.T) {
 			config.Mode = ModeHAStandby
 			config.NodeID = "test-node"
 			config.HAStandby.Role = role
-			config.HAStandby.PeerAddr = "peer:7688"
+			config.HAStandby.PeerAddr = "peer:7000"
 
 			err := config.Validate()
 			assert.NoError(t, err)
@@ -1729,7 +1729,7 @@ func TestConfig_Validate_InvalidHARoles(t *testing.T) {
 			config.Mode = ModeHAStandby
 			config.NodeID = "test-node"
 			config.HAStandby.Role = role
-			config.HAStandby.PeerAddr = "peer:7688"
+			config.HAStandby.PeerAddr = "peer:7000"
 
 			err := config.Validate()
 			require.Error(t, err)
@@ -1758,7 +1758,7 @@ func TestConfig_Validate_AllModes(t *testing.T) {
 			setup: func(c *Config) {
 				c.NodeID = "test"
 				c.HAStandby.Role = "primary"
-				c.HAStandby.PeerAddr = "standby:7688"
+				c.HAStandby.PeerAddr = "standby:7000"
 			},
 			expectError: false,
 		},
@@ -1768,7 +1768,7 @@ func TestConfig_Validate_AllModes(t *testing.T) {
 			setup: func(c *Config) {
 				c.NodeID = "test"
 				c.HAStandby.Role = "standby"
-				c.HAStandby.PeerAddr = "primary:7688"
+				c.HAStandby.PeerAddr = "primary:7000"
 			},
 			expectError: false,
 		},
@@ -1777,7 +1777,7 @@ func TestConfig_Validate_AllModes(t *testing.T) {
 			mode: ModeHAStandby,
 			setup: func(c *Config) {
 				c.NodeID = "test"
-				c.HAStandby.PeerAddr = "primary:7688"
+				c.HAStandby.PeerAddr = "primary:7000"
 			},
 			expectError: true,
 		},
@@ -1805,7 +1805,7 @@ func TestConfig_Validate_AllModes(t *testing.T) {
 			setup: func(c *Config) {
 				c.NodeID = "test"
 				c.Raft.Bootstrap = false
-				c.Raft.Peers = []PeerConfig{{ID: "leader", Addr: "leader:7688"}}
+				c.Raft.Peers = []PeerConfig{{ID: "leader", Addr: "leader:7000"}}
 			},
 			expectError: false,
 		},

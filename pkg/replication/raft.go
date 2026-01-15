@@ -247,6 +247,14 @@ func (r *RaftReplicator) Start(ctx context.Context) error {
 
 	log.Printf("[Raft %s] Starting node", r.config.NodeID)
 
+	if r.transport == nil {
+		transport, err := NewDefaultTransportFromConfig(r.config)
+		if err != nil {
+			return fmt.Errorf("init transport: %w", err)
+		}
+		r.transport = transport
+	}
+
 	// Initialize peer tracking for all configured peers
 	r.peerMu.Lock()
 	for _, peer := range r.config.Raft.Peers {

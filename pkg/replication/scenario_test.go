@@ -323,7 +323,7 @@ func TestScenario_HAStandby_Primary_A_BasicOperations(t *testing.T) {
 	primaryConfig.Mode = ModeHAStandby
 	primaryConfig.NodeID = "primary-1"
 	primaryConfig.HAStandby.Role = "primary"
-	primaryConfig.HAStandby.PeerAddr = "standby:7688"
+	primaryConfig.HAStandby.PeerAddr = "standby:7000"
 
 	primaryNode := cluster.AddNode("primary-1", primaryConfig)
 	primary, err := NewHAStandbyReplicator(primaryConfig, primaryNode.Storage)
@@ -381,7 +381,7 @@ func TestScenario_HAStandby_Primary_B_StandbyConnection(t *testing.T) {
 	primaryConfig.Mode = ModeHAStandby
 	primaryConfig.NodeID = "primary-1"
 	primaryConfig.HAStandby.Role = "primary"
-	primaryConfig.HAStandby.PeerAddr = "standby:7688"
+	primaryConfig.HAStandby.PeerAddr = "standby:7000"
 
 	primaryNode := cluster.AddNode("primary-1", primaryConfig)
 	primary, err := NewHAStandbyReplicator(primaryConfig, primaryNode.Storage)
@@ -421,7 +421,7 @@ func TestScenario_HAStandby_Primary_C_Failover(t *testing.T) {
 	primaryConfig.Mode = ModeHAStandby
 	primaryConfig.NodeID = "primary-1"
 	primaryConfig.HAStandby.Role = "primary"
-	primaryConfig.HAStandby.PeerAddr = "standby:7688"
+	primaryConfig.HAStandby.PeerAddr = "standby:7000"
 	primaryConfig.HAStandby.AutoFailover = true
 
 	primaryNode := cluster.AddNode("primary-1", primaryConfig)
@@ -467,7 +467,7 @@ func TestScenario_HAStandby_Primary_D_HighLatency(t *testing.T) {
 	primaryConfig.Mode = ModeHAStandby
 	primaryConfig.NodeID = "primary-1"
 	primaryConfig.HAStandby.Role = "primary"
-	primaryConfig.HAStandby.PeerAddr = "standby:7688"
+	primaryConfig.HAStandby.PeerAddr = "standby:7000"
 	primaryConfig.HAStandby.HeartbeatInterval = 5 * time.Second
 	primaryConfig.HAStandby.FailoverTimeout = 30 * time.Second
 
@@ -512,7 +512,7 @@ func TestScenario_HAStandby_Standby_A_BasicOperations(t *testing.T) {
 	standbyConfig.Mode = ModeHAStandby
 	standbyConfig.NodeID = "standby-1"
 	standbyConfig.HAStandby.Role = "standby"
-	standbyConfig.HAStandby.PeerAddr = "primary:7688"
+	standbyConfig.HAStandby.PeerAddr = "primary:7000"
 
 	standbyNode := cluster.AddNode("standby-1", standbyConfig)
 	standby, err := NewHAStandbyReplicator(standbyConfig, standbyNode.Storage)
@@ -565,13 +565,13 @@ func TestScenario_HAStandby_Standby_B_WALReplication(t *testing.T) {
 	primaryConfig.Mode = ModeHAStandby
 	primaryConfig.NodeID = "primary-1"
 	primaryConfig.HAStandby.Role = "primary"
-	primaryConfig.HAStandby.PeerAddr = "standby:7688"
+	primaryConfig.HAStandby.PeerAddr = "standby:7000"
 
 	standbyConfig := DefaultConfig()
 	standbyConfig.Mode = ModeHAStandby
 	standbyConfig.NodeID = "standby-1"
 	standbyConfig.HAStandby.Role = "standby"
-	standbyConfig.HAStandby.PeerAddr = "primary:7688"
+	standbyConfig.HAStandby.PeerAddr = "primary:7000"
 
 	primaryTransport := NewMockTransport()
 	standbyTransport := NewMockTransport()
@@ -639,7 +639,7 @@ func TestScenario_HAStandby_Standby_C_Promotion(t *testing.T) {
 	standbyConfig.Mode = ModeHAStandby
 	standbyConfig.NodeID = "standby-1"
 	standbyConfig.HAStandby.Role = "standby"
-	standbyConfig.HAStandby.PeerAddr = "primary:7688"
+	standbyConfig.HAStandby.PeerAddr = "primary:7000"
 	standbyConfig.HAStandby.AutoFailover = true
 
 	standbyStorage := NewMockStorage()
@@ -681,7 +681,7 @@ func TestScenario_HAStandby_Standby_D_HighLatency(t *testing.T) {
 	standbyConfig.Mode = ModeHAStandby
 	standbyConfig.NodeID = "standby-1"
 	standbyConfig.HAStandby.Role = "standby"
-	standbyConfig.HAStandby.PeerAddr = "primary:7688"
+	standbyConfig.HAStandby.PeerAddr = "primary:7000"
 	standbyConfig.HAStandby.HeartbeatInterval = 10 * time.Second
 	standbyConfig.HAStandby.FailoverTimeout = 60 * time.Second
 
@@ -780,7 +780,7 @@ func TestScenario_Raft_Leader_B_Consensus(t *testing.T) {
 		if i > 0 {
 			// Non-bootstrap nodes need peers configured
 			configs[i].Raft.Peers = []PeerConfig{
-				{ID: "node-1", Addr: "node1:7688"},
+				{ID: "node-1", Addr: "node1:7000"},
 			}
 		}
 		storages[i] = NewMockStorage()
@@ -904,7 +904,7 @@ func TestScenario_Raft_Follower_A_BasicOperations(t *testing.T) {
 	followerConfig.NodeID = "follower-1"
 	followerConfig.Raft.Bootstrap = false
 	followerConfig.Raft.Peers = []PeerConfig{
-		{ID: "leader-1", Addr: "leader:7688"},
+		{ID: "leader-1", Addr: "leader:7000"},
 	}
 
 	followerStorage := NewMockStorage()
@@ -952,7 +952,7 @@ func TestScenario_Raft_Follower_B_LogReplication(t *testing.T) {
 	followerConfig.Mode = ModeRaft
 	followerConfig.NodeID = "follower-1"
 	followerConfig.Raft.Bootstrap = false
-	followerConfig.Raft.Peers = []PeerConfig{{ID: "leader-1", Addr: "leader1:7688"}}
+	followerConfig.Raft.Peers = []PeerConfig{{ID: "leader-1", Addr: "leader1:7000"}}
 
 	followerStorage := NewMockStorage()
 	follower, err := NewRaftReplicator(followerConfig, followerStorage)
@@ -994,7 +994,7 @@ func TestScenario_Raft_Follower_C_LeaderElection(t *testing.T) {
 	followerConfig.Mode = ModeRaft
 	followerConfig.NodeID = "follower-1"
 	followerConfig.Raft.Bootstrap = false
-	followerConfig.Raft.Peers = []PeerConfig{{ID: "leader-1", Addr: "leader1:7688"}}
+	followerConfig.Raft.Peers = []PeerConfig{{ID: "leader-1", Addr: "leader1:7000"}}
 	followerConfig.Raft.ElectionTimeout = 500 * time.Millisecond
 
 	followerStorage := NewMockStorage()
@@ -1032,7 +1032,7 @@ func TestScenario_Raft_Follower_D_HighLatency(t *testing.T) {
 	followerConfig.Mode = ModeRaft
 	followerConfig.NodeID = "follower-1"
 	followerConfig.Raft.Bootstrap = false
-	followerConfig.Raft.Peers = []PeerConfig{{ID: "leader-1", Addr: "leader1:7688"}}
+	followerConfig.Raft.Peers = []PeerConfig{{ID: "leader-1", Addr: "leader1:7000"}}
 	followerConfig.Raft.ElectionTimeout = 30 * time.Second // Very long for high latency
 	followerConfig.Raft.HeartbeatTimeout = 10 * time.Second
 
@@ -1113,7 +1113,7 @@ func TestScenario_MultiRegion_B_CrossRegion(t *testing.T) {
 	usEastConfig.MultiRegion.RegionID = "us-east"
 	usEastConfig.MultiRegion.LocalCluster.Bootstrap = true
 	usEastConfig.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "eu-west", Addrs: []string{"eu-coordinator:7688"}, Priority: 1},
+		{RegionID: "eu-west", Addrs: []string{"eu-coordinator:7000"}, Priority: 1},
 	}
 	usEastConfig.MultiRegion.CrossRegionSyncMode = SyncAsync
 
@@ -1123,7 +1123,7 @@ func TestScenario_MultiRegion_B_CrossRegion(t *testing.T) {
 	euWestConfig.MultiRegion.RegionID = "eu-west"
 	euWestConfig.MultiRegion.LocalCluster.Bootstrap = true
 	euWestConfig.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "us-east", Addrs: []string{"us-coordinator:7688"}, Priority: 1},
+		{RegionID: "us-east", Addrs: []string{"us-coordinator:7000"}, Priority: 1},
 	}
 	euWestConfig.MultiRegion.CrossRegionSyncMode = SyncAsync
 
@@ -1171,7 +1171,7 @@ func TestScenario_MultiRegion_C_RegionFailover(t *testing.T) {
 	primaryRegionConfig.MultiRegion.RegionID = "primary"
 	primaryRegionConfig.MultiRegion.LocalCluster.Bootstrap = true
 	primaryRegionConfig.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "secondary", Addrs: []string{"secondary:7688"}, Priority: 1},
+		{RegionID: "secondary", Addrs: []string{"secondary:7000"}, Priority: 1},
 	}
 
 	primaryStorage := NewMockStorage()
@@ -1280,7 +1280,7 @@ func TestScenario_CrossCutting_A_ModeTransitions(t *testing.T) {
 		haConfig.Mode = ModeHAStandby
 		haConfig.NodeID = "node-1"
 		haConfig.HAStandby.Role = "primary"
-		haConfig.HAStandby.PeerAddr = "standby:7688"
+		haConfig.HAStandby.PeerAddr = "standby:7000"
 
 		transport := NewMockTransport()
 		ha, err := NewHAStandbyReplicator(haConfig, storage)
@@ -1308,7 +1308,7 @@ func TestScenario_CrossCutting_A_ModeTransitions(t *testing.T) {
 		haConfig.Mode = ModeHAStandby
 		haConfig.NodeID = "node-1"
 		haConfig.HAStandby.Role = "primary"
-		haConfig.HAStandby.PeerAddr = "standby:7688"
+		haConfig.HAStandby.PeerAddr = "standby:7000"
 
 		transport := NewMockTransport()
 		ha, err := NewHAStandbyReplicator(haConfig, storage)
@@ -1408,7 +1408,7 @@ func TestScenario_CrossCutting_C_ConfigValidation(t *testing.T) {
 		config.Mode = ModeHAStandby
 		config.NodeID = ""
 		config.HAStandby.Role = "primary"
-		config.HAStandby.PeerAddr = "standby:7688"
+		config.HAStandby.PeerAddr = "standby:7000"
 		err := config.Validate()
 		assert.Error(t, err)
 	})
@@ -1712,7 +1712,7 @@ func TestScenario_HighLatency_Transport_Connection(t *testing.T) {
 			defer cancel()
 
 			start := time.Now()
-			conn, err := chaosTransport.Connect(ctx, "peer:7688")
+			conn, err := chaosTransport.Connect(ctx, "peer:7000")
 			elapsed := time.Since(start)
 
 			t.Logf("Transport.Connect with %v configured latency took %v", latency, elapsed)
@@ -1968,7 +1968,7 @@ func TestMultiRegion_TwoRegions_CrossRegionConnection(t *testing.T) {
 	config1.MultiRegion.RegionID = "us-east"
 	config1.MultiRegion.LocalCluster.Bootstrap = true
 	config1.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "eu-west", Addrs: []string{"eu-west-1:7688"}, Priority: 1},
+		{RegionID: "eu-west", Addrs: []string{"eu-west-1:7000"}, Priority: 1},
 	}
 
 	// Secondary region (eu-west)
@@ -1978,7 +1978,7 @@ func TestMultiRegion_TwoRegions_CrossRegionConnection(t *testing.T) {
 	config2.MultiRegion.RegionID = "eu-west"
 	config2.MultiRegion.LocalCluster.Bootstrap = true
 	config2.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "us-east", Addrs: []string{"us-east-1:7688"}, Priority: 1},
+		{RegionID: "us-east", Addrs: []string{"us-east-1:7000"}, Priority: 1},
 	}
 
 	region1, err := NewMultiRegionReplicator(config1, storage1)
@@ -2044,7 +2044,7 @@ func TestMultiRegion_RegionFailover(t *testing.T) {
 	config2.MultiRegion.RegionID = "eu-west"
 	config2.MultiRegion.LocalCluster.Bootstrap = true
 	config2.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "us-east", Addrs: []string{"us-east-1:7688"}, Priority: 1},
+		{RegionID: "us-east", Addrs: []string{"us-east-1:7000"}, Priority: 1},
 	}
 
 	region1, err := NewMultiRegionReplicator(config1, storage1)
@@ -2095,10 +2095,10 @@ func TestMultiRegion_FailoverRequiresLeader(t *testing.T) {
 	config.MultiRegion.RegionID = "eu-west"
 	config.MultiRegion.LocalCluster.Bootstrap = false
 	config.MultiRegion.LocalCluster.Peers = []PeerConfig{
-		{ID: "eu-west-2", Addr: "eu-west-2:7688"},
+		{ID: "eu-west-2", Addr: "eu-west-2:7000"},
 	}
 	config.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "us-east", Addrs: []string{"us-east-1:7688"}, Priority: 1},
+		{RegionID: "us-east", Addrs: []string{"us-east-1:7000"}, Priority: 1},
 	}
 
 	region, err := NewMultiRegionReplicator(config, storage)
@@ -2136,7 +2136,7 @@ func TestMultiRegion_WALStreaming(t *testing.T) {
 	config1.MultiRegion.RegionID = "us-east"
 	config1.MultiRegion.LocalCluster.Bootstrap = true
 	config1.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "eu-west", Addrs: []string{"eu-west-1:7688"}, Priority: 1},
+		{RegionID: "eu-west", Addrs: []string{"eu-west-1:7000"}, Priority: 1},
 	}
 
 	// Secondary region
@@ -2230,8 +2230,8 @@ func TestMultiRegion_ShutdownCleansUpConnections(t *testing.T) {
 	config.MultiRegion.RegionID = "us-east"
 	config.MultiRegion.LocalCluster.Bootstrap = true
 	config.MultiRegion.RemoteRegions = []RemoteRegionConfig{
-		{RegionID: "eu-west", Addrs: []string{"eu-west-1:7688"}, Priority: 1},
-		{RegionID: "ap-south", Addrs: []string{"ap-south-1:7688"}, Priority: 2},
+		{RegionID: "eu-west", Addrs: []string{"eu-west-1:7000"}, Priority: 1},
+		{RegionID: "ap-south", Addrs: []string{"ap-south-1:7000"}, Priority: 2},
 	}
 
 	region, err := NewMultiRegionReplicator(config, storage)

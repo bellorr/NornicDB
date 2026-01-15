@@ -86,6 +86,15 @@ func (r *MultiRegionReplicator) Start(ctx context.Context) error {
 		return nil
 	}
 
+	if r.transport == nil {
+		transport, err := NewDefaultTransportFromConfig(r.config)
+		if err != nil {
+			return err
+		}
+		r.transport = transport
+		r.localRaft.SetTransport(transport)
+	}
+
 	// Start local Raft cluster
 	if err := r.localRaft.Start(ctx); err != nil {
 		return err

@@ -18,13 +18,14 @@
 //
 //	NORNICDB_CLUSTER_MODE=standalone|ha_standby|raft|multi_region
 //	NORNICDB_CLUSTER_NODE_ID=node-1
-//	NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7688
-//	NORNICDB_CLUSTER_ADVERTISE_ADDR=192.168.1.10:7688
+//	NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7000
+//	NORNICDB_CLUSTER_ADVERTISE_ADDR=192.168.1.10:7000
+//	NORNICDB_CLUSTER_REPLICATION_SECRET=your-shared-secret-min-32-chars
 //
 // Hot Standby:
 //
 //	NORNICDB_CLUSTER_HA_ROLE=primary|standby
-//	NORNICDB_CLUSTER_HA_PEER_ADDR=standby-host:7688
+//	NORNICDB_CLUSTER_HA_PEER_ADDR=standby-host:7000
 //	NORNICDB_CLUSTER_HA_SYNC_MODE=async|quorum
 //	NORNICDB_CLUSTER_HA_HEARTBEAT_MS=1000
 //	NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT=30s
@@ -32,7 +33,7 @@
 //
 // Raft Cluster:
 //
-//	NORNICDB_CLUSTER_RAFT_PEERS=node-2:7688,node-3:7688
+//	NORNICDB_CLUSTER_RAFT_PEERS=node-2:7000,node-3:7000
 //	NORNICDB_CLUSTER_RAFT_BOOTSTRAP=true
 //	NORNICDB_CLUSTER_RAFT_ELECTION_TIMEOUT=1s
 //	NORNICDB_CLUSTER_RAFT_HEARTBEAT_TIMEOUT=100ms
@@ -42,7 +43,7 @@
 // Multi-Region:
 //
 //	NORNICDB_CLUSTER_REGION_ID=us-east
-//	NORNICDB_CLUSTER_REMOTE_REGIONS=eu-west:coord1:7688,ap-south:coord2:7688
+//	NORNICDB_CLUSTER_REMOTE_REGIONS=eu-west:coord1:7000,ap-south:coord2:7000
 //	NORNICDB_CLUSTER_CROSS_REGION_MODE=async|quorum
 //
 // Example Usage:
@@ -181,6 +182,11 @@ type Config struct {
 	// Defaults to BindAddr if not set.
 	// Environment: NORNICDB_CLUSTER_ADVERTISE_ADDR
 	AdvertiseAddr string
+
+	// ReplicationSecret is a shared secret used to authenticate cluster messages.
+	// When set, nodes must present valid HMAC signatures for replication traffic.
+	// Environment: NORNICDB_CLUSTER_REPLICATION_SECRET
+	ReplicationSecret string
 
 	// DataDir for replication state (Raft logs, snapshots).
 	// Defaults to main database DataDir + "/replication"
@@ -414,8 +420,8 @@ type ConsistencyConfig struct {
 func DefaultConfig() *Config {
 	return &Config{
 		Mode:          ModeStandalone,
-		BindAddr:      "0.0.0.0:7688",
-		AdvertiseAddr: "127.0.0.1:7688", // Default to localhost for tests
+		BindAddr:      "0.0.0.0:7000",
+		AdvertiseAddr: "127.0.0.1:7000", // Default to localhost for tests
 		DataDir:       "./data/replication",
 
 		HAStandby: HAStandbyConfig{
@@ -464,7 +470,7 @@ func DefaultConfig() *Config {
 //	NORNICDB_CLUSTER_MODE=ha_standby
 //	NORNICDB_CLUSTER_NODE_ID=primary-1
 //	NORNICDB_CLUSTER_HA_ROLE=primary
-//	NORNICDB_CLUSTER_HA_PEER_ADDR=standby-1:7688
+//	NORNICDB_CLUSTER_HA_PEER_ADDR=standby-1:7000
 //	NORNICDB_CLUSTER_HA_AUTO_FAILOVER=true
 //
 // Example environment for Raft:
@@ -472,16 +478,17 @@ func DefaultConfig() *Config {
 //	NORNICDB_CLUSTER_MODE=raft
 //	NORNICDB_CLUSTER_NODE_ID=node-1
 //	NORNICDB_CLUSTER_RAFT_BOOTSTRAP=true
-//	NORNICDB_CLUSTER_RAFT_PEERS=node-2:node2:7688,node-3:node3:7688
+//	NORNICDB_CLUSTER_RAFT_PEERS=node-2:node2:7000,node-3:node3:7000
 func LoadFromEnv() *Config {
 	config := DefaultConfig()
 
 	// Core settings
 	config.Mode = ReplicationMode(getEnv("NORNICDB_CLUSTER_MODE", string(ModeStandalone)))
 	config.NodeID = getEnv("NORNICDB_CLUSTER_NODE_ID", generateNodeID())
-	config.BindAddr = getEnv("NORNICDB_CLUSTER_BIND_ADDR", "0.0.0.0:7688")
+	config.BindAddr = getEnv("NORNICDB_CLUSTER_BIND_ADDR", "0.0.0.0:7000")
 	config.AdvertiseAddr = getEnv("NORNICDB_CLUSTER_ADVERTISE_ADDR", config.BindAddr)
 	config.DataDir = getEnv("NORNICDB_CLUSTER_DATA_DIR", "./data/replication")
+	config.ReplicationSecret = getEnv("NORNICDB_CLUSTER_REPLICATION_SECRET", "")
 
 	// HA Standby settings
 	config.HAStandby.Role = getEnv("NORNICDB_CLUSTER_HA_ROLE", "")
@@ -593,6 +600,10 @@ func (c *Config) Validate() error {
 		if err := c.validateTLS(); err != nil {
 			return err
 		}
+	}
+
+	if c.ReplicationSecret != "" && len(c.ReplicationSecret) < 32 {
+		return fmt.Errorf("replication secret must be at least 32 characters")
 	}
 
 	return nil
@@ -733,7 +744,7 @@ func parsePeers(s string) []PeerConfig {
 			// Just hostname, assume default port
 			peers = append(peers, PeerConfig{
 				ID:   fmt.Sprintf("peer-%d", i+1),
-				Addr: p + ":7688",
+				Addr: p + ":7000",
 			})
 		}
 	}

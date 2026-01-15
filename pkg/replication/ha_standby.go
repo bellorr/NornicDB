@@ -202,7 +202,11 @@ func (r *HAStandbyReplicator) Start(ctx context.Context) error {
 
 	// Use default transport if not set
 	if r.transport == nil {
-		r.transport = NewDefaultTransport(nil)
+		transport, err := NewDefaultTransportFromConfig(r.config)
+		if err != nil {
+			return fmt.Errorf("init transport: %w", err)
+		}
+		r.transport = transport
 	}
 
 	log.Printf("[HA] Starting in role=%s peer=%s sync_mode=%s wal_batch_size=%d wal_batch_timeout=%s",

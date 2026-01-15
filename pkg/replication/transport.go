@@ -5,13 +5,14 @@
 // NornicDB cluster communication uses a hybrid approach:
 //
 // 1. **Client Bolt Protocol (default port 7687)** - Used for:
+//
 //   - Neo4j driver compatibility for client queries
 //
-//   Note: automatic "write forwarding" over Bolt (follower/standby -> leader/primary)
-//   is not implemented yet. Today, clients should connect to the leader/primary for
-//   writes (followers/standby will reject writes with ErrNotLeader).
+//     Note: automatic "write forwarding" over Bolt (follower/standby -> leader/primary)
+//     is not implemented yet. Today, clients should connect to the leader/primary for
+//     writes (followers/standby will reject writes with ErrNotLeader).
 //
-// 2. **Cluster Protocol (default port 7688)** - Used for:
+// 2. **Cluster Protocol (default port 7000)** - Used for:
 //   - Raft consensus (RequestVote, AppendEntries)
 //   - WAL streaming for HA standby
 //   - Heartbeats and health checks
@@ -25,14 +26,18 @@
 // Example Configuration:
 //
 //	NORNICDB_CLUSTER_MODE=raft
-//	NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7688
+//	NORNICDB_CLUSTER_BIND_ADDR=0.0.0.0:7000
 //	NORNICDB_BOLT_PORT=7687
 package replication
 
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -74,9 +79,11 @@ const (
 
 // ClusterMessage is the on-wire format for cluster communication.
 type ClusterMessage struct {
-	Type    ClusterMessageType
-	NodeID  string
-	Payload []byte
+	Type      ClusterMessageType
+	NodeID    string
+	Timestamp int64
+	Signature string
+	Payload   []byte
 }
 
 // ClusterTransport handles cluster-to-cluster communication.
@@ -99,6 +106,10 @@ type ClusterTransport struct {
 	readTimeout  time.Duration
 	writeTimeout time.Duration
 	maxMsgSize   int
+	tlsServer    *tls.Config
+	tlsClient    *tls.Config
+	authSecret   []byte
+	authMaxSkew  time.Duration
 
 	// Message handlers
 	handlers map[ClusterMessageType]MessageHandler
@@ -115,6 +126,10 @@ type ClusterTransportConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	MaxMsgSize   int
+	TLSServer    *tls.Config
+	TLSClient    *tls.Config
+	AuthSecret   []byte
+	AuthMaxSkew  time.Duration
 }
 
 // DefaultClusterTransportConfig returns production defaults.
@@ -124,6 +139,7 @@ func DefaultClusterTransportConfig() *ClusterTransportConfig {
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 10 * time.Second,
 		MaxMsgSize:   64 * 1024 * 1024, // 64MB max
+		AuthMaxSkew:  30 * time.Second,
 	}
 }
 
@@ -157,6 +173,10 @@ func NewClusterTransport(config *ClusterTransportConfig) *ClusterTransport {
 		readTimeout:  config.ReadTimeout,
 		writeTimeout: config.WriteTimeout,
 		maxMsgSize:   config.MaxMsgSize,
+		tlsServer:    config.TLSServer,
+		tlsClient:    config.TLSClient,
+		authSecret:   config.AuthSecret,
+		authMaxSkew:  config.AuthMaxSkew,
 		handlers:     make(map[ClusterMessageType]MessageHandler),
 	}
 }
@@ -193,7 +213,13 @@ func (t *ClusterTransport) Connect(ctx context.Context, addr string) (PeerConnec
 
 	var d net.Dialer
 	d.Timeout = dialTimeout
-	netConn, err := d.DialContext(dialCtx, "tcp", addr)
+	var netConn net.Conn
+	var err error
+	if t.tlsClient != nil {
+		netConn, err = tls.DialWithDialer(&d, "tcp", addr, t.tlsClient)
+	} else {
+		netConn, err = d.DialContext(dialCtx, "tcp", addr)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("connect to %s: %w", addr, err)
 	}
@@ -212,7 +238,7 @@ func (t *ClusterTransport) Connect(ctx context.Context, addr string) (PeerConnec
 }
 
 func (t *ClusterTransport) createConnection(addr string, netConn net.Conn) *ClusterConnection {
-	return &ClusterConnection{
+	conn := &ClusterConnection{
 		transport:    t,
 		addr:         addr,
 		conn:         netConn,
@@ -223,7 +249,12 @@ func (t *ClusterTransport) createConnection(addr string, netConn net.Conn) *Clus
 		maxMsgSize:   t.maxMsgSize,
 		closeCh:      make(chan struct{}),
 		pendingRPCs:  make(map[uint64]chan *ClusterMessage),
+		authSecret:   t.authSecret,
+		authMaxSkew:  t.authMaxSkew,
 	}
+	// Mark connected immediately so callers can send without racing readLoop startup.
+	conn.connected.Store(true)
+	return conn
 }
 
 // Listen starts accepting cluster connections.
@@ -232,7 +263,13 @@ func (t *ClusterTransport) Listen(ctx context.Context, addr string, handler Conn
 		return errors.New("transport closed")
 	}
 
-	listener, err := net.Listen("tcp", addr)
+	var listener net.Listener
+	var err error
+	if t.tlsServer != nil {
+		listener, err = tls.Listen("tcp", addr, t.tlsServer)
+	} else {
+		listener, err = net.Listen("tcp", addr)
+	}
 	if err != nil {
 		return fmt.Errorf("listen on %s: %w", addr, err)
 	}
@@ -342,6 +379,8 @@ type ClusterConnection struct {
 	rpcMu       sync.Mutex
 	nextRPCID   uint64
 	pendingRPCs map[uint64]chan *ClusterMessage
+	authSecret  []byte
+	authMaxSkew time.Duration
 }
 
 func (c *ClusterConnection) sendRPC(ctx context.Context, msg *ClusterMessage) (*ClusterMessage, error) {
@@ -351,6 +390,7 @@ func (c *ClusterConnection) sendRPC(ctx context.Context, msg *ClusterMessage) (*
 	if msg.NodeID == "" && c.transport != nil && c.transport.nodeID != "" {
 		msg.NodeID = c.transport.nodeID
 	}
+	c.signMessage(msg)
 
 	// Create response channel
 	c.rpcMu.Lock()
@@ -429,6 +469,11 @@ func (c *ClusterConnection) readLoopWithContext(ctx context.Context) {
 			return
 		}
 
+		if err := c.verifyMessage(msg); err != nil {
+			log.Printf("[Cluster] Auth failed from %s: %v", c.addr, err)
+			return
+		}
+
 		// Dispatch to pending RPC (single outstanding RPC per connection is expected today).
 		c.rpcMu.Lock()
 		var (
@@ -473,6 +518,7 @@ func (c *ClusterConnection) readLoopWithContext(ctx context.Context) {
 			continue
 		}
 
+		c.signMessage(resp)
 		c.mu.Lock()
 		writeTimeout := c.writeTimeout
 		if writeTimeout <= 0 {
@@ -653,6 +699,40 @@ func (c *ClusterConnection) IsConnected() bool {
 	return c.connected.Load()
 }
 
+func (c *ClusterConnection) signMessage(msg *ClusterMessage) {
+	if len(c.authSecret) == 0 {
+		return
+	}
+	if msg.NodeID == "" && c.transport != nil && c.transport.nodeID != "" {
+		msg.NodeID = c.transport.nodeID
+	}
+	if msg.Timestamp == 0 {
+		msg.Timestamp = time.Now().UnixNano()
+	}
+	msg.Signature = computeMessageSignature(c.authSecret, msg)
+}
+
+func (c *ClusterConnection) verifyMessage(msg *ClusterMessage) error {
+	if len(c.authSecret) == 0 {
+		return nil
+	}
+	if msg.Signature == "" || msg.Timestamp == 0 || msg.NodeID == "" {
+		return errors.New("missing authentication fields")
+	}
+	if c.authMaxSkew > 0 {
+		now := time.Now()
+		ts := time.Unix(0, msg.Timestamp)
+		if now.Sub(ts) > c.authMaxSkew || ts.Sub(now) > c.authMaxSkew {
+			return fmt.Errorf("timestamp outside allowed skew")
+		}
+	}
+	expected := computeMessageSignature(c.authSecret, msg)
+	if !hmac.Equal([]byte(expected), []byte(msg.Signature)) {
+		return errors.New("invalid signature")
+	}
+	return nil
+}
+
 // Wire protocol helpers
 
 func writeClusterMessage(w *bufio.Writer, msg *ClusterMessage) error {
@@ -694,6 +774,36 @@ func readClusterMessage(r *bufio.Reader, maxSize int) (*ClusterMessage, error) {
 	}
 
 	return &msg, nil
+}
+
+func computeMessageSignature(secret []byte, msg *ClusterMessage) string {
+	mac := hmac.New(sha256.New, secret)
+
+	_, _ = mac.Write([]byte{byte(msg.Type)})
+	writeStringWithLength(mac, msg.NodeID)
+	writeInt64(mac, msg.Timestamp)
+	writeBytesWithLength(mac, msg.Payload)
+
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func writeInt64(w io.Writer, v int64) {
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], uint64(v))
+	_, _ = w.Write(buf[:])
+}
+
+func writeStringWithLength(w io.Writer, s string) {
+	writeBytesWithLength(w, []byte(s))
+}
+
+func writeBytesWithLength(w io.Writer, b []byte) {
+	var buf [4]byte
+	binary.BigEndian.PutUint32(buf[:], uint32(len(b)))
+	_, _ = w.Write(buf[:])
+	if len(b) > 0 {
+		_, _ = w.Write(b)
+	}
 }
 
 // Verify interface compliance

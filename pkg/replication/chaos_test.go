@@ -518,7 +518,7 @@ func TestChaos_PacketLoss(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.HAStandby.WALBatchTimeout = 100 * time.Millisecond
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
@@ -569,7 +569,7 @@ func TestChaos_HighLatency_CrossRegion(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.HAStandby.HeartbeatInterval = 5 * time.Second // Longer for high latency
 	config.HAStandby.FailoverTimeout = 30 * time.Second  // Longer timeout
 
@@ -662,7 +662,7 @@ func TestChaos_ConnectionDrop(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.HAStandby.ReconnectInterval = 100 * time.Millisecond
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
@@ -782,7 +782,7 @@ func TestChaos_MixedFailures(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 	config.HAStandby.ReconnectInterval = 500 * time.Millisecond
 	config.HAStandby.FailoverTimeout = 10 * time.Second
 
@@ -887,7 +887,7 @@ func TestChaos_RecoveryAfterPartition(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "primary-1"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 
 	replicator, err := NewHAStandbyReplicator(config, storage)
 	require.NoError(t, err)
@@ -1030,7 +1030,7 @@ func TestSecurity_TLSRequired(t *testing.T) {
 	config.Mode = ModeHAStandby
 	config.NodeID = "test-node"
 	config.HAStandby.Role = "primary"
-	config.HAStandby.PeerAddr = "standby:7688"
+	config.HAStandby.PeerAddr = "standby:7000"
 
 	// Verify TLS config fields exist
 	// In production, we would test that non-TLS connections are rejected
