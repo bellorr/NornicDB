@@ -70,8 +70,7 @@ func (s *Server) withAuth(handler http.HandlerFunc, requiredPerm auth.Permission
 			// Cache successful Basic auth results so clients that send Basic on every request
 			// (Neo4j compatibility) don't pay bcrypt+JWT generation each time.
 			if s.basicAuthCache != nil {
-				key := basicAuthCacheKey(authHeader)
-				if cached, ok := s.basicAuthCache.get(key); ok {
+				if cached, ok := s.basicAuthCache.GetFromHeader(authHeader); ok {
 					claims = cached
 					err = nil
 					if traceAuth && r.URL.Path == "/graphql" {
@@ -96,7 +95,7 @@ func (s *Server) withAuth(handler http.HandlerFunc, requiredPerm auth.Permission
 				})
 			}
 			if err == nil && s.basicAuthCache != nil && claims != nil {
-				s.basicAuthCache.set(basicAuthCacheKey(authHeader), claims)
+				s.basicAuthCache.SetFromHeader(authHeader, claims)
 			}
 			if traceAuth && r.URL.Path == "/graphql" {
 				fmt.Printf("[AUTH] %s %s basic_auth=%v err=%v\n", r.Method, r.URL.Path, time.Since(start), err)

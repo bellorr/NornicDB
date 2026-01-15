@@ -369,6 +369,9 @@ type Authenticator struct {
 
 	// Audit callback for compliance logging
 	auditLog func(event AuditEvent)
+
+	// Cached token validation results for repeated auth checks.
+	tokenCache *tokenCache
 }
 
 // AuditEvent represents an authentication-related event for compliance logging.
@@ -605,6 +608,10 @@ func NewAuthenticator(config AuthConfig, storage storage.Engine) (*Authenticator
 		users:   make(map[string]*User),
 		config:  config,
 		storage: storage,
+		tokenCache: newTokenCache(
+			DefaultAuthCacheEntries,
+			DefaultAuthCacheTTL,
+		),
 	}
 
 	// Load users from storage
@@ -1145,7 +1152,20 @@ func (a *Authenticator) ValidateToken(token string) (*JWTClaims, error) {
 	token = strings.TrimPrefix(token, "Bearer ")
 	token = strings.TrimSpace(token)
 
-	return a.verifyJWT(token)
+	if a.tokenCache != nil {
+		if cached, ok := a.tokenCache.get(token); ok {
+			return cached, nil
+		}
+	}
+
+	claims, err := a.verifyJWT(token)
+	if err != nil {
+		return nil, err
+	}
+	if a.tokenCache != nil {
+		a.tokenCache.set(token, claims)
+	}
+	return claims, nil
 }
 
 // GetUserByID retrieves a user by their ID.

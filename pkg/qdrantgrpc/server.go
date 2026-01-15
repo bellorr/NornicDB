@@ -179,12 +179,13 @@ func DefaultConfig() *Config {
 
 // Server is the Qdrant-compatible gRPC server.
 type Server struct {
-	config        *Config
-	collections   CollectionStore
-	baseStorage   storage.Engine
-	searchService SearchServiceProvider
-	vecIndex      *vectorIndexCache
-	authenticator *auth.Authenticator // Authentication for gRPC requests
+	config         *Config
+	collections    CollectionStore
+	baseStorage    storage.Engine
+	searchService  SearchServiceProvider
+	vecIndex       *vectorIndexCache
+	authenticator  *auth.Authenticator // Authentication for gRPC requests
+	basicAuthCache *auth.BasicAuthCache
 
 	grpcServer *grpc.Server
 	listener   net.Listener
@@ -215,13 +216,14 @@ func NewServer(config *Config, collections CollectionStore, baseStorage storage.
 	}
 
 	return &Server{
-		config:        config,
-		collections:   collections,
-		baseStorage:   baseStorage,
-		searchService: searchProvider,
-		vecIndex:      newVectorIndexCache(),
-		authenticator: authenticator,
-		register:      nil,
+		config:         config,
+		collections:    collections,
+		baseStorage:    baseStorage,
+		searchService:  searchProvider,
+		vecIndex:       newVectorIndexCache(),
+		authenticator:  authenticator,
+		basicAuthCache: auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
+		register:       nil,
 	}, nil
 }
 
@@ -493,6 +495,12 @@ func (s *Server) handleBasicAuth(ctx context.Context, authHeader string) (*auth.
 
 	username, password := parts[0], parts[1]
 
+	if s.basicAuthCache != nil {
+		if cached, ok := s.basicAuthCache.Get(username, password); ok {
+			return cached, nil
+		}
+	}
+
 	// Get client IP from metadata if available
 	clientIP := "unknown"
 	if md, ok := metadata.FromIncomingContext(ctx); ok {
@@ -515,12 +523,18 @@ func (s *Server) handleBasicAuth(ctx context.Context, authHeader string) (*auth.
 		roles[i] = string(role)
 	}
 
-	return &auth.JWTClaims{
+	claims := &auth.JWTClaims{
 		Sub:      user.ID,
 		Username: user.Username,
 		Email:    user.Email,
 		Roles:    roles,
-	}, nil
+	}
+
+	if s.basicAuthCache != nil {
+		s.basicAuthCache.Set(username, password, claims)
+	}
+
+	return claims, nil
 }
 
 func hasPermissionFromClaims(claims *auth.JWTClaims, required auth.Permission) bool {

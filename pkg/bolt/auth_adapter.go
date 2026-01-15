@@ -55,6 +55,7 @@ import (
 type AuthenticatorAdapter struct {
 	auth           *auth.Authenticator
 	allowAnonymous bool
+	basicAuthCache *auth.BasicAuthCache
 }
 
 // NewAuthenticatorAdapter creates a new BoltAuthenticator that wraps auth.Authenticator.
@@ -76,6 +77,7 @@ func NewAuthenticatorAdapter(authenticator *auth.Authenticator) *AuthenticatorAd
 	return &AuthenticatorAdapter{
 		auth:           authenticator,
 		allowAnonymous: false,
+		basicAuthCache: auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
 	}
 }
 
@@ -87,6 +89,7 @@ func NewAuthenticatorAdapterWithAnonymous(authenticator *auth.Authenticator) *Au
 	return &AuthenticatorAdapter{
 		auth:           authenticator,
 		allowAnonymous: true,
+		basicAuthCache: auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
 	}
 }
 
@@ -174,6 +177,16 @@ func (a *AuthenticatorAdapter) Authenticate(scheme, principal, credentials strin
 		return nil, fmt.Errorf("unsupported authentication scheme: %s (supported: 'basic', 'bearer', 'none')", scheme)
 	}
 
+	if a.basicAuthCache != nil {
+		if cached, ok := a.basicAuthCache.Get(principal, credentials); ok {
+			return &BoltAuthResult{
+				Authenticated: true,
+				Username:      cached.Username,
+				Roles:         cached.Roles,
+			}, nil
+		}
+	}
+
 	// Validate credentials using the shared authenticator
 	// The Authenticate method handles:
 	// - Password verification (bcrypt)
@@ -189,6 +202,15 @@ func (a *AuthenticatorAdapter) Authenticate(scheme, principal, credentials strin
 	roles := make([]string, len(user.Roles))
 	for i, r := range user.Roles {
 		roles[i] = string(r)
+	}
+
+	if a.basicAuthCache != nil {
+		a.basicAuthCache.Set(principal, credentials, &auth.JWTClaims{
+			Sub:      user.ID,
+			Username: user.Username,
+			Email:    user.Email,
+			Roles:    roles,
+		})
 	}
 
 	return &BoltAuthResult{
