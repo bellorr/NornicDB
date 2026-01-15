@@ -55,7 +55,9 @@ func TestClusterTransport_HeartbeatRoundTrip(t *testing.T) {
 	}
 	defer conn.Close()
 
-	waitForConnected(t, conn, 2*time.Second)
+	if !waitForConnected(conn, 2*time.Second) {
+		t.Fatalf("client connection did not become connected")
+	}
 
 	// Ensure RPC path works end-to-end (request routed to handler and response read back).
 	_, err = conn.SendHeartbeat(ctx, &HeartbeatRequest{
@@ -72,15 +74,13 @@ func TestClusterTransport_HeartbeatRoundTrip(t *testing.T) {
 	}
 }
 
-func waitForConnected(t *testing.T, conn PeerConnection, timeout time.Duration) {
-	t.Helper()
-
+func waitForConnected(conn PeerConnection, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if conn.IsConnected() {
-			return
+			return true
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("connection did not become ready")
+	return conn.IsConnected()
 }

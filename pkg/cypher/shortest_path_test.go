@@ -45,8 +45,8 @@ func TestShortestPathCypher(t *testing.T) {
 
 		// Should find a path of length 2 (Alice -> Bob -> Carol or Alice -> Dave -> Carol)
 		path := result.Rows[0][0].(map[string]interface{})
-		length := path["length"].(int)
-		if length != 2 {
+		length := path["length"].(int64)
+		if length != int64(2) {
 			t.Errorf("Expected path length 2, got %d", length)
 		}
 	})
@@ -91,8 +91,8 @@ func TestShortestPathCypher(t *testing.T) {
 		// Both should be length 2
 		for i, row := range result.Rows {
 			path := row[0].(map[string]interface{})
-			length := path["length"].(int)
-			if length != 2 {
+			length := path["length"].(int64)
+			if length != int64(2) {
 				t.Errorf("Path %d: Expected length 2, got %d", i, length)
 			}
 		}

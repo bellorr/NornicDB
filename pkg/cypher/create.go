@@ -57,6 +57,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 	// First, create all nodes
 	createdNodes := make(map[string]*storage.Node)
 	createdEdges := make(map[string]*storage.Edge)
+	createdPaths := make(map[string]PathResult)
 	for _, nodePatternStr := range nodePatterns {
 		nodePatternStr = strings.TrimSpace(nodePatternStr)
 		if nodePatternStr == "" {
@@ -125,7 +126,9 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 		}
 
 		// Process relationship chains - keep going until no remainder
-		currentPattern := relPatternStr
+		pathVar, currentPattern := parseCreatePathAssignment(relPatternStr)
+		var pathNodes []*storage.Node
+		var pathEdges []*storage.Edge
 		for currentPattern != "" {
 			// Parse the relationship pattern: (varA)-[:TYPE {props}]->(varB)
 			sourceContent, relStr, targetContent, isReverse, remainder, err := e.parseCreateRelPatternWithVars(currentPattern)
@@ -233,6 +236,13 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 			if relVar != "" {
 				createdEdges[relVar] = edge
 			}
+			if pathVar != "" {
+				if len(pathNodes) == 0 {
+					pathNodes = append(pathNodes, startNode)
+				}
+				pathEdges = append(pathEdges, edge)
+				pathNodes = append(pathNodes, endNode)
+			}
 			result.Stats.RelationshipsCreated++
 
 			// If there's more chain to process, continue with target as new source
@@ -241,6 +251,14 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				currentPattern = "(" + targetContent + ")" + remainder
 			} else {
 				currentPattern = ""
+			}
+		}
+
+		if pathVar != "" {
+			createdPaths[pathVar] = PathResult{
+				Nodes:         pathNodes,
+				Relationships: pathEdges,
+				Length:        len(pathEdges),
 			}
 		}
 	}
@@ -260,7 +278,15 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				result.Columns[i] = item.expr
 			}
 
-			// Relationship variables first (RETURN r, r.prop, id(r), type(r), ...)
+			// Path variables first (RETURN p, nodes(p), relationships(p), length(p))
+			if varName := extractVariableNameFromReturnItem(item.expr); varName != "" {
+				if path, ok := createdPaths[varName]; ok {
+					row[i] = e.pathToValue(path, item.expr, varName)
+					continue
+				}
+			}
+
+			// Relationship variables next (RETURN r, r.prop, id(r), type(r), ...)
 			//
 			// This matches Neo4j expectations that `r` is returned as a relationship
 			// structure and can be used in functions like id(r)/type(r).
@@ -314,6 +340,20 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 	}
 
 	return result, nil
+}
+
+func parseCreatePathAssignment(pattern string) (string, string) {
+	trimmed := strings.TrimSpace(pattern)
+	eqIdx := strings.Index(trimmed, "=")
+	if eqIdx <= 0 {
+		return "", pattern
+	}
+	left := strings.TrimSpace(trimmed[:eqIdx])
+	right := strings.TrimSpace(trimmed[eqIdx+1:])
+	if left == "" || !isValidIdentifier(left) || !strings.HasPrefix(right, "(") {
+		return "", pattern
+	}
+	return left, right
 }
 
 // executeCreateWithRefs is like executeCreate but also returns the created nodes and edges maps.
@@ -629,6 +669,14 @@ func (e *StorageExecutor) splitCreatePatterns(pattern string) []string {
 				current.WriteByte(c)
 				if c == '-' || c == '<' {
 					inRelationship = true
+				}
+				continue
+			}
+			// Preserve path assignment prefixes like "p=(:A)-[:R]->(:B)".
+			// We drop whitespace, but keep identifiers and "=" before the first "(".
+			if depth == 0 && !inRelationship {
+				if isWordChar(byte(c)) || c == '=' {
+					current.WriteByte(c)
 				}
 			}
 		}
