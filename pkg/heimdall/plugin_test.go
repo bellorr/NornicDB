@@ -577,6 +577,51 @@ func TestListHeimdallPlugins(t *testing.T) {
 	assert.True(t, names["plugin2"])
 }
 
+type OrderedMockPlugin struct {
+	*MockHeimdallPlugin
+	priority int
+	before   []string
+	after    []string
+}
+
+func NewOrderedMockPlugin(name string, priority int, before, after []string) *OrderedMockPlugin {
+	return &OrderedMockPlugin{
+		MockHeimdallPlugin: NewMockPlugin(name),
+		priority:           priority,
+		before:             before,
+		after:              after,
+	}
+}
+
+func (o *OrderedMockPlugin) Priority() int    { return o.priority }
+func (o *OrderedMockPlugin) Before() []string { return o.before }
+func (o *OrderedMockPlugin) After() []string  { return o.after }
+
+func TestListHeimdallPlugins_Ordering(t *testing.T) {
+	globalManager = nil
+
+	manager := GetSubsystemManager()
+	ctx := SubsystemContext{
+		Config:  DefaultConfig(),
+		Bifrost: &NoOpBifrost{},
+	}
+	manager.SetContext(ctx)
+
+	pluginA := NewOrderedMockPlugin("alpha", 0, nil, nil)
+	pluginB := NewOrderedMockPlugin("beta", 10, nil, nil)
+	pluginC := NewOrderedMockPlugin("gamma", 5, nil, []string{"beta"})
+
+	require.NoError(t, manager.RegisterPlugin(pluginA, "", true))
+	require.NoError(t, manager.RegisterPlugin(pluginB, "", true))
+	require.NoError(t, manager.RegisterPlugin(pluginC, "", true))
+
+	plugins := ListHeimdallPlugins()
+	require.Len(t, plugins, 3)
+	assert.Equal(t, "beta", plugins[0].Plugin.Name())
+	assert.Equal(t, "gamma", plugins[1].Plugin.Name())
+	assert.Equal(t, "alpha", plugins[2].Plugin.Name())
+}
+
 func TestListHeimdallActions(t *testing.T) {
 	// Reset global manager
 	globalManager = nil

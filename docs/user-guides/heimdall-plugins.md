@@ -10,9 +10,10 @@
 6. [Building and Loading Plugins](#building-and-loading-plugins)
 7. [Testing Plugins](#testing-plugins)
 8. [Example: Complete Plugin](#example-complete-plugin)
-9. [Optional Lifecycle Hooks](#optional-lifecycle-hooks)
-10. [Best Practices](#best-practices)
-11. [Troubleshooting](#troubleshooting)
+9. [Ordering and Determinism](#ordering-and-determinism)
+10. [Optional Lifecycle Hooks](#optional-lifecycle-hooks)
+11. [Best Practices](#best-practices)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -605,6 +606,27 @@ func (p *AnomalyPlugin) addEvent(eventType, message string) {
 
 ---
 
+## Ordering and Determinism
+
+Heimdall executes hooks in a deterministic order. Plugins can opt into ordering
+control by implementing `PluginOrdering`.
+
+```go
+type PluginOrdering interface {
+    Priority() int      // Higher runs earlier
+    Before() []string   // Plugins that must run after this one
+    After() []string    // Plugins that must run before this one
+}
+```
+
+If Heimdall detects a cycle, it falls back to `priority desc, name asc` and logs a warning.
+
+### Execution Model
+
+- PrePrompt and PreExecute: ordered and synchronous.
+- PostExecute: asynchronous via a bounded worker pool.
+- DatabaseEvent: per-plugin bounded queues with backpressure.
+
 ## Optional Lifecycle Hooks
 
 Plugins can implement optional interfaces to hook into the request lifecycle. These are **opt-in** - plugins only implement what they need.
@@ -686,6 +708,9 @@ func (p *MyPlugin) PostExecute(ctx *heimdall.PostExecuteContext) {
 }
 ```
 
+PostExecute hooks run asynchronously via a bounded worker pool. If the queue is full,
+the job is dropped and logged.
+
 ### DatabaseEventHook (React to DB Operations)
 
 ```go
@@ -707,6 +732,9 @@ func (p *MyPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
     }
 }
 ```
+
+Database events are delivered through per-plugin bounded queues. Under sustained
+load, events may be dropped to preserve system health.
 
 ### Autonomous Action Invocation (HeimdallInvoker)
 
@@ -861,7 +889,13 @@ if err != nil {
 }
 ```
 
-### 4. Progress Updates (Inline Notifications)
+### 4. Ordering and Hooks
+
+- Only implement `PluginOrdering` if you truly need deterministic ordering.
+- Avoid hard dependencies unless required; keep hooks independent when possible.
+- Assume PostExecute and DatabaseEvent delivery can be dropped under load.
+
+### 5. Progress Updates (Inline Notifications)
 
 ```go
 // Notifications are sent inline with the streaming response

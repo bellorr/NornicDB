@@ -75,6 +75,7 @@ import (
 	"path/filepath"
 	"plugin"
 	"reflect"
+	"sort"
 	"sync"
 	"time"
 )
@@ -628,11 +629,13 @@ type LoadedHeimdallPlugin struct {
 // SubsystemManager manages all SLM plugins/subsystems.
 // Provides the SLM with full control over registered subsystems.
 type SubsystemManager struct {
-	mu          sync.RWMutex
-	plugins     map[string]*LoadedHeimdallPlugin // keyed by plugin name
-	actions     map[string]ActionFunc            // keyed by full name: slm.plugin.action
-	ctx         SubsystemContext                 // shared context for subsystems
-	initialized bool
+	mu             sync.RWMutex
+	plugins        map[string]*LoadedHeimdallPlugin // keyed by plugin name
+	actions        map[string]ActionFunc            // keyed by full name: slm.plugin.action
+	ctx            SubsystemContext                 // shared context for subsystems
+	initialized    bool
+	orderedPlugins []*LoadedHeimdallPlugin
+	orderDirty     bool
 }
 
 var (
@@ -646,8 +649,9 @@ func GetSubsystemManager() *SubsystemManager {
 	defer globalManagerMu.Unlock()
 	if globalManager == nil {
 		globalManager = &SubsystemManager{
-			plugins: make(map[string]*LoadedHeimdallPlugin),
-			actions: make(map[string]ActionFunc),
+			plugins:    make(map[string]*LoadedHeimdallPlugin),
+			actions:    make(map[string]ActionFunc),
+			orderDirty: true,
 		}
 	}
 	return globalManager
@@ -682,10 +686,19 @@ func (m *SubsystemManager) RegisterPlugin(p HeimdallPlugin, path string, builtin
 	}
 
 	// Register plugin
-	m.plugins[name] = &LoadedHeimdallPlugin{
+	lp := &LoadedHeimdallPlugin{
 		Plugin:  p,
 		Path:    path,
 		Builtin: builtin,
+	}
+	m.plugins[name] = lp
+	m.orderDirty = true
+
+	globalEventDispatcher.mu.RLock()
+	running := globalEventDispatcher.running
+	globalEventDispatcher.mu.RUnlock()
+	if running {
+		globalEventDispatcher.ensurePluginQueueForPlugin(lp)
 	}
 
 	// Register all actions from this plugin
@@ -722,11 +735,12 @@ func (m *SubsystemManager) GetAction(name string) (ActionFunc, bool) {
 // StartAll starts all registered subsystems.
 func (m *SubsystemManager) StartAll() error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	plugins := m.listOrderedPluginsLocked()
+	m.mu.RUnlock()
 
-	for name, lp := range m.plugins {
+	for _, lp := range plugins {
 		if err := lp.Plugin.Start(); err != nil {
-			return fmt.Errorf("failed to start %s: %w", name, err)
+			return fmt.Errorf("failed to start %s: %w", lp.Plugin.Name(), err)
 		}
 	}
 	return nil
@@ -735,12 +749,13 @@ func (m *SubsystemManager) StartAll() error {
 // StopAll stops all registered subsystems.
 func (m *SubsystemManager) StopAll() error {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	plugins := m.listOrderedPluginsLocked()
+	m.mu.RUnlock()
 
 	var lastErr error
-	for name, lp := range m.plugins {
+	for _, lp := range plugins {
 		if err := lp.Plugin.Stop(); err != nil {
-			lastErr = fmt.Errorf("failed to stop %s: %w", name, err)
+			lastErr = fmt.Errorf("failed to stop %s: %w", lp.Plugin.Name(), err)
 		}
 	}
 	return lastErr
@@ -752,24 +767,28 @@ func (m *SubsystemManager) ShutdownAll() error {
 	defer m.mu.Unlock()
 
 	var lastErr error
-	for name, lp := range m.plugins {
+	plugins := m.listOrderedPluginsLocked()
+	for _, lp := range plugins {
 		if err := lp.Plugin.Shutdown(); err != nil {
-			lastErr = fmt.Errorf("failed to shutdown %s: %w", name, err)
+			lastErr = fmt.Errorf("failed to shutdown %s: %w", lp.Plugin.Name(), err)
 		}
 	}
 	m.plugins = make(map[string]*LoadedHeimdallPlugin)
 	m.actions = make(map[string]ActionFunc)
+	m.orderedPlugins = nil
+	m.orderDirty = true
 	return lastErr
 }
 
 // AllHealth returns health status of all subsystems.
 func (m *SubsystemManager) AllHealth() map[string]SubsystemHealth {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	plugins := m.listOrderedPluginsLocked()
+	m.mu.RUnlock()
 
 	result := make(map[string]SubsystemHealth)
-	for name, lp := range m.plugins {
-		result[name] = lp.Plugin.Health()
+	for _, lp := range plugins {
+		result[lp.Plugin.Name()] = lp.Plugin.Health()
 	}
 	return result
 }
@@ -777,11 +796,12 @@ func (m *SubsystemManager) AllHealth() map[string]SubsystemHealth {
 // AllSummaries returns summaries of all subsystems (for SLM context).
 func (m *SubsystemManager) AllSummaries() map[string]string {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	plugins := m.listOrderedPluginsLocked()
+	m.mu.RUnlock()
 
 	result := make(map[string]string)
-	for name, lp := range m.plugins {
-		result[name] = lp.Plugin.Summary()
+	for _, lp := range plugins {
+		result[lp.Plugin.Name()] = lp.Plugin.Summary()
 	}
 	return result
 }
@@ -1058,11 +1078,139 @@ func ListHeimdallPlugins() []*LoadedHeimdallPlugin {
 	m := GetSubsystemManager()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	result := make([]*LoadedHeimdallPlugin, 0, len(m.plugins))
-	for _, p := range m.plugins {
-		result = append(result, p)
+	return m.listOrderedPluginsLocked()
+}
+
+func (m *SubsystemManager) listOrderedPluginsLocked() []*LoadedHeimdallPlugin {
+	if !m.orderDirty && m.orderedPlugins != nil {
+		return append([]*LoadedHeimdallPlugin(nil), m.orderedPlugins...)
 	}
+
+	ordered := orderPlugins(m.plugins)
+	m.orderedPlugins = ordered
+	m.orderDirty = false
+	return append([]*LoadedHeimdallPlugin(nil), ordered...)
+}
+
+func orderPlugins(plugins map[string]*LoadedHeimdallPlugin) []*LoadedHeimdallPlugin {
+	if len(plugins) == 0 {
+		return nil
+	}
+
+	nodes := make(map[string]*LoadedHeimdallPlugin, len(plugins))
+	for name, lp := range plugins {
+		nodes[name] = lp
+	}
+
+	type nodeInfo struct {
+		inDegree int
+		out      map[string]struct{}
+		priority int
+	}
+
+	info := make(map[string]*nodeInfo, len(nodes))
+	for name, lp := range nodes {
+		info[name] = &nodeInfo{
+			out:      make(map[string]struct{}),
+			priority: pluginPriority(lp.Plugin),
+		}
+	}
+
+	addEdge := func(from, to string) {
+		if from == to {
+			return
+		}
+		if _, ok := nodes[from]; !ok {
+			return
+		}
+		if _, ok := nodes[to]; !ok {
+			return
+		}
+		if _, exists := info[from].out[to]; exists {
+			return
+		}
+		info[from].out[to] = struct{}{}
+		info[to].inDegree++
+	}
+
+	for name, lp := range nodes {
+		before, after := pluginOrdering(lp.Plugin)
+		for _, b := range before {
+			addEdge(name, b)
+		}
+		for _, a := range after {
+			addEdge(a, name)
+		}
+	}
+
+	ready := make([]string, 0, len(nodes))
+	for name, data := range info {
+		if data.inDegree == 0 {
+			ready = append(ready, name)
+		}
+	}
+
+	sortReady := func() {
+		sort.Slice(ready, func(i, j int) bool {
+			pi := info[ready[i]].priority
+			pj := info[ready[j]].priority
+			if pi != pj {
+				return pi > pj
+			}
+			return ready[i] < ready[j]
+		})
+	}
+
+	sortReady()
+
+	result := make([]*LoadedHeimdallPlugin, 0, len(nodes))
+	for len(ready) > 0 {
+		name := ready[0]
+		ready = ready[1:]
+		result = append(result, nodes[name])
+
+		for out := range info[name].out {
+			info[out].inDegree--
+			if info[out].inDegree == 0 {
+				ready = append(ready, out)
+			}
+		}
+		sortReady()
+	}
+
+	if len(result) != len(nodes) {
+		// Cycle detected - fall back to deterministic priority + name ordering.
+		fallback := make([]*LoadedHeimdallPlugin, 0, len(nodes))
+		for _, lp := range nodes {
+			fallback = append(fallback, lp)
+		}
+		sort.Slice(fallback, func(i, j int) bool {
+			pi := pluginPriority(fallback[i].Plugin)
+			pj := pluginPriority(fallback[j].Plugin)
+			if pi != pj {
+				return pi > pj
+			}
+			return fallback[i].Plugin.Name() < fallback[j].Plugin.Name()
+		})
+		log.Printf("[Heimdall] Plugin ordering cycle detected; falling back to priority order")
+		return fallback
+	}
+
 	return result
+}
+
+func pluginPriority(p HeimdallPlugin) int {
+	if ordering, ok := p.(PluginOrdering); ok {
+		return ordering.Priority()
+	}
+	return 0
+}
+
+func pluginOrdering(p HeimdallPlugin) (before []string, after []string) {
+	if ordering, ok := p.(PluginOrdering); ok {
+		return ordering.Before(), ordering.After()
+	}
+	return nil, nil
 }
 
 // RegisterBuiltinAction registers a built-in action (not from .so plugin).
@@ -1210,9 +1358,9 @@ func BuiltinActions() []ActionFunc {
 
 				// Build schema context
 				schemaInfo := map[string]interface{}{
-					"labels":      labels,
-					"properties":  properties,
-					"relTypes":    relTypes,
+					"labels":     labels,
+					"properties": properties,
+					"relTypes":   relTypes,
 				}
 
 				// Use SLM to generate completion if available
@@ -1369,7 +1517,7 @@ func CallPreExecuteHooks(ctx *PreExecuteContext) PreExecuteResult {
 
 // CallPostExecuteHooks calls PostExecute on all plugins that implement PostExecuteHook.
 // Plugins that don't implement the hook are silently skipped.
-// This is fire-and-forget - runs asynchronously.
+// This is fire-and-forget - runs asynchronously using a bounded worker pool.
 func CallPostExecuteHooks(ctx *PostExecuteContext) {
 	if !HeimdallPluginsInitialized() {
 		return
@@ -1379,8 +1527,68 @@ func CallPostExecuteHooks(ctx *PostExecuteContext) {
 	for _, p := range plugins {
 		// Check if plugin implements PostExecuteHook
 		if hook, ok := p.Plugin.(PostExecuteHook); ok {
-			go hook.PostExecute(ctx) // Fire and forget
+			postExecutePool().enqueue(postExecuteJob{
+				pluginName: p.Plugin.Name(),
+				hook:       hook,
+				ctx:        ctx,
+			})
 		}
+	}
+}
+
+type postExecuteJob struct {
+	pluginName string
+	hook       PostExecuteHook
+	ctx        *PostExecuteContext
+}
+
+type postExecuteWorkerPool struct {
+	once    sync.Once
+	jobs    chan postExecuteJob
+	workers int
+}
+
+const (
+	defaultPostExecuteWorkers = 4
+	defaultPostExecuteQueue   = 256
+)
+
+var globalPostExecutePool = &postExecuteWorkerPool{workers: defaultPostExecuteWorkers}
+
+func postExecutePool() *postExecuteWorkerPool {
+	globalPostExecutePool.once.Do(globalPostExecutePool.start)
+	return globalPostExecutePool
+}
+
+func (p *postExecuteWorkerPool) start() {
+	if p.workers <= 0 {
+		p.workers = defaultPostExecuteWorkers
+	}
+	p.jobs = make(chan postExecuteJob, defaultPostExecuteQueue)
+	for i := 0; i < p.workers; i++ {
+		go func() {
+			for job := range p.jobs {
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							log.Printf("[Heimdall] PostExecute panic in %s: %v", job.pluginName, r)
+						}
+					}()
+					job.hook.PostExecute(job.ctx)
+				}()
+			}
+		}()
+	}
+}
+
+func (p *postExecuteWorkerPool) enqueue(job postExecuteJob) {
+	if p.jobs == nil {
+		p.start()
+	}
+	select {
+	case p.jobs <- job:
+	default:
+		log.Printf("[Heimdall] PostExecute queue full, dropping job from %s", job.pluginName)
 	}
 }
 
@@ -1424,15 +1632,27 @@ func CallSynthesisHooks(ctx *SynthesisContext) string {
 
 // dbEventDispatcher manages asynchronous delivery of database events to plugins.
 type dbEventDispatcher struct {
-	mu      sync.RWMutex
-	running bool
-	events  chan *DatabaseEvent
-	done    chan struct{}
+	mu           sync.RWMutex
+	running      bool
+	events       chan *DatabaseEvent
+	done         chan struct{}
+	pluginQueues map[string]*pluginEventQueue
 }
 
 var globalEventDispatcher = &dbEventDispatcher{
-	events: make(chan *DatabaseEvent, 1000), // Buffer up to 1000 events
-	done:   make(chan struct{}),
+	events:       make(chan *DatabaseEvent, 1000), // Buffer up to 1000 events
+	done:         make(chan struct{}),
+	pluginQueues: make(map[string]*pluginEventQueue),
+}
+
+const (
+	defaultDatabaseEventQueue = 256
+)
+
+type pluginEventQueue struct {
+	name string
+	hook DatabaseEventHook
+	ch   chan *DatabaseEvent
 }
 
 // StartEventDispatcher starts the background event dispatcher.
@@ -1449,6 +1669,7 @@ func StartEventDispatcher() {
 	d.running = true
 	d.events = make(chan *DatabaseEvent, 1000)
 	d.done = make(chan struct{})
+	d.pluginQueues = make(map[string]*pluginEventQueue)
 
 	go func() {
 		for {
@@ -1474,6 +1695,10 @@ func StopEventDispatcher() {
 
 	d.running = false
 	close(d.done)
+	for _, queue := range d.pluginQueues {
+		close(queue.ch)
+	}
+	d.pluginQueues = make(map[string]*pluginEventQueue)
 }
 
 // dispatchEventToPlugins sends an event to all plugins that implement DatabaseEventHook.
@@ -1486,16 +1711,63 @@ func dispatchEventToPlugins(event *DatabaseEvent) {
 	for _, p := range plugins {
 		// Check if plugin implements DatabaseEventHook
 		if hook, ok := p.Plugin.(DatabaseEventHook); ok {
-			// Fire and forget - don't block on slow plugins
-			go func(h DatabaseEventHook, e *DatabaseEvent) {
+			globalEventDispatcher.enqueueEvent(p.Plugin.Name(), hook, event)
+		}
+	}
+}
+
+func (d *dbEventDispatcher) ensurePluginQueueForPlugin(lp *LoadedHeimdallPlugin) {
+	if lp == nil {
+		return
+	}
+	if hook, ok := lp.Plugin.(DatabaseEventHook); ok {
+		d.ensurePluginQueue(lp.Plugin.Name(), hook)
+	}
+}
+
+func (d *dbEventDispatcher) ensurePluginQueue(name string, hook DatabaseEventHook) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	if _, ok := d.pluginQueues[name]; ok {
+		return
+	}
+
+	queue := &pluginEventQueue{
+		name: name,
+		hook: hook,
+		ch:   make(chan *DatabaseEvent, defaultDatabaseEventQueue),
+	}
+	d.pluginQueues[name] = queue
+
+	go func(q *pluginEventQueue) {
+		for event := range q.ch {
+			func() {
 				defer func() {
 					if r := recover(); r != nil {
-						fmt.Printf("[Heimdall] DatabaseEventHook panic in %T: %v\n", h, r)
+						fmt.Printf("[Heimdall] DatabaseEventHook panic in %s: %v\n", q.name, r)
 					}
 				}()
-				h.OnDatabaseEvent(e)
-			}(hook, event)
+				q.hook.OnDatabaseEvent(event)
+			}()
 		}
+	}(queue)
+}
+
+func (d *dbEventDispatcher) enqueueEvent(name string, hook DatabaseEventHook, event *DatabaseEvent) {
+	d.ensurePluginQueue(name, hook)
+
+	d.mu.RLock()
+	queue := d.pluginQueues[name]
+	d.mu.RUnlock()
+	if queue == nil {
+		return
+	}
+
+	select {
+	case queue.ch <- event:
+	default:
+		fmt.Printf("[Heimdall] DatabaseEvent queue full for %s, dropping event: %s\n", name, event.Type)
 	}
 }
 

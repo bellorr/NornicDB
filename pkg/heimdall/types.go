@@ -1153,6 +1153,20 @@ type DatabaseEventHook interface {
 	OnDatabaseEvent(event *DatabaseEvent)
 }
 
+// PluginOrdering is an optional interface for plugins that want deterministic ordering.
+// Higher priority runs earlier. Before/After define ordering constraints by plugin name.
+type PluginOrdering interface {
+	// Priority controls ordering when there are no explicit dependencies.
+	// Higher values run earlier.
+	Priority() int
+
+	// Before lists plugin names that must run after this plugin.
+	Before() []string
+
+	// After lists plugin names that must run before this plugin.
+	After() []string
+}
+
 // FullLifecycleHook is a convenience interface for plugins that implement all hooks.
 // Plugins are NOT required to implement this - they can pick and choose.
 //
