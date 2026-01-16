@@ -610,7 +610,7 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 
 	// For routing, we still need upperQuery for some handlers
 	// TODO: Migrate handlers to use QueryInfo directly
-	upperQuery := strings.ToUpper(cypher)
+	upperQuery := strings.ToUpper(strings.TrimSpace(cypher))
 
 	// Try cache for read-only queries (using cached analysis)
 	if info.IsReadOnly && e.cache != nil {
@@ -1271,7 +1271,9 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 
 	// Only route to executeSet if it's a MATCH ... SET or standalone SET
 	if hasSet && !hasOnCreateSet && !hasOnMatchSet {
-		return e.executeSet(ctx, cypher)
+		if startsWithMatch || findKeywordIndex(cypher, "SET") == 0 {
+			return e.executeSet(ctx, cypher)
+		}
 	}
 
 	// Handle MATCH ... REMOVE (property removal) - string-literal-aware

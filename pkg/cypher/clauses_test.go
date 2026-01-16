@@ -258,7 +258,7 @@ func TestCallDbIndexes(t *testing.T) {
 	}
 
 	// Should return empty list (no indexes implemented yet)
-	if result.Columns == nil || len(result.Columns) == 0 {
+	if len(result.Columns) == 0 {
 		t.Error("Expected columns in result")
 	}
 }
@@ -1165,6 +1165,49 @@ func TestSetPlusMergeWithParameter(t *testing.T) {
 	}
 	if node.Properties["count"] != int64(42) {
 		t.Errorf("Numeric property from parameter not added, got: %v", node.Properties["count"])
+	}
+}
+
+func TestSetPlusMergeWithMapVariable(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create a node with some properties
+	_, _ = store.CreateNode(&storage.Node{
+		ID:     "test-node-map-var",
+		Labels: []string{"MergeTest"},
+		Properties: map[string]interface{}{
+			"name":    "Original",
+			"version": 1,
+		},
+	})
+
+	result, err := e.Execute(ctx, `
+		WITH {version: 3, status: 'from_with'} AS props
+		MATCH (n:MergeTest {name: 'Original'})
+		SET n += props
+	`, nil)
+	if err != nil {
+		t.Fatalf("SET += with map variable failed: %v", err)
+	}
+
+	t.Logf("Stats: %+v", result.Stats)
+
+	// Verify properties were merged - get fresh copy
+	node, err := store.GetNode("test-node-map-var")
+	if err != nil {
+		t.Fatalf("Failed to get node: %v", err)
+	}
+	t.Logf("Node properties: %+v", node.Properties)
+
+	if node.Properties["status"] != "from_with" {
+		t.Errorf("Map variable property not added, got: %v", node.Properties["status"])
+	}
+	if node.Properties["version"] != int64(3) {
+		t.Errorf("Map variable property not updated, got: %v", node.Properties["version"])
 	}
 }
 

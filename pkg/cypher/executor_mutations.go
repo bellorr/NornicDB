@@ -490,6 +490,8 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 
 	// Parse the properties to merge
 	var propsToMerge map[string]interface{}
+	mapVarName := ""
+	paramMapUsed := false
 
 	if strings.HasPrefix(right, "{") {
 		// Inline properties: {key: value, ...}
@@ -514,34 +516,56 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 			return nil, fmt.Errorf("SET += parameter $%s not found in provided parameters", paramName)
 		}
 
-		// Validate that the parameter value is a map
-		propsMap, ok := paramValue.(map[string]interface{})
-		if !ok {
-			// Try to convert from map[interface{}]interface{} (common when parsing JSON)
-			if genericMap, ok := paramValue.(map[interface{}]interface{}); ok {
-				propsMap = make(map[string]interface{})
-				for k, v := range genericMap {
-					keyStr, ok := k.(string)
-					if !ok {
-						return nil, fmt.Errorf("SET += parameter $%s must be a map with string keys, got key type %T", paramName, k)
-					}
-					propsMap[keyStr] = v
-				}
-			} else {
-				return nil, fmt.Errorf("SET += parameter $%s must be a map, got type %T", paramName, paramValue)
-			}
+		propsMap, err := normalizePropsMap(paramValue, fmt.Sprintf("parameter $%s", paramName))
+		if err != nil {
+			return nil, err
 		}
-
 		propsToMerge = propsMap
+		paramMapUsed = true
+	} else if isValidIdentifier(right) {
+		// Map variable: SET n += props
+		mapVarName = right
 	} else {
 		return nil, fmt.Errorf("SET += requires a map or parameter (got: %q)", right)
 	}
 
 	// Collect updated nodes for RETURN
 	var updatedNodes []*storage.Node
+	colIndex := make(map[string]int, len(matchResult.Columns))
+	for i, col := range matchResult.Columns {
+		colIndex[col] = i
+	}
+	targetIdx, hasTargetIdx := colIndex[variable]
+	mapIdx, hasMapIdx := colIndex[mapVarName]
 
 	// Update matched nodes
 	for _, row := range matchResult.Rows {
+		propsForRow := propsToMerge
+		if mapVarName != "" && !paramMapUsed {
+			if !hasMapIdx || mapIdx >= len(row) {
+				return nil, fmt.Errorf("SET += requires a map variable in scope (missing %q)", mapVarName)
+			}
+			propsMap, err := normalizePropsMap(row[mapIdx], fmt.Sprintf("variable %s", mapVarName))
+			if err != nil {
+				return nil, err
+			}
+			propsForRow = propsMap
+		}
+
+		// Prefer updating only the requested variable, fall back to scanning row.
+		if hasTargetIdx && targetIdx < len(row) {
+			node, ok := row[targetIdx].(*storage.Node)
+			if ok && node != nil {
+				for k, v := range propsForRow {
+					setNodeProperty(node, k, v)
+					result.Stats.PropertiesSet++
+				}
+				_ = e.storage.UpdateNode(node)
+				updatedNodes = append(updatedNodes, node)
+				continue
+			}
+		}
+
 		for _, val := range row {
 			node, ok := val.(*storage.Node)
 			if !ok || node == nil {
@@ -549,7 +573,7 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 			}
 
 			// Merge properties (new values override existing)
-			for k, v := range propsToMerge {
+			for k, v := range propsForRow {
 				setNodeProperty(node, k, v)
 				result.Stats.PropertiesSet++
 			}
@@ -586,6 +610,25 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 	}
 
 	return result, nil
+}
+
+func normalizePropsMap(value interface{}, source string) (map[string]interface{}, error) {
+	propsMap, ok := value.(map[string]interface{})
+	if ok {
+		return propsMap, nil
+	}
+	if genericMap, ok := value.(map[interface{}]interface{}); ok {
+		propsMap = make(map[string]interface{}, len(genericMap))
+		for k, v := range genericMap {
+			keyStr, ok := k.(string)
+			if !ok {
+				return nil, fmt.Errorf("SET += %s must be a map with string keys, got key type %T", source, k)
+			}
+			propsMap[keyStr] = v
+		}
+		return propsMap, nil
+	}
+	return nil, fmt.Errorf("SET += %s must be a map, got type %T", source, value)
 }
 
 // executeRemove handles MATCH ... REMOVE queries for property removal.

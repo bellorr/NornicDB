@@ -139,7 +139,13 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 			alias = item
 		}
 
-		val := e.evaluateExpressionWithContext(expr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+		trimmedExpr := strings.TrimSpace(expr)
+		var val interface{}
+		if strings.HasPrefix(trimmedExpr, "{") && strings.HasSuffix(trimmedExpr, "}") {
+			val = e.evaluateMapLiteral(trimmedExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+		} else {
+			val = e.evaluateExpressionWithContext(trimmedExpr, make(map[string]*storage.Node), make(map[string]*storage.Edge))
+		}
 		boundVars[alias] = val
 		columns = append(columns, alias)
 		values = append(values, val)
@@ -236,6 +242,10 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, replacement)
 			case string:
 				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, fmt.Sprintf("'%s'", v))
+			case map[string]interface{}:
+				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, mapToCypherLiteral(v))
+			case map[interface{}]interface{}:
+				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, mapToCypherLiteral(normalizeInterfaceMap(v)))
 			case nil:
 				substitutedRemainder = strings.ReplaceAll(substitutedRemainder, varName, "null")
 			default:
@@ -249,6 +259,51 @@ func (e *StorageExecutor) executeWith(ctx context.Context, cypher string) (*Exec
 		Columns: columns,
 		Rows:    [][]interface{}{values},
 	}, nil
+}
+
+func normalizeInterfaceMap(input map[interface{}]interface{}) map[string]interface{} {
+	output := make(map[string]interface{}, len(input))
+	for k, v := range input {
+		key := fmt.Sprintf("%v", k)
+		output[key] = v
+	}
+	return output
+}
+
+func mapToCypherLiteral(m map[string]interface{}) string {
+	var parts []string
+	for k, v := range m {
+		parts = append(parts, fmt.Sprintf("%s: %s", k, valueToCypherLiteral(v)))
+	}
+	return "{" + strings.Join(parts, ", ") + "}"
+}
+
+func valueToCypherLiteral(v interface{}) string {
+	switch val := v.(type) {
+	case string:
+		return fmt.Sprintf("'%s'", val)
+	case bool:
+		if val {
+			return "true"
+		}
+		return "false"
+	case int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64:
+		return fmt.Sprintf("%v", val)
+	case map[string]interface{}:
+		return mapToCypherLiteral(val)
+	case map[interface{}]interface{}:
+		return mapToCypherLiteral(normalizeInterfaceMap(val))
+	case []interface{}:
+		items := make([]string, len(val))
+		for i, item := range val {
+			items[i] = valueToCypherLiteral(item)
+		}
+		return "[" + strings.Join(items, ", ") + "]"
+	case nil:
+		return "null"
+	default:
+		return fmt.Sprintf("%v", val)
+	}
 }
 
 // splitWithItems splits WITH expressions respecting nested brackets and quotes
