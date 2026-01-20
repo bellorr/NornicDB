@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -594,8 +593,7 @@ func (a *StorageAdapter) GetWALEntries(fromPosition uint64, maxEntries int) ([]*
 	a.walMu.RLock()
 	defer a.walMu.RUnlock()
 
-	walPath := filepath.Join(a.walDir, "wal.log")
-	storageEntries, err := storage.ReadWALEntries(walPath)
+	storageEntries, err := storage.ReadWALEntriesFromDir(a.walDir)
 	if err != nil {
 		// Handle missing WAL file gracefully (may not exist yet)
 		if os.IsNotExist(err) {

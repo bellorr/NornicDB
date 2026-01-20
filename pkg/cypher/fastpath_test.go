@@ -182,24 +182,23 @@ func TestFastPath_RegexMatching(t *testing.T) {
 // BenchmarkFastPath_WithLimit benchmarks the WITH LIMIT pattern.
 func BenchmarkFastPath_WithLimit(b *testing.B) {
 	baseEngine := storage.NewMemoryEngine()
-
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	defer asyncEngine.Close()
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	defer asyncBase.Close()
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
 
 	// Setup
 	for i := 0; i < 10; i++ {
-		asyncEngine.CreateNode(&storage.Node{
+		_, _ = engine.CreateNode(&storage.Node{
 			ID:     storage.NodeID(fmt.Sprintf("actor%d", i)),
 			Labels: []string{"Actor"},
 		})
-		asyncEngine.CreateNode(&storage.Node{
+		_, _ = engine.CreateNode(&storage.Node{
 			ID:     storage.NodeID(fmt.Sprintf("movie%d", i)),
 			Labels: []string{"Movie"},
 		})
 	}
 
-	executor := NewStorageExecutor(asyncEngine)
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 	query := "MATCH (a:Actor), (m:Movie) WITH a, m LIMIT 1 CREATE (a)-[r:T]->(m) DELETE r"
 
@@ -212,14 +211,13 @@ func BenchmarkFastPath_WithLimit(b *testing.B) {
 // BenchmarkFastPath_LDBC benchmarks the LDBC property pattern.
 func BenchmarkFastPath_LDBC(b *testing.B) {
 	baseEngine := storage.NewMemoryEngine()
-
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	defer asyncEngine.Close()
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	defer asyncBase.Close()
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
 
 	// Setup
 	for i := 1; i <= 10; i++ {
-		asyncEngine.CreateNode(&storage.Node{
+		_, _ = engine.CreateNode(&storage.Node{
 			ID:     storage.NodeID(fmt.Sprintf("person%d", i)),
 			Labels: []string{"Person"},
 			Properties: map[string]interface{}{
@@ -228,7 +226,7 @@ func BenchmarkFastPath_LDBC(b *testing.B) {
 		})
 	}
 
-	executor := NewStorageExecutor(asyncEngine)
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 	query := "MATCH (p1:Person {id: 1}), (p2:Person {id: 2}) CREATE (p1)-[r:KNOWS]->(p2) DELETE r"
 

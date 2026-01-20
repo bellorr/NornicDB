@@ -25,9 +25,10 @@ import (
 type ConstraintType string
 
 const (
-	ConstraintUnique  ConstraintType = "UNIQUE"
-	ConstraintNodeKey ConstraintType = "NODE_KEY"
-	ConstraintExists  ConstraintType = "EXISTS"
+	ConstraintUnique       ConstraintType = "UNIQUE"
+	ConstraintNodeKey      ConstraintType = "NODE_KEY"
+	ConstraintExists       ConstraintType = "EXISTS"
+	ConstraintPropertyType ConstraintType = "PROPERTY_TYPE"
 )
 
 // Constraint represents a Neo4j-compatible schema constraint.
@@ -43,8 +44,9 @@ type SchemaManager struct {
 	mu sync.RWMutex
 
 	// Constraints
-	uniqueConstraints map[string]*UniqueConstraint // key: "Label:property"
-	constraints       map[string]Constraint        // key: constraint name, stores all constraint types
+	uniqueConstraints       map[string]*UniqueConstraint    // key: "Label:property"
+	constraints             map[string]Constraint           // key: constraint name, stores all constraint types
+	propertyTypeConstraints map[string]PropertyTypeConstraint // key: constraint name
 
 	// Indexes
 	propertyIndexes  map[string]*PropertyIndex  // key: "Label:property" (single property)
@@ -145,13 +147,14 @@ type SchemaManager struct {
 //	All methods are thread-safe for concurrent access.
 func NewSchemaManager() *SchemaManager {
 	return &SchemaManager{
-		uniqueConstraints: make(map[string]*UniqueConstraint),
-		constraints:       make(map[string]Constraint),
-		propertyIndexes:   make(map[string]*PropertyIndex),
-		compositeIndexes:  make(map[string]*CompositeIndex),
-		fulltextIndexes:   make(map[string]*FulltextIndex),
-		vectorIndexes:     make(map[string]*VectorIndex),
-		rangeIndexes:      make(map[string]*RangeIndex),
+		uniqueConstraints:       make(map[string]*UniqueConstraint),
+		constraints:             make(map[string]Constraint),
+		propertyTypeConstraints: make(map[string]PropertyTypeConstraint),
+		propertyIndexes:         make(map[string]*PropertyIndex),
+		compositeIndexes:        make(map[string]*CompositeIndex),
+		fulltextIndexes:         make(map[string]*FulltextIndex),
+		vectorIndexes:           make(map[string]*VectorIndex),
+		rangeIndexes:            make(map[string]*RangeIndex),
 	}
 }
 
@@ -370,6 +373,35 @@ func (sm *SchemaManager) AddUniqueConstraint(name, label, property string) error
 		if err := sm.persist(def); err != nil {
 			delete(sm.uniqueConstraints, key)
 			delete(sm.constraints, name)
+			return err
+		}
+	}
+
+	return nil
+}
+
+// AddPropertyTypeConstraint adds a property type constraint to the schema.
+// This enforces a specific type for a property on a label (NULL values allowed).
+func (sm *SchemaManager) AddPropertyTypeConstraint(name, label, property string, expectedType PropertyType) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if _, exists := sm.propertyTypeConstraints[name]; exists {
+		return nil
+	}
+
+	ptc := PropertyTypeConstraint{
+		Name:         name,
+		Label:        label,
+		Property:     property,
+		ExpectedType: expectedType,
+	}
+	sm.propertyTypeConstraints[name] = ptc
+
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.propertyTypeConstraints, name)
 			return err
 		}
 	}
@@ -1003,24 +1035,119 @@ func (sm *SchemaManager) AddConstraint(c Constraint) error {
 	defer sm.mu.Unlock()
 
 	// Store in the constraints map (preserves type)
-	if _, exists := sm.constraints[c.Name]; !exists {
-		sm.constraints[c.Name] = c
+	if _, exists := sm.constraints[c.Name]; exists {
+		return nil
 	}
+	sm.constraints[c.Name] = c
 
 	// For UNIQUE constraints, also add to legacy uniqueConstraints map
+	var uniqueKey string
+	var uniqueConstraint *UniqueConstraint
 	if c.Type == ConstraintUnique && len(c.Properties) == 1 {
-		key := fmt.Sprintf("%s:%s", c.Label, c.Properties[0])
-		if _, exists := sm.uniqueConstraints[key]; !exists {
-			sm.uniqueConstraints[key] = &UniqueConstraint{
+		uniqueKey = fmt.Sprintf("%s:%s", c.Label, c.Properties[0])
+		if existing, exists := sm.uniqueConstraints[uniqueKey]; !exists {
+			uniqueConstraint = &UniqueConstraint{
 				Name:     c.Name,
 				Label:    c.Label,
 				Property: c.Properties[0],
 				values:   make(map[interface{}]NodeID),
 			}
+			sm.uniqueConstraints[uniqueKey] = uniqueConstraint
+		} else {
+			uniqueConstraint = existing
+		}
+	}
+
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.constraints, c.Name)
+			if c.Type == ConstraintUnique && len(c.Properties) == 1 && uniqueConstraint != nil {
+				delete(sm.uniqueConstraints, uniqueKey)
+			}
+			return err
 		}
 	}
 
 	return nil
+}
+
+// DropConstraint removes a constraint (by name) from the schema.
+// This supports both standard constraints and property type constraints.
+func (sm *SchemaManager) DropConstraint(name string) error {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	var droppedConstraint *Constraint
+	var droppedUnique *UniqueConstraint
+	var droppedTypeConstraint *PropertyTypeConstraint
+	var droppedUniqueKey string
+
+	if c, ok := sm.constraints[name]; ok {
+		droppedConstraint = &c
+		delete(sm.constraints, name)
+
+		if c.Type == ConstraintUnique && len(c.Properties) == 1 {
+			droppedUniqueKey = fmt.Sprintf("%s:%s", c.Label, c.Properties[0])
+			if existing, ok := sm.uniqueConstraints[droppedUniqueKey]; ok {
+				droppedUnique = existing
+				delete(sm.uniqueConstraints, droppedUniqueKey)
+			}
+		}
+	} else if ptc, ok := sm.propertyTypeConstraints[name]; ok {
+		droppedTypeConstraint = &ptc
+		delete(sm.propertyTypeConstraints, name)
+	} else {
+		return fmt.Errorf("constraint %q does not exist", name)
+	}
+
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			if droppedConstraint != nil {
+				sm.constraints[name] = *droppedConstraint
+				if droppedUnique != nil {
+					sm.uniqueConstraints[droppedUniqueKey] = droppedUnique
+				}
+			}
+			if droppedTypeConstraint != nil {
+				sm.propertyTypeConstraints[name] = *droppedTypeConstraint
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+// GetPropertyTypeConstraintsForLabels returns type constraints for the given labels.
+func (sm *SchemaManager) GetPropertyTypeConstraintsForLabels(labels []string) []PropertyTypeConstraint {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	result := make([]PropertyTypeConstraint, 0)
+	for _, c := range sm.propertyTypeConstraints {
+		for _, label := range labels {
+			if c.Label == label {
+				result = append(result, c)
+				break
+			}
+		}
+	}
+
+	return result
+}
+
+// GetAllPropertyTypeConstraints returns all property type constraints.
+func (sm *SchemaManager) GetAllPropertyTypeConstraints() []PropertyTypeConstraint {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+
+	result := make([]PropertyTypeConstraint, 0, len(sm.propertyTypeConstraints))
+	for _, c := range sm.propertyTypeConstraints {
+		result = append(result, c)
+	}
+	return result
 }
 
 // GetIndexes returns all indexes.

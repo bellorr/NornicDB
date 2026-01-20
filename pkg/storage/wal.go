@@ -38,6 +38,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -236,6 +237,12 @@ type WALConfig struct {
 	// SnapshotInterval for automatic snapshots
 	SnapshotInterval time.Duration
 
+	// RetentionMaxSegments keeps at most N sealed segments (0 = unlimited).
+	RetentionMaxSegments int
+
+	// RetentionMaxAge keeps segments newer than this duration (0 = unlimited).
+	RetentionMaxAge time.Duration
+
 	// Logger receives WAL diagnostics events (optional).
 	// If nil, a default stdlib-backed logger is used.
 	Logger WALLogger
@@ -270,6 +277,11 @@ type WAL struct {
 	entries  atomic.Int64
 	bytes    atomic.Int64
 	closed   atomic.Bool
+
+	segmentFirstSeq uint64
+	segmentEntries  int64
+	segmentBytes    int64
+	segmentCreatedAt time.Time
 
 	// Background sync goroutine
 	syncTicker *time.Ticker
@@ -311,6 +323,9 @@ func NewWAL(dir string, cfg *WALConfig) (*WAL, error) {
 	if err := os.MkdirAll(cfg.Dir, 0755); err != nil {
 		return nil, fmt.Errorf("wal: failed to create directory: %w", err)
 	}
+	if err := os.MkdirAll(walSegmentsDir(cfg.Dir), 0755); err != nil {
+		return nil, fmt.Errorf("wal: failed to create segments directory: %w", err)
+	}
 
 	// Ensure logger is available early (used by startup repair diagnostics).
 	if cfg.Logger == nil {
@@ -322,7 +337,7 @@ func NewWAL(dir string, cfg *WALConfig) (*WAL, error) {
 	//
 	// This truncates only the *incomplete tail* (or the first corrupted tail record)
 	// back to the last known-good record boundary.
-	walPath := filepath.Join(cfg.Dir, "wal.log")
+	walPath := walActivePath(cfg.Dir)
 	if repaired, diag, err := repairWALTailIfNeeded(walPath, cfg.Logger); err != nil {
 		return nil, err
 	} else if repaired && diag != nil {
@@ -364,6 +379,7 @@ func NewWAL(dir string, cfg *WALConfig) (*WAL, error) {
 	if seq, err := w.loadLastSequence(); err == nil {
 		w.sequence.Store(seq)
 	}
+	w.loadActiveSegmentState()
 
 	// Start batch sync if configured
 	if cfg.SyncMode == "batch" && cfg.BatchSyncInterval > 0 {
@@ -377,24 +393,33 @@ func NewWAL(dir string, cfg *WALConfig) (*WAL, error) {
 // loadLastSequence reads the last sequence number from existing WAL.
 // Handles both legacy JSON format and new atomic format automatically.
 func (w *WAL) loadLastSequence() (uint64, error) {
-	walPath := filepath.Join(w.config.Dir, "wal.log")
-
-	// Use ReadWALEntries which handles both formats
-	entries, err := ReadWALEntries(walPath)
+	entries, err := ReadWALEntriesFromDir(w.config.Dir)
 	if err != nil {
-		// For corrupted or empty WAL, start fresh
 		if os.IsNotExist(err) {
 			return 0, err
 		}
-		// Log corruption but return 0 to start fresh
 		return 0, nil
 	}
-
 	if len(entries) == 0 {
 		return 0, nil
 	}
-
 	return entries[len(entries)-1].Sequence, nil
+}
+
+func (w *WAL) loadActiveSegmentState() {
+	activePath := walActivePath(w.config.Dir)
+	entries, err := ReadWALEntries(activePath)
+	if err != nil || len(entries) == 0 {
+		return
+	}
+
+	info, err := os.Stat(activePath)
+	if err == nil {
+		w.segmentBytes = info.Size()
+	}
+	w.segmentEntries = int64(len(entries))
+	w.segmentFirstSeq = entries[0].Sequence
+	w.segmentCreatedAt = entries[0].Timestamp
 }
 
 // batchSyncLoop periodically syncs writes to disk.
@@ -492,9 +517,19 @@ func (w *WAL) AppendWithDatabaseReturningSeq(op OperationType, data interface{},
 	w.totalWrites.Add(1)
 	w.lastEntryTime.Store(time.Now().UnixNano())
 
+	if w.segmentEntries == 0 {
+		w.segmentFirstSeq = seq
+		w.segmentCreatedAt = entry.Timestamp
+	}
+	w.segmentEntries++
+	w.segmentBytes += alignedRecordLen
+
 	// Immediate sync if configured
 	if w.config.SyncMode == "immediate" {
 		if err := w.syncLocked(); err != nil {
+			return 0, err
+		}
+		if err := w.maybeRotateLocked(seq); err != nil {
 			return 0, err
 		}
 		return seq, nil
@@ -504,6 +539,10 @@ func (w *WAL) AppendWithDatabaseReturningSeq(op OperationType, data interface{},
 	// (and crash-recovery can find entries) even when we aren't fsync'ing.
 	if err := w.writer.Flush(); err != nil {
 		return 0, fmt.Errorf("wal: flush failed: %w", err)
+	}
+
+	if err := w.maybeRotateLocked(seq); err != nil {
+		return 0, err
 	}
 
 	return seq, nil
@@ -557,6 +596,88 @@ func (w *WAL) syncLocked() error {
 
 	w.totalSyncs.Add(1)
 	w.lastSyncTime.Store(time.Now().UnixNano())
+	return nil
+}
+
+func (w *WAL) maybeRotateLocked(lastSeq uint64) error {
+	if w.segmentEntries == 0 {
+		return nil
+	}
+
+	if w.config.MaxFileSize > 0 && w.segmentBytes >= w.config.MaxFileSize {
+		return w.rotateSegmentLocked(lastSeq)
+	}
+	if w.config.MaxEntries > 0 && w.segmentEntries >= w.config.MaxEntries {
+		return w.rotateSegmentLocked(lastSeq)
+	}
+	return nil
+}
+
+func (w *WAL) rotateSegmentLocked(lastSeq uint64) error {
+	if w.segmentEntries == 0 {
+		return nil
+	}
+
+	if err := w.syncLocked(); err != nil {
+		return err
+	}
+	if err := w.file.Close(); err != nil {
+		return err
+	}
+
+	segmentDir := walSegmentsDir(w.config.Dir)
+	if err := os.MkdirAll(segmentDir, 0755); err != nil {
+		return err
+	}
+
+	segmentName := fmt.Sprintf("seg-%020d-%020d.wal", w.segmentFirstSeq, lastSeq)
+	activePath := walActivePath(w.config.Dir)
+	segmentPath := filepath.Join(segmentDir, segmentName)
+	if err := os.Rename(activePath, segmentPath); err != nil {
+		return err
+	}
+	_ = syncDir(segmentDir)
+
+	manifest, err := loadWALManifest(w.config.Dir)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(segmentPath)
+	sizeBytes := int64(0)
+	if err == nil {
+		sizeBytes = info.Size()
+	}
+	manifest.Segments = append(manifest.Segments, WALSegment{
+		FirstSeq:  w.segmentFirstSeq,
+		LastSeq:   lastSeq,
+		SizeBytes: sizeBytes,
+		CreatedAt: w.segmentCreatedAt,
+		Path:      segmentName,
+	})
+	sort.Slice(manifest.Segments, func(i, j int) bool {
+		return manifest.Segments[i].FirstSeq < manifest.Segments[j].FirstSeq
+	})
+	if err := writeWALManifest(w.config.Dir, manifest); err != nil {
+		return err
+	}
+
+	file, err := os.OpenFile(activePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	if err := syncDir(w.config.Dir); err != nil {
+		file.Close()
+		return err
+	}
+
+	w.file = file
+	w.writer = bufio.NewWriterSize(file, 64*1024)
+	w.encoder = json.NewEncoder(w.writer)
+	w.segmentFirstSeq = 0
+	w.segmentEntries = 0
+	w.segmentBytes = 0
+	w.segmentCreatedAt = time.Time{}
+
 	return nil
 }
 
@@ -1019,7 +1140,7 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 	}
 
 	// Close current WAL file
-	walPath := filepath.Join(w.config.Dir, "wal.log")
+	walPath := walActivePath(w.config.Dir)
 	if err := w.file.Close(); err != nil {
 		return fmt.Errorf("wal: failed to close for truncate: %w", err)
 	}
@@ -1027,7 +1148,7 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 	// Read all entries from current WAL
 	// Use best-effort read for truncation - corrupted entries before snapshotSeq
 	// can be safely discarded since the snapshot captured the state.
-	allEntries, readErr := ReadWALEntries(walPath)
+	allEntries, readErr := ReadWALEntriesFromDir(w.config.Dir)
 
 	// Filter entries AFTER snapshot sequence
 	var keptEntries []WALEntry
@@ -1050,7 +1171,7 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 		w.reportCorruption(diag, readErr)
 
 		// Try to salvage entries after snapshot sequence using best-effort read.
-		keptEntries, _ = readWALEntriesForTruncation(walPath, snapshotSeq)
+		keptEntries, _ = ReadWALEntriesAfterFromDir(w.config.Dir, snapshotSeq)
 		if len(keptEntries) == 0 {
 			// No entries to keep - just start fresh with empty WAL
 			fmt.Printf("⚠️  WAL corrupted but snapshot saved; starting fresh WAL\n")
@@ -1116,6 +1237,10 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 	}
 	tmpFile.Close()
 
+	_ = os.RemoveAll(walSegmentsDir(w.config.Dir))
+	_ = os.MkdirAll(walSegmentsDir(w.config.Dir), 0755)
+	_ = writeWALManifest(w.config.Dir, &WALManifest{Version: walManifestVersion})
+
 	// Atomically rename temp WAL over old WAL
 	if err := os.Rename(tmpPath, walPath); err != nil {
 		os.Remove(tmpPath)
@@ -1134,6 +1259,12 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 		return fmt.Errorf("wal: failed to reopen after truncate: %w", err)
 	}
 
+	w.segmentFirstSeq = 0
+	w.segmentEntries = 0
+	w.segmentBytes = 0
+	w.segmentCreatedAt = time.Time{}
+	w.loadActiveSegmentState()
+
 	// Update stats
 	w.entries.Store(int64(len(keptEntries)))
 	w.bytes.Store(bytesWritten)
@@ -1141,10 +1272,80 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 	return nil
 }
 
+// ApplyRetention deletes sealed segments that are safe to drop after a snapshot.
+// Segments are only deleted if their last sequence is <= snapshotSeq.
+func (w *WAL) ApplyRetention(snapshotSeq uint64) error {
+	if w.closed.Load() {
+		return ErrWALClosed
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.applyRetentionLocked(snapshotSeq)
+}
+
+func (w *WAL) applyRetentionLocked(snapshotSeq uint64) error {
+	if snapshotSeq == 0 {
+		return nil
+	}
+
+	manifest, err := loadWALManifest(w.config.Dir)
+	if err != nil {
+		return err
+	}
+	if len(manifest.Segments) == 0 {
+		return nil
+	}
+
+	now := time.Now()
+	cutoff := now.Add(-w.config.RetentionMaxAge)
+
+	var candidates []WALSegment
+	var keep []WALSegment
+	for _, seg := range manifest.Segments {
+		if seg.LastSeq <= snapshotSeq {
+			candidates = append(candidates, seg)
+		} else {
+			keep = append(keep, seg)
+		}
+	}
+
+	if w.config.RetentionMaxAge > 0 {
+		var remaining []WALSegment
+		for _, seg := range candidates {
+			if seg.CreatedAt.After(cutoff) {
+				keep = append(keep, seg)
+			} else {
+				remaining = append(remaining, seg)
+			}
+		}
+		candidates = remaining
+	}
+
+	if w.config.RetentionMaxSegments > 0 && len(candidates) > w.config.RetentionMaxSegments {
+		sort.Slice(candidates, func(i, j int) bool {
+			return candidates[i].LastSeq < candidates[j].LastSeq
+		})
+		keepCount := w.config.RetentionMaxSegments
+		keep = append(keep, candidates[len(candidates)-keepCount:]...)
+		candidates = candidates[:len(candidates)-keepCount]
+	}
+
+	for _, seg := range candidates {
+		_ = os.Remove(filepath.Join(walSegmentsDir(w.config.Dir), seg.Path))
+	}
+
+	manifest.Segments = keep
+	sort.Slice(manifest.Segments, func(i, j int) bool {
+		return manifest.Segments[i].FirstSeq < manifest.Segments[j].FirstSeq
+	})
+
+	return writeWALManifest(w.config.Dir, manifest)
+}
+
 // reopenWAL reopens the WAL file for appending.
 // Called after truncation or other operations that close the file.
 func (w *WAL) reopenWAL() error {
-	walPath := filepath.Join(w.config.Dir, "wal.log")
+	walPath := walActivePath(w.config.Dir)
 	file, err := os.OpenFile(walPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("wal: failed to reopen: %w", err)
@@ -1153,6 +1354,11 @@ func (w *WAL) reopenWAL() error {
 	w.file = file
 	w.writer = bufio.NewWriterSize(file, 64*1024)
 	w.encoder = json.NewEncoder(w.writer)
+	w.segmentFirstSeq = 0
+	w.segmentEntries = 0
+	w.segmentBytes = 0
+	w.segmentCreatedAt = time.Time{}
+	w.loadActiveSegmentState()
 
 	return nil
 }
@@ -1944,8 +2150,7 @@ func RecoverWithTransactions(walDir, snapshotPath string) (*MemoryEngine, *Trans
 	}
 
 	// Read all WAL entries
-	walPath := filepath.Join(walDir, "wal.log")
-	entries, err := ReadWALEntries(walPath)
+	entries, err := ReadWALEntriesFromDir(walDir)
 	if err != nil && !os.IsNotExist(err) {
 		return nil, result, fmt.Errorf("wal: failed to read WAL: %w", err)
 	}
@@ -2155,19 +2360,18 @@ func RecoverFromWALWithResult(walDir, snapshotPath string) (*MemoryEngine, Repla
 	}
 
 	// Replay WAL entries after snapshot
-	walPath := filepath.Join(walDir, "wal.log")
-
-	// Check if WAL file exists first
-	if _, statErr := os.Stat(walPath); os.IsNotExist(statErr) {
+	activePath := walActivePath(walDir)
+	manifest, _ := loadWALManifest(walDir)
+	if _, statErr := os.Stat(activePath); os.IsNotExist(statErr) && len(manifest.Segments) == 0 {
 		return engine, result, nil // No WAL to replay, return engine as-is
 	}
 
 	// Ensure we don't have a torn tail record before reading for recovery.
 	// This is critical when recovery is invoked because the main server never started,
 	// so NewWAL() (which also repairs tails) was never called.
-	_, _, _ = repairWALTailIfNeeded(walPath, defaultWALLogger{})
+	_, _, _ = repairWALTailIfNeeded(activePath, defaultWALLogger{})
 
-	entries, err := ReadWALEntriesAfter(walPath, snapshotSeq)
+	entries, err := ReadWALEntriesAfterFromDir(walDir, snapshotSeq)
 	if err != nil {
 		return nil, result, fmt.Errorf("wal: failed to read WAL: %w", err)
 	}

@@ -981,11 +981,13 @@ func (c *CompositeEngine) GetSchema() *SchemaManager {
 
 		// Merge constraints
 		constraints := constituentSchema.GetConstraints()
-		for _, constraint := range constraints {
+		for i := range constraints {
+			constraint := &constraints[i]
 			// Add constraint if not already present (by name)
 			mergedConstraints := mergedSchema.GetConstraints()
 			found := false
-			for _, existing := range mergedConstraints {
+			for j := range mergedConstraints {
+				existing := &mergedConstraints[j]
 				if existing.Name == constraint.Name {
 					found = true
 					break
@@ -1002,18 +1004,41 @@ func (c *CompositeEngine) GetSchema() *SchemaManager {
 		}
 
 		// Also get all constraints from the constraints map (includes all types)
-		allConstraints := constituentSchema.GetConstraintsForLabels([]string{}) // Empty labels gets all
-		for _, constraint := range allConstraints {
+		allConstraints := constituentSchema.GetAllConstraints()
+		for i := range allConstraints {
+			constraint := &allConstraints[i]
 			mergedConstraints := mergedSchema.GetConstraints()
 			found := false
-			for _, existing := range mergedConstraints {
+			for j := range mergedConstraints {
+				existing := &mergedConstraints[j]
 				if existing.Name == constraint.Name {
 					found = true
 					break
 				}
 			}
 			if !found {
-				_ = mergedSchema.AddConstraint(constraint)
+				_ = mergedSchema.AddConstraint(*constraint)
+			}
+		}
+
+		// Merge property type constraints.
+		typeConstraints := constituentSchema.GetAllPropertyTypeConstraints()
+		for _, constraint := range typeConstraints {
+			existing := mergedSchema.GetAllPropertyTypeConstraints()
+			found := false
+			for _, current := range existing {
+				if current.Name == constraint.Name {
+					found = true
+					break
+				}
+			}
+			if !found {
+				_ = mergedSchema.AddPropertyTypeConstraint(
+					constraint.Name,
+					constraint.Label,
+					constraint.Property,
+					constraint.ExpectedType,
+				)
 			}
 		}
 

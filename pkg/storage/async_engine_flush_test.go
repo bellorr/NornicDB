@@ -91,6 +91,18 @@ func newErrorEngine() *errorEngine {
 	}
 }
 
+// Namespace forwards the namespace from the wrapped NamespacedEngine (when present).
+//
+// This is important because AsyncEngine can accept unprefixed IDs when the inner engine
+// is namespace-scoped; these tests intentionally exercise the stack:
+//   AsyncEngine -> NamespacedEngine -> MemoryEngine
+func (e *errorEngine) Namespace() string {
+	if provider, ok := e.Engine.(interface{ Namespace() string }); ok {
+		return provider.Namespace()
+	}
+	return ""
+}
+
 func (e *errorEngine) Close() error {
 	// Close the underlying engine (NamespacedEngine.Close() is a no-op).
 	if e.baseEngine != nil {

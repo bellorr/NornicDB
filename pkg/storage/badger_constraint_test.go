@@ -470,6 +470,92 @@ func TestCompareValues(t *testing.T) {
 	}
 }
 
+func TestBadgerEngine_UpdateNode_EnforcesUniqueConstraint(t *testing.T) {
+	engine, cleanup := setupTestBadgerEngine(t)
+	defer cleanup()
+
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
+		Name:       "unique_email",
+		Type:       ConstraintUnique,
+		Label:      "User",
+		Properties: []string{"email"},
+	})
+
+	_, err := engine.CreateNode(&Node{
+		ID:     NodeID(prefixTestID("user-1")),
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"email": "alice@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateNode failed: %v", err)
+	}
+
+	_, err = engine.CreateNode(&Node{
+		ID:     NodeID(prefixTestID("user-2")),
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"email": "bob@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateNode failed: %v", err)
+	}
+
+	err = engine.UpdateNode(&Node{
+		ID:     NodeID(prefixTestID("user-2")),
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"email": "alice@example.com",
+		},
+	})
+	if err == nil {
+		t.Fatal("Expected UNIQUE constraint violation on update, got nil")
+	}
+	if _, ok := err.(*ConstraintViolationError); !ok {
+		t.Fatalf("Expected ConstraintViolationError, got %T", err)
+	}
+}
+
+func TestBadgerEngine_DeleteNode_UnregistersUniqueConstraint(t *testing.T) {
+	engine, cleanup := setupTestBadgerEngine(t)
+	defer cleanup()
+
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
+		Name:       "unique_email",
+		Type:       ConstraintUnique,
+		Label:      "User",
+		Properties: []string{"email"},
+	})
+
+	_, err := engine.CreateNode(&Node{
+		ID:     NodeID(prefixTestID("user-1")),
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"email": "reuse@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateNode failed: %v", err)
+	}
+
+	if err := engine.DeleteNode(NodeID(prefixTestID("user-1"))); err != nil {
+		t.Fatalf("DeleteNode failed: %v", err)
+	}
+
+	_, err = engine.CreateNode(&Node{
+		ID:     NodeID(prefixTestID("user-2")),
+		Labels: []string{"User"},
+		Properties: map[string]interface{}{
+			"email": "reuse@example.com",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Expected reused unique value to succeed after delete, got: %v", err)
+	}
+}
+
 // TestBadgerTransaction_ConstraintAcrossCommits tests constraint enforcement across multiple commits.
 func TestBadgerTransaction_ConstraintAcrossCommits(t *testing.T) {
 	engine, cleanup := setupTestBadgerEngine(t)

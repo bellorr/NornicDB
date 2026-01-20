@@ -454,6 +454,13 @@ func (ae *AsyncEngine) GetEngine() Engine {
 
 // CreateNode adds to cache and returns immediately.
 func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
+	if node == nil {
+		return "", ErrInvalidData
+	}
+	if err := ae.validateNodeConstraints(node); err != nil {
+		return "", err
+	}
+
 	// Check cache size limit BEFORE acquiring lock to avoid deadlock
 	// If cache is full, flush synchronously to make room
 	if ae.maxNodeCacheSize > 0 {
@@ -504,6 +511,13 @@ func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
 
 // UpdateNode adds to cache and returns immediately.
 func (ae *AsyncEngine) UpdateNode(node *Node) error {
+	if node == nil {
+		return ErrInvalidData
+	}
+	if err := ae.validateNodeConstraints(node); err != nil {
+		return err
+	}
+
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
@@ -1464,6 +1478,10 @@ func (ae *AsyncEngine) Close() error {
 
 // BulkCreateNodes creates nodes in batch (async).
 func (ae *AsyncEngine) BulkCreateNodes(nodes []*Node) error {
+	if err := ae.validateBulkNodeConstraints(nodes); err != nil {
+		return err
+	}
+
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
@@ -1472,6 +1490,314 @@ func (ae *AsyncEngine) BulkCreateNodes(nodes []*Node) error {
 		ae.nodeCache[node.ID] = node
 	}
 	ae.pendingWrites += int64(len(nodes))
+	return nil
+}
+
+func (ae *AsyncEngine) validateBulkNodeConstraints(nodes []*Node) error {
+	seen := make(map[string]struct{})
+
+	for _, node := range nodes {
+		if node == nil {
+			return ErrInvalidData
+		}
+		namespace, prefixRequired, err := ae.resolveNamespace(node.ID)
+		if err != nil {
+			return err
+		}
+		if err := ae.validateNodeConstraintsWithNamespace(node, namespace, prefixRequired); err != nil {
+			return err
+		}
+
+		schema := ae.GetSchemaForNamespace(namespace)
+		if schema == nil {
+			continue
+		}
+
+		constraints := schema.GetConstraintsForLabels(node.Labels)
+		for _, c := range constraints {
+			switch c.Type {
+			case ConstraintUnique:
+				if len(c.Properties) != 1 {
+					continue
+				}
+				prop := c.Properties[0]
+				value := node.Properties[prop]
+				if value == nil {
+					continue
+				}
+				key := fmt.Sprintf("%s:%s:%s", namespace, c.Name, constraintValueKey(value))
+				if _, exists := seen[key]; exists {
+					return &ConstraintViolationError{
+						Type:       ConstraintUnique,
+						Label:      c.Label,
+						Properties: []string{prop},
+						Message:    fmt.Sprintf("Node with %s=%v already exists in batch", prop, value),
+					}
+				}
+				seen[key] = struct{}{}
+			case ConstraintNodeKey:
+				values := make([]interface{}, len(c.Properties))
+				for i, prop := range c.Properties {
+					values[i] = node.Properties[prop]
+					if values[i] == nil {
+						return &ConstraintViolationError{
+							Type:       ConstraintNodeKey,
+							Label:      c.Label,
+							Properties: c.Properties,
+							Message:    fmt.Sprintf("NODE KEY property %s cannot be null", prop),
+						}
+					}
+				}
+				key := fmt.Sprintf("%s:%s:%s", namespace, c.Name, constraintCompositeKey(values))
+				if _, exists := seen[key]; exists {
+					return &ConstraintViolationError{
+						Type:       ConstraintNodeKey,
+						Label:      c.Label,
+						Properties: c.Properties,
+						Message:    fmt.Sprintf("Node with key %v=%v already exists in batch", c.Properties, values),
+					}
+				}
+				seen[key] = struct{}{}
+			}
+		}
+	}
+
+	return nil
+}
+
+func (ae *AsyncEngine) validateNodeConstraints(node *Node) error {
+	namespace, prefixRequired, err := ae.resolveNamespace(node.ID)
+	if err != nil {
+		return err
+	}
+	return ae.validateNodeConstraintsWithNamespace(node, namespace, prefixRequired)
+}
+
+func (ae *AsyncEngine) validateNodeConstraintsWithNamespace(node *Node, namespace string, prefixRequired bool) error {
+	if node == nil {
+		return ErrInvalidData
+	}
+
+	schema := ae.GetSchemaForNamespace(namespace)
+	if schema == nil {
+		return nil
+	}
+
+	constraints := schema.GetConstraintsForLabels(node.Labels)
+	for _, constraint := range constraints {
+		switch constraint.Type {
+		case ConstraintUnique:
+			if err := ae.checkUniqueConstraint(node, constraint, namespace, prefixRequired); err != nil {
+				return err
+			}
+		case ConstraintNodeKey:
+			if err := ae.checkNodeKeyConstraint(node, constraint, namespace, prefixRequired); err != nil {
+				return err
+			}
+		case ConstraintExists:
+			if err := ae.checkExistenceConstraint(node, constraint); err != nil {
+				return err
+			}
+		}
+	}
+
+	typeConstraints := schema.GetPropertyTypeConstraintsForLabels(node.Labels)
+	for _, constraint := range typeConstraints {
+		value := node.Properties[constraint.Property]
+		if err := ValidatePropertyType(value, constraint.ExpectedType); err != nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintPropertyType,
+				Label:      constraint.Label,
+				Properties: []string{constraint.Property},
+				Message:    fmt.Sprintf("Property %s must be %s (%v)", constraint.Property, constraint.ExpectedType, err),
+			}
+		}
+	}
+
+	return nil
+}
+
+func (ae *AsyncEngine) checkUniqueConstraint(node *Node, c Constraint, namespace string, prefixRequired bool) error {
+	if len(c.Properties) != 1 {
+		return nil
+	}
+	prop := c.Properties[0]
+	if node.Properties == nil {
+		return nil
+	}
+	value := node.Properties[prop]
+	if value == nil {
+		return nil
+	}
+
+	nsPrefix := namespace + ":"
+	ae.mu.RLock()
+	for id, n := range ae.nodeCache {
+		if id == node.ID || ae.deleteNodes[id] {
+			continue
+		}
+		if prefixRequired && !strings.HasPrefix(string(id), nsPrefix) {
+			continue
+		}
+		if hasLabel(n.Labels, c.Label) && compareValues(n.Properties[prop], value) {
+			ae.mu.RUnlock()
+			return &ConstraintViolationError{
+				Type:       ConstraintUnique,
+				Label:      c.Label,
+				Properties: []string{prop},
+				Message:    fmt.Sprintf("Node with %s=%v already exists in async cache", prop, value),
+			}
+		}
+	}
+	ae.mu.RUnlock()
+
+	nodes, err := ae.engine.GetNodesByLabel(c.Label)
+	if err != nil {
+		return nil
+	}
+	for _, existing := range nodes {
+		if existing.ID == node.ID {
+			continue
+		}
+		if prefixRequired && !strings.HasPrefix(string(existing.ID), nsPrefix) {
+			continue
+		}
+		if compareValues(existing.Properties[prop], value) {
+			return &ConstraintViolationError{
+				Type:       ConstraintUnique,
+				Label:      c.Label,
+				Properties: []string{prop},
+				Message:    fmt.Sprintf("Node with %s=%v already exists (nodeID: %s)", prop, value, existing.ID),
+			}
+		}
+	}
+
+	return nil
+}
+
+func (ae *AsyncEngine) checkNodeKeyConstraint(node *Node, c Constraint, namespace string, prefixRequired bool) error {
+	if len(c.Properties) < 1 {
+		return nil
+	}
+	if node.Properties == nil {
+		return &ConstraintViolationError{
+			Type:       ConstraintNodeKey,
+			Label:      c.Label,
+			Properties: c.Properties,
+			Message:    "NODE KEY properties cannot be null",
+		}
+	}
+
+	values := make([]interface{}, len(c.Properties))
+	for i, prop := range c.Properties {
+		value := node.Properties[prop]
+		if value == nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintNodeKey,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("NODE KEY property %s cannot be null", prop),
+			}
+		}
+		values[i] = value
+	}
+
+	nsPrefix := namespace + ":"
+	ae.mu.RLock()
+	for id, n := range ae.nodeCache {
+		if id == node.ID || ae.deleteNodes[id] {
+			continue
+		}
+		if prefixRequired && !strings.HasPrefix(string(id), nsPrefix) {
+			continue
+		}
+		if !hasLabel(n.Labels, c.Label) {
+			continue
+		}
+		match := true
+		for i, prop := range c.Properties {
+			if !compareValues(n.Properties[prop], values[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			ae.mu.RUnlock()
+			return &ConstraintViolationError{
+				Type:       ConstraintNodeKey,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("Node with key %v=%v already exists in async cache", c.Properties, values),
+			}
+		}
+	}
+	ae.mu.RUnlock()
+
+	nodes, err := ae.engine.GetNodesByLabel(c.Label)
+	if err != nil {
+		return nil
+	}
+	for _, existing := range nodes {
+		if existing.ID == node.ID {
+			continue
+		}
+		if prefixRequired && !strings.HasPrefix(string(existing.ID), nsPrefix) {
+			continue
+		}
+		match := true
+		for i, prop := range c.Properties {
+			if !compareValues(existing.Properties[prop], values[i]) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return &ConstraintViolationError{
+				Type:       ConstraintNodeKey,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("Node with key %v=%v already exists (nodeID: %s)", c.Properties, values, existing.ID),
+			}
+		}
+	}
+
+	return nil
+}
+
+func (ae *AsyncEngine) resolveNamespace(nodeID NodeID) (string, bool, error) {
+	if namespace, _, ok := ParseDatabasePrefix(string(nodeID)); ok {
+		return namespace, true, nil
+	}
+	if provider, ok := ae.engine.(interface{ Namespace() string }); ok {
+		ns := provider.Namespace()
+		if ns != "" {
+			return ns, false, nil
+		}
+	}
+	return "", false, fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", nodeID)
+}
+
+func (ae *AsyncEngine) checkExistenceConstraint(node *Node, c Constraint) error {
+	if len(c.Properties) != 1 {
+		return nil
+	}
+	prop := c.Properties[0]
+	if node.Properties == nil {
+		return &ConstraintViolationError{
+			Type:       ConstraintExists,
+			Label:      c.Label,
+			Properties: []string{prop},
+			Message:    fmt.Sprintf("Required property %s is missing", prop),
+		}
+	}
+	if val, ok := node.Properties[prop]; !ok || val == nil {
+		return &ConstraintViolationError{
+			Type:       ConstraintExists,
+			Label:      c.Label,
+			Properties: []string{prop},
+			Message:    fmt.Sprintf("Required property %s is missing", prop),
+		}
+	}
 	return nil
 }
 

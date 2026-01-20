@@ -709,8 +709,9 @@ func (e *DBQueryExecutor) Execute(ctx context.Context, query string, params map[
 	}
 
 	return &bolt.QueryResult{
-		Columns: result.Columns,
-		Rows:    result.Rows,
+		Columns:  result.Columns,
+		Rows:     result.Rows,
+		Metadata: result.Metadata,
 	}, nil
 }
 

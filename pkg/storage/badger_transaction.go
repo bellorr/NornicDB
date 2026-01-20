@@ -283,7 +283,7 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 
 	// Delete with the same semantics as BadgerEngine.DeleteNode (cascade edges + embedding cleanup),
 	// but within the transaction for atomicity.
-	edgesDeleted, deletedEdgeIDs, err := tx.engine.deleteNodeInTxn(tx.badgerTx, nodeID)
+	edgesDeleted, deletedEdgeIDs, _, err := tx.engine.deleteNodeInTxn(tx.badgerTx, nodeID)
 	if err != nil {
 		return err
 	}
@@ -293,10 +293,10 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 	tx.deletedNodes[nodeID] = struct{}{}
 
 	tx.operations = append(tx.operations, Operation{
-		Type:      OpDeleteNode,
-		Timestamp: time.Now(),
-		NodeID:    nodeID,
-		OldNode:   oldNode,
+		Type:           OpDeleteNode,
+		Timestamp:      time.Now(),
+		NodeID:         nodeID,
+		OldNode:        oldNode,
 		EdgesDeleted:   edgesDeleted,
 		DeletedEdgeIDs: deletedEdgeIDs,
 	})
@@ -718,6 +718,19 @@ func (tx *BadgerTransaction) validateNodeConstraints(node *Node) error {
 		}
 	}
 
+	typeConstraints := schema.GetPropertyTypeConstraintsForLabels(node.Labels)
+	for _, constraint := range typeConstraints {
+		value := node.Properties[constraint.Property]
+		if err := ValidatePropertyType(value, constraint.ExpectedType); err != nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintPropertyType,
+				Label:      constraint.Label,
+				Properties: []string{constraint.Property},
+				Message:    fmt.Sprintf("Property %s must be %s (%v)", constraint.Property, constraint.ExpectedType, err),
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -823,51 +836,6 @@ func (tx *BadgerTransaction) scanForUniqueViolation(namespace, label, property s
 	}
 
 	return nil
-}
-
-// compareValues compares two property values for equality.
-func compareValues(a, b interface{}) bool {
-	// Handle different numeric types
-	switch v1 := a.(type) {
-	case int:
-		switch v2 := b.(type) {
-		case int:
-			return v1 == v2
-		case int64:
-			return int64(v1) == v2
-		case float64:
-			return float64(v1) == v2
-		}
-	case int64:
-		switch v2 := b.(type) {
-		case int:
-			return v1 == int64(v2)
-		case int64:
-			return v1 == v2
-		case float64:
-			return float64(v1) == v2
-		}
-	case float64:
-		switch v2 := b.(type) {
-		case int:
-			return v1 == float64(v2)
-		case int64:
-			return v1 == float64(v2)
-		case float64:
-			return v1 == v2
-		}
-	case string:
-		if v2, ok := b.(string); ok {
-			return v1 == v2
-		}
-	case bool:
-		if v2, ok := b.(bool); ok {
-			return v1 == v2
-		}
-	}
-
-	// Default comparison
-	return a == b
 }
 
 // checkNodeKeyConstraint ensures composite key uniqueness across ALL data.

@@ -781,6 +781,22 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 		return nil, fmt.Errorf("failed to start implicit transaction: %w", err)
 	}
 
+	// Optional WAL transaction markers for receipts.
+	var wal *storage.WAL
+	var walSeqStart uint64
+	txID := tx.ID
+	var dbName string
+	if txID != "" {
+		wal, dbName = e.resolveWALAndDatabase()
+		if wal != nil {
+			walSeqStart, err = wal.AppendTxBegin(dbName, txID, nil)
+			if err != nil {
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("failed to write WAL tx begin: %w", err)
+			}
+		}
+	}
+
 	// Create a transactional wrapper that routes writes through the transaction
 	// CRITICAL: We pass the wrapper through context instead of modifying e.storage
 	// because e.storage modification is NOT thread-safe for concurrent executions.
@@ -796,12 +812,31 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	if execErr != nil {
 		// Rollback on any error - prevents partial data corruption
 		tx.Rollback()
+		if wal != nil && walSeqStart > 0 {
+			_, _ = wal.AppendTxAbort(dbName, txID, execErr.Error())
+		}
 		return nil, execErr
 	}
 
 	// Commit successful transaction
 	if err := tx.Commit(); err != nil {
+		if wal != nil && walSeqStart > 0 {
+			_, _ = wal.AppendTxAbort(dbName, txID, err.Error())
+		}
 		return nil, fmt.Errorf("failed to commit implicit transaction: %w", err)
+	}
+
+	// Attach receipt metadata if WAL markers were recorded.
+	if wal != nil && walSeqStart > 0 {
+		opCount := tx.OperationCount()
+		if commitSeq, walErr := wal.AppendTxCommit(dbName, txID, opCount); walErr == nil {
+			if receipt, recErr := storage.NewReceipt(txID, walSeqStart, commitSeq, dbName, time.Now().UTC()); recErr == nil {
+				if result.Metadata == nil {
+					result.Metadata = make(map[string]interface{})
+				}
+				result.Metadata["receipt"] = receipt
+			}
+		}
 	}
 
 	// Flush if needed for durability
@@ -840,6 +875,34 @@ func (e *StorageExecutor) getStorage(ctx context.Context) storage.Engine {
 		return txWrapper
 	}
 	return e.storage
+}
+
+// resolveWALAndDatabase attempts to find a WAL instance and database name
+// by unwrapping common storage wrappers (namespaced, async, WAL engines).
+func (e *StorageExecutor) resolveWALAndDatabase() (*storage.WAL, string) {
+	engine := e.storage
+	var dbName string
+
+	for engine != nil {
+		if ns, ok := engine.(interface{ Namespace() string }); ok && dbName == "" {
+			dbName = ns.Namespace()
+		}
+		if walProvider, ok := engine.(interface{ GetWAL() *storage.WAL }); ok {
+			return walProvider.GetWAL(), dbName
+		}
+		switch wrapper := engine.(type) {
+		case interface{ GetUnderlying() storage.Engine }:
+			engine = wrapper.GetUnderlying()
+		case interface{ GetEngine() storage.Engine }:
+			engine = wrapper.GetEngine()
+		case interface{ GetInnerEngine() storage.Engine }:
+			engine = wrapper.GetInnerEngine()
+		default:
+			return nil, dbName
+		}
+	}
+
+	return nil, dbName
 }
 
 // transactionStorageWrapper wraps a BadgerTransaction to implement storage.Engine
@@ -1385,6 +1448,10 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 		// Must be at start (position 0) to be a standalone clause
 		// Handles flexible whitespace: "DROP ALIAS", "DROP\tALIAS", "DROP\nALIAS", etc.
 		return e.executeDropAlias(ctx, cypher)
+	case findMultiWordKeywordIndex(cypher, "DROP", "CONSTRAINT") == 0:
+		// Schema command: DROP CONSTRAINT (must not be treated as generic DROP no-op).
+		// Must be at start (position 0) to be a standalone clause.
+		return e.executeSchemaCommand(ctx, cypher)
 	case findKeywordIndex(cypher, "DROP") == 0:
 		// DROP INDEX/CONSTRAINT - treat as no-op (NornicDB manages indexes internally)
 		// Must be at start (position 0) to be a standalone clause

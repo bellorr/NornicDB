@@ -7,15 +7,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // TransactionContext holds the active transaction for a Cypher session.
 type TransactionContext struct {
-	tx     interface{} // *storage.BadgerTransaction (MemoryEngine now wraps BadgerEngine)
-	engine storage.Engine
-	active bool
+	tx          interface{} // *storage.BadgerTransaction (MemoryEngine now wraps BadgerEngine)
+	engine      storage.Engine
+	active      bool
+	wal         *storage.WAL
+	walSeqStart uint64
+	database    string
+	txID        string
 }
 
 // parseTransactionStatement checks if query is BEGIN/COMMIT/ROLLBACK.
@@ -61,21 +66,45 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to start transaction: %w", err)
 		}
-		e.txContext = &TransactionContext{
+		txCtx := &TransactionContext{
 			tx:     tx,
 			engine: eng,
 			active: true,
+			txID:   tx.ID,
 		}
+		if wal, dbName := e.resolveWALAndDatabase(); wal != nil {
+			walSeq, walErr := wal.AppendTxBegin(dbName, tx.ID, nil)
+			if walErr != nil {
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("failed to write WAL tx begin: %w", walErr)
+			}
+			txCtx.wal = wal
+			txCtx.walSeqStart = walSeq
+			txCtx.database = dbName
+		}
+		e.txContext = txCtx
 	case *storage.MemoryEngine:
 		tx, err := eng.BeginTransaction()
 		if err != nil {
 			return nil, fmt.Errorf("failed to start transaction: %w", err)
 		}
-		e.txContext = &TransactionContext{
+		txCtx := &TransactionContext{
 			tx:     tx,
 			engine: eng,
 			active: true,
+			txID:   tx.ID,
 		}
+		if wal, dbName := e.resolveWALAndDatabase(); wal != nil {
+			walSeq, walErr := wal.AppendTxBegin(dbName, tx.ID, nil)
+			if walErr != nil {
+				_ = tx.Rollback()
+				return nil, fmt.Errorf("failed to write WAL tx begin: %w", walErr)
+			}
+			txCtx.wal = wal
+			txCtx.walSeqStart = walSeq
+			txCtx.database = dbName
+		}
+		e.txContext = txCtx
 	default:
 		return nil, fmt.Errorf("engine does not support transactions")
 	}
@@ -94,25 +123,59 @@ func (e *StorageExecutor) handleCommit() (*ExecuteResult, error) {
 
 	// Commit based on transaction type
 	// All engines now use BadgerTransaction (MemoryEngine wraps BadgerEngine)
-	var err error
+	var (
+		err     error
+		receipt *storage.Receipt
+		opCount int
+	)
 	switch tx := e.txContext.tx.(type) {
 	case *storage.BadgerTransaction:
+		opCount = tx.OperationCount()
 		err = tx.Commit()
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
 	}
 
-	e.txContext.active = false
-	e.txContext = nil
+	wal := e.txContext.wal
+	walSeqStart := e.txContext.walSeqStart
+	txID := e.txContext.txID
+	dbName := e.txContext.database
+
+	if err == nil && wal != nil && walSeqStart > 0 {
+		commitSeq, walErr := wal.AppendTxCommit(dbName, txID, opCount)
+		if walErr == nil {
+			receipt, _ = storage.NewReceipt(
+				txID,
+				walSeqStart,
+				commitSeq,
+				dbName,
+				time.Now().UTC(),
+			)
+		}
+	}
 
 	if err != nil {
+		if wal != nil && walSeqStart > 0 {
+			_, _ = wal.AppendTxAbort(dbName, txID, err.Error())
+		}
+		e.txContext.active = false
+		e.txContext = nil
 		return nil, fmt.Errorf("commit failed: %w", err)
 	}
 
-	return &ExecuteResult{
+	e.txContext.active = false
+	e.txContext = nil
+
+	result := &ExecuteResult{
 		Columns: []string{"status"},
 		Rows:    [][]interface{}{{"Transaction committed"}},
-	}, nil
+	}
+	if receipt != nil {
+		result.Metadata = map[string]interface{}{
+			"receipt": receipt,
+		}
+	}
+	return result, nil
 }
 
 // handleRollback rolls back the active transaction.
@@ -129,6 +192,10 @@ func (e *StorageExecutor) handleRollback() (*ExecuteResult, error) {
 		err = tx.Rollback()
 	default:
 		return nil, fmt.Errorf("unknown transaction type")
+	}
+
+	if e.txContext.wal != nil && e.txContext.walSeqStart > 0 {
+		_, _ = e.txContext.wal.AppendTxAbort(e.txContext.database, e.txContext.txID, "rollback")
 	}
 
 	e.txContext.active = false

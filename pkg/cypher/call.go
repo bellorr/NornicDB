@@ -944,7 +944,7 @@ func (e *StorageExecutor) callDbConstraints() (*ExecuteResult, error) {
 	schema := e.storage.GetSchema()
 	if schema == nil {
 		return &ExecuteResult{
-			Columns: []string{"name", "type", "labelsOrTypes", "properties"},
+			Columns: []string{"name", "type", "labelsOrTypes", "properties", "propertyType"},
 			Rows:    [][]interface{}{},
 		}, nil
 	}
@@ -968,11 +968,22 @@ func (e *StorageExecutor) callDbConstraints() (*ExecuteResult, error) {
 			constraintType,
 			labelsOrTypes,
 			properties,
+			nil,
+		})
+	}
+
+	for _, constraint := range schema.GetAllPropertyTypeConstraints() {
+		rows = append(rows, []interface{}{
+			constraint.Name,
+			string(storage.ConstraintPropertyType),
+			[]string{constraint.Label},
+			[]string{constraint.Property},
+			string(constraint.ExpectedType),
 		})
 	}
 
 	return &ExecuteResult{
-		Columns: []string{"name", "type", "labelsOrTypes", "properties"},
+		Columns: []string{"name", "type", "labelsOrTypes", "properties", "propertyType"},
 		Rows:    rows,
 	}, nil
 }

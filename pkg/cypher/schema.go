@@ -13,6 +13,8 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // executeSchemaCommand handles CREATE CONSTRAINT and CREATE INDEX commands.
@@ -22,6 +24,8 @@ func (e *StorageExecutor) executeSchemaCommand(ctx context.Context, cypher strin
 	// Order matters: check more specific patterns first
 	if strings.Contains(upper, "CREATE CONSTRAINT") {
 		return e.executeCreateConstraint(ctx, cypher)
+	} else if strings.Contains(upper, "DROP CONSTRAINT") {
+		return e.executeDropConstraint(ctx, cypher)
 	} else if strings.Contains(upper, "CREATE FULLTEXT INDEX") {
 		return e.executeCreateFulltextIndex(ctx, cypher)
 	} else if strings.Contains(upper, "CREATE VECTOR INDEX") {
@@ -45,6 +49,230 @@ func (e *StorageExecutor) executeSchemaCommand(ctx context.Context, cypher strin
 //
 //	CREATE CONSTRAINT IF NOT EXISTS ON (n:Label) ASSERT n.property IS UNIQUE
 func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	// NODE KEY constraints (Neo4j 5.x)
+	if matches := constraintNamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {
+		constraintName := matches[1]
+		label := matches[3]
+		properties := e.parseConstraintProperties(matches[4])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("NODE KEY constraint requires properties")
+		}
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintNodeKey,
+			Label:      label,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintUnnamedForRequireNodeKey.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		properties := e.parseConstraintProperties(matches[3])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("NODE KEY constraint requires properties")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_node_key", strings.ToLower(label), strings.ToLower(strings.Join(properties, "_")))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintNodeKey,
+			Label:      label,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintOnAssertNodeKey.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		properties := e.parseConstraintProperties(matches[3])
+		if len(properties) == 0 {
+			return nil, fmt.Errorf("NODE KEY constraint requires properties")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_node_key", strings.ToLower(label), strings.ToLower(strings.Join(properties, "_")))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintNodeKey,
+			Label:      label,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// EXISTS / NOT NULL constraints
+	if matches := constraintNamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
+		constraintName := matches[1]
+		label := matches[3]
+		property := matches[5]
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintExists,
+			Label:      label,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintUnnamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		property := matches[4]
+		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintExists,
+			Label:      label,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintOnAssertExists.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		property := matches[4]
+		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintExists,
+			Label:      label,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintOnAssertNotNull.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		property := matches[4]
+		constraintName := fmt.Sprintf("constraint_%s_%s_exists", strings.ToLower(label), strings.ToLower(property))
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintExists,
+			Label:      label,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	// Property type constraints
+	if matches := constraintNamedForRequireType.FindStringSubmatch(cypher); matches != nil {
+		constraintName := matches[1]
+		label := matches[3]
+		property := matches[5]
+		expectedType, err := parsePropertyType(matches[6])
+		if err != nil {
+			return nil, err
+		}
+		ptc := storage.PropertyTypeConstraint{
+			Name:         constraintName,
+			Label:        label,
+			Property:     property,
+			ExpectedType: expectedType,
+		}
+		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, label, property, expectedType); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintUnnamedForRequireType.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		property := matches[4]
+		expectedType, err := parsePropertyType(matches[5])
+		if err != nil {
+			return nil, err
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_type", strings.ToLower(label), strings.ToLower(property))
+		ptc := storage.PropertyTypeConstraint{
+			Name:         constraintName,
+			Label:        label,
+			Property:     property,
+			ExpectedType: expectedType,
+		}
+		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, label, property, expectedType); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintOnAssertType.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		property := matches[4]
+		expectedType, err := parsePropertyType(matches[5])
+		if err != nil {
+			return nil, err
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_type", strings.ToLower(label), strings.ToLower(property))
+		ptc := storage.PropertyTypeConstraint{
+			Name:         constraintName,
+			Label:        label,
+			Property:     property,
+			ExpectedType: expectedType,
+		}
+		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(e.storage, ptc); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddPropertyTypeConstraint(constraintName, label, property, expectedType); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
 	// Pattern 1 (Neo4j 5.x): CREATE CONSTRAINT name IF NOT EXISTS FOR (n:Label) REQUIRE n.property IS UNIQUE
 	// Uses pre-compiled pattern from regex_patterns.go
 	if matches := constraintNamedForRequire.FindStringSubmatch(cypher); matches != nil {
@@ -52,7 +280,16 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		label := matches[3]
 		property := matches[5]
 
-		// Add constraint to schema
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintUnique,
+			Label:      label,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
 		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property); err != nil {
 			return nil, err
 		}
@@ -66,6 +303,16 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		property := matches[4]
 		constraintName := fmt.Sprintf("constraint_%s_%s", strings.ToLower(label), strings.ToLower(property))
 
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintUnique,
+			Label:      label,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
 		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property); err != nil {
 			return nil, err
 		}
@@ -79,6 +326,16 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		property := matches[4]
 		constraintName := fmt.Sprintf("constraint_%s_%s", strings.ToLower(label), strings.ToLower(property))
 
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintUnique,
+			Label:      label,
+			Properties: []string{property},
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
 		if err := e.storage.GetSchema().AddUniqueConstraint(constraintName, label, property); err != nil {
 			return nil, err
 		}
@@ -86,6 +343,25 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 	}
 
 	return nil, fmt.Errorf("invalid CREATE CONSTRAINT syntax")
+}
+
+// executeDropConstraint handles DROP CONSTRAINT commands.
+func (e *StorageExecutor) executeDropConstraint(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	matches := dropConstraintPattern.FindStringSubmatch(cypher)
+	if matches == nil {
+		return nil, fmt.Errorf("invalid DROP CONSTRAINT syntax")
+	}
+	name := matches[1]
+
+	if err := e.storage.GetSchema().DropConstraint(name); err != nil {
+		// If IF EXISTS was used, swallow missing constraint errors.
+		if strings.Contains(strings.ToUpper(cypher), "IF EXISTS") && strings.Contains(err.Error(), "does not exist") {
+			return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+		}
+		return nil, err
+	}
+
+	return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 }
 
 // executeCreateIndex handles CREATE INDEX commands.
@@ -219,6 +495,40 @@ func (e *StorageExecutor) parseIndexProperties(propertiesStr string) []string {
 	}
 
 	return properties
+}
+
+func (e *StorageExecutor) parseConstraintProperties(propertiesStr string) []string {
+	parts := strings.Split(propertiesStr, ",")
+	properties := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if dotIdx := strings.LastIndex(part, "."); dotIdx >= 0 && dotIdx < len(part)-1 {
+			propName := strings.TrimSpace(part[dotIdx+1:])
+			if propName != "" {
+				properties = append(properties, propName)
+			}
+		}
+	}
+	return properties
+}
+
+func parsePropertyType(typeName string) (storage.PropertyType, error) {
+	switch strings.ToUpper(strings.TrimSpace(typeName)) {
+	case "STRING":
+		return storage.PropertyTypeString, nil
+	case "INTEGER", "INT":
+		return storage.PropertyTypeInteger, nil
+	case "FLOAT":
+		return storage.PropertyTypeFloat, nil
+	case "BOOLEAN", "BOOL":
+		return storage.PropertyTypeBoolean, nil
+	case "DATE":
+		return storage.PropertyTypeDate, nil
+	case "DATETIME":
+		return storage.PropertyTypeDateTime, nil
+	default:
+		return "", fmt.Errorf("unsupported property type: %s", typeName)
+	}
 }
 
 // executeCreateFulltextIndex handles CREATE FULLTEXT INDEX commands.

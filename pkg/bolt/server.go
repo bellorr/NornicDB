@@ -311,6 +311,7 @@ type DeferrableExecutor interface {
 type QueryResult struct {
 	Columns []string
 	Rows    [][]any
+	Metadata map[string]any
 }
 
 // BoltAuthenticator is the interface for authenticating Bolt protocol connections.
@@ -1497,7 +1498,11 @@ func (s *Session) handlePull(data []byte) error {
 
 		bookmark := s.currentBookmark()
 		if s.lastQueryIsWrite {
-			bookmark = s.generateBookmark()
+			if receiptBookmark, ok := s.bookmarkFromReceipt(); ok {
+				bookmark = receiptBookmark
+			} else {
+				bookmark = s.generateBookmark()
+			}
 		}
 
 		// Build stats matching Neo4j format (only if there are updates)
@@ -1628,12 +1633,12 @@ func (s *Session) generateBookmark() string {
 	// Store sequence in session
 	s.lastTxSequence = seqNum
 
-	return fmt.Sprintf("nornicdb:bookmark:%d", seqNum)
+	return formatBookmark(uint64(seqNum))
 }
 
 func (s *Session) currentBookmark() string {
 	if s.server == nil {
-		return "nornicdb:bookmark:0"
+		return formatBookmark(0)
 	}
 	s.server.txSequenceMu.RLock()
 	seqNum := s.server.txSequence
@@ -1641,7 +1646,59 @@ func (s *Session) currentBookmark() string {
 	if seqNum < 0 {
 		seqNum = 0
 	}
-	return fmt.Sprintf("nornicdb:bookmark:%d", seqNum)
+	return formatBookmark(uint64(seqNum))
+}
+
+func (s *Session) bookmarkFromReceipt() (string, bool) {
+	if s.lastResult == nil || s.lastResult.Metadata == nil {
+		return "", false
+	}
+
+	receiptAny, ok := s.lastResult.Metadata["receipt"]
+	if !ok || receiptAny == nil {
+		return "", false
+	}
+
+	var seq uint64
+	switch r := receiptAny.(type) {
+	case *storage.Receipt:
+		if r != nil {
+			seq = r.WALSeqEnd
+		}
+	case storage.Receipt:
+		seq = r.WALSeqEnd
+	case map[string]interface{}:
+		if val, ok := r["wal_seq_end"].(uint64); ok {
+			seq = val
+		} else if val, ok := r["wal_seq_end"].(float64); ok {
+			seq = uint64(val)
+		} else if val, ok := r["wal_seq_end"].(int64); ok {
+			seq = uint64(val)
+		}
+	}
+
+	if seq == 0 {
+		return "", false
+	}
+
+	s.updateBookmarkSequence(seq)
+	return formatBookmark(seq), true
+}
+
+func (s *Session) updateBookmarkSequence(seq uint64) {
+	if s.server == nil {
+		return
+	}
+
+	s.server.txSequenceMu.Lock()
+	if int64(seq) > s.server.txSequence {
+		s.server.txSequence = int64(seq)
+	}
+	s.server.txSequenceMu.Unlock()
+}
+
+func formatBookmark(seq uint64) string {
+	return fmt.Sprintf("nornicdb:bookmark:%d", seq)
 }
 
 // validateBookmarks validates bookmarks for causal consistency.
@@ -1954,7 +2011,8 @@ func (a *boltQueryExecutorAdapter) Execute(ctx context.Context, query string, pa
 
 	// Convert result to Bolt format
 	return &QueryResult{
-		Columns: result.Columns,
-		Rows:    result.Rows,
+		Columns:  result.Columns,
+		Rows:     result.Rows,
+		Metadata: result.Metadata,
 	}, nil
 }

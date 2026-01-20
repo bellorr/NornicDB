@@ -38,15 +38,6 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 	}
 	schema := b.GetSchemaForNamespace(dbName)
 
-	// Check unique constraints for all labels and properties
-	for _, label := range node.Labels {
-		for propName, propValue := range node.Properties {
-			if err := schema.CheckUniqueConstraint(label, propName, propValue, ""); err != nil {
-				return "", fmt.Errorf("constraint violation: %w", err)
-			}
-		}
-	}
-
 	err := b.withUpdate(func(txn *badger.Txn) error {
 		// Check if node already exists
 		key := nodeKey(node.ID)
@@ -55,6 +46,10 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 			return ErrAlreadyExists
 		}
 		if err != badger.ErrKeyNotFound {
+			return err
+		}
+
+		if err := b.validateNodeConstraintsInTxn(txn, node, schema, dbName, node.ID); err != nil {
 			return err
 		}
 
@@ -187,8 +182,15 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		return err
 	}
 
+	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+	if !ok {
+		return fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", node.ID)
+	}
+	schema := b.GetSchemaForNamespace(dbName)
+
 	// Track if this is an insert (new node) or update (existing node)
 	wasInsert := false
+	var existingNode *Node
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
 		key := nodeKey(node.ID)
@@ -198,6 +200,9 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		if err == badger.ErrKeyNotFound {
 			// Node doesn't exist - do an insert (upsert behavior)
 			wasInsert = true
+			if err := b.validateNodeConstraintsInTxn(txn, node, schema, dbName, node.ID); err != nil {
+				return err
+			}
 			data, embeddingsSeparate, err := encodeNode(node)
 			if err != nil {
 				return fmt.Errorf("failed to encode node: %w", err)
@@ -240,17 +245,20 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 		}
 
 		// Node exists - update it
-		var existing *Node
 		if err := item.Value(func(val []byte) error {
 			var decodeErr error
-			existing, decodeErr = decodeNodeWithEmbeddings(txn, val, node.ID)
+			existingNode, decodeErr = decodeNodeWithEmbeddings(txn, val, node.ID)
 			return decodeErr
 		}); err != nil {
 			return err
 		}
 
+		if err := b.validateNodeConstraintsInTxn(txn, node, schema, dbName, node.ID); err != nil {
+			return err
+		}
+
 		// Remove old label indexes
-		for _, label := range existing.Labels {
+		for _, label := range existingNode.Labels {
 			if err := txn.Delete(labelIndexKey(label, node.ID)); err != nil {
 				return err
 			}
@@ -330,10 +338,30 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 	// Update cache on successful operation
 	if err == nil {
 		if wasInsert {
+			// Register unique constraint values
+			for _, label := range node.Labels {
+				for propName, propValue := range node.Properties {
+					schema.RegisterUniqueValue(label, propName, propValue, node.ID)
+				}
+			}
+
 			b.cacheOnNodeCreated(node)
 			// Notify listeners about the new node
 			b.notifyNodeCreated(node)
 		} else {
+			if existingNode != nil {
+				for _, label := range existingNode.Labels {
+					for propName, propValue := range existingNode.Properties {
+						schema.UnregisterUniqueValue(label, propName, propValue)
+					}
+				}
+			}
+			for _, label := range node.Labels {
+				for propName, propValue := range node.Properties {
+					schema.RegisterUniqueValue(label, propName, propValue, node.ID)
+				}
+			}
+
 			b.cacheOnNodeUpdated(node)
 			// Notify listeners to re-index the updated node
 			b.notifyNodeUpdated(node)
@@ -518,16 +546,30 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 	// Track edge deletions for counter update after transaction
 	var totalEdgesDeleted int64
 	var deletedEdgeIDs []EdgeID
+	var deletedNode *Node
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
-		edgesDeleted, edgeIDs, err := b.deleteNodeInTxn(txn, id)
+		edgesDeleted, edgeIDs, node, err := b.deleteNodeInTxn(txn, id)
 		totalEdgesDeleted = edgesDeleted
 		deletedEdgeIDs = edgeIDs
+		deletedNode = node
 		return err
 	})
 
 	// Invalidate cache on successful delete
 	if err == nil {
+		if deletedNode != nil {
+			dbName, _, ok := ParseDatabasePrefix(string(deletedNode.ID))
+			if ok {
+				schema := b.GetSchemaForNamespace(dbName)
+				for _, label := range deletedNode.Labels {
+					for propName, propValue := range deletedNode.Properties {
+						schema.UnregisterUniqueValue(label, propName, propValue)
+					}
+				}
+			}
+		}
+
 		b.cacheOnNodeDeleted(id, totalEdgesDeleted)
 
 		// Notify listeners about deleted edges

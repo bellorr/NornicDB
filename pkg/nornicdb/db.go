@@ -2060,6 +2060,7 @@ func generateID(prefix string) string {
 // memoryToNode converts a Memory to a storage.Node.
 func memoryToNode(mem *Memory) *storage.Node {
 	props := make(map[string]any)
+	props["id"] = mem.ID
 	props["content"] = mem.Content
 	props["title"] = mem.Title
 	props["tier"] = string(mem.Tier)
@@ -2139,7 +2140,7 @@ func nodeToMemory(node *storage.Node) *Memory {
 
 	// Store remaining properties
 	knownKeys := map[string]bool{
-		"content": true, "title": true, "tier": true,
+		"id": true, "content": true, "title": true, "tier": true,
 		"decay_score": true, "last_accessed": true,
 		"access_count": true, "source": true, "tags": true,
 	}

@@ -3,25 +3,32 @@ package storage
 
 import (
 	"fmt"
+	"time"
 )
 
 // ValidateConstraintOnCreation validates that all existing data satisfies the constraint.
 // This is called when CREATE CONSTRAINT is executed, matching Neo4j behavior.
 func (b *BadgerEngine) ValidateConstraintOnCreation(c Constraint) error {
+	return ValidateConstraintOnCreationForEngine(b, c)
+}
+
+// ValidateConstraintOnCreationForEngine validates constraints using the Engine interface.
+// This allows callers (like Cypher) to validate through wrapper engines (namespaced, WAL, etc.).
+func ValidateConstraintOnCreationForEngine(engine Engine, c Constraint) error {
 	switch c.Type {
 	case ConstraintUnique:
-		return b.validateUniqueConstraintOnCreation(c)
+		return validateUniqueConstraintOnCreationWithEngine(engine, c)
 	case ConstraintNodeKey:
-		return b.validateNodeKeyConstraintOnCreation(c)
+		return validateNodeKeyConstraintOnCreationWithEngine(engine, c)
 	case ConstraintExists:
-		return b.validateExistenceConstraintOnCreation(c)
+		return validateExistenceConstraintOnCreationWithEngine(engine, c)
 	default:
 		return fmt.Errorf("unknown constraint type: %s", c.Type)
 	}
 }
 
 // validateUniqueConstraintOnCreation checks all existing nodes for duplicates.
-func (b *BadgerEngine) validateUniqueConstraintOnCreation(c Constraint) error {
+func validateUniqueConstraintOnCreationWithEngine(engine Engine, c Constraint) error {
 	if len(c.Properties) != 1 {
 		return fmt.Errorf("UNIQUE constraint requires exactly 1 property, got %d", len(c.Properties))
 	}
@@ -30,7 +37,7 @@ func (b *BadgerEngine) validateUniqueConstraintOnCreation(c Constraint) error {
 	seen := make(map[interface{}]NodeID)
 
 	// Scan all nodes with this label
-	nodes, err := b.GetNodesByLabel(c.Label)
+	nodes, err := engine.GetNodesByLabel(c.Label)
 	if err != nil {
 		return fmt.Errorf("scanning nodes: %w", err)
 	}
@@ -58,14 +65,14 @@ func (b *BadgerEngine) validateUniqueConstraintOnCreation(c Constraint) error {
 }
 
 // validateNodeKeyConstraintOnCreation checks all existing nodes for duplicate composite keys.
-func (b *BadgerEngine) validateNodeKeyConstraintOnCreation(c Constraint) error {
+func validateNodeKeyConstraintOnCreationWithEngine(engine Engine, c Constraint) error {
 	if len(c.Properties) < 1 {
 		return fmt.Errorf("NODE KEY constraint requires at least 1 property")
 	}
 
 	seen := make(map[string]NodeID) // composite key -> nodeID
 
-	nodes, err := b.GetNodesByLabel(c.Label)
+	nodes, err := engine.GetNodesByLabel(c.Label)
 	if err != nil {
 		return fmt.Errorf("scanning nodes: %w", err)
 	}
@@ -113,14 +120,14 @@ func (b *BadgerEngine) validateNodeKeyConstraintOnCreation(c Constraint) error {
 }
 
 // validateExistenceConstraintOnCreation checks all existing nodes have the required property.
-func (b *BadgerEngine) validateExistenceConstraintOnCreation(c Constraint) error {
+func validateExistenceConstraintOnCreationWithEngine(engine Engine, c Constraint) error {
 	if len(c.Properties) != 1 {
 		return fmt.Errorf("EXISTS constraint requires exactly 1 property, got %d", len(c.Properties))
 	}
 
 	property := c.Properties[0]
 
-	nodes, err := b.GetNodesByLabel(c.Label)
+	nodes, err := engine.GetNodesByLabel(c.Label)
 	if err != nil {
 		return fmt.Errorf("scanning nodes: %w", err)
 	}
@@ -237,9 +244,10 @@ func (b *BadgerEngine) validateExistenceRelationshipConstraint(rc RelationshipCo
 
 // PropertyTypeConstraint represents a type constraint on properties.
 type PropertyTypeConstraint struct {
-	Label      string
-	Property   string
-	ExpectedType PropertyType
+	Name         string       `json:"name"`
+	Label        string       `json:"label"`
+	Property     string       `json:"property"`
+	ExpectedType PropertyType `json:"expected_type"`
 }
 
 // PropertyType represents the expected type of a property.
@@ -297,6 +305,13 @@ func ValidatePropertyType(value interface{}, expectedType PropertyType) error {
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("expected BOOLEAN, got %T", value)
 		}
+	case PropertyTypeDate, PropertyTypeDateTime:
+		switch value.(type) {
+		case time.Time:
+			return nil
+		default:
+			return fmt.Errorf("expected %s, got %T", expectedType, value)
+		}
 	default:
 		return fmt.Errorf("unknown property type: %s", expectedType)
 	}
@@ -306,7 +321,12 @@ func ValidatePropertyType(value interface{}, expectedType PropertyType) error {
 
 // ValidatePropertyTypeConstraintOnCreation validates existing data against type constraint.
 func (b *BadgerEngine) ValidatePropertyTypeConstraintOnCreation(ptc PropertyTypeConstraint) error {
-	nodes, err := b.GetNodesByLabel(ptc.Label)
+	return ValidatePropertyTypeConstraintOnCreationForEngine(b, ptc)
+}
+
+// ValidatePropertyTypeConstraintOnCreationForEngine validates type constraints using Engine.
+func ValidatePropertyTypeConstraintOnCreationForEngine(engine Engine, ptc PropertyTypeConstraint) error {
+	nodes, err := engine.GetNodesByLabel(ptc.Label)
 	if err != nil {
 		return fmt.Errorf("scanning nodes: %w", err)
 	}

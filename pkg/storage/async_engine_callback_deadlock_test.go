@@ -25,7 +25,7 @@ func TestAsyncEngine_DeleteNode_CallbackCanReenterStorage(t *testing.T) {
 		}
 	})
 
-	id, err := ae.CreateNode(&Node{ID: "n1", Labels: []string{"L"}})
+	id, err := ae.CreateNode(&Node{ID: NodeID(prefixTestID("n1")), Labels: []string{"L"}})
 	require.NoError(t, err)
 
 	done := make(chan error, 1)
@@ -63,7 +63,7 @@ func TestAsyncEngine_BulkDeleteNodes_CallbackCanReenterStorage(t *testing.T) {
 		}
 	})
 
-	id, err := ae.CreateNode(&Node{ID: "n1", Labels: []string{"L"}})
+	id, err := ae.CreateNode(&Node{ID: NodeID(prefixTestID("n1")), Labels: []string{"L"}})
 	require.NoError(t, err)
 
 	done := make(chan error, 1)

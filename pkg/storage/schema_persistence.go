@@ -16,6 +16,8 @@ type SchemaDefinition struct {
 
 	Constraints []Constraint `json:"constraints,omitempty"`
 
+	PropertyTypeConstraints []PropertyTypeConstraint `json:"property_type_constraints,omitempty"`
+
 	PropertyIndexes  []SchemaPropertyIndexDef  `json:"property_indexes,omitempty"`
 	CompositeIndexes []SchemaCompositeIndexDef `json:"composite_indexes,omitempty"`
 	FulltextIndexes  []FulltextIndex           `json:"fulltext_indexes,omitempty"`
@@ -75,6 +77,25 @@ func (sm *SchemaManager) exportDefinitionLocked() *SchemaDefinition {
 				return def.Constraints[i].Label < def.Constraints[j].Label
 			}
 			return def.Constraints[i].Name < def.Constraints[j].Name
+		})
+	}
+
+	// Property type constraints.
+	if len(sm.propertyTypeConstraints) > 0 {
+		def.PropertyTypeConstraints = make([]PropertyTypeConstraint, 0, len(sm.propertyTypeConstraints))
+		for _, c := range sm.propertyTypeConstraints {
+			def.PropertyTypeConstraints = append(def.PropertyTypeConstraints, PropertyTypeConstraint{
+				Name:         c.Name,
+				Label:        c.Label,
+				Property:     c.Property,
+				ExpectedType: c.ExpectedType,
+			})
+		}
+		sort.Slice(def.PropertyTypeConstraints, func(i, j int) bool {
+			if def.PropertyTypeConstraints[i].Label != def.PropertyTypeConstraints[j].Label {
+				return def.PropertyTypeConstraints[i].Label < def.PropertyTypeConstraints[j].Label
+			}
+			return def.PropertyTypeConstraints[i].Name < def.PropertyTypeConstraints[j].Name
 		})
 	}
 
@@ -187,6 +208,7 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 	// Reset all collections.
 	sm.uniqueConstraints = make(map[string]*UniqueConstraint)
 	sm.constraints = make(map[string]Constraint)
+	sm.propertyTypeConstraints = make(map[string]PropertyTypeConstraint)
 	sm.propertyIndexes = make(map[string]*PropertyIndex)
 	sm.compositeIndexes = make(map[string]*CompositeIndex)
 	sm.fulltextIndexes = make(map[string]*FulltextIndex)
@@ -213,6 +235,16 @@ func (sm *SchemaManager) ReplaceFromDefinition(def *SchemaDefinition) error {
 				Property: cc.Properties[0],
 				values:   make(map[interface{}]NodeID),
 			}
+		}
+	}
+
+	// Property type constraints.
+	for _, c := range def.PropertyTypeConstraints {
+		sm.propertyTypeConstraints[c.Name] = PropertyTypeConstraint{
+			Name:         c.Name,
+			Label:        c.Label,
+			Property:     c.Property,
+			ExpectedType: c.ExpectedType,
 		}
 	}
 

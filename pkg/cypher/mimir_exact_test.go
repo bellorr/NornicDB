@@ -250,20 +250,18 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
-	// Create BadgerEngine -> NamespacedEngine -> AsyncEngine stack (like production)
+	// Create BadgerEngine -> AsyncEngine -> NamespacedEngine stack (matches production order)
 	badger, err := storage.NewBadgerEngine(filepath.Join(tmpDir, "data"))
 	require.NoError(t, err)
 	defer badger.Close()
 
-	// Wrap with NamespacedEngine (required for prefixed storage)
-	namespaced := storage.NewNamespacedEngine(badger, "test")
-
 	config := storage.DefaultAsyncEngineConfig()
 	config.FlushInterval = 100 * time.Millisecond
-	async := storage.NewAsyncEngine(namespaced, config)
-	defer async.Close()
+	asyncBase := storage.NewAsyncEngine(badger, config)
+	defer asyncBase.Close()
 
-	exec := NewStorageExecutor(async)
+	store := storage.NewNamespacedEngine(asyncBase, "test")
+	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
 	// ==========================================================================
@@ -367,13 +365,13 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 	}
 
 	// Flush to BadgerDB
-	err = async.Flush()
+	err = asyncBase.Flush()
 	require.NoError(t, err)
 
 	// ==========================================================================
 	// Step 3: Verify chunks were created with relationships
 	// ==========================================================================
-	allNodes, err := async.AllNodes()
+	allNodes, err := store.AllNodes()
 	require.NoError(t, err)
 
 	// Build maps for lookup
@@ -421,7 +419,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 		node.Properties["embedding_dimensions"] = 4
 		node.Properties["embedding_model"] = "test-model"
 		node.Properties["has_embedding"] = true
-		err := async.UpdateNode(node)
+		err := store.UpdateNode(node)
 		require.NoError(t, err)
 	}
 
@@ -439,12 +437,12 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 		node.Properties["embedding_dimensions"] = 4
 		node.Properties["embedding_model"] = "test-model"
 		node.Properties["has_embedding"] = true
-		err := async.UpdateNode(node)
+		err := store.UpdateNode(node)
 		require.NoError(t, err)
 	}
 
 	// Flush embedding updates
-	err = async.Flush()
+	err = asyncBase.Flush()
 	require.NoError(t, err)
 
 	t.Logf("Set embeddings: %d files, %d chunks", len(filesWithEmbeddings), len(chunksWithEmbeddings))
@@ -554,7 +552,7 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 	// Step 6: Verify embeddings persisted to BadgerDB
 	// ==========================================================================
 	t.Run("verify embeddings persisted in BadgerDB", func(t *testing.T) {
-		err = async.Flush()
+		err = asyncBase.Flush()
 		require.NoError(t, err)
 
 		var filesWithEmbed, chunksWithEmbed int

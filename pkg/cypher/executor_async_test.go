@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
 )
 
 // skipDiskIOTestOnWindows skips disk I/O intensive tests on Windows to avoid OOM
@@ -27,9 +28,9 @@ func skipDiskIOTestOnWindows(t *testing.T) {
 func TestExecuteImplicitAsync_CreateNode(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create a node
@@ -68,9 +69,9 @@ func TestExecuteImplicitAsync_CreateNode(t *testing.T) {
 func TestExecuteImplicitAsync_CreateRelationship(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create two nodes
@@ -112,9 +113,9 @@ func TestExecuteImplicitAsync_CreateRelationship(t *testing.T) {
 func TestExecuteImplicitAsync_AggregationEmptyDB(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Count nodes in empty database
@@ -141,9 +142,9 @@ func TestExecuteImplicitAsync_AggregationEmptyDB(t *testing.T) {
 func TestExecuteImplicitAsync_RelationshipCountEmptyDB(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Count relationships in empty database
@@ -170,9 +171,9 @@ func TestExecuteImplicitAsync_RelationshipCountEmptyDB(t *testing.T) {
 func TestExecuteImplicitAsync_BulkCreateAndCount(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create 10 Person nodes
@@ -223,9 +224,9 @@ func TestExecuteImplicitAsync_BulkCreateAndCount(t *testing.T) {
 func TestExecuteImplicitAsync_DeleteNode(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create and then delete a node
@@ -257,9 +258,9 @@ func TestExecuteImplicitAsync_DeleteNode(t *testing.T) {
 func TestExecuteImplicitAsync_CreateDeleteRelationship(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create two permanent nodes
@@ -311,9 +312,9 @@ func TestExecuteImplicitAsync_CreateDeleteRelationship(t *testing.T) {
 func TestExecuteImplicitAsync_MatchCreateDeleteSingleQuery(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create nodes
@@ -347,9 +348,9 @@ func TestExecuteImplicitAsync_MatchCreateDeleteSingleQuery(t *testing.T) {
 func TestBenchmarkMatchCreateDelete(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create nodes to match (like the benchmark setup)
@@ -406,9 +407,9 @@ func TestBenchmarkMatchCreateDelete(t *testing.T) {
 func TestBenchmarkMatchCreateDelete_WithFlush(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncEngine := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncEngine, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create nodes
@@ -460,16 +461,22 @@ func TestBenchmarkMatchCreateDelete_WithBadger(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create BadgerEngine: %v", err)
 	}
-	defer badgerEngine.Close()
+	// AsyncEngine.Close() will close the underlying BadgerEngine.
 
 	asyncEngine := storage.NewAsyncEngine(badgerEngine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	defer asyncEngine.Close()
+
+	// Match production order: Badger -> Async -> Namespaced (IDs must be prefixed for Badger).
+	engine := storage.NewNamespacedEngine(asyncEngine, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create nodes
-	executor.Execute(ctx, "CREATE (a:Actor {name: 'Keanu'})", nil)
-	executor.Execute(ctx, "CREATE (m:Movie {title: 'Matrix'})", nil)
-	asyncEngine.Flush()
+	_, err = executor.Execute(ctx, "CREATE (a:Actor {name: 'Keanu'})", nil)
+	require.NoError(t, err)
+	_, err = executor.Execute(ctx, "CREATE (m:Movie {title: 'Matrix'})", nil)
+	require.NoError(t, err)
+	require.NoError(t, asyncEngine.Flush())
 
 	iterations := 100
 	t.Logf("Running %d iterations of MATCH...CREATE...DELETE (BadgerEngine, no flush)", iterations)
@@ -509,16 +516,22 @@ func TestBenchmarkMatchCreateDelete_WithBadgerAndFlush(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create BadgerEngine: %v", err)
 	}
-	defer badgerEngine.Close()
+	// AsyncEngine.Close() will close the underlying BadgerEngine.
 
 	asyncEngine := storage.NewAsyncEngine(badgerEngine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	defer asyncEngine.Close()
+
+	// Match production order: Badger -> Async -> Namespaced (IDs must be prefixed for Badger).
+	engine := storage.NewNamespacedEngine(asyncEngine, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create nodes
-	executor.Execute(ctx, "CREATE (a:Actor {name: 'Keanu'})", nil)
-	executor.Execute(ctx, "CREATE (m:Movie {title: 'Matrix'})", nil)
-	asyncEngine.Flush()
+	_, err = executor.Execute(ctx, "CREATE (a:Actor {name: 'Keanu'})", nil)
+	require.NoError(t, err)
+	_, err = executor.Execute(ctx, "CREATE (m:Movie {title: 'Matrix'})", nil)
+	require.NoError(t, err)
+	require.NoError(t, asyncEngine.Flush())
 
 	iterations := 100
 	t.Logf("Running %d iterations (BadgerEngine + Flush = Bolt simulation)", iterations)
@@ -613,9 +626,9 @@ func TestBenchmarkMatchCreateDelete_LargeDataset_Direct(t *testing.T) {
 func TestBenchmarkMatchCreateDelete_LargeDataset_WithFlush(t *testing.T) {
 	baseEngine := storage.NewMemoryEngine()
 
-	engine := storage.NewNamespacedEngine(baseEngine, "test")
-	asyncEngine := storage.NewAsyncEngine(engine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncEngine := storage.NewAsyncEngine(baseEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncEngine, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create 100 actors + 150 movies
@@ -658,8 +671,9 @@ func TestBenchmarkMatchCreateDelete_Badger_LargeDataset(t *testing.T) {
 	}
 	defer badgerEngine.Close()
 
-	asyncEngine := storage.NewAsyncEngine(badgerEngine, nil)
-	executor := NewStorageExecutor(asyncEngine)
+	asyncBase := storage.NewAsyncEngine(badgerEngine, nil)
+	engine := storage.NewNamespacedEngine(asyncBase, "test")
+	executor := NewStorageExecutor(engine)
 	ctx := context.Background()
 
 	// Create 100 actors + 150 movies
@@ -669,7 +683,7 @@ func TestBenchmarkMatchCreateDelete_Badger_LargeDataset(t *testing.T) {
 	for i := 0; i < 150; i++ {
 		executor.Execute(ctx, fmt.Sprintf("CREATE (m:Movie {title: 'Movie_%d'})", i), nil)
 	}
-	asyncEngine.Flush()
+	asyncBase.Flush()
 
 	iterations := 100
 	t.Logf("Running %d iterations (BadgerDB, 100 actors + 150 movies)", iterations)
@@ -685,7 +699,7 @@ func TestBenchmarkMatchCreateDelete_Badger_LargeDataset(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Iteration %d failed: %v", i, err)
 		}
-		asyncEngine.Flush()
+		asyncBase.Flush()
 	}
 	elapsed := time.Since(start)
 

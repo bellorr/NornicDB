@@ -25,6 +25,25 @@ var (
 	constraintUnnamedForRequire = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+UNIQUE`)
 	constraintOnAssert          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+UNIQUE`)
 
+	// EXISTS / NOT NULL constraints
+	constraintNamedForRequireNotNull   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+NOT\s+NULL`)
+	constraintUnnamedForRequireNotNull = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+NOT\s+NULL`)
+	constraintOnAssertExists           = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+exists\s*\(\s*(\w+)\.(\w+)\s*\)`)
+	constraintOnAssertNotNull          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+NOT\s+NULL`)
+
+	// NODE KEY constraints
+	constraintNamedForRequireNodeKey   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
+	constraintUnnamedForRequireNodeKey = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
+	constraintOnAssertNodeKey          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
+
+	// Property type constraints
+	constraintNamedForRequireType   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)
+	constraintUnnamedForRequireType = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)
+	constraintOnAssertType          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)
+
+	// DROP CONSTRAINT
+	dropConstraintPattern = regexp.MustCompile(`(?i)DROP\s+CONSTRAINT(?:\s+IF\s+EXISTS)?\s+(\w+)`)
+
 	// Index patterns - CREATE INDEX [name] [IF NOT EXISTS] FOR (var:Label) ON (var.prop)
 	indexNamedFor   = regexp.MustCompile(`(?i)CREATE\s+INDEX\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+ON\s+\(([^)]+)\)`)
 	indexUnnamedFor = regexp.MustCompile(`(?i)CREATE\s+INDEX(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+ON\s+\(([^)]+)\)`)

@@ -278,6 +278,97 @@ func TestSchemaErrorCases(t *testing.T) {
 	})
 }
 
+func TestCreateExistsConstraint(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE CONSTRAINT person_name_required IF NOT EXISTS FOR (p:Person) REQUIRE p.name IS NOT NULL", nil)
+	if err != nil {
+		t.Fatalf("Failed to create EXISTS constraint: %v", err)
+	}
+
+	allConstraints := store.GetSchema().GetAllConstraints()
+	if len(allConstraints) != 1 {
+		t.Fatalf("Expected 1 constraint, got %d", len(allConstraints))
+	}
+	if allConstraints[0].Type != storage.ConstraintExists {
+		t.Fatalf("Expected EXISTS constraint, got %s", allConstraints[0].Type)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:Person {age: 42})", nil)
+	if err == nil {
+		t.Fatal("Expected EXISTS constraint violation, got nil")
+	}
+}
+
+func TestCreateNodeKeyConstraint(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE CONSTRAINT user_key IF NOT EXISTS FOR (u:User) REQUIRE (u.username, u.domain) IS NODE KEY", nil)
+	if err != nil {
+		t.Fatalf("Failed to create NODE KEY constraint: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:User {username: 'alice', domain: 'example.com'})", nil)
+	if err != nil {
+		t.Fatalf("Failed to create first user: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:User {username: 'alice', domain: 'example.com'})", nil)
+	if err == nil {
+		t.Fatal("Expected NODE KEY constraint violation, got nil")
+	}
+}
+
+func TestCreateTypeConstraint(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE CONSTRAINT user_age_type IF NOT EXISTS FOR (u:User) REQUIRE u.age IS :: INTEGER", nil)
+	if err != nil {
+		t.Fatalf("Failed to create type constraint: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:User {age: 30})", nil)
+	if err != nil {
+		t.Fatalf("Expected valid integer, got error: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:User {age: 'thirty'})", nil)
+	if err == nil {
+		t.Fatal("Expected type constraint violation, got nil")
+	}
+}
+
+func TestDropConstraint(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE CONSTRAINT drop_me IF NOT EXISTS FOR (n:Node) REQUIRE n.id IS UNIQUE", nil)
+	if err != nil {
+		t.Fatalf("Failed to create constraint: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "DROP CONSTRAINT drop_me", nil)
+	if err != nil {
+		t.Fatalf("Failed to drop constraint: %v", err)
+	}
+
+	allConstraints := store.GetSchema().GetAllConstraints()
+	if len(allConstraints) != 0 {
+		t.Fatalf("Expected 0 constraints after drop, got %d", len(allConstraints))
+	}
+}
+
 func TestVectorIndexWithDifferentOptions(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 

@@ -201,8 +201,9 @@ func (db *DB) IsAsyncWritesEnabled() bool {
 
 // CypherResult holds results from a Cypher query.
 type CypherResult struct {
-	Columns []string        `json:"columns"`
-	Rows    [][]interface{} `json:"rows"`
+	Columns  []string               `json:"columns"`
+	Rows     [][]interface{}        `json:"rows"`
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // ExecuteCypher runs a Cypher query and returns structured results.
@@ -221,8 +222,9 @@ func (db *DB) ExecuteCypher(ctx context.Context, query string, params map[string
 	}
 
 	return &CypherResult{
-		Columns: result.Columns,
-		Rows:    result.Rows,
+		Columns:  result.Columns,
+		Rows:     result.Rows,
+		Metadata: result.Metadata,
 	}, nil
 }
 
@@ -1139,6 +1141,77 @@ func (db *DB) CreateIndex(ctx context.Context, label, property, indexType string
 	default:
 		return fmt.Errorf("unsupported index type: %s (use: property, fulltext, vector, range)", indexType)
 	}
+}
+
+// BootstrapCanonicalSchema creates standard constraints for the canonical Memory model.
+// This is idempotent and can be safely called on startup.
+func (db *DB) BootstrapCanonicalSchema(ctx context.Context) error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if db.closed {
+		return ErrClosed
+	}
+
+	schema := db.storage.GetSchema()
+	if schema == nil {
+		return fmt.Errorf("schema manager not initialized")
+	}
+
+	required := []string{"id", "content", "tier", "decay_score", "last_accessed", "access_count"}
+	for _, prop := range required {
+		constraint := storage.Constraint{
+			Name:       fmt.Sprintf("canonical_memory_%s_required", prop),
+			Type:       storage.ConstraintExists,
+			Label:      "Memory",
+			Properties: []string{prop},
+		}
+		if err := storage.ValidateConstraintOnCreationForEngine(db.storage, constraint); err != nil {
+			return err
+		}
+		if err := schema.AddConstraint(constraint); err != nil {
+			return err
+		}
+	}
+
+	nodeKey := storage.Constraint{
+		Name:       "canonical_memory_id_key",
+		Type:       storage.ConstraintNodeKey,
+		Label:      "Memory",
+		Properties: []string{"id"},
+	}
+	if err := storage.ValidateConstraintOnCreationForEngine(db.storage, nodeKey); err != nil {
+		return err
+	}
+	if err := schema.AddConstraint(nodeKey); err != nil {
+		return err
+	}
+
+	typeConstraints := map[string]storage.PropertyType{
+		"id":            storage.PropertyTypeString,
+		"content":       storage.PropertyTypeString,
+		"tier":          storage.PropertyTypeString,
+		"decay_score":   storage.PropertyTypeFloat,
+		"last_accessed": storage.PropertyTypeString,
+		"access_count":  storage.PropertyTypeInteger,
+	}
+	for prop, expectedType := range typeConstraints {
+		name := fmt.Sprintf("canonical_memory_%s_type", prop)
+		ptc := storage.PropertyTypeConstraint{
+			Name:         name,
+			Label:        "Memory",
+			Property:     prop,
+			ExpectedType: expectedType,
+		}
+		if err := storage.ValidatePropertyTypeConstraintOnCreationForEngine(db.storage, ptc); err != nil {
+			return err
+		}
+		if err := schema.AddPropertyTypeConstraint(name, "Memory", prop, expectedType); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // BackupableEngine is an interface for engines that support backup.

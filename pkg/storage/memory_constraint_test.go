@@ -48,7 +48,7 @@ func TestBulkCreateNodesConstraintEnforcement(t *testing.T) {
 			t.Fatal("Expected constraint violation error, got nil")
 		}
 
-		if !strings.Contains(err.Error(), "constraint violation") {
+		if !strings.Contains(strings.ToLower(err.Error()), "constraint violation") {
 			t.Errorf("Expected constraint violation error, got: %v", err)
 		}
 
@@ -101,7 +101,7 @@ func TestBulkCreateNodesConstraintEnforcement(t *testing.T) {
 			t.Fatal("Expected constraint violation error when creating duplicate after bulk create")
 		}
 
-		if !strings.Contains(err.Error(), "constraint violation") {
+		if !strings.Contains(strings.ToLower(err.Error()), "constraint violation") {
 			t.Errorf("Expected constraint violation error, got: %v", err)
 		}
 	})

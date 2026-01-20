@@ -753,7 +753,7 @@ func TestCallDbConstraints(t *testing.T) {
 		result, err := exec.Execute(ctx, "CALL db.constraints()", nil)
 		require.NoError(t, err)
 		require.NotNil(t, result)
-		assert.Equal(t, []string{"name", "type", "labelsOrTypes", "properties"}, result.Columns)
+		assert.Equal(t, []string{"name", "type", "labelsOrTypes", "properties", "propertyType"}, result.Columns)
 		assert.Empty(t, result.Rows, "Should return empty when no constraints exist")
 	})
 
@@ -774,6 +774,7 @@ func TestCallDbConstraints(t *testing.T) {
 		assert.Equal(t, []string{"Node"}, labelsOrTypes, "Labels")
 		properties := row[3].([]string)
 		assert.Equal(t, []string{"id"}, properties, "Properties")
+		assert.Nil(t, row[4], "Property type should be nil for UNIQUE constraint")
 	})
 
 	t.Run("multiple_constraints", func(t *testing.T) {

@@ -35,8 +35,9 @@ func TestAsyncEngine_CreateNode(t *testing.T) {
 	defer async.Close()
 
 	// Create a node
+	nodeID := NodeID(prefixTestID("node-1"))
 	node := &Node{
-		ID:         "node-1",
+		ID:         nodeID,
 		Labels:     []string{"Person"},
 		Properties: map[string]any{"name": "Alice"},
 	}
@@ -44,7 +45,7 @@ func TestAsyncEngine_CreateNode(t *testing.T) {
 	require.NoError(t, err)
 
 	// Should be readable immediately from cache
-	stored, err := async.GetNode("node-1")
+	stored, err := async.GetNode(nodeID)
 	require.NoError(t, err)
 	assert.Equal(t, "Alice", stored.Properties["name"])
 

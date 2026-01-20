@@ -32,7 +32,8 @@ func TestCypher_CountAfterDeleteRecreate(t *testing.T) {
 	defer asyncEngine.Close()
 
 	// Create Cypher executor
-	exec := NewStorageExecutor(asyncEngine)
+	store := storage.NewNamespacedEngine(asyncEngine, "test")
+	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
 	// Step 1: Create nodes via Cypher
@@ -100,7 +101,8 @@ func TestCypher_CountVsMatchCount(t *testing.T) {
 	asyncEngine := storage.NewAsyncEngine(walEngine, nil)
 	defer asyncEngine.Close()
 
-	exec := NewStorageExecutor(asyncEngine)
+	store := storage.NewNamespacedEngine(asyncEngine, "test")
+	exec := NewStorageExecutor(store)
 	ctx := context.Background()
 
 	// Create nodes

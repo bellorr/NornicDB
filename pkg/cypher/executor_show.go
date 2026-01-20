@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/multidb"
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // ===== SHOW Commands (Neo4j compatibility) =====
@@ -23,10 +24,42 @@ func (e *StorageExecutor) executeShowIndexes(ctx context.Context, cypher string)
 
 // executeShowConstraints handles SHOW CONSTRAINTS command
 func (e *StorageExecutor) executeShowConstraints(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// NornicDB manages constraints internally, return empty list
+	schema := e.storage.GetSchema()
+	rows := [][]interface{}{}
+
+	if schema != nil {
+		constraints := schema.GetAllConstraints()
+		for i, constraint := range constraints {
+			rows = append(rows, []interface{}{
+				int64(i + 1),
+				constraint.Name,
+				string(constraint.Type),
+				"NODE",
+				[]string{constraint.Label},
+				constraint.Properties,
+				nil,
+				nil,
+			})
+		}
+
+		offset := len(rows)
+		for i, constraint := range schema.GetAllPropertyTypeConstraints() {
+			rows = append(rows, []interface{}{
+				int64(offset + i + 1),
+				constraint.Name,
+				string(storage.ConstraintPropertyType),
+				"NODE",
+				[]string{constraint.Label},
+				[]string{constraint.Property},
+				nil,
+				string(constraint.ExpectedType),
+			})
+		}
+	}
+
 	return &ExecuteResult{
 		Columns: []string{"id", "name", "type", "entityType", "labelsOrTypes", "properties", "ownedIndex", "propertyType"},
-		Rows:    [][]interface{}{},
+		Rows:    rows,
 	}, nil
 }
 

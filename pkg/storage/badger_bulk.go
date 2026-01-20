@@ -26,20 +26,8 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 		}
 	}
 
-	// Check unique constraints for all nodes BEFORE inserting any
-	for _, node := range nodes {
-		dbName, _, ok := ParseDatabasePrefix(string(node.ID))
-		if !ok {
-			return fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", node.ID)
-		}
-		schema := b.GetSchemaForNamespace(dbName)
-		for _, label := range node.Labels {
-			for propName, propValue := range node.Properties {
-				if err := schema.CheckUniqueConstraint(label, propName, propValue, ""); err != nil {
-					return fmt.Errorf("constraint violation: %w", err)
-				}
-			}
-		}
+	if err := b.validateBulkNodeConstraints(nodes); err != nil {
+		return err
 	}
 
 	err := b.withUpdate(func(txn *badger.Txn) error {
@@ -56,6 +44,15 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 
 		// Insert all nodes
 		for _, node := range nodes {
+			dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+			if !ok {
+				return fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", node.ID)
+			}
+			schema := b.GetSchemaForNamespace(dbName)
+			if err := b.validateNodeConstraintsInTxn(txn, node, schema, dbName, node.ID); err != nil {
+				return err
+			}
+
 			data, embeddingsSeparate, err := encodeNode(node)
 			if err != nil {
 				return fmt.Errorf("failed to encode node: %w", err)
@@ -113,6 +110,92 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 	}
 
 	return err
+}
+
+func (b *BadgerEngine) validateBulkNodeConstraints(nodes []*Node) error {
+	seen := make(map[string]struct{})
+
+	for _, node := range nodes {
+		dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+		if !ok {
+			return fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", node.ID)
+		}
+		schema := b.GetSchemaForNamespace(dbName)
+		if schema == nil {
+			continue
+		}
+
+		constraints := schema.GetConstraintsForLabels(node.Labels)
+		for _, c := range constraints {
+			switch c.Type {
+			case ConstraintUnique:
+				if len(c.Properties) != 1 {
+					continue
+				}
+				prop := c.Properties[0]
+				value := node.Properties[prop]
+				if value == nil {
+					continue
+				}
+				key := fmt.Sprintf("%s:%s:%s", dbName, c.Name, constraintValueKey(value))
+				if _, exists := seen[key]; exists {
+					return &ConstraintViolationError{
+						Type:       ConstraintUnique,
+						Label:      c.Label,
+						Properties: []string{prop},
+						Message:    fmt.Sprintf("Node with %s=%v already exists in batch", prop, value),
+					}
+				}
+				seen[key] = struct{}{}
+			case ConstraintNodeKey:
+				values := make([]interface{}, len(c.Properties))
+				for i, prop := range c.Properties {
+					values[i] = node.Properties[prop]
+					if values[i] == nil {
+						return &ConstraintViolationError{
+							Type:       ConstraintNodeKey,
+							Label:      c.Label,
+							Properties: c.Properties,
+							Message:    fmt.Sprintf("NODE KEY property %s cannot be null", prop),
+						}
+					}
+				}
+				key := fmt.Sprintf("%s:%s:%s", dbName, c.Name, constraintCompositeKey(values))
+				if _, exists := seen[key]; exists {
+					return &ConstraintViolationError{
+						Type:       ConstraintNodeKey,
+						Label:      c.Label,
+						Properties: c.Properties,
+						Message:    fmt.Sprintf("Node with key %v=%v already exists in batch", c.Properties, values),
+					}
+				}
+				seen[key] = struct{}{}
+			case ConstraintExists:
+				if len(c.Properties) != 1 {
+					continue
+				}
+				prop := c.Properties[0]
+				if node.Properties == nil {
+					return &ConstraintViolationError{
+						Type:       ConstraintExists,
+						Label:      c.Label,
+						Properties: []string{prop},
+						Message:    fmt.Sprintf("Required property %s is missing", prop),
+					}
+				}
+				if val, ok := node.Properties[prop]; !ok || val == nil {
+					return &ConstraintViolationError{
+						Type:       ConstraintExists,
+						Label:      c.Label,
+						Properties: []string{prop},
+						Message:    fmt.Sprintf("Required property %s is missing", prop),
+					}
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 // BulkCreateEdges creates multiple edges in a single transaction.
