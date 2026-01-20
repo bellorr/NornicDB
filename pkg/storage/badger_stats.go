@@ -168,7 +168,9 @@ func (b *BadgerEngine) EdgeCountByPrefix(prefix string) (int64, error) {
 
 // GetSchema returns the schema manager.
 func (b *BadgerEngine) GetSchema() *SchemaManager {
-	return b.schema
+	// Backwards-compat: callers without an explicit namespace get the default DB schema.
+	// Most production callers should use NamespacedEngine which routes correctly.
+	return b.GetSchemaForNamespace("nornic")
 }
 
 // Close closes the BadgerDB database.

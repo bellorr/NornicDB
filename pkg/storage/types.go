@@ -436,6 +436,14 @@ type NamespaceLister interface {
 	ListNamespaces() []string
 }
 
+// NamespaceSchemaProvider is an optional extension interface that provides per-namespace schema.
+//
+// This enables multi-database deployments to maintain isolated constraints/indexes per database,
+// matching Neo4j’s per-database schema model.
+type NamespaceSchemaProvider interface {
+	GetSchemaForNamespace(namespace string) *SchemaManager
+}
+
 // NodeEventCallback is called when storage operations complete successfully.
 // This allows external services (like search indexes) to stay synchronized with storage.
 type NodeEventCallback func(node *Node)

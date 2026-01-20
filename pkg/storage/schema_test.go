@@ -208,7 +208,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 		store := NewMemoryEngine()
 
 		// Add constraint
-		store.GetSchema().AddUniqueConstraint("email_unique", "User", "email")
+		store.GetSchemaForNamespace("test").AddUniqueConstraint("email_unique", "User", "email")
 
 		// First node succeeds
 		node1 := &Node{
@@ -256,7 +256,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 	t.Run("ConstraintOnMultipleLabels", func(t *testing.T) {
 		store := NewMemoryEngine()
 
-		store.GetSchema().AddUniqueConstraint("id_unique", "Entity", "id")
+		store.GetSchemaForNamespace("test").AddUniqueConstraint("id_unique", "Entity", "id")
 
 		// Node with Entity label
 		node1 := &Node{
@@ -288,7 +288,7 @@ func TestMemoryEngineConstraintIntegration(t *testing.T) {
 	t.Run("NoConstraintForDifferentLabel", func(t *testing.T) {
 		store := NewMemoryEngine()
 
-		store.GetSchema().AddUniqueConstraint("user_email", "User", "email")
+		store.GetSchemaForNamespace("test").AddUniqueConstraint("user_email", "User", "email")
 
 		// Create User with email
 		user := &Node{

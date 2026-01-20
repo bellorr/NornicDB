@@ -13,7 +13,7 @@ func TestBadgerTransaction_FullScanUniqueConstraint(t *testing.T) {
 	defer cleanup()
 
 	// Create UNIQUE constraint
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "unique_email",
 		Type:       ConstraintUnique,
 		Label:      "User",
@@ -92,7 +92,7 @@ func TestBadgerTransaction_FullScanNodeKeyConstraint(t *testing.T) {
 	defer cleanup()
 
 	// Create NODE KEY constraint on (username, domain)
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "user_key",
 		Type:       ConstraintNodeKey,
 		Label:      "User",
@@ -226,7 +226,7 @@ func TestBadgerTransaction_UniqueConstraintWithinTransaction(t *testing.T) {
 	engine, cleanup := setupTestBadgerEngine(t)
 	defer cleanup()
 
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "unique_id",
 		Type:       ConstraintUnique,
 		Label:      "Node",
@@ -265,7 +265,7 @@ func TestBadgerTransaction_NullValuesAllowed(t *testing.T) {
 	engine, cleanup := setupTestBadgerEngine(t)
 	defer cleanup()
 
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "unique_optional",
 		Type:       ConstraintUnique,
 		Label:      "Node",
@@ -303,7 +303,7 @@ func TestBadgerTransaction_NodeKeyRequiresAllProperties(t *testing.T) {
 	engine, cleanup := setupTestBadgerEngine(t)
 	defer cleanup()
 
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "composite_key",
 		Type:       ConstraintNodeKey,
 		Label:      "Entity",
@@ -341,7 +341,7 @@ func TestBadgerTransaction_ExistenceConstraint(t *testing.T) {
 	engine, cleanup := setupTestBadgerEngine(t)
 	defer cleanup()
 
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "require_email",
 		Type:       ConstraintExists,
 		Label:      "User",
@@ -390,14 +390,14 @@ func TestBadgerTransaction_MultipleConstraints(t *testing.T) {
 	defer cleanup()
 
 	// Add multiple constraints
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "unique_email",
 		Type:       ConstraintUnique,
 		Label:      "User",
 		Properties: []string{"email"},
 	})
 
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "require_name",
 		Type:       ConstraintExists,
 		Label:      "User",
@@ -475,7 +475,7 @@ func TestBadgerTransaction_ConstraintAcrossCommits(t *testing.T) {
 	engine, cleanup := setupTestBadgerEngine(t)
 	defer cleanup()
 
-	engine.schema.AddConstraint(Constraint{
+	engine.GetSchemaForNamespace("test").AddConstraint(Constraint{
 		Name:       "unique_username",
 		Type:       ConstraintUnique,
 		Label:      "Account",

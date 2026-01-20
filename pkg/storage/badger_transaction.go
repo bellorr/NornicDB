@@ -256,6 +256,31 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 		return ErrTransactionClosed
 	}
 
+	// Capture old node state for constraint bookkeeping (e.g., unique value unregister).
+	var oldNode *Node
+	if pending, exists := tx.pendingNodes[nodeID]; exists {
+		oldNode = copyNode(pending)
+	} else {
+		item, err := tx.badgerTx.Get(nodeKey(nodeID))
+		if err == badger.ErrKeyNotFound {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		var nodeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			nodeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			return err
+		}
+		oldNode, err = deserializeNode(nodeBytes)
+		if err != nil {
+			return err
+		}
+	}
+
 	// Delete with the same semantics as BadgerEngine.DeleteNode (cascade edges + embedding cleanup),
 	// but within the transaction for atomicity.
 	edgesDeleted, deletedEdgeIDs, err := tx.engine.deleteNodeInTxn(tx.badgerTx, nodeID)
@@ -271,6 +296,7 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 		Type:      OpDeleteNode,
 		Timestamp: time.Now(),
 		NodeID:    nodeID,
+		OldNode:   oldNode,
 		EdgesDeleted:   edgesDeleted,
 		DeletedEdgeIDs: deletedEdgeIDs,
 	})
@@ -507,22 +533,64 @@ func (tx *BadgerTransaction) Commit() error {
 		}
 	}
 
-	// Register unique constraint values for created/updated nodes
-	// This must happen AFTER commit succeeds to maintain consistency
-	for _, node := range tx.pendingNodes {
-		for _, label := range node.Labels {
-			for propName, propValue := range node.Properties {
-				tx.engine.schema.RegisterUniqueValue(label, propName, propValue, node.ID)
+	// Update derived unique-constraint caches (in-memory) based on committed operations.
+	// This keeps non-transactional CreateNode() uniqueness checks consistent with transactional writes.
+	//
+	// NOTE: We don't persist these caches; they are rebuilt from stored nodes on startup.
+	for _, op := range tx.operations {
+		switch op.Type {
+		case OpCreateNode:
+			if op.Node == nil {
+				continue
+			}
+			dbName, _, ok := ParseDatabasePrefix(string(op.Node.ID))
+			if !ok {
+				continue
+			}
+			schema := tx.engine.GetSchemaForNamespace(dbName)
+			for _, label := range op.Node.Labels {
+				for propName, propValue := range op.Node.Properties {
+					schema.RegisterUniqueValue(label, propName, propValue, op.Node.ID)
+				}
+			}
+		case OpUpdateNode:
+			if op.OldNode != nil {
+				dbName, _, ok := ParseDatabasePrefix(string(op.OldNode.ID))
+				if ok {
+					schema := tx.engine.GetSchemaForNamespace(dbName)
+					for _, label := range op.OldNode.Labels {
+						for propName, propValue := range op.OldNode.Properties {
+							schema.UnregisterUniqueValue(label, propName, propValue)
+						}
+					}
+				}
+			}
+			if op.Node != nil {
+				dbName, _, ok := ParseDatabasePrefix(string(op.Node.ID))
+				if ok {
+					schema := tx.engine.GetSchemaForNamespace(dbName)
+					for _, label := range op.Node.Labels {
+						for propName, propValue := range op.Node.Properties {
+							schema.RegisterUniqueValue(label, propName, propValue, op.Node.ID)
+						}
+					}
+				}
+			}
+		case OpDeleteNode:
+			if op.OldNode == nil {
+				continue
+			}
+			dbName, _, ok := ParseDatabasePrefix(string(op.OldNode.ID))
+			if !ok {
+				continue
+			}
+			schema := tx.engine.GetSchemaForNamespace(dbName)
+			for _, label := range op.OldNode.Labels {
+				for propName, propValue := range op.OldNode.Properties {
+					schema.UnregisterUniqueValue(label, propName, propValue)
+				}
 			}
 		}
-	}
-
-	// Unregister unique constraint values for deleted nodes
-	for nodeID := range tx.deletedNodes {
-		// We need to get the node's old values - they were stored in pendingNodes if updated first
-		// For pure deletes, we need to look up what was there
-		// This is a simplification - in production we'd track the deleted node's properties
-		tx.engine.schema.UnregisterUniqueValue("", "", nodeID) // Will be no-op if not found
 	}
 
 	// ACID GUARANTEE: Force fsync for explicit transactions
@@ -624,8 +692,14 @@ func (tx *BadgerTransaction) nodeExists(nodeID NodeID) bool {
 
 // validateNodeConstraints checks all constraints for a node.
 func (tx *BadgerTransaction) validateNodeConstraints(node *Node) error {
-	// Get constraints from schema
-	constraints := tx.engine.schema.GetConstraintsForLabels(node.Labels)
+	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+	if !ok {
+		return fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", node.ID)
+	}
+
+	// Get constraints from the schema for this namespace (per DB).
+	schema := tx.engine.GetSchemaForNamespace(dbName)
+	constraints := schema.GetConstraintsForLabels(node.Labels)
 
 	for _, constraint := range constraints {
 		switch constraint.Type {
@@ -656,9 +730,18 @@ func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) err
 		return nil // NULL doesn't violate uniqueness
 	}
 
-	// Check pending nodes in this transaction
+	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+	if !ok {
+		return fmt.Errorf("node ID must be prefixed with namespace, got: %s", node.ID)
+	}
+	nsPrefix := dbName + ":"
+
+	// Check pending nodes in this transaction (namespace-scoped).
 	for id, n := range tx.pendingNodes {
 		if id == node.ID {
+			continue
+		}
+		if !strings.HasPrefix(string(id), nsPrefix) {
 			continue
 		}
 		if hasLabel(n.Labels, c.Label) && n.Properties[prop] == value {
@@ -671,16 +754,17 @@ func (tx *BadgerTransaction) checkUniqueConstraint(node *Node, c Constraint) err
 		}
 	}
 
-	// Full-scan check: scan all existing nodes with this label
-	if err := tx.scanForUniqueViolation(c.Label, prop, value, node.ID); err != nil {
+	// Full-scan check: scan all existing nodes with this label (namespace-scoped).
+	if err := tx.scanForUniqueViolation(dbName, c.Label, prop, value, node.ID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// scanForUniqueViolation performs a full database scan to check for UNIQUE violations.
-func (tx *BadgerTransaction) scanForUniqueViolation(label, property string, value interface{}, excludeNodeID NodeID) error {
+// scanForUniqueViolation performs a full database scan to check for UNIQUE violations
+// within a single namespace (database).
+func (tx *BadgerTransaction) scanForUniqueViolation(namespace, label, property string, value interface{}, excludeNodeID NodeID) error {
 	// Scan all nodes with this label
 	prefix := labelIndexKey(label, "")
 	opts := badger.DefaultIteratorOptions
@@ -801,9 +885,18 @@ func (tx *BadgerTransaction) checkNodeKeyConstraint(node *Node, c Constraint) er
 		}
 	}
 
-	// Check pending nodes in this transaction
+	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+	if !ok {
+		return fmt.Errorf("node ID must be prefixed with namespace, got: %s", node.ID)
+	}
+	nsPrefix := dbName + ":"
+
+	// Check pending nodes in this transaction (namespace-scoped).
 	for id, n := range tx.pendingNodes {
 		if id == node.ID {
+			continue
+		}
+		if !strings.HasPrefix(string(id), nsPrefix) {
 			continue
 		}
 		if !hasLabel(n.Labels, c.Label) {
@@ -828,16 +921,17 @@ func (tx *BadgerTransaction) checkNodeKeyConstraint(node *Node, c Constraint) er
 		}
 	}
 
-	// Full-scan check: scan all existing nodes with this label
-	if err := tx.scanForNodeKeyViolation(c.Label, c.Properties, values, node.ID); err != nil {
+	// Full-scan check: scan all existing nodes with this label (namespace-scoped).
+	if err := tx.scanForNodeKeyViolation(dbName, c.Label, c.Properties, values, node.ID); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-// scanForNodeKeyViolation performs a full database scan to check for NODE KEY violations.
-func (tx *BadgerTransaction) scanForNodeKeyViolation(label string, properties []string, values []interface{}, excludeNodeID NodeID) error {
+// scanForNodeKeyViolation performs a full database scan to check for NODE KEY violations
+// within a single namespace (database).
+func (tx *BadgerTransaction) scanForNodeKeyViolation(namespace, label string, properties []string, values []interface{}, excludeNodeID NodeID) error {
 	prefix := labelIndexKey(label, "")
 	opts := badger.DefaultIteratorOptions
 	opts.PrefetchValues = false
@@ -857,6 +951,12 @@ func (tx *BadgerTransaction) scanForNodeKeyViolation(label string, properties []
 		nodeID := NodeID(parts[1])
 
 		if nodeID == excludeNodeID {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(nodeID), namespace+":") {
+			continue
+		}
+		if namespace != "" && !strings.HasPrefix(string(nodeID), namespace+":") {
 			continue
 		}
 

@@ -23,6 +23,7 @@ const (
 	prefixEdgeTypeIndex = byte(0x06) // edgetype:type:edgeID -> []byte{} (for fast type lookups)
 	prefixPendingEmbed  = byte(0x07) // pending_embed:nodeID -> []byte{} (nodes needing embedding)
 	prefixEmbedding     = byte(0x08) // embedding:nodeID:chunkIndex -> []float32 (separate storage for large embeddings)
+	prefixSchema        = byte(0x09) // schema:global -> JSON(SchemaDefinition)
 )
 
 // maxNodeSize is the maximum size for a node to be stored inline (50KB to leave room for BadgerDB overhead)
@@ -66,10 +67,13 @@ const (
 //	engine.CreateNode(node)
 type BadgerEngine struct {
 	db       *badger.DB
-	schema   *SchemaManager
-	mu       sync.RWMutex // Protects schema operations
+	mu       sync.RWMutex // Protects lifecycle state (e.g., Close) and any coarse-grained engine invariants
 	closed   bool
 	inMemory bool // True if running in memory-only mode (testing)
+
+	// Per-namespace schema (Neo4j-compatible: each database has its own schema).
+	schemasMu sync.RWMutex
+	schemas   map[string]*SchemaManager // namespace -> schema
 
 	// Hot node cache for frequently accessed nodes
 	// Dramatically speeds up repeated MATCH lookups
@@ -486,8 +490,8 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 
 	engine := &BadgerEngine{
 		db:       db,
-		schema:   NewSchemaManager(),
 		inMemory: opts.InMemory,
+		schemas:  make(map[string]*SchemaManager),
 
 		nodeCacheMaxEntries:   opts.NodeCacheMaxEntries,
 		edgeTypeCacheMaxTypes: opts.EdgeTypeCacheMaxTypes,
@@ -510,6 +514,12 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	if err := engine.initializeCounts(); err != nil {
 		db.Close() // Clean up on error
 		return nil, fmt.Errorf("failed to initialize counts: %w", err)
+	}
+
+	// Load persisted schema definitions (per namespace) and rebuild derived caches.
+	if err := engine.loadPersistedSchemas(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to load persisted schema: %w", err)
 	}
 
 	return engine, nil

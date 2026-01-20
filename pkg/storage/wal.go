@@ -424,17 +424,30 @@ func (w *WAL) batchSyncLoop() {
 //   - Missing/truncated payload: length mismatch detected
 //   - Missing checksum: CRC verification fails
 func (w *WAL) Append(op OperationType, data interface{}) error {
-	return w.AppendWithDatabase(op, data, "")
+	_, err := w.AppendWithDatabaseReturningSeq(op, data, "")
+	return err
+}
+
+// AppendReturningSeq writes a new entry to the WAL and returns its sequence number.
+func (w *WAL) AppendReturningSeq(op OperationType, data interface{}) (uint64, error) {
+	return w.AppendWithDatabaseReturningSeq(op, data, "")
 }
 
 // AppendWithDatabase writes a new entry to the WAL with database/namespace information.
 func (w *WAL) AppendWithDatabase(op OperationType, data interface{}, database string) error {
+	_, err := w.AppendWithDatabaseReturningSeq(op, data, database)
+	return err
+}
+
+// AppendWithDatabaseReturningSeq writes a new entry to the WAL with database/namespace information
+// and returns the assigned sequence number.
+func (w *WAL) AppendWithDatabaseReturningSeq(op OperationType, data interface{}, database string) (uint64, error) {
 	if !config.IsWALEnabled() {
-		return nil // WAL disabled, skip
+		return 0, nil // WAL disabled, skip
 	}
 
 	if w.closed.Load() {
-		return ErrWALClosed
+		return 0, ErrWALClosed
 	}
 
 	dataBuf := walJSONBufPool.Get().(*bytes.Buffer)
@@ -445,7 +458,7 @@ func (w *WAL) AppendWithDatabase(op OperationType, data interface{}, database st
 	// Serialize data into a reusable buffer (reduces allocs vs json.Marshal).
 	dataBytes, err := marshalJSONCompact(dataBuf, data)
 	if err != nil {
-		return fmt.Errorf("wal: failed to marshal data: %w", err)
+		return 0, fmt.Errorf("wal: failed to marshal data: %w", err)
 	}
 
 	// Create entry
@@ -464,14 +477,14 @@ func (w *WAL) AppendWithDatabase(op OperationType, data interface{}, database st
 
 	entryBytes, err := marshalJSONCompact(entryBuf, &entry)
 	if err != nil {
-		return fmt.Errorf("wal: failed to serialize entry: %w", err)
+		return 0, fmt.Errorf("wal: failed to serialize entry: %w", err)
 	}
 
 	// Write atomically: magic + version + length + payload + crc + trailer + padding
 	// Format v2 adds trailer canary and 8-byte alignment for corruption-proof writes.
 	alignedRecordLen, err := writeAtomicRecordV2(w.writer, entryBytes)
 	if err != nil {
-		return fmt.Errorf("wal: failed to write entry: %w", err)
+		return 0, fmt.Errorf("wal: failed to write entry: %w", err)
 	}
 
 	w.entries.Add(1)
@@ -481,10 +494,43 @@ func (w *WAL) AppendWithDatabase(op OperationType, data interface{}, database st
 
 	// Immediate sync if configured
 	if w.config.SyncMode == "immediate" {
-		return w.syncLocked()
+		if err := w.syncLocked(); err != nil {
+			return 0, err
+		}
+		return seq, nil
 	}
 
-	return nil
+	// For non-immediate modes, still flush the userspace buffer so the WAL is readable
+	// (and crash-recovery can find entries) even when we aren't fsync'ing.
+	if err := w.writer.Flush(); err != nil {
+		return 0, fmt.Errorf("wal: flush failed: %w", err)
+	}
+
+	return seq, nil
+}
+
+// AppendTxBegin writes a transaction-begin marker to the WAL.
+func (w *WAL) AppendTxBegin(database, txID string, metadata map[string]string) (uint64, error) {
+	return w.AppendWithDatabaseReturningSeq(OpTxBegin, WALTxData{
+		TxID:     txID,
+		Metadata: metadata,
+	}, database)
+}
+
+// AppendTxCommit writes a transaction-commit marker to the WAL.
+func (w *WAL) AppendTxCommit(database, txID string, opCount int) (uint64, error) {
+	return w.AppendWithDatabaseReturningSeq(OpTxCommit, WALTxData{
+		TxID:    txID,
+		OpCount: opCount,
+	}, database)
+}
+
+// AppendTxAbort writes a transaction-abort marker to the WAL.
+func (w *WAL) AppendTxAbort(database, txID, reason string) (uint64, error) {
+	return w.AppendWithDatabaseReturningSeq(OpTxAbort, WALTxData{
+		TxID:   txID,
+		Reason: reason,
+	}, database)
 }
 
 // Sync flushes all buffered writes to disk.

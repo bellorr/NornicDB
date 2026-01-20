@@ -1146,6 +1146,14 @@ func (ae *AsyncEngine) GetSchema() *SchemaManager {
 	return ae.engine.GetSchema()
 }
 
+// GetSchemaForNamespace implements NamespaceSchemaProvider when the underlying engine supports it.
+func (ae *AsyncEngine) GetSchemaForNamespace(namespace string) *SchemaManager {
+	if p, ok := ae.engine.(NamespaceSchemaProvider); ok {
+		return p.GetSchemaForNamespace(namespace)
+	}
+	return ae.engine.GetSchema()
+}
+
 func (ae *AsyncEngine) NodeCount() (int64, error) {
 	// Prevent double-counting during flush I/O:
 	// Flush holds flushMu.Lock() across the entire flush (including engine writes).

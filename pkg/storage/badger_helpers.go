@@ -126,6 +126,16 @@ func embeddingKey(nodeID NodeID, chunkIndex int) []byte {
 	return key
 }
 
+// schemaKey stores the persisted schema definition for a database namespace.
+// Format: prefixSchema + namespace + 0x00
+func schemaKey(namespace string) []byte {
+	key := make([]byte, 0, 1+len(namespace)+1)
+	key = append(key, prefixSchema)
+	key = append(key, []byte(namespace)...)
+	key = append(key, 0x00)
+	return key
+}
+
 // embeddingPrefix returns the prefix for scanning all embeddings for a node.
 // Format: prefix + nodeID + 0x00
 func embeddingPrefix(nodeID NodeID) []byte {

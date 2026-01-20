@@ -127,6 +127,53 @@ func TestWAL_Append(t *testing.T) {
 		assert.Equal(t, int64(1), stats.TotalWrites)
 	})
 
+	t.Run("append_returns_sequence", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &WALConfig{Dir: dir, SyncMode: "none"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		seq1, err := wal.AppendReturningSeq(OpCreateNode, WALNodeData{Node: &Node{ID: "seq-1"}})
+		require.NoError(t, err)
+		seq2, err := wal.AppendReturningSeq(OpCreateNode, WALNodeData{Node: &Node{ID: "seq-2"}})
+		require.NoError(t, err)
+
+		assert.Equal(t, uint64(1), seq1)
+		assert.Equal(t, uint64(2), seq2)
+		assert.Equal(t, uint64(2), wal.Sequence())
+	})
+
+	t.Run("append_tx_markers_return_sequences", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &WALConfig{Dir: dir, SyncMode: "none"}
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+		defer wal.Close()
+
+		beginSeq, err := wal.AppendTxBegin("testdb", "tx-1", map[string]string{"source": "test"})
+		require.NoError(t, err)
+		commitSeq, err := wal.AppendTxCommit("testdb", "tx-1", 2)
+		require.NoError(t, err)
+		abortSeq, err := wal.AppendTxAbort("testdb", "tx-2", "test abort")
+		require.NoError(t, err)
+
+		assert.Equal(t, uint64(1), beginSeq)
+		assert.Equal(t, uint64(2), commitSeq)
+		assert.Equal(t, uint64(3), abortSeq)
+
+		entries, err := ReadWALEntries(filepath.Join(dir, "wal.log"))
+		require.NoError(t, err)
+		require.Len(t, entries, 3)
+		assert.Equal(t, OpTxBegin, entries[0].Operation)
+		assert.Equal(t, OpTxCommit, entries[1].Operation)
+		assert.Equal(t, OpTxAbort, entries[2].Operation)
+
+		var beginData WALTxData
+		require.NoError(t, json.Unmarshal(entries[0].Data, &beginData))
+		assert.Equal(t, "tx-1", beginData.TxID)
+	})
+
 	t.Run("skips_when_wal_disabled", func(t *testing.T) {
 		config.DisableWAL()
 		defer config.EnableWAL()
@@ -998,8 +1045,10 @@ func TestBatchWriter_Commit(t *testing.T) {
 	}
 
 	// Commit batch
-	err = batch.Commit()
+	firstSeq, lastSeq, err := batch.CommitWithSeq()
 	require.NoError(t, err)
+	assert.Equal(t, uint64(1), firstSeq)
+	assert.Equal(t, uint64(5), lastSeq)
 
 	// Batch should be cleared after commit
 	assert.Equal(t, 0, batch.Len())
@@ -1056,6 +1105,34 @@ func TestBatchWriter_AppendEdge(t *testing.T) {
 
 	err = batch.Commit()
 	require.NoError(t, err)
+}
+
+func TestBatchWriter_CommitWithTxID(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	dir := t.TempDir()
+	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
+	wal, err := NewWAL("", cfg)
+	require.NoError(t, err)
+	defer wal.Close()
+
+	batch := wal.NewBatchWithTxID("tx-batch-1")
+
+	node := &Node{ID: "tx-node-1", Labels: []string{"Test"}}
+	err = batch.AppendNode(OpCreateNode, node)
+	require.NoError(t, err)
+
+	err = batch.Commit()
+	require.NoError(t, err)
+
+	entries, err := ReadWALEntries(filepath.Join(dir, "wal.log"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+
+	var data WALNodeData
+	require.NoError(t, json.Unmarshal(entries[0].Data, &data))
+	assert.Equal(t, "tx-batch-1", data.TxID)
 }
 
 func TestWAL_TruncateAfterSnapshot(t *testing.T) {

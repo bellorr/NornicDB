@@ -454,8 +454,11 @@ func (n *NamespacedEngine) GetOutDegree(nodeID NodeID) int {
 // ============================================================================
 
 func (n *NamespacedEngine) GetSchema() *SchemaManager {
-	// Schema is shared across namespaces (labels/types are global concepts)
-	// But we could namespace this in the future if needed
+	// Prefer per-namespace schema when supported by the underlying engine chain.
+	// This matches Neo4j behavior (each database has its own schema).
+	if p, ok := n.inner.(NamespaceSchemaProvider); ok {
+		return p.GetSchemaForNamespace(n.namespace)
+	}
 	return n.inner.GetSchema()
 }
 

@@ -28,9 +28,14 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 
 	// Check unique constraints for all nodes BEFORE inserting any
 	for _, node := range nodes {
+		dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+		if !ok {
+			return fmt.Errorf("node ID must be prefixed with namespace (e.g., 'nornic:node-123'), got: %s", node.ID)
+		}
+		schema := b.GetSchemaForNamespace(dbName)
 		for _, label := range node.Labels {
 			for propName, propValue := range node.Properties {
-				if err := b.schema.CheckUniqueConstraint(label, propName, propValue, ""); err != nil {
+				if err := schema.CheckUniqueConstraint(label, propName, propValue, ""); err != nil {
 					return fmt.Errorf("constraint violation: %w", err)
 				}
 			}
@@ -87,9 +92,14 @@ func (b *BadgerEngine) BulkCreateNodes(nodes []*Node) error {
 	// Register unique constraint values after successful bulk insert
 	if err == nil {
 		for _, node := range nodes {
+			dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+			if !ok {
+				continue
+			}
+			schema := b.GetSchemaForNamespace(dbName)
 			for _, label := range node.Labels {
 				for propName, propValue := range node.Properties {
-					b.schema.RegisterUniqueValue(label, propName, propValue, node.ID)
+					schema.RegisterUniqueValue(label, propName, propValue, node.ID)
 				}
 			}
 		}

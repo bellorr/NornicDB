@@ -52,6 +52,10 @@ type SchemaManager struct {
 	fulltextIndexes  map[string]*FulltextIndex  // key: index_name
 	vectorIndexes    map[string]*VectorIndex    // key: index_name
 	rangeIndexes     map[string]*RangeIndex     // key: index_name
+
+	// Persistence hook (optional).
+	// When set (by BadgerEngine), schema changes are persisted transactionally.
+	persist func(def *SchemaDefinition) error
 }
 
 // NewSchemaManager creates a new schema manager with empty constraint and index collections.
@@ -149,6 +153,15 @@ func NewSchemaManager() *SchemaManager {
 		vectorIndexes:     make(map[string]*VectorIndex),
 		rangeIndexes:      make(map[string]*RangeIndex),
 	}
+}
+
+// SetPersister sets an optional persistence hook for schema changes.
+// When set, schema mutations will attempt to persist the updated schema definition
+// and will roll back the in-memory change if persistence fails.
+func (sm *SchemaManager) SetPersister(persist func(def *SchemaDefinition) error) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.persist = persist
 }
 
 // UniqueConstraint represents a unique constraint on a label and property.
@@ -351,6 +364,16 @@ func (sm *SchemaManager) AddUniqueConstraint(name, label, property string) error
 	}
 	sm.constraints[name] = constraint
 
+	// Persist schema if configured. If persistence fails, roll back the in-memory change.
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.uniqueConstraints, key)
+			delete(sm.constraints, name)
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -427,6 +450,14 @@ func (sm *SchemaManager) AddPropertyIndex(name, label string, properties []strin
 		values:     make(map[interface{}][]NodeID),
 	}
 
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.propertyIndexes, key)
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -459,6 +490,14 @@ func (sm *SchemaManager) AddCompositeIndex(name, label string, properties []stri
 		Properties:  properties,
 		fullIndex:   make(map[string][]NodeID),
 		prefixIndex: make(map[string][]NodeID),
+	}
+
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.compositeIndexes, name)
+			return err
+		}
 	}
 
 	return nil
@@ -685,6 +724,14 @@ func (sm *SchemaManager) AddFulltextIndex(name string, labels, properties []stri
 		Properties: properties,
 	}
 
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.fulltextIndexes, name)
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -705,6 +752,14 @@ func (sm *SchemaManager) AddVectorIndex(name, label, property string, dimensions
 		SimilarityFunc: similarityFunc,
 	}
 
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.vectorIndexes, name)
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -723,6 +778,14 @@ func (sm *SchemaManager) AddRangeIndex(name, label, property string) error {
 		Property: property,
 		entries:  make([]rangeEntry, 0),
 		nodeValue: make(map[NodeID]float64), // NodeID -> value
+	}
+
+	if sm.persist != nil {
+		def := sm.exportDefinitionLocked()
+		if err := sm.persist(def); err != nil {
+			delete(sm.rangeIndexes, name)
+			return err
+		}
 	}
 
 	return nil

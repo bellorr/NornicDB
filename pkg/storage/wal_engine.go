@@ -551,6 +551,14 @@ func (w *WALEngine) GetSchema() *SchemaManager {
 	return w.engine.GetSchema()
 }
 
+// GetSchemaForNamespace implements NamespaceSchemaProvider when the underlying engine supports it.
+func (w *WALEngine) GetSchemaForNamespace(namespace string) *SchemaManager {
+	if p, ok := w.engine.(NamespaceSchemaProvider); ok {
+		return p.GetSchemaForNamespace(namespace)
+	}
+	return w.engine.GetSchema()
+}
+
 // NodeCount delegates to underlying engine.
 func (w *WALEngine) NodeCount() (int64, error) {
 	return w.engine.NodeCount()

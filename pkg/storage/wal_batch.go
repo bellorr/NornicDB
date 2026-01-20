@@ -44,6 +44,7 @@ type BatchWriter struct {
 	wal     *WAL
 	pending []pendingEntry // Operations without sequence numbers
 	mu      sync.Mutex
+	txID    string
 }
 
 // pendingEntry stores an operation before sequence number assignment.
@@ -62,19 +63,29 @@ func (w *WAL) NewBatch() *BatchWriter {
 	}
 }
 
+// NewBatchWithTxID creates a new batch writer that stamps each entry with a TxID.
+// The TxID will be embedded in WAL payloads (e.g., WALNodeData.TxID).
+func (w *WAL) NewBatchWithTxID(txID string) *BatchWriter {
+	return &BatchWriter{
+		wal:     w,
+		pending: make([]pendingEntry, 0, 100),
+		txID:    txID,
+	}
+}
+
 // AppendNode adds a node operation to the batch.
 func (b *BatchWriter) AppendNode(op OperationType, node *Node) error {
-	return b.append(op, &WALNodeData{Node: node})
+	return b.append(op, &WALNodeData{Node: node, TxID: b.txID})
 }
 
 // AppendEdge adds an edge operation to the batch.
 func (b *BatchWriter) AppendEdge(op OperationType, edge *Edge) error {
-	return b.append(op, &WALEdgeData{Edge: edge})
+	return b.append(op, &WALEdgeData{Edge: edge, TxID: b.txID})
 }
 
 // AppendDelete adds a delete operation to the batch.
 func (b *BatchWriter) AppendDelete(op OperationType, id string) error {
-	return b.append(op, &WALDeleteData{ID: id})
+	return b.append(op, &WALDeleteData{ID: id, TxID: b.txID})
 }
 
 // append adds a generic operation to the batch.
@@ -108,15 +119,23 @@ func (b *BatchWriter) append(op OperationType, data interface{}) error {
 // Sequence numbers are assigned here to ensure proper ordering.
 // This is the only fsync in the batch - much faster than per-write sync.
 func (b *BatchWriter) Commit() error {
+	_, _, err := b.CommitWithSeq()
+	return err
+}
+
+// CommitWithSeq writes all batched entries, syncs to disk, and returns the
+// sequence range assigned to the batch. If the batch is empty or WAL is disabled,
+// returns (0, 0, nil).
+func (b *BatchWriter) CommitWithSeq() (uint64, uint64, error) {
 	if !config.IsWALEnabled() {
-		return nil
+		return 0, 0, nil
 	}
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	if len(b.pending) == 0 {
-		return nil
+		return 0, 0, nil
 	}
 
 	b.wal.mu.Lock()
@@ -127,9 +146,15 @@ func (b *BatchWriter) Commit() error {
 	entryBuf := walJSONBufPool.Get().(*bytes.Buffer)
 	defer walJSONBufPool.Put(entryBuf)
 
+	var firstSeq uint64
+	var lastSeq uint64
 	for _, pending := range b.pending {
 		// Assign sequence number NOW, at commit time
 		seq := b.wal.sequence.Add(1)
+		if firstSeq == 0 {
+			firstSeq = seq
+		}
+		lastSeq = seq
 
 		entry := WALEntry{
 			Sequence:  seq,
@@ -142,12 +167,12 @@ func (b *BatchWriter) Commit() error {
 		// Serialize entry into reusable buffer (reduces allocs vs json.Marshal).
 		entryBytes, err := marshalJSONCompact(entryBuf, &entry)
 		if err != nil {
-			return fmt.Errorf("wal batch: failed to serialize entry seq %d: %w", seq, err)
+			return 0, 0, fmt.Errorf("wal batch: failed to serialize entry seq %d: %w", seq, err)
 		}
 
 		alignedRecordLen, err := writeAtomicRecordV2(b.wal.writer, entryBytes)
 		if err != nil {
-			return fmt.Errorf("wal batch: failed to write entry seq %d: %w", seq, err)
+			return 0, 0, fmt.Errorf("wal batch: failed to write entry seq %d: %w", seq, err)
 		}
 
 		b.wal.entries.Add(1)
@@ -157,7 +182,7 @@ func (b *BatchWriter) Commit() error {
 
 	// Single sync at the end
 	if err := b.wal.syncLocked(); err != nil {
-		return fmt.Errorf("wal batch: sync failed: %w", err)
+		return 0, 0, fmt.Errorf("wal batch: sync failed: %w", err)
 	}
 
 	b.wal.bytes.Add(totalBytes)
@@ -165,7 +190,7 @@ func (b *BatchWriter) Commit() error {
 
 	// Clear batch
 	b.pending = b.pending[:0]
-	return nil
+	return firstSeq, lastSeq, nil
 }
 
 // Rollback discards all uncommitted entries.
