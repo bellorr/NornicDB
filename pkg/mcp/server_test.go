@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,8 +162,10 @@ func TestNewServer(t *testing.T) {
 
 // Mock Embedder
 type mockEmbedder struct {
-	embedCalled bool
-	embedding   []float32
+	embedCalled      bool
+	embedBatchCalled bool
+	batchTexts       []string
+	embedding        []float32
 }
 
 func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -174,6 +177,8 @@ func (m *mockEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 }
 
 func (m *mockEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	m.embedBatchCalled = true
+	m.batchTexts = append([]string(nil), texts...)
 	result := make([][]float32, len(texts))
 	for i := range texts {
 		result[i] = make([]float32, 1024)
@@ -370,6 +375,46 @@ func TestHandleDiscover_NoDB(t *testing.T) {
 	_, err = server.handleDiscover(ctx, map[string]interface{}{})
 	if err == nil {
 		t.Error("Expected error for missing query")
+	}
+}
+
+func TestHandleDiscover_ChunksLongQueryForEmbedding(t *testing.T) {
+	db, err := nornicdb.Open("", nil)
+	if err != nil {
+		t.Fatalf("failed to open in-memory nornicdb: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	embedder := &mockEmbedder{}
+	cfg := DefaultServerConfig()
+	cfg.Embedder = embedder
+	cfg.EmbeddingEnabled = true
+
+	server := NewServer(db, cfg)
+	ctx := context.Background()
+
+	longQuery := strings.Repeat("a", 600) // >512 chars, should chunk
+	_, err = server.handleDiscover(ctx, map[string]interface{}{
+		"query": longQuery,
+		"limit": 10,
+	})
+	if err != nil {
+		t.Fatalf("handleDiscover() error = %v", err)
+	}
+
+	if !embedder.embedBatchCalled {
+		t.Error("expected EmbedBatch to be called for chunked query embedding")
+	}
+	if embedder.embedCalled {
+		t.Error("expected Embed (single) NOT to be called for chunked query embedding")
+	}
+	if len(embedder.batchTexts) <= 1 {
+		t.Errorf("expected query to be chunked into multiple parts, got %d", len(embedder.batchTexts))
+	}
+	for i, c := range embedder.batchTexts {
+		if len(c) > 512 {
+			t.Errorf("expected chunk %d to be <= 512 chars, got %d", i, len(c))
+		}
 	}
 }
 

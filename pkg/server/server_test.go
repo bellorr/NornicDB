@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -119,6 +120,53 @@ func makeRequest(t *testing.T, server *Server, method, path string, body interfa
 
 	return recorder
 }
+
+type countingEmbedder struct {
+	mu sync.Mutex
+
+	failIfLenGreater int
+	dims             int
+
+	calls  int
+	maxLen int
+}
+
+func (e *countingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	e.mu.Lock()
+	e.calls++
+	if len(text) > e.maxLen {
+		e.maxLen = len(text)
+	}
+	fail := e.failIfLenGreater > 0 && len(text) > e.failIfLenGreater
+	dims := e.dims
+	e.mu.Unlock()
+
+	if fail {
+		return nil, fmt.Errorf("text too long: len=%d", len(text))
+	}
+	if dims <= 0 {
+		dims = 1024
+	}
+	vec := make([]float32, dims)
+	vec[0] = float32(len(text))
+	return vec, nil
+}
+
+func (e *countingEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	var firstErr error
+	for i, t := range texts {
+		v, err := e.Embed(ctx, t)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		out[i] = v
+	}
+	return out, firstErr
+}
+
+func (e *countingEmbedder) Dimensions() int { return e.dims }
+func (e *countingEmbedder) Model() string   { return "counting-embedder" }
 
 // =============================================================================
 // Server Creation Tests
@@ -910,6 +958,34 @@ func TestHandleSearch(t *testing.T) {
 	if resp2.Code != http.StatusOK {
 		t.Errorf("expected status 200 on second request, got %d: %s", resp2.Code, resp2.Body.String())
 	}
+}
+
+func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	// Simulate a local embedder that fails on long inputs (token buffer overflow, etc.).
+	// The search endpoint should chunk the query and only embed chunk-sized strings.
+	emb := &countingEmbedder{
+		failIfLenGreater: 512,
+		dims:             1024,
+	}
+	server.db.SetEmbedder(emb)
+
+	longQuery := strings.Repeat("a", 1200)
+	resp := makeRequest(t, server, "POST", "/nornicdb/search", map[string]interface{}{
+		"query": longQuery,
+		"limit": 10,
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+	emb.mu.Lock()
+	calls := emb.calls
+	maxLen := emb.maxLen
+	emb.mu.Unlock()
+
+	require.GreaterOrEqual(t, calls, 2, "expected query embedding to run on multiple chunks")
+	require.LessOrEqual(t, maxLen, 512, "expected no embedding call on the full query")
 }
 
 func TestHandleSearchRebuild(t *testing.T) {

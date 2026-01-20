@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -597,7 +598,7 @@ func TestBuildEmbeddingText(t *testing.T) {
 func TestChunkText(t *testing.T) {
 	t.Run("short_text_single_chunk", func(t *testing.T) {
 		text := "Short text"
-		chunks := chunkText(text, 512, 50)
+		chunks := util.ChunkText(text, 512, 50)
 
 		assert.Len(t, chunks, 1)
 		assert.Equal(t, text, chunks[0])
@@ -610,7 +611,7 @@ func TestChunkText(t *testing.T) {
 			text += "This is sentence number " + string(rune('0'+i%10)) + ". "
 		}
 
-		chunks := chunkText(text, 100, 20)
+		chunks := util.ChunkText(text, 100, 20)
 
 		assert.Greater(t, len(chunks), 1, "Should create multiple chunks")
 
@@ -622,7 +623,7 @@ func TestChunkText(t *testing.T) {
 
 	t.Run("respects_overlap", func(t *testing.T) {
 		text := "Word1 Word2 Word3 Word4 Word5 Word6 Word7 Word8 Word9 Word10"
-		chunks := chunkText(text, 30, 10)
+		chunks := util.ChunkText(text, 30, 10)
 
 		if len(chunks) >= 2 {
 			// Check that there's some overlap between consecutive chunks
@@ -748,7 +749,7 @@ func (a *Application) Stop(ctx context.Context) error {
 }
 `
 		// Test with realistic chunk settings (512 chars, 50 overlap)
-		chunks := chunkText(largeContent, 512, 50)
+		chunks := util.ChunkText(largeContent, 512, 50)
 
 		t.Logf("Large content: %d chars, chunked into %d pieces", len(largeContent), len(chunks))
 
@@ -778,7 +779,7 @@ func (a *Application) Stop(ctx context.Context) error {
 
 		t.Logf("Very large content: %d chars (%.1f KB)", len(veryLargeContent), float64(len(veryLargeContent))/1024)
 
-		chunks := chunkText(veryLargeContent, 512, 50)
+		chunks := util.ChunkText(veryLargeContent, 512, 50)
 
 		t.Logf("Chunked into %d pieces", len(chunks))
 

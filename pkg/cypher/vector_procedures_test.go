@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -368,6 +369,24 @@ func TestVectorIndexQueryNodesWithProcedure(t *testing.T) {
 		// Verify the embedder was called
 		assert.Equal(t, "machine learning", mockEmbedder.lastQuery)
 	})
+
+	t.Run("string_query_with_embedder_long_query_chunked", func(t *testing.T) {
+		// Embedder simulates a tokenizer limit (fails if called with >512 chars).
+		mockEmbedder := &failingOnLongQueryEmbedder{
+			embedding: []float32{0.1, 0.2, 0.3, 0.4},
+		}
+		exec.SetEmbedder(mockEmbedder)
+
+		longQuery := strings.Repeat("a", 1200)
+		result, err := exec.Execute(ctx, "CALL db.index.vector.queryNodes('test_idx', 5, $q) YIELD node, score", map[string]interface{}{
+			"q": longQuery,
+		})
+		require.NoError(t, err)
+		assert.NotNil(t, result)
+
+		require.GreaterOrEqual(t, mockEmbedder.calls, 2, "expected embedding to run on multiple query chunks")
+		require.LessOrEqual(t, mockEmbedder.maxLen, 512, "expected no embedding call on the full long query")
+	})
 }
 
 // mockQueryEmbedder is a test embedder for string queries
@@ -378,6 +397,24 @@ type mockQueryEmbedder struct {
 
 func (m *mockQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
 	m.lastQuery = text
+	return m.embedding, nil
+}
+
+type failingOnLongQueryEmbedder struct {
+	embedding []float32
+
+	calls  int
+	maxLen int
+}
+
+func (m *failingOnLongQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	m.calls++
+	if len(text) > m.maxLen {
+		m.maxLen = len(text)
+	}
+	if len(text) > 512 {
+		return nil, fmt.Errorf("simulated tokenizer overflow for len=%d", len(text))
+	}
 	return m.embedding, nil
 }
 
@@ -848,6 +885,40 @@ func TestCallDbIndexVectorQueryRelationships(t *testing.T) {
 		// Should find relationships after embedding
 		assert.Greater(t, len(result.Rows), 0, "Should find relationships when string is embedded")
 		assert.Equal(t, "machine learning", mockEmbedder.lastQuery, "Embedder should be called with query string")
+	})
+
+	t.Run("query_with_string_parameter_long_query_chunked", func(t *testing.T) {
+		// Create relationship vector index dedicated to this test.
+		_, err := exec.Execute(ctx, "CALL db.index.vector.createRelationshipIndex('rel_long_text_idx', 'CONTAINS_LONG', 'embedding', 4, 'cosine')", nil)
+		require.NoError(t, err)
+
+		// Create nodes and relationship with embedding.
+		_, err = engine.CreateNode(&storage.Node{ID: "nl1", Labels: []string{"Node"}})
+		require.NoError(t, err)
+		_, err = engine.CreateNode(&storage.Node{ID: "nl2", Labels: []string{"Node"}})
+		require.NoError(t, err)
+		err = engine.CreateEdge(&storage.Edge{
+			ID:         "rel_long",
+			Type:       "CONTAINS_LONG",
+			StartNode:  "nl1",
+			EndNode:    "nl2",
+			Properties: map[string]interface{}{"embedding": []float64{0.85, 0.15, 0.0, 0.0}},
+		})
+		require.NoError(t, err)
+
+		mockEmbedder := &failingOnLongQueryEmbedder{
+			embedding: []float32{0.85, 0.15, 0.0, 0.0},
+		}
+		exec.SetEmbedder(mockEmbedder)
+
+		longQuery := strings.Repeat("a", 1200)
+		result, err := exec.Execute(ctx, fmt.Sprintf("CALL db.index.vector.queryRelationships('rel_long_text_idx', 5, '%s') YIELD relationship, score", longQuery), nil)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Greater(t, len(result.Rows), 0, "Should find relationships when long string is chunk-embedded")
+
+		require.GreaterOrEqual(t, mockEmbedder.calls, 2, "expected embedding to run on multiple query chunks")
+		require.LessOrEqual(t, mockEmbedder.maxLen, 512, "expected no embedding call on the full long query")
 	})
 
 	t.Run("no_index_scenario", func(t *testing.T) {

@@ -5,8 +5,11 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // ============================================================================
@@ -393,12 +396,104 @@ func (e *QueryExecutor) Discover(ctx context.Context, query string, nodeTypes []
 	var searchResults []*SemanticSearchResult
 	var err error
 
-	// Try vector search if embedder is available
+	// Try vector search if embedder is available.
+	// For long queries, proactively chunk by length and fuse results across chunks.
 	if e.embedder != nil {
-		queryEmbedding, embedErr := e.embedder.Embed(ctx, query)
-		if embedErr == nil {
-			method = "vector"
-			searchResults, err = e.searcher.HybridSearch(ctx, query, queryEmbedding, nodeTypes, limit)
+		const (
+			queryChunkSize    = 512
+			queryChunkOverlap = 50
+			maxQueryChunks    = 32
+			outerRRFK         = 60
+		)
+
+		queryChunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
+		if len(queryChunks) > maxQueryChunks {
+			queryChunks = queryChunks[:maxQueryChunks]
+		}
+
+		if len(queryChunks) <= 1 {
+			queryEmbedding, embedErr := e.embedder.Embed(ctx, query)
+			if embedErr == nil && len(queryEmbedding) > 0 {
+				method = "vector"
+				searchResults, err = e.searcher.HybridSearch(ctx, query, queryEmbedding, nodeTypes, limit)
+			}
+		} else {
+			perChunkLimit := limit
+			if perChunkLimit < 10 {
+				perChunkLimit = 10
+			}
+			if perChunkLimit < limit*3 {
+				perChunkLimit = limit * 3
+			}
+			if perChunkLimit > 100 {
+				perChunkLimit = 100
+			}
+
+			type fused struct {
+				best     *SemanticSearchResult
+				scoreRRF float64
+			}
+			fusedByID := make(map[string]*fused)
+
+			var usedVectorChunks int
+			for _, chunkQuery := range queryChunks {
+				emb, embedErr := e.embedder.Embed(ctx, chunkQuery)
+				if embedErr != nil || len(emb) == 0 {
+					continue
+				}
+				usedVectorChunks++
+
+				chunkResults, searchErr := e.searcher.HybridSearch(ctx, chunkQuery, emb, nodeTypes, perChunkLimit)
+				if searchErr != nil {
+					continue
+				}
+
+				for rank, r := range chunkResults {
+					if r == nil {
+						continue
+					}
+					f := fusedByID[r.ID]
+					if f == nil {
+						f = &fused{best: r}
+						fusedByID[r.ID] = f
+					}
+					// Outer RRF: 1/(k + rank), rank is 1-based.
+					f.scoreRRF += 1.0 / (outerRRFK + float64(rank+1))
+					if f.best == nil || r.Score > f.best.Score {
+						f.best = r
+					}
+				}
+			}
+
+			if usedVectorChunks > 0 && len(fusedByID) > 0 {
+				method = "vector"
+				fusedList := make([]*fused, 0, len(fusedByID))
+				for _, f := range fusedByID {
+					fusedList = append(fusedList, f)
+				}
+				sort.Slice(fusedList, func(i, j int) bool {
+					return fusedList[i].scoreRRF > fusedList[j].scoreRRF
+				})
+				if limit <= 0 {
+					limit = 10
+				}
+				if len(fusedList) > limit {
+					fusedList = fusedList[:limit]
+				}
+
+				searchResults = make([]*SemanticSearchResult, 0, len(fusedList))
+				for _, f := range fusedList {
+					if f.best == nil {
+						continue
+					}
+					searchResults = append(searchResults, &SemanticSearchResult{
+						ID:         f.best.ID,
+						Labels:     f.best.Labels,
+						Properties: f.best.Properties,
+						Score:      f.scoreRRF,
+					})
+				}
+			}
 		}
 	}
 

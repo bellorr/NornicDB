@@ -11,6 +11,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // =============================================================================
@@ -268,12 +269,6 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Try to generate embedding for hybrid search
-	queryEmbedding, embedErr := s.db.EmbedQuery(r.Context(), req.Query)
-	if embedErr != nil {
-		log.Printf("⚠️ Query embedding failed: %v", embedErr)
-	}
-
 	// Get or create search service for this database
 	// Search services are cached per database since indexes are namespace-aware
 	// (the storage engine already filters to the correct namespace)
@@ -284,19 +279,136 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		log.Printf("⚠️ Failed to build search indexes for db %s: %v", dbName, err)
 	}
 
-	opts := search.DefaultSearchOptions()
-	opts.Limit = req.Limit
-	if len(req.Labels) > 0 {
-		opts.Types = req.Labels
+	// If embeddings are available, chunk long queries by length so vector search
+	// remains usable for paragraph-sized inputs (no relying on tokenization errors).
+	//
+	// For short queries (1 chunk), we preserve the legacy behavior and return the
+	// search service response directly.
+	const (
+		queryChunkSize    = 512
+		queryChunkOverlap = 50
+		maxQueryChunks    = 32
+		outerRRFK         = 60
+	)
+
+	queryChunks := util.ChunkText(req.Query, queryChunkSize, queryChunkOverlap)
+	if len(queryChunks) > maxQueryChunks {
+		queryChunks = queryChunks[:maxQueryChunks]
 	}
 
 	var searchResponse *search.SearchResponse
-	if queryEmbedding != nil {
-		// Use hybrid search (vector + text)
-		searchResponse, err = searchSvc.Search(ctx, req.Query, queryEmbedding, opts)
+	// Helper to build search options consistently.
+	buildOpts := func(q string, limit int) *search.SearchOptions {
+		opts := search.GetAdaptiveRRFConfig(q)
+		opts.Limit = limit
+		if len(req.Labels) > 0 {
+			opts.Types = req.Labels
+		}
+		return opts
+	}
+
+	// Fast path: short query (single chunk). Try hybrid; fall back to BM25.
+	if len(queryChunks) <= 1 {
+		emb, embedErr := s.db.EmbedQuery(ctx, req.Query)
+		if embedErr != nil {
+			log.Printf("⚠️ Query embedding failed: %v", embedErr)
+		}
+		if len(emb) > 0 {
+			searchResponse, err = searchSvc.Search(ctx, req.Query, emb, buildOpts(req.Query, req.Limit))
+		} else {
+			searchResponse, err = searchSvc.Search(ctx, req.Query, nil, buildOpts(req.Query, req.Limit))
+		}
 	} else {
-		// Fall back to text-only search
-		searchResponse, err = searchSvc.Search(ctx, req.Query, nil, opts)
+		// Multi-chunk: embed/search each chunk, then fuse results across chunks using RRF.
+		perChunkLimit := req.Limit
+		if perChunkLimit < 10 {
+			perChunkLimit = 10
+		}
+		if perChunkLimit < req.Limit*3 {
+			perChunkLimit = req.Limit * 3
+		}
+		if perChunkLimit > 100 {
+			perChunkLimit = 100
+		}
+
+		type fused struct {
+			node     *nornicdb.Node
+			scoreRRF float64
+		}
+		fusedByID := make(map[string]*fused)
+
+		var usedVectorChunks int
+		for _, chunkQuery := range queryChunks {
+			emb, embedErr := s.db.EmbedQuery(ctx, chunkQuery)
+			if embedErr != nil {
+				log.Printf("⚠️ Query embedding failed (chunked): %v", embedErr)
+				continue
+			}
+			if len(emb) == 0 {
+				continue
+			}
+			usedVectorChunks++
+
+			resp, searchErr := searchSvc.Search(ctx, chunkQuery, emb, buildOpts(chunkQuery, perChunkLimit))
+			if searchErr != nil || resp == nil {
+				continue
+			}
+
+			for rank := range resp.Results {
+				r := resp.Results[rank]
+				id := string(r.NodeID) // already unprefixed by namespaced storage/search layer
+				f := fusedByID[id]
+				if f == nil {
+					f = &fused{
+						node: &nornicdb.Node{
+							ID:         id,
+							Labels:     r.Labels,
+							Properties: r.Properties,
+						},
+						scoreRRF: 0,
+					}
+					fusedByID[id] = f
+				}
+
+				// Outer RRF: 1/(k + rank), rank is 1-based.
+				f.scoreRRF += 1.0 / (outerRRFK + float64(rank+1))
+			}
+		}
+
+		if usedVectorChunks == 0 || len(fusedByID) == 0 {
+			// Embeddings not available (or all failed): fall back to BM25.
+			searchResponse, err = searchSvc.Search(ctx, req.Query, nil, buildOpts(req.Query, req.Limit))
+		} else {
+			// Materialize fused response.
+			fusedList := make([]*fused, 0, len(fusedByID))
+			for _, f := range fusedByID {
+				fusedList = append(fusedList, f)
+			}
+			sort.Slice(fusedList, func(i, j int) bool {
+				return fusedList[i].scoreRRF > fusedList[j].scoreRRF
+			})
+			if len(fusedList) > req.Limit {
+				fusedList = fusedList[:req.Limit]
+			}
+
+			// Build a SearchResponse-like structure to reuse existing conversion code.
+			searchResponse = &search.SearchResponse{
+				SearchMethod:      "chunked_rrf_hybrid",
+				FallbackTriggered: false,
+				Results:           make([]search.SearchResult, 0, len(fusedList)),
+			}
+			for _, f := range fusedList {
+				// Note: we use the fused RRF score as the primary score; inner ranks are not meaningful after fusion.
+				searchResponse.Results = append(searchResponse.Results, search.SearchResult{
+					ID:         f.node.ID,
+					NodeID:     storage.NodeID(f.node.ID),
+					Labels:     f.node.Labels,
+					Properties: f.node.Properties,
+					Score:      f.scoreRRF,
+					RRFScore:   f.scoreRRF,
+				})
+			}
+		}
 	}
 
 	if err != nil {

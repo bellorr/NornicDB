@@ -49,11 +49,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // Embedder interface for generating embeddings (abstracts Ollama/OpenAI).
@@ -645,39 +647,124 @@ func (s *Server) handleDiscover(ctx context.Context, args map[string]interface{}
 	if s.db != nil {
 		// Try vector search if embeddings enabled
 		if s.embed != nil && s.config.EmbeddingEnabled {
-			queryEmbedding, err := s.embed.Embed(ctx, query)
-			if err == nil {
+			// IMPORTANT: don't rely on embedding failures to detect "too long" queries.
+			// Instead, proactively chunk the query into embedding-safe segments.
+			const (
+				queryChunkSize    = 512
+				queryChunkOverlap = 50
+				maxQueryChunks    = 32 // safety cap to prevent pathological requests
+				outerRRFK         = 60 // RRF constant (matches search default)
+			)
+
+			queryChunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
+			if len(queryChunks) > maxQueryChunks {
+				queryChunks = queryChunks[:maxQueryChunks]
+			}
+
+			// Embed each chunk and search; then fuse results across chunks using RRF (rank-based),
+			// which is robust even when per-chunk scores are not directly comparable.
+			queryEmbeddings, err := s.embed.EmbedBatch(ctx, queryChunks)
+			if err == nil && len(queryEmbeddings) == len(queryChunks) && len(queryEmbeddings) > 0 {
 				method = "vector"
-				// Use hybrid search with embedding
-				dbResults, err := s.db.HybridSearch(ctx, query, queryEmbedding, nodeTypes, limit)
-				if err == nil {
-					var results []SearchResult
-					for _, r := range dbResults {
-						if minScore > 0 && r.Score < minScore {
-							continue
-						}
-						content := getStringProp(r.Node.Properties, "content")
-						preview := truncateString(content, 200)
-						result := SearchResult{
-							ID:             r.Node.ID,
-							Type:           getLabelType(r.Node.Labels),
-							Title:          getStringProp(r.Node.Properties, "title"),
-							ContentPreview: preview,
-							Similarity:     r.Score,
-							Properties:     sanitizePropertiesForLLM(r.Node.Properties),
-						}
-						// Add related nodes if depth > 1
-						if depth > 1 {
-							result.Related = s.getRelatedNodes(ctx, r.Node.ID, depth)
-						}
-						results = append(results, result)
-					}
-					return DiscoverResult{
-						Results: results,
-						Method:  method,
-						Total:   len(results),
-					}, nil
+
+				// Pull more candidates per chunk, then cut down after fusion.
+				perChunkLimit := limit
+				if perChunkLimit < 10 {
+					perChunkLimit = 10
 				}
+				if len(queryChunks) > 1 && perChunkLimit < limit*3 {
+					perChunkLimit = limit * 3
+				}
+				if perChunkLimit > 100 {
+					perChunkLimit = 100
+				}
+
+				type fused struct {
+					node      *nornicdb.Node
+					title     string
+					nodeType  string
+					scoreRRF  float64
+					bestScore float64
+				}
+				fusedByID := make(map[string]*fused)
+
+				for i, emb := range queryEmbeddings {
+					if len(emb) == 0 {
+						continue
+					}
+					chunkQuery := queryChunks[i]
+
+					dbResults, err := s.db.HybridSearch(ctx, chunkQuery, emb, nodeTypes, perChunkLimit)
+					if err != nil {
+						continue
+					}
+
+					for rank, r := range dbResults {
+						id := r.Node.ID
+						f := fusedByID[id]
+						if f == nil {
+							f = &fused{
+								node:      r.Node,
+								title:     getStringProp(r.Node.Properties, "title"),
+								nodeType:  getLabelType(r.Node.Labels),
+								scoreRRF:  0,
+								bestScore: r.Score,
+							}
+							fusedByID[id] = f
+						}
+
+						// Outer RRF: 1/(k + rank), rank is 1-based.
+						f.scoreRRF += 1.0 / (outerRRFK + float64(rank+1))
+						if r.Score > f.bestScore {
+							f.bestScore = r.Score
+						}
+					}
+				}
+
+				// Build and sort fused list.
+				fusedList := make([]*fused, 0, len(fusedByID))
+				for _, f := range fusedByID {
+					// Apply threshold to fused score.
+					if minScore > 0 && f.scoreRRF < minScore {
+						continue
+					}
+					fusedList = append(fusedList, f)
+				}
+
+				sort.Slice(fusedList, func(i, j int) bool {
+					return fusedList[i].scoreRRF > fusedList[j].scoreRRF
+				})
+
+				if limit <= 0 {
+					limit = 10
+				}
+				if len(fusedList) > limit {
+					fusedList = fusedList[:limit]
+				}
+
+				results := make([]SearchResult, 0, len(fusedList))
+				for _, f := range fusedList {
+					content := getStringProp(f.node.Properties, "content")
+					preview := truncateString(content, 200)
+					result := SearchResult{
+						ID:             f.node.ID,
+						Type:           f.nodeType,
+						Title:          f.title,
+						ContentPreview: preview,
+						Similarity:     f.scoreRRF,
+						Properties:     sanitizePropertiesForLLM(f.node.Properties),
+					}
+					if depth > 1 {
+						result.Related = s.getRelatedNodes(ctx, f.node.ID, depth)
+					}
+					results = append(results, result)
+				}
+
+				return DiscoverResult{
+					Results: results,
+					Method:  method,
+					Total:   len(results),
+				}, nil
 			}
 		}
 

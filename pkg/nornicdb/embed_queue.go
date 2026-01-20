@@ -11,6 +11,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // EmbedWorker manages async embedding generation using a pull-based model.
@@ -506,7 +507,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	text := buildEmbeddingText(node.Properties, node.Labels)
 
 	// Chunk text if needed
-	chunks := chunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
+	chunks := util.ChunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
 
 	// Embed all chunks (all nodes are handled the same way - no special File handling)
 	embeddings, err := ew.embedder.EmbedBatch(ew.ctx, chunks)
@@ -849,51 +850,6 @@ func buildEmbeddingText(properties map[string]interface{}, labels []string) stri
 		return "node"
 	}
 	return result
-}
-
-// chunkText splits text into chunks with overlap, trying to break at natural boundaries.
-// Returns the original text as single chunk if it fits within chunkSize.
-func chunkText(text string, chunkSize, overlap int) []string {
-	if len(text) <= chunkSize {
-		return []string{text}
-	}
-
-	var chunks []string
-	start := 0
-
-	for start < len(text) {
-		end := start + chunkSize
-		if end > len(text) {
-			end = len(text)
-		}
-
-		// If not the last chunk, try to break at natural boundary
-		if end < len(text) {
-			chunk := text[start:end]
-
-			// Try paragraph break
-			if idx := strings.LastIndex(chunk, "\n\n"); idx > chunkSize/2 {
-				end = start + idx
-			} else if idx := strings.LastIndex(chunk, ". "); idx > chunkSize/2 {
-				// Try sentence break
-				end = start + idx + 1
-			} else if idx := strings.LastIndex(chunk, " "); idx > chunkSize/2 {
-				// Try word break
-				end = start + idx
-			}
-		}
-
-		chunks = append(chunks, text[start:end])
-
-		// Move start forward, accounting for overlap
-		nextStart := end - overlap
-		if nextStart <= start {
-			nextStart = end // Prevent infinite loop
-		}
-		start = nextStart
-	}
-
-	return chunks
 }
 
 // MarshalJSON for worker stats.

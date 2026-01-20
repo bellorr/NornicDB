@@ -144,6 +144,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/replication"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // Errors returned by DB operations.
@@ -1531,7 +1532,72 @@ func (db *DB) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
 	if db.embedQueue == nil {
 		return nil, nil // Not an error - just no embedding available
 	}
-	return db.embedQueue.embedder.Embed(ctx, query)
+
+	// Proactively chunk long queries by length to keep embedding generation safe
+	// across providers (especially local tokenizers with fixed buffers).
+	//
+	// For long queries, we embed each chunk and return the normalized average.
+	// This provides a single vector suitable for APIs that accept only one query vector
+	// (e.g., Qdrant-compatible endpoints), while higher-level search surfaces may still
+	// do per-chunk search + fusion for best recall.
+	const (
+		queryChunkSize    = 512
+		queryChunkOverlap = 50
+		maxQueryChunks    = 32
+	)
+
+	chunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
+	if len(chunks) > maxQueryChunks {
+		chunks = chunks[:maxQueryChunks]
+	}
+	if len(chunks) <= 1 {
+		return db.embedQueue.embedder.Embed(ctx, query)
+	}
+
+	embs, err := db.embedQueue.embedder.EmbedBatch(ctx, chunks)
+	if len(embs) == 0 {
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	var (
+		sum   []float32
+		count int
+	)
+	for _, v := range embs {
+		if len(v) == 0 {
+			continue
+		}
+		if sum == nil {
+			sum = make([]float32, len(v))
+		}
+		if len(v) != len(sum) {
+			continue
+		}
+		for i := range v {
+			sum[i] += v[i]
+		}
+		count++
+	}
+	if count == 0 {
+		if err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	inv := float32(1.0 / float32(count))
+	for i := range sum {
+		sum[i] *= inv
+	}
+	vector.NormalizeInPlace(sum)
+
+	// Best effort: many callers treat a non-nil error as "no embeddings available"
+	// and will fall back to keyword search. If we produced a vector, prefer returning
+	// it and letting callers proceed with semantic search.
+	return sum, nil
 }
 
 // Store creates a new memory with automatic relationship inference.
