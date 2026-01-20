@@ -151,6 +151,16 @@ htop
    nornicdb serve --parallel=true
    ```
 
+### Maximum query/content size (MCP + embeddings)
+
+If you are using the MCP tools (`store`, `discover`, etc.):
+
+- **HTTP request size**: MCP limits request bodies via `MaxRequestSize` (default **10MB**).
+  - Applies to `/mcp`, `/mcp/tools/call`, and `/mcp/initialize`.
+- **Embedding input limits**: the effective max “query size” for vector search is bounded by the embedding model context.
+  - For **local GGUF embeddings**, the embedder context is sized for short inputs; if the query is too long to tokenize, vector embedding will fail and `discover` will fall back to keyword search.
+- **Stored content**: large content is chunked for embeddings (default **512 characters per chunk** with overlap), but very large payloads will increase background embedding work.
+
 ### High Memory Usage
 
 **Symptoms:**
@@ -197,6 +207,41 @@ htop
    # If >1GB, delete it (data is safe in BadgerDB)
    rm /path/to/data/wal/wal.log
    ```
+
+## Data Integrity / Recovery
+
+### Server won't start until data is deleted (corruption after crash)
+
+**Typical trigger:**
+- Hard kills (OOM / `docker kill -9`), GPU/CGO segfaults, host power loss, or storage hiccups.
+
+**What to do:**
+
+1. **Do not delete your data directory.** Instead, back it up first.
+
+2. **Use snapshot + WAL recovery (Neo4j-style “tx log recovery”)**
+
+NornicDB maintains:
+- **Snapshots** in `<dataDir>/snapshots/` (e.g., `snapshot-YYYYMMDD-HHMMSS.json`)
+- **WAL** in `<dataDir>/wal/wal.log`
+
+If your build includes auto-recovery, you can enable/force it with:
+
+```bash
+NORNICDB_AUTO_RECOVER_ON_CORRUPTION=true
+```
+
+On startup, NornicDB will:
+- Load the latest snapshot
+- Replay WAL entries after that snapshot
+- **Rename** your original directory to `<dataDir>.corrupted-<timestamp>` (for forensics)
+- Rebuild a fresh store and restore recovered nodes/edges
+
+3. **If recovery can’t run**
+
+- Ensure the container has write access to the volume
+- Ensure snapshots exist in `<dataDir>/snapshots/`
+- Avoid running the DB data directory on unstable/union filesystem mounts (prefer a dedicated disk path)
 
 ### High CPU Usage
 

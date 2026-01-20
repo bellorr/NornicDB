@@ -312,8 +312,34 @@ func NewWAL(dir string, cfg *WALConfig) (*WAL, error) {
 		return nil, fmt.Errorf("wal: failed to create directory: %w", err)
 	}
 
-	// Open or create WAL file
+	// Ensure logger is available early (used by startup repair diagnostics).
+	if cfg.Logger == nil {
+		cfg.Logger = defaultWALLogger{}
+	}
+
+	// Startup repair: if the previous process crashed mid-write, the WAL can end with a
+	// partial record. If we append after that, the WAL becomes permanently unreadable.
+	//
+	// This truncates only the *incomplete tail* (or the first corrupted tail record)
+	// back to the last known-good record boundary.
 	walPath := filepath.Join(cfg.Dir, "wal.log")
+	if repaired, diag, err := repairWALTailIfNeeded(walPath, cfg.Logger); err != nil {
+		return nil, err
+	} else if repaired && diag != nil {
+		// Best-effort structured log; the diagnostic JSON artifact is already written.
+		cfg.Logger.Log("warn", "wal startup repair applied", map[string]any{
+			"wal_path":          diag.WALPath,
+			"file_size":         diag.FileSize,
+			"corrupted_seq":     diag.CorruptedSeq,
+			"last_good_seq":     diag.LastGoodSeq,
+			"recovery_action":   diag.RecoveryAction,
+			"suspected_cause":   diag.SuspectedCause,
+			"backup_path":       diag.BackupPath,
+			"timestamp_rfc3339": diag.Timestamp.Format(time.RFC3339),
+		})
+	}
+
+	// Open or create WAL file
 	file, err := os.OpenFile(walPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("wal: failed to open file: %w", err)
@@ -331,9 +357,7 @@ func NewWAL(dir string, cfg *WALConfig) (*WAL, error) {
 		writer:   bufio.NewWriterSize(file, 64*1024), // 64KB buffer
 		stopSync: make(chan struct{}),
 	}
-	if w.config.Logger == nil {
-		w.config.Logger = defaultWALLogger{}
-	}
+	// cfg.Logger is guaranteed non-nil above.
 	w.encoder = json.NewEncoder(w.writer)
 
 	// Load existing sequence number
@@ -964,7 +988,7 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 	if readErr != nil {
 		// WAL is corrupted, but snapshot was saved successfully.
 		// CRITICAL: Backup corrupted WAL for forensic analysis before modifying
-			backupPath := w.backupCorruptedWAL(walPath)
+		backupPath := w.backupCorruptedWAL(walPath)
 
 		// Log detailed diagnostics
 		diag := &CorruptionDiagnostics{
@@ -975,9 +999,9 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 		}
 		if fi, err := os.Stat(walPath); err == nil {
 			diag.FileSize = fi.Size()
-			}
-			diag.diagnoseCause()
-			w.reportCorruption(diag, readErr)
+		}
+		diag.diagnoseCause()
+		w.reportCorruption(diag, readErr)
 
 		// Try to salvage entries after snapshot sequence using best-effort read.
 		keptEntries, _ = readWALEntriesForTruncation(walPath, snapshotSeq)
@@ -2054,25 +2078,25 @@ func RecoverFromWALWithResult(walDir, snapshotPath string) (*MemoryEngine, Repla
 				dbName = "nornic" // Fallback to "nornic" if not configured
 			}
 
-				if len(snapshot.Nodes) > 0 {
-					if parsedDB, _, ok := ParseDatabasePrefix(string(snapshot.Nodes[0].ID)); ok {
-						dbName = parsedDB
-					}
-				} else if len(snapshot.Edges) > 0 {
-					if parsedDB, _, ok := ParseDatabasePrefix(string(snapshot.Edges[0].ID)); ok {
-						dbName = parsedDB
-					}
+			if len(snapshot.Nodes) > 0 {
+				if parsedDB, _, ok := ParseDatabasePrefix(string(snapshot.Nodes[0].ID)); ok {
+					dbName = parsedDB
 				}
+			} else if len(snapshot.Edges) > 0 {
+				if parsedDB, _, ok := ParseDatabasePrefix(string(snapshot.Edges[0].ID)); ok {
+					dbName = parsedDB
+				}
+			}
 
 			// Unprefix snapshot data for the selected database before restoring via NamespacedEngine.
-				for _, node := range snapshot.Nodes {
-					node.ID = NodeID(StripDatabasePrefix(dbName, string(node.ID)))
-				}
-				for _, edge := range snapshot.Edges {
-					edge.ID = EdgeID(StripDatabasePrefix(dbName, string(edge.ID)))
-					edge.StartNode = NodeID(StripDatabasePrefix(dbName, string(edge.StartNode)))
-					edge.EndNode = NodeID(StripDatabasePrefix(dbName, string(edge.EndNode)))
-				}
+			for _, node := range snapshot.Nodes {
+				node.ID = NodeID(StripDatabasePrefix(dbName, string(node.ID)))
+			}
+			for _, edge := range snapshot.Edges {
+				edge.ID = EdgeID(StripDatabasePrefix(dbName, string(edge.ID)))
+				edge.StartNode = NodeID(StripDatabasePrefix(dbName, string(edge.StartNode)))
+				edge.EndNode = NodeID(StripDatabasePrefix(dbName, string(edge.EndNode)))
+			}
 
 			namespacedEngine := NewNamespacedEngine(engine, dbName)
 			if err := namespacedEngine.BulkCreateNodes(snapshot.Nodes); err != nil {
@@ -2091,6 +2115,11 @@ func RecoverFromWALWithResult(walDir, snapshotPath string) (*MemoryEngine, Repla
 	if _, statErr := os.Stat(walPath); os.IsNotExist(statErr) {
 		return engine, result, nil // No WAL to replay, return engine as-is
 	}
+
+	// Ensure we don't have a torn tail record before reading for recovery.
+	// This is critical when recovery is invoked because the main server never started,
+	// so NewWAL() (which also repairs tails) was never called.
+	_, _, _ = repairWALTailIfNeeded(walPath, defaultWALLogger{})
 
 	entries, err := ReadWALEntriesAfter(walPath, snapshotSeq)
 	if err != nil {

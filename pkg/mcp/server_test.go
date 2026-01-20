@@ -248,6 +248,36 @@ func TestHandleCallTool(t *testing.T) {
 	}
 }
 
+func TestHandleCallTool_MaxRequestSizeEnforced(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.MaxRequestSize = 10 // Intentionally tiny to force truncation
+	server := NewServer(nil, cfg)
+
+	body := `{"name":"store","arguments":{"content":"test content"}}`
+	req := httptest.NewRequest("POST", "/mcp/tools/call", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	server.handleCallTool(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400, got %d", rec.Code)
+	}
+}
+
+func TestHandleInitialize_MaxRequestSizeEnforced(t *testing.T) {
+	cfg := DefaultServerConfig()
+	cfg.MaxRequestSize = 10 // Intentionally tiny to force truncation
+	server := NewServer(nil, cfg)
+
+	body := `{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"x","version":"1"}}`
+	req := httptest.NewRequest("POST", "/mcp/initialize", bytes.NewBufferString(body))
+	rec := httptest.NewRecorder()
+	server.handleInitialize(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400, got %d", rec.Code)
+	}
+}
+
 func TestHandleMCP_Initialize(t *testing.T) {
 	server := NewServer(nil, nil)
 

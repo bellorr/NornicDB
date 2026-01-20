@@ -348,7 +348,12 @@ func (s *Server) handleInitialize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req InitRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, s.config.MaxRequestSize))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -381,7 +386,12 @@ func (s *Server) handleCallTool(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CallToolRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(io.LimitReader(r.Body, s.config.MaxRequestSize))
+	if err != nil {
+		s.writeError(w, http.StatusBadRequest, "failed to read request body")
+		return
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
 		s.writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}

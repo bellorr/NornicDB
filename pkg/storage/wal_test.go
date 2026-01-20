@@ -54,6 +54,50 @@ func TestNewWAL(t *testing.T) {
 		_, err = os.Stat(dir)
 		assert.NoError(t, err)
 	})
+
+	t.Run("repairs_incomplete_tail_on_startup", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &WALConfig{
+			Dir:      dir,
+			SyncMode: "none", // deterministic tests; only flushes bufio.Writer
+		}
+
+		wal, err := NewWAL("", cfg)
+		require.NoError(t, err)
+
+		// Write two entries and flush to disk.
+		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{Node: &Node{ID: "n1"}}))
+		require.NoError(t, wal.Sync())
+		require.NoError(t, wal.Append(OpCreateNode, WALNodeData{Node: &Node{ID: "n2"}}))
+		require.NoError(t, wal.Sync())
+		require.NoError(t, wal.Close())
+
+		walPath := filepath.Join(dir, "wal.log")
+		fi, err := os.Stat(walPath)
+		require.NoError(t, err)
+		require.Greater(t, fi.Size(), int64(3))
+
+		// Simulate a crash mid-write by truncating the file tail (torn record).
+		require.NoError(t, os.Truncate(walPath, fi.Size()-3))
+
+		// Reopen WAL: startup repair should truncate the incomplete record before appending.
+		wal2, err := NewWAL("", cfg)
+		require.NoError(t, err)
+
+		// The second entry was torn and should have been discarded by tail repair.
+		require.Equal(t, uint64(1), wal2.Sequence())
+
+		// Appending should work and produce a readable WAL.
+		require.NoError(t, wal2.Append(OpCreateNode, WALNodeData{Node: &Node{ID: "n3"}}))
+		require.NoError(t, wal2.Sync())
+		require.NoError(t, wal2.Close())
+
+		entries, err := ReadWALEntries(walPath)
+		require.NoError(t, err)
+		require.Len(t, entries, 2)
+		require.Equal(t, uint64(1), entries[0].Sequence)
+		require.Equal(t, uint64(2), entries[1].Sequence)
+	})
 }
 
 func TestWAL_Append(t *testing.T) {

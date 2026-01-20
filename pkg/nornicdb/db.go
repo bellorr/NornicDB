@@ -859,7 +859,21 @@ func Open(dataDir string, config *Config) (*DB, error) {
 						"Original error: %w", err)
 				}
 			}
-			return nil, fmt.Errorf("failed to open persistent storage: %w", err)
+
+			// Auto-recover (Neo4j-style): if the primary store can't open due to corruption,
+			// rebuild a fresh Badger store from snapshot + WAL replay, preserving the old
+			// directory for forensics.
+			if autoRecoverOnCorruptionEnabled() && looksLikeCorruption(err) && !config.EncryptionEnabled {
+				log.Printf("⚠️  Persistent store open failed; attempting auto-recovery from snapshots + WAL (dataDir=%s)", dataDir)
+				recovered, backupDir, recErr := recoverBadgerFromSnapshotAndWAL(dataDir, badgerOpts)
+				if recErr != nil {
+					return nil, fmt.Errorf("failed to open persistent storage: %w (auto-recovery failed: %v)", err, recErr)
+				}
+				log.Printf("✅ Auto-recovery succeeded; preserved old data dir at %s", backupDir)
+				badgerEngine = recovered
+			} else {
+				return nil, fmt.Errorf("failed to open persistent storage: %w", err)
+			}
 		}
 
 		// Initialize WAL for durability (uses batch sync mode by default for better performance)
