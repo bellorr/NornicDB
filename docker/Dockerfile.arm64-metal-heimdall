@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git ca-certificates && rm -rf /var/lib/apt/lists/*
 
 ARG LLAMA_VERSION=b7285
+ARG LLAMA_BUILD_JOBS=2
 WORKDIR /llama
 RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/llama.cpp.git . && \
     cmake -B build \
@@ -40,7 +41,7 @@ RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/l
       -DLLAMA_CURL=OFF \
       -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF \
       -DCMAKE_C_FLAGS="-mcpu=generic" -DCMAKE_CXX_FLAGS="-mcpu=generic" && \
-    cmake --build build --config Release -j$(nproc)
+    cmake --build build --config Release -j${LLAMA_BUILD_JOBS}
 
 # Combine static libs into single archive
 RUN mkdir -p /out && \

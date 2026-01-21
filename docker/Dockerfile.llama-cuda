@@ -10,6 +10,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential cmake git ca-certificates && rm -rf /var/lib/apt/lists/*
 
 ARG LLAMA_VERSION=b7285
+ARG LLAMA_BUILD_JOBS=2
 WORKDIR /llama
 RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/llama.cpp.git . && \
     cmake -B build \
@@ -19,7 +20,7 @@ RUN git clone --depth 1 --branch ${LLAMA_VERSION} https://github.com/ggerganov/l
       -DGGML_CUDA=ON -DGGML_CUDA_FA_ALL_QUANTS=ON \
       -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" \
       -DCMAKE_POSITION_INDEPENDENT_CODE=ON && \
-    cmake --build build --config Release -j$(nproc)
+    cmake --build build --config Release -j${LLAMA_BUILD_JOBS}
 
 # Combine and export
 RUN mkdir -p /output/lib /output/include && \

@@ -37,6 +37,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Clone and build llama.cpp for CPU
+ARG LLAMA_BUILD_JOBS=2
 RUN git clone --depth 1 --branch b4782 https://github.com/ggml-org/llama.cpp.git . && \
     cmake -B build \
       -DGGML_BACKEND_DL=ON \
@@ -46,7 +47,7 @@ RUN git clone --depth 1 --branch b4782 https://github.com/ggml-org/llama.cpp.git
       -DGGML_METAL=OFF \
       -DBUILD_SHARED_LIBS=ON \
       -DCMAKE_BUILD_TYPE=Release && \
-    cmake --build build -j$(nproc) && \
+    cmake --build build -j${LLAMA_BUILD_JOBS} && \
     mkdir -p /output/lib && \
     cp build/bin/*.so /output/lib/ 2>/dev/null || true && \
     cp build/src/*.so /output/lib/ 2>/dev/null || true && \

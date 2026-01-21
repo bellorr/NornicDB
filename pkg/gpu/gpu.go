@@ -142,6 +142,7 @@ package gpu
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"runtime"
 	"sort"
 	"sync"
@@ -2100,6 +2101,12 @@ func (ei *EmbeddingIndex) syncToCUDA() error {
 	// Normalize vectors on GPU for faster cosine similarity
 	n := uint32(len(ei.nodeIDs))
 	dims := uint32(ei.dimensions)
+	if n == 0 || dims == 0 {
+		return nil
+	}
+	if expected := int(n) * int(dims); expected != len(ei.cpuVectors) {
+		return fmt.Errorf("gpu: cpuVectors size mismatch (expected %d floats, got %d)", expected, len(ei.cpuVectors))
+	}
 	if err := ei.cudaDevice.NormalizeVectors(ei.cudaBuffer, n, dims); err != nil {
 		// Non-fatal: we can still search with unnormalized vectors
 		// (but slower since we need to normalize each query)

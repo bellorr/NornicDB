@@ -585,6 +585,17 @@ func (b *Buffer) ReadFloat32(count int) []float32 {
 
 // NormalizeVectors normalizes vectors in-place to unit length.
 func (d *Device) NormalizeVectors(vectors *Buffer, n, dimensions uint32) error {
+	if d == nil || d.ptr == nil || vectors == nil || vectors.ptr == nil {
+		return fmt.Errorf("%w: invalid device or buffer", ErrKernelExecution)
+	}
+	if n == 0 || dimensions == 0 {
+		return nil
+	}
+	expectedBytes := uint64(n) * uint64(dimensions) * 4
+	if vectors.Size() < expectedBytes {
+		return fmt.Errorf("%w: buffer too small for normalization (need %d bytes, have %d)", ErrKernelExecution, expectedBytes, vectors.Size())
+	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
