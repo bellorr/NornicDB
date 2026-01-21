@@ -14,6 +14,7 @@ Complete reference for all feature flags in NornicDB. Feature flags allow you to
 | | Evidence Buffering | ✅ Enabled | `NORNICDB_EVIDENCE_BUFFERING_ENABLED` |
 | | Per-Node Config | ✅ Enabled | `NORNICDB_PER_NODE_CONFIG_ENABLED` |
 | | WAL (Write-Ahead Log) | ✅ Enabled | `NORNICDB_WAL_ENABLED` |
+| | Auto-Recover on Corruption | ✅ Enabled | `NORNICDB_AUTO_RECOVER_ON_CORRUPTION` |
 | **Performance** | | | |
 | | Embedding Cache | ✅ Enabled (10K) | `NORNICDB_EMBEDDING_CACHE_SIZE` |
 | | Async Writes | ✅ Enabled | `NORNICDB_ASYNC_WRITES_ENABLED` |
@@ -242,6 +243,34 @@ defer cleanup()
   - `none`: no fsync (fastest, data loss risk)
 - Point-in-time snapshots for efficient recovery
 - Recovery: Load snapshot + replay WAL entries
+
+---
+
+### Auto-Recover on Corruption
+
+**Purpose**: Automatically recover from an unclean shutdown that leaves the persistent store unable to open (Neo4j-style “tx log recovery”).
+
+**Environment Variable**: `NORNICDB_AUTO_RECOVER_ON_CORRUPTION`
+
+**Default**: ✅ Enabled
+
+```bash
+# Disable (server will fail fast instead of rebuilding from WAL/snapshots)
+export NORNICDB_AUTO_RECOVER_ON_CORRUPTION=false
+
+# Force an attempt when Badger open fails (requires WAL/snapshots to exist)
+export NORNICDB_AUTO_RECOVER_ON_CORRUPTION=true
+```
+
+**Behavior**:
+- Repairs a torn WAL tail (if the last write was interrupted)
+- If the persistent store still fails to open:
+  - Preserves your original directory by renaming it to `<dataDir>.corrupted-<timestamp>`
+  - Rebuilds a fresh store from **snapshot + WAL replay** (or WAL-only if no snapshots exist yet)
+
+**Safety notes**:
+- Auto-recovery is **not attempted** for encrypted stores (to avoid data loss when the encryption key is wrong).
+- Auto-recovery only runs when recovery artifacts exist (`<dataDir>/wal/` and/or `<dataDir>/snapshots/`).
 
 ---
 

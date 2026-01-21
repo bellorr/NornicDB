@@ -864,7 +864,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			// Auto-recover (Neo4j-style): if the primary store can't open due to corruption,
 			// rebuild a fresh Badger store from snapshot + WAL replay, preserving the old
 			// directory for forensics.
-			if autoRecoverOnCorruptionEnabled() && looksLikeCorruption(err) && !config.EncryptionEnabled {
+			autoRecoverEnabled := autoRecoverOnCorruptionEnabled()
+			autoRecoverExplicit := strings.TrimSpace(os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION")) != ""
+			corruptionSuspected := looksLikeCorruption(err)
+			recoverableArtifacts := hasRecoverableArtifacts(dataDir)
+			if autoRecoverEnabled && !config.EncryptionEnabled && recoverableArtifacts && (corruptionSuspected || autoRecoverExplicit) {
+				log.Printf("🔧 Auto-recover setting: enabled=%t env(NORNICDB_AUTO_RECOVER_ON_CORRUPTION)=%q", autoRecoverEnabled, os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION"))
 				log.Printf("⚠️  Persistent store open failed; attempting auto-recovery from snapshots + WAL (dataDir=%s)", dataDir)
 				recovered, backupDir, recErr := recoverBadgerFromSnapshotAndWAL(dataDir, badgerOpts)
 				if recErr != nil {
@@ -873,6 +878,8 @@ func Open(dataDir string, config *Config) (*DB, error) {
 				log.Printf("✅ Auto-recovery succeeded; preserved old data dir at %s", backupDir)
 				badgerEngine = recovered
 			} else {
+				log.Printf("🔧 Auto-recover skipped: enabled=%t env(NORNICDB_AUTO_RECOVER_ON_CORRUPTION)=%q corruption_suspected=%t encryption_enabled=%t",
+					autoRecoverEnabled, os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION"), corruptionSuspected, config.EncryptionEnabled)
 				return nil, fmt.Errorf("failed to open persistent storage: %w", err)
 			}
 		}

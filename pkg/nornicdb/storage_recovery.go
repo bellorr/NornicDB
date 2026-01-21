@@ -14,8 +14,7 @@ import (
 // autoRecoverOnCorruptionEnabled controls whether NornicDB should attempt to recover
 // from WAL snapshots when the primary Badger store fails to open.
 //
-// This is intentionally conservative: recovery is only attempted when we have a snapshot
-// to restore from, and the original data directory is always preserved via rename.
+// The original data directory is always preserved via rename before rebuilding a fresh store.
 func autoRecoverOnCorruptionEnabled() bool {
 	v := strings.TrimSpace(strings.ToLower(os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION")))
 	if v == "" {
@@ -34,10 +33,46 @@ func looksLikeCorruption(err error) bool {
 	// Heuristics: prefer catching real corruption/format issues, not permissions.
 	return strings.Contains(s, "corrupt") ||
 		strings.Contains(s, "checksum") ||
+		strings.Contains(s, "verify()") ||
+		strings.Contains(s, "verify") ||
 		strings.Contains(s, "manifest") ||
 		strings.Contains(s, "log truncate required") ||
 		strings.Contains(s, "badger") && strings.Contains(s, "truncate") ||
 		strings.Contains(s, "value log")
+}
+
+// hasRecoverableArtifacts returns true if the data directory appears to contain recovery inputs:
+// snapshots and/or a WAL (active wal.log or sealed segments).
+//
+// This is used to avoid "recovering" into an empty database when there is nothing to replay.
+func hasRecoverableArtifacts(dataDir string) bool {
+	// Snapshots.
+	if _, err := latestSnapshotPath(filepath.Join(dataDir, "snapshots")); err == nil {
+		return true
+	}
+
+	// WAL: active file.
+	walDir := filepath.Join(dataDir, "wal")
+	activeWAL := filepath.Join(walDir, "wal.log")
+	if st, err := os.Stat(activeWAL); err == nil && st.Size() > 0 {
+		return true
+	}
+
+	// WAL: sealed segments (seg-*-*.wal).
+	segmentsDir := filepath.Join(walDir, "segments")
+	if entries, err := os.ReadDir(segmentsDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if strings.HasPrefix(name, "seg-") && strings.HasSuffix(name, ".wal") {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 func latestSnapshotPath(snapshotDir string) (string, error) {
@@ -85,9 +120,13 @@ func recoverBadgerFromSnapshotAndWAL(dataDir string, badgerOpts storage.BadgerOp
 	walDir := filepath.Join(dataDir, "wal")
 	snapshotDir := filepath.Join(dataDir, "snapshots")
 
-	snapPath, err := latestSnapshotPath(snapshotDir)
-	if err != nil {
-		return nil, "", fmt.Errorf("auto-recover: %w", err)
+	snapPath, snapErr := latestSnapshotPath(snapshotDir)
+	if snapErr != nil {
+		// No snapshots yet (e.g., new DB) or snapshot directory missing — attempt WAL-only recovery.
+		// This can fully recover data when WAL still contains the full history (pre-compaction),
+		// and is still better than "delete the data directory" when snapshots haven't been created.
+		fmt.Printf("⚠️  Auto-recover: no snapshots found (%v); attempting WAL-only recovery\n", snapErr)
+		snapPath = ""
 	}
 
 	// Rebuild state in memory from snapshot + WAL. This does not depend on Badger.

@@ -6,6 +6,7 @@
 package nornicdb
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,6 +50,8 @@ var (
 	pluginsInitialized bool
 )
 
+var errHeimdallContextRequired = errors.New("heimdall plugin requires subsystem context (Heimdall disabled or not initialized)")
+
 // LoadPluginsFromDir scans a directory for .so files and loads them.
 // Auto-detects plugin types and registers appropriately:
 //   - Function plugins → Register with APOC/Cypher executor
@@ -88,6 +91,7 @@ func LoadPluginsFromDir(dir string, heimdallCtx *heimdall.SubsystemContext) erro
 		total     int
 		function  int
 		heimdall  int
+		skipped   int
 		failed    int
 		functions int
 		actions   int
@@ -96,6 +100,19 @@ func LoadPluginsFromDir(dir string, heimdallCtx *heimdall.SubsystemContext) erro
 	for _, path := range matches {
 		loaded, err := loadPluginFile(path, heimdallCtx)
 		if err != nil {
+			// Heimdall plugins require an initialized subsystem context; when Heimdall is disabled
+			// (or not initialized yet), we skip loading them rather than treating as a failure.
+			if errors.Is(err, errHeimdallContextRequired) {
+				stats.skipped++
+				if loaded != nil && loaded.Name != "" {
+					fmt.Printf("║ - [HEIM] %-15s v%-8s skipped (Heimdall disabled)      ║\n",
+						loaded.Name, loaded.Version)
+				} else {
+					fmt.Printf("║ - [HEIM] %-47s skipped (Heimdall disabled) ║\n", filepath.Base(path))
+				}
+				continue
+			}
+
 			fmt.Printf("║ ⚠️  %-56s ║\n", filepath.Base(path)+": "+err.Error())
 			stats.failed++
 			continue
@@ -132,6 +149,9 @@ func LoadPluginsFromDir(dir string, heimdallCtx *heimdall.SubsystemContext) erro
 	fmt.Println("╠══════════════════════════════════════════════════════════════╣")
 	fmt.Printf("║ Loaded: %d plugins (%d function, %d heimdall) %15s ║\n",
 		stats.total, stats.function, stats.heimdall, "")
+	if stats.skipped > 0 {
+		fmt.Printf("║ Skipped: %d plugins (Heimdall disabled) %24s ║\n", stats.skipped, "")
+	}
 	if stats.functions > 0 {
 		fmt.Printf("║         %d Cypher functions available %23s ║\n", stats.functions, "")
 	}
@@ -268,12 +288,22 @@ func loadHeimdallPlugin(sym interface{}, path string, ctx *heimdall.SubsystemCon
 
 // registerHeimdallPlugin registers the plugin with Heimdall's subsystem manager.
 func registerHeimdallPlugin(hp heimdall.HeimdallPlugin, path string, ctx *heimdall.SubsystemContext) (*LoadedPlugin, error) {
+	// Heimdall plugins depend on an initialized Heimdall subsystem context (Bifrost, DB reader, etc).
+	// When Heimdall is disabled, we should *not* register/start Heimdall plugins — doing so can
+	// start background goroutines and make `heimdall.enabled: false` a no-op in practice.
+	if ctx == nil {
+		return &LoadedPlugin{
+			Name:    hp.Name(),
+			Version: hp.Version(),
+			Type:    PluginTypeHeimdall,
+			Path:    path,
+		}, errHeimdallContextRequired
+	}
+
 	mgr := heimdall.GetSubsystemManager()
 
 	// Set context if provided
-	if ctx != nil {
-		mgr.SetContext(*ctx)
-	}
+	mgr.SetContext(*ctx)
 
 	// Register with Heimdall
 	if err := mgr.RegisterPlugin(hp, path, false); err != nil {

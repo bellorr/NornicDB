@@ -386,6 +386,9 @@ func TestMyPlugin_Actions(t *testing.T) {
 # Start NornicDB with Heimdall enabled
 NORNICDB_HEIMDALL_ENABLED=true ./nornicdb
 
+# Note: Heimdall plugins are skipped unless Heimdall is enabled and initialized.
+# Environment variables override config file values, so double-check your container env.
+
 # Open Bifrost chat UI and type:
 # "run my analyze action"
 # "analyze the graph with threshold 0.5"

@@ -204,7 +204,11 @@ If you are using the MCP tools (`store`, `discover`, etc.):
    # Large WAL files can cause OOM on startup
    du -sh /path/to/data/wal/
    
-   # If >1GB, delete it (data is safe in BadgerDB)
+   # If >1GB, consider trimming it.
+   #
+   # NOTE: Deleting the WAL can lose the *very latest* mutations if the process
+   # crashed after WAL append but before the change was applied to the main store.
+   # Prefer auto-recovery (snapshot + WAL) when possible.
    rm /path/to/data/wal/wal.log
    ```
 
@@ -225,22 +229,29 @@ NornicDB maintains:
 - **Snapshots** in `<dataDir>/snapshots/` (e.g., `snapshot-YYYYMMDD-HHMMSS.json`)
 - **WAL** in `<dataDir>/wal/wal.log`
 
-If your build includes auto-recovery, you can enable/force it with:
+**Auto-recovery (recommended)**
+
+Auto-recovery is **enabled by default**. You can:
+- **Disable**: `NORNICDB_AUTO_RECOVER_ON_CORRUPTION=false`
+- **Force an attempt** (even if the open error message doesn’t match the corruption heuristics): `NORNICDB_AUTO_RECOVER_ON_CORRUPTION=true`
 
 ```bash
 NORNICDB_AUTO_RECOVER_ON_CORRUPTION=true
 ```
 
 On startup, NornicDB will:
-- Load the latest snapshot
-- Replay WAL entries after that snapshot
+- Repair the WAL tail if the previous process crashed mid-write
+- Load the latest snapshot (if present)
+- Replay WAL entries after that snapshot (or replay WAL-only if no snapshots exist yet)
 - **Rename** your original directory to `<dataDir>.corrupted-<timestamp>` (for forensics)
 - Rebuild a fresh store and restore recovered nodes/edges
 
 3. **If recovery can’t run**
 
 - Ensure the container has write access to the volume
-- Ensure snapshots exist in `<dataDir>/snapshots/`
+- Ensure at least one recovery artifact exists:
+  - snapshots in `<dataDir>/snapshots/`, and/or
+  - WAL in `<dataDir>/wal/` (`wal.log` or sealed `segments/seg-*.wal`)
 - Avoid running the DB data directory on unstable/union filesystem mounts (prefer a dedicated disk path)
 
 ### High CPU Usage

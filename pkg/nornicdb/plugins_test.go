@@ -392,6 +392,7 @@ type mockHeimdallPlugin struct {
 	name    string
 	version string
 	ptype   string
+	startCalls int
 }
 
 func (m *mockHeimdallPlugin) Name() string                                   { return m.name }
@@ -399,7 +400,7 @@ func (m *mockHeimdallPlugin) Version() string                                { r
 func (m *mockHeimdallPlugin) Type() string                                   { return m.ptype }
 func (m *mockHeimdallPlugin) Description() string                            { return "Test Heimdall plugin" }
 func (m *mockHeimdallPlugin) Initialize(ctx heimdall.SubsystemContext) error { return nil }
-func (m *mockHeimdallPlugin) Start() error                                   { return nil }
+func (m *mockHeimdallPlugin) Start() error                                   { m.startCalls++; return nil }
 func (m *mockHeimdallPlugin) Stop() error                                    { return nil }
 func (m *mockHeimdallPlugin) Shutdown() error                                { return nil }
 func (m *mockHeimdallPlugin) Status() heimdall.SubsystemStatus {
@@ -427,4 +428,22 @@ func (m *mockPluginNoType) Version() string { return m.version }
 // Helper to get reflect.Value from interface
 func reflectValueOf(i interface{}) reflect.Value {
 	return reflect.ValueOf(i)
+}
+
+func TestRegisterHeimdallPlugin_RequiresSubsystemContext(t *testing.T) {
+	// If Heimdall is disabled/not initialized, Heimdall plugins must not be registered or started.
+	plugin := &mockHeimdallPlugin{
+		name:    "watcher",
+		version: "1.0.0",
+		ptype:   "heimdall",
+	}
+
+	loaded, err := registerHeimdallPlugin(plugin, "/test/watcher.so", nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, errHeimdallContextRequired)
+	require.NotNil(t, loaded)
+	assert.Equal(t, PluginTypeHeimdall, loaded.Type)
+	assert.Equal(t, "watcher", loaded.Name)
+	assert.Equal(t, "1.0.0", loaded.Version)
+	assert.Equal(t, 0, plugin.startCalls, "Start() must not be called when Heimdall is disabled")
 }

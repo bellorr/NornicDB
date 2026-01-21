@@ -7,7 +7,7 @@ Heimdall is NornicDB's built-in AI assistant that enables natural language inter
 ### Enable Heimdall
 
 ```bash
-# Environment variable
+# Environment variable (overrides config file)
 export NORNICDB_HEIMDALL_ENABLED=true
 
 # Or in docker-compose
@@ -17,6 +17,15 @@ environment:
 # Start NornicDB
 ./nornicdb serve
 ```
+
+Or via config file:
+
+```yaml
+heimdall:
+  enabled: true
+```
+
+**Precedence note:** environment variables override YAML config values. If `heimdall.enabled: false` “does nothing”, check whether `NORNICDB_HEIMDALL_ENABLED` is set in your container/runtime environment.
 
 ### Access Bifrost Chat
 
@@ -32,8 +41,8 @@ environment:
 | `NORNICDB_HEIMDALL_MODEL` | `qwen2.5-0.5b-instruct` | GGUF model to use |
 | `NORNICDB_MODELS_DIR` | `/app/models` | Directory containing GGUF models |
 | `NORNICDB_HEIMDALL_GPU_LAYERS` | `-1` | GPU layers (-1 = auto) |
-| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | `32768` | Context window (32K max) |
-| `NORNICDB_HEIMDALL_BATCH_SIZE` | `8192` | Batch size for prefill (8K max) |
+| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | `8192` | Context window (tokens) |
+| `NORNICDB_HEIMDALL_BATCH_SIZE` | `2048` | Batch size for prefill |
 | `NORNICDB_HEIMDALL_MAX_TOKENS` | `1024` | Max tokens per response |
 | `NORNICDB_HEIMDALL_TEMPERATURE` | `0.1` | Response creativity (0.0-1.0) |
 
@@ -213,6 +222,7 @@ When disabled:
 - Bifrost chat UI shows "AI Assistant not enabled"
 - `/api/bifrost/*` endpoints return disabled status
 - No SLM model is loaded (saves memory)
+- Heimdall plugins are **not** started (they are skipped unless Heimdall is enabled and initialized)
 
 ## Chat History
 

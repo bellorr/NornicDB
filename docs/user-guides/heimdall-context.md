@@ -10,12 +10,12 @@ Heimdall uses a **single-shot command architecture** - each request is independe
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                    32K CONTEXT WINDOW                            │
-│                  (qwen2.5-0.5b-instruct max)                     │
+│                    8K CONTEXT WINDOW (default)                    │
+│              (model may support larger; configurable)             │
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │            SYSTEM PROMPT (12K budget)                     │   │
+│  │            SYSTEM PROMPT (6K budget)                      │   │
 │  │  ┌────────────────────────────────────────────────────┐  │   │
 │  │  │ Identity & Role (~50 tokens)                       │  │   │
 │  │  │ "You are Heimdall, the AI assistant..."            │  │   │
@@ -41,11 +41,11 @@ Heimdall uses a **single-shot command architecture** - each request is independe
 │  │  └────────────────────────────────────────────────────┘  │   │
 │  │                                                           │   │
 │  │  Total base system: ~1,200 tokens                         │   │
-│  │  Available for plugins: ~10,800 tokens                    │   │
+│  │  Available for plugins: ~4,800 tokens                     │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │            USER MESSAGE (4K budget)                       │   │
+│  │            USER MESSAGE (2K budget)                       │   │
 │  │  Single-shot command from Bifrost UI                      │   │
 │  └──────────────────────────────────────────────────────────┘   │
 │                                                                  │
@@ -61,9 +61,17 @@ Heimdall uses a **single-shot command architecture** - each request is independe
 
 | Setting | Value | Purpose |
 |---------|-------|---------|
-| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | 32768 | Full 32K context window |
-| `NORNICDB_HEIMDALL_BATCH_SIZE` | 8192 | 8K batch for prefill |
+| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | 8192 | Model context window (tokens) |
+| `NORNICDB_HEIMDALL_BATCH_SIZE` | 2048 | Batch size for prefill |
 | `NORNICDB_HEIMDALL_MAX_TOKENS` | 1024 | 1K response limit |
+
+Heimdall also enforces a **prompt construction budget** (so plugins can’t blow up the system prompt):
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS` | 8192 | Total prompt budget (system + user) |
+| `NORNICDB_HEIMDALL_MAX_SYSTEM_TOKENS` | 6000 | System prompt budget (base + plugins) |
+| `NORNICDB_HEIMDALL_MAX_USER_TOKENS` | 2000 | User message budget |
 
 ## How Multi-Batch Prefill Works
 
@@ -72,7 +80,7 @@ When the system prompt exceeds the batch size, Heimdall automatically splits it 
 ```
 System Prompt (2K tokens) + User Message (500 tokens) = 2.5K total
 
-Batch 1: [System prompt tokens 0-8191]      → KV cache stores
+Batch 1: [System prompt tokens 0-2047]      → KV cache stores
 Batch 2: [Remaining tokens + user message]  → KV cache accumulates
                                             → Generation starts
 ```
@@ -81,13 +89,13 @@ The KV cache accumulates across batches, so the model "sees" the entire context 
 
 ## Token Budget Constants
 
-These constants define the allocation in `pkg/heimdall/types.go`:
+These defaults are defined in `pkg/heimdall/types.go` and can be overridden via environment variables:
 
 ```go
 const (
-    MaxContextTokens      = 16384  // 16K total context budget
-    MaxSystemPromptTokens = 12000  // 12K for system + plugins
-    MaxUserMessageTokens  = 4000   // 4K for user commands
+    DefaultMaxContextTokens      = 8192  // 8K total context budget
+    DefaultMaxSystemPromptTokens = 6000  // 6K for system + plugins
+    DefaultMaxUserMessageTokens  = 2000  // 2K for user commands
     TokensPerChar         = 0.25   // ~4 chars per token estimate
 )
 ```
@@ -106,7 +114,7 @@ const (
 
 ## Fallback Behavior
 
-If plugins add too many instructions and the system prompt exceeds the 12K budget, Heimdall automatically falls back to a minimal prompt:
+If plugins add too many instructions and the system prompt exceeds the system budget, Heimdall automatically falls back to a minimal prompt:
 
 ```go
 // Minimal fallback prompt (~200 tokens)
@@ -135,7 +143,7 @@ Respond with JSON only."
 1. **KV Cache is lazy** - Only allocates for actual tokens used
 2. **Prefill is fast** - Parallel processing of input tokens
 3. **Generation dominates** - 90% of time is in token generation
-4. **Your prompts are small** - ~2K tokens vs 32K capacity
+4. **Your prompts are small** - typically ~1–3K tokens vs 8K default capacity (and you can increase the context window if needed)
 
 ## Model Specifications
 
@@ -155,14 +163,14 @@ Respond with JSON only."
 ### Default (Balanced)
 ```bash
 NORNICDB_HEIMDALL_ENABLED=true
-# Uses all defaults - 32K context, 8K batch, 1K output
+# Uses defaults - 8K context, 2K batch, 1K output
 ```
 
 ### Memory Constrained
 ```bash
 NORNICDB_HEIMDALL_ENABLED=true
-NORNICDB_HEIMDALL_CONTEXT_SIZE=8192   # Reduce if low RAM
-NORNICDB_HEIMDALL_BATCH_SIZE=2048
+NORNICDB_HEIMDALL_CONTEXT_SIZE=4096   # Reduce if low RAM
+NORNICDB_HEIMDALL_BATCH_SIZE=1024
 NORNICDB_HEIMDALL_MAX_TOKENS=512      # Shorter responses
 ```
 
@@ -177,7 +185,7 @@ NORNICDB_HEIMDALL_MAX_TOKENS=2048     # Allow longer explanations
 The handler logs token budget information:
 
 ```
-[Bifrost] Token budget: system=1247, user=156, total=1403/16384
+[Bifrost] Token budget: system=1247, user=156, total=1403/8192
 ```
 
 If you see truncation errors, check:

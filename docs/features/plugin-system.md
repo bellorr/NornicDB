@@ -85,10 +85,12 @@ NORNICDB_PLUGINS_DIR=/opt/nornicdb/plugins
 # Heimdall plugin directory (subsystem management)
 NORNICDB_HEIMDALL_PLUGINS_DIR=/opt/nornicdb/heimdall-plugins
 
-# Enable Heimdall (required for Heimdall plugins)
+# Enable Heimdall (required for Heimdall plugins; env overrides config file)
 NORNICDB_HEIMDALL_ENABLED=true
 NORNICDB_MODELS_DIR=/opt/nornicdb/models
 ```
+
+**Important:** Heimdall plugins require an initialized Heimdall subsystem context (Bifrost, DB reader, invoker). If Heimdall is disabled, Heimdall plugins are **skipped and not started** — this prevents background goroutines from running when `heimdall.enabled: false`.
 
 ### Docker Example
 

@@ -5,7 +5,7 @@ go 1.25.5
 require (
 	github.com/99designs/gqlgen v0.17.84
 	github.com/antlr4-go/antlr/v4 v4.13.1
-	github.com/dgraph-io/badger/v4 v4.8.0
+	github.com/dgraph-io/badger/v4 v4.9.0
 	github.com/ebitengine/purego v0.9.1
 	github.com/google/uuid v1.6.0
 	github.com/hybridgroup/yzma v1.3.0
@@ -36,7 +36,7 @@ require (
 	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jupiterrider/ffi v0.5.1 // indirect
-	github.com/klauspost/compress v1.18.1 // indirect
+	github.com/klauspost/compress v1.18.3 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	github.com/sosodev/duration v1.3.1 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
