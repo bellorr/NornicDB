@@ -864,6 +864,9 @@ func (s *Server) convertValueToNeo4jFormat(val interface{}) interface{} {
 		// Regular map - convert nested values
 		result := make(map[string]interface{}, len(v))
 		for k, vv := range v {
+			if k == "_pathResult" {
+				continue
+			}
 			result[k] = s.convertValueToNeo4jFormat(vv)
 		}
 		return result

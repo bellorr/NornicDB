@@ -336,6 +336,7 @@ func (e *StorageExecutor) pathToMap(path PathResult) map[string]interface{} {
 	}
 
 	return map[string]interface{}{
+		"_pathResult":   path,
 		"nodes":         nodes,
 		"relationships": rels,
 		"length":        int64(path.Length),

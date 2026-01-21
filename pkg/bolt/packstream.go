@@ -7,6 +7,7 @@ import (
 	"math"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
 )
@@ -168,6 +169,9 @@ func encodePackStreamValueInto(dst []byte, v any) []byte {
 		return encodePackStreamStringInto(dst, string(val))
 	// Map types
 	case map[string]any:
+		if path, ok := extractPathFromMap(val); ok {
+			return encodePathInto(dst, path.Nodes, path.Relationships)
+		}
 		// Check if this is a node (has _nodeId and labels)
 		if nodeId, hasNodeId := val["_nodeId"]; hasNodeId {
 			if labels, hasLabels := val["labels"]; hasLabels {
@@ -239,6 +243,13 @@ func encodePackStreamValueInto(dst []byte, v any) []byte {
 			return append(dst, 0xC0)
 		}
 		return encodeStorageEdgeInto(dst, val)
+	case unboundRelationship:
+		return encodeUnboundRelationshipInto(dst, &val)
+	case *unboundRelationship:
+		if val == nil {
+			return append(dst, 0xC0)
+		}
+		return encodeUnboundRelationshipInto(dst, val)
 	case []storage.Edge:
 		if len(val) == 0 {
 			return append(dst, 0x90)
@@ -682,6 +693,227 @@ func encodeStorageEdgeInto(dst []byte, edge *storage.Edge) []byte {
 		dst = encodePackStreamValueInto(dst, v)
 	}
 	return dst
+}
+
+type unboundRelationship struct {
+	id         storage.EdgeID
+	relType    string
+	properties map[string]any
+}
+
+func encodeUnboundRelationshipInto(dst []byte, rel *unboundRelationship) []byte {
+	// Bolt Unbound Relationship structure: B3 72 (tiny struct, 3 fields, signature 'r')
+	dst = append(dst, 0xB3, 0x72)
+	dst = encodePackStreamIntInto(dst, util.HashStringToInt64(string(rel.id)))
+	dst = encodePackStreamStringInto(dst, rel.relType)
+
+	if len(rel.properties) == 0 {
+		return append(dst, 0xA0)
+	}
+	return encodePackStreamMapInto(dst, rel.properties)
+}
+
+func encodePathInto(dst []byte, pathNodes []*storage.Node, pathRels []*storage.Edge) []byte {
+	// Bolt Path structure: B3 50 (tiny struct, 3 fields, signature 'P')
+	dst = append(dst, 0xB3, 0x50)
+
+	if len(pathNodes) == 0 {
+		// Invalid path; encode empty lists to avoid malformed structures.
+		dst = append(dst, 0x90, 0x90, 0x90)
+		return dst
+	}
+
+	if len(pathRels) == 0 {
+		// Path length 0 should contain only the first node.
+		dst = encodePackStreamListInto(dst, []any{pathNodes[0]})
+		dst = append(dst, 0x90, 0x90)
+		return dst
+	}
+
+	uniqueNodes, nodeIndex := uniquePathNodes(pathNodes)
+	uniqueRels, relIndex := uniquePathRels(pathRels)
+
+	// Field 1: Nodes list
+	dst = encodePackStreamValueInto(dst, uniqueNodes)
+
+	// Field 2: Unbound relationships list
+	rels := make([]any, len(uniqueRels))
+	for i, rel := range uniqueRels {
+		rels[i] = unboundRelationship{
+			id:         rel.ID,
+			relType:    rel.Type,
+			properties: rel.Properties,
+		}
+	}
+	dst = encodePackStreamListInto(dst, rels)
+
+	// Field 3: Sequence list
+	sequence := buildPathSequence(pathNodes, pathRels, nodeIndex, relIndex)
+	dst = encodePackStreamValueInto(dst, sequence)
+
+	return dst
+}
+
+func uniquePathNodes(nodes []*storage.Node) ([]*storage.Node, map[storage.NodeID]int) {
+	if len(nodes) == 0 {
+		return nil, map[storage.NodeID]int{}
+	}
+	unique := make([]*storage.Node, 0, len(nodes))
+	index := make(map[storage.NodeID]int, len(nodes))
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if _, ok := index[node.ID]; ok {
+			continue
+		}
+		index[node.ID] = len(unique)
+		unique = append(unique, node)
+	}
+	return unique, index
+}
+
+func uniquePathRels(rels []*storage.Edge) ([]*storage.Edge, map[storage.EdgeID]int) {
+	if len(rels) == 0 {
+		return nil, map[storage.EdgeID]int{}
+	}
+	unique := make([]*storage.Edge, 0, len(rels))
+	index := make(map[storage.EdgeID]int, len(rels))
+	for _, rel := range rels {
+		if rel == nil {
+			continue
+		}
+		if _, ok := index[rel.ID]; ok {
+			continue
+		}
+		index[rel.ID] = len(unique)
+		unique = append(unique, rel)
+	}
+	return unique, index
+}
+
+func buildPathSequence(pathNodes []*storage.Node, pathRels []*storage.Edge, nodeIndex map[storage.NodeID]int, relIndex map[storage.EdgeID]int) []int64 {
+	if len(pathNodes) == 0 || len(pathRels) == 0 {
+		return []int64{}
+	}
+
+	if len(pathNodes) < len(pathRels)+1 {
+		return []int64{}
+	}
+
+	sequence := make([]int64, 0, len(pathRels)*2)
+	current := pathNodes[0]
+	for i := 0; i < len(pathRels); i++ {
+		rel := pathRels[i]
+		next := pathNodes[i+1]
+		if rel == nil || current == nil || next == nil {
+			return []int64{}
+		}
+		relPos, ok := relIndex[rel.ID]
+		if !ok {
+			return []int64{}
+		}
+		nodePos, ok := nodeIndex[next.ID]
+		if !ok {
+			return []int64{}
+		}
+
+		relSeq := int64(relPos + 1)
+		if current.ID != rel.StartNode {
+			relSeq = -relSeq
+		}
+
+		sequence = append(sequence, relSeq, int64(nodePos))
+		current = next
+	}
+	return sequence
+}
+
+func extractPathFromMap(val map[string]any) (*cypher.PathResult, bool) {
+	raw, ok := val["_pathResult"]
+	if !ok {
+		return nil, false
+	}
+
+	switch path := raw.(type) {
+	case cypher.PathResult:
+		return &path, true
+	case *cypher.PathResult:
+		if path != nil {
+			return path, true
+		}
+	}
+
+	nodes := coercePathNodes(val["nodes"])
+	rels := coercePathRels(val["relationships"])
+	if len(rels) == 0 {
+		rels = coercePathRels(val["rels"])
+	}
+	if len(nodes) == 0 && len(rels) == 0 {
+		return nil, false
+	}
+
+	return &cypher.PathResult{
+		Nodes:         nodes,
+		Relationships: rels,
+		Length:        len(rels),
+	}, true
+}
+
+func coercePathNodes(val any) []*storage.Node {
+	switch nodes := val.(type) {
+	case []*storage.Node:
+		return nodes
+	case []storage.Node:
+		converted := make([]*storage.Node, 0, len(nodes))
+		for i := range nodes {
+			node := nodes[i]
+			converted = append(converted, &node)
+		}
+		return converted
+	case []any:
+		converted := make([]*storage.Node, 0, len(nodes))
+		for _, item := range nodes {
+			switch node := item.(type) {
+			case *storage.Node:
+				converted = append(converted, node)
+			case storage.Node:
+				n := node
+				converted = append(converted, &n)
+			}
+		}
+		return converted
+	default:
+		return nil
+	}
+}
+
+func coercePathRels(val any) []*storage.Edge {
+	switch rels := val.(type) {
+	case []*storage.Edge:
+		return rels
+	case []storage.Edge:
+		converted := make([]*storage.Edge, 0, len(rels))
+		for i := range rels {
+			rel := rels[i]
+			converted = append(converted, &rel)
+		}
+		return converted
+	case []any:
+		converted := make([]*storage.Edge, 0, len(rels))
+		for _, item := range rels {
+			switch rel := item.(type) {
+			case *storage.Edge:
+				converted = append(converted, rel)
+			case storage.Edge:
+				r := rel
+				converted = append(converted, &r)
+			}
+		}
+		return converted
+	default:
+		return nil
+	}
 }
 
 // encodeNode encodes a node as a proper Bolt Node structure (signature 0x4E).
