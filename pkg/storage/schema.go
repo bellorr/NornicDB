@@ -29,6 +29,7 @@ const (
 	ConstraintNodeKey      ConstraintType = "NODE_KEY"
 	ConstraintExists       ConstraintType = "EXISTS"
 	ConstraintPropertyType ConstraintType = "PROPERTY_TYPE"
+	ConstraintTemporal     ConstraintType = "TEMPORAL_NO_OVERLAP"
 )
 
 // Constraint represents a Neo4j-compatible schema constraint.

@@ -325,6 +325,33 @@ func TestCreateNodeKeyConstraint(t *testing.T) {
 	}
 }
 
+func TestCreateTemporalConstraint(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE CONSTRAINT fact_temporal IF NOT EXISTS FOR (v:FactVersion) REQUIRE (v.fact_key, v.valid_from, v.valid_to) IS TEMPORAL NO OVERLAP", nil)
+	if err != nil {
+		t.Fatalf("Failed to create TEMPORAL constraint: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:FactVersion {fact_key: 'k1', valid_from: datetime('2024-01-01T00:00:00Z'), valid_to: datetime('2024-02-01T00:00:00Z')})", nil)
+	if err != nil {
+		t.Fatalf("Failed to create first FactVersion: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:FactVersion {fact_key: 'k1', valid_from: datetime('2024-01-15T00:00:00Z'), valid_to: datetime('2024-03-01T00:00:00Z')})", nil)
+	if err == nil {
+		t.Fatal("Expected TEMPORAL constraint violation, got nil")
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:FactVersion {fact_key: 'k1', valid_from: datetime('2024-02-01T00:00:00Z'), valid_to: datetime('2024-03-01T00:00:00Z')})", nil)
+	if err != nil {
+		t.Fatalf("Expected non-overlapping FactVersion to succeed: %v", err)
+	}
+}
+
 func TestCreateTypeConstraint(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 	store := storage.NewNamespacedEngine(baseStore, "test")

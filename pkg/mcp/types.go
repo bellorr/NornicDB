@@ -87,6 +87,7 @@ type StoreResult struct {
 	Title       string       `json:"title"`
 	Embedded    bool         `json:"embedded"`
 	Suggestions []Suggestion `json:"suggestions,omitempty"`
+	Receipt     interface{}  `json:"receipt,omitempty"`
 }
 
 // Suggestion represents a suggested related node
@@ -148,10 +149,10 @@ type RelatedNode struct {
 	ID           string   `json:"id"`
 	Type         string   `json:"type"`
 	Title        string   `json:"title,omitempty"`
-	Distance     int      `json:"distance"`             // Hops from the source node (1 = direct, 2 = two hops, etc.)
-	Relationship string   `json:"relationship"`         // Relationship type that connects to this node
-	Direction    string   `json:"direction,omitempty"`  // "outgoing", "incoming", or "both"
-	Path         []string `json:"path,omitempty"`       // Node IDs in the path (for depth > 1)
+	Distance     int      `json:"distance"`            // Hops from the source node (1 = direct, 2 = two hops, etc.)
+	Relationship string   `json:"relationship"`        // Relationship type that connects to this node
+	Direction    string   `json:"direction,omitempty"` // "outgoing", "incoming", or "both"
+	Path         []string `json:"path,omitempty"`      // Node IDs in the path (for depth > 1)
 }
 
 // LinkParams - Input for link tool
@@ -165,10 +166,11 @@ type LinkParams struct {
 
 // LinkResult - Output from link tool
 type LinkResult struct {
-	EdgeID    string `json:"edge_id"`
-	From      Node   `json:"from"`
-	To        Node   `json:"to"`
-	Suggested []Edge `json:"suggested,omitempty"`
+	EdgeID    string      `json:"edge_id"`
+	From      Node        `json:"from"`
+	To        Node        `json:"to"`
+	Suggested []Edge      `json:"suggested,omitempty"`
+	Receipt   interface{} `json:"receipt,omitempty"`
 }
 
 // Note: IndexParams, IndexResult, UnindexParams, UnindexResult removed
@@ -187,10 +189,11 @@ type TaskParams struct {
 
 // TaskResult - Output from task tool
 type TaskResult struct {
-	Task       Node   `json:"task"`
-	Blockers   []Node `json:"blockers,omitempty"`
-	Subtasks   []Node `json:"subtasks,omitempty"`
-	NextAction string `json:"next_action,omitempty"`
+	Task       Node        `json:"task"`
+	Blockers   []Node      `json:"blockers,omitempty"`
+	Subtasks   []Node      `json:"subtasks,omitempty"`
+	NextAction string      `json:"next_action,omitempty"`
+	Receipt    interface{} `json:"receipt,omitempty"`
 }
 
 // TasksParams - Input for tasks tool

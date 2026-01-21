@@ -7,6 +7,7 @@
 ### Core Features
 - **[Vector Search](vector-search.md)** - Semantic search with embeddings
 - **[Hybrid Search (RRF)](hybrid-search.md)** - Combine vector + BM25 search
+- **[Canonical Graph + Mutation Log](canonical-graph-ledger.md)** - Build a canonical truth store with constraints, temporal validity, receipts, and a WAL-backed mutation log
 - **[Qdrant gRPC Endpoint](qdrant-grpc.md)** - Use Qdrant SDKs against NornicDB
 - **[Transactions](transactions.md)** - ACID guarantees and transaction management
 - **[Clustering](clustering.md)** - High availability and replication
@@ -47,6 +48,9 @@
 
 **Ensure data consistency**
 → [Transactions Guide](transactions.md)
+
+**Build a canonical truth store**
+→ [Canonical Graph + Mutation Log Guide](canonical-graph-ledger.md)
 
 **Migrate from Neo4j**
 → [Data Import/Export](data-import-export.md)

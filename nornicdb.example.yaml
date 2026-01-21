@@ -145,6 +145,23 @@ database:
   # Env: NORNICDB_WAL_SYNC_INTERVAL
   wal_sync_interval: "100ms"
 
+  # WAL auto-compaction (snapshots + truncation)
+  # Env: NORNICDB_WAL_AUTO_COMPACTION_ENABLED
+  wal_auto_compaction_enabled: true
+
+  # WAL retention settings (optional)
+  # These control how long sealed WAL segments are kept after snapshots.
+  # Env: NORNICDB_WAL_RETENTION_MAX_SEGMENTS
+  # Env: NORNICDB_WAL_RETENTION_MAX_AGE
+  # Example: keep last 24 segments or 7 days of WAL history
+  wal_retention_max_segments: 0
+  wal_retention_max_age: "0s"
+
+  # Ledger retention defaults (optional)
+  # If enabled and retention values are unset, defaults to 24 segments / 7 days
+  # Env: NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS
+  wal_ledger_retention_defaults: false
+
 # =============================================================================
 # STORAGE (Alias for database.data_dir)
 # =============================================================================

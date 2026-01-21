@@ -25,6 +25,10 @@ NORNICDB_STRICT_DURABILITY=true
 | `NORNICDB_STRICT_DURABILITY` | `false` | Enable maximum safety mode (2-5x slower) |
 | `NORNICDB_WAL_SYNC_MODE` | `batch` | WAL sync strategy: `batch`, `immediate`, or `none` |
 | `NORNICDB_WAL_SYNC_INTERVAL` | `100ms` | Interval for batch sync mode |
+| `NORNICDB_WAL_AUTO_COMPACTION_ENABLED` | `true` | Enable automatic snapshots + WAL truncation |
+| `NORNICDB_WAL_RETENTION_MAX_SEGMENTS` | `0` | Keep at most N sealed WAL segments (0 = unlimited) |
+| `NORNICDB_WAL_RETENTION_MAX_AGE` | `0s` | Keep sealed WAL segments newer than this duration (0 = unlimited) |
+| `NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS` | `false` | Enable ledger retention defaults when unset |
 
 ### Sync Modes Explained
 
@@ -79,6 +83,47 @@ NORNICDB_WAL_SYNC_MODE=none
 - **Data Risk**: **HIGH** - entire buffer can be lost on crash
 - **Performance**: 10-100x faster writes
 - **Use Case**: Testing, development, temporary data
+
+## WAL Retention (Ledger Use Cases)
+
+You can retain sealed WAL segments for audit/ledger workflows. This keeps a historical
+mutation log while still allowing periodic snapshots.
+
+```bash
+# Keep the most recent 24 segments and 7 days of history
+NORNICDB_WAL_RETENTION_MAX_SEGMENTS=24
+NORNICDB_WAL_RETENTION_MAX_AGE=168h
+
+# Or enable ledger defaults when unset (opt-in)
+NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS=true
+```
+
+YAML configuration:
+
+```yaml
+database:
+  wal_retention_max_segments: 24
+  wal_retention_max_age: "168h"
+```
+
+Auto-compaction remains enabled by default (preserves existing behavior). These
+settings are **opt-in** and only control how long sealed WAL segments are retained
+after snapshots.
+
+## Auto-Compaction Toggle
+
+If you need a strictly append-only WAL without periodic truncation, disable auto-compaction:
+
+```bash
+NORNICDB_WAL_AUTO_COMPACTION_ENABLED=false
+```
+
+```yaml
+database:
+  wal_auto_compaction_enabled: false
+```
+
+With auto-compaction disabled, you must manage snapshots and WAL growth manually.
 
 ## Strict Durability Mode
 

@@ -337,6 +337,12 @@ type Config struct {
 	AsyncMaxNodeCacheSize int           `yaml:"async_max_node_cache_size"` // Max nodes to buffer before forcing flush (default: 50000, 0=unlimited)
 	AsyncMaxEdgeCacheSize int           `yaml:"async_max_edge_cache_size"` // Max edges to buffer before forcing flush (default: 100000, 0=unlimited)
 
+	// WAL retention settings (optional)
+	WALRetentionMaxSegments    int           `yaml:"wal_retention_max_segments"`    // Max sealed WAL segments to keep (0 = unlimited)
+	WALRetentionMaxAge         time.Duration `yaml:"wal_retention_max_age"`         // Max age of WAL segments to keep (0 = unlimited)
+	WALAutoCompactionEnabled   bool          `yaml:"wal_auto_compaction_enabled"`   // Enable automatic snapshots + WAL truncation
+	WALRetentionLedgerDefaults bool          `yaml:"wal_ledger_retention_defaults"` // Enable ledger-grade retention defaults when unset
+
 	// BadgerEngine in-process caches (hot read paths)
 	BadgerNodeCacheMaxEntries   int `yaml:"badger_node_cache_max_entries"`    // Max hot nodes cached in-process (default: 10000)
 	BadgerEdgeTypeCacheMaxTypes int `yaml:"badger_edge_type_cache_max_types"` // Max edge types cached for GetEdgesByType (default: 50)
@@ -408,6 +414,10 @@ func DefaultConfig() *Config {
 		AsyncFlushInterval:              50 * time.Millisecond, // Flush pending writes every 50ms
 		AsyncMaxNodeCacheSize:           50000,                 // Buffer up to 50K nodes before forcing flush (~35MB)
 		AsyncMaxEdgeCacheSize:           100000,                // Buffer up to 100K edges before forcing flush (~50MB)
+		WALRetentionMaxSegments:         0,                     // Unlimited by default
+		WALRetentionMaxAge:              0,                     // Unlimited by default
+		WALAutoCompactionEnabled:        true,                  // Auto-compaction enabled by default
+		WALRetentionLedgerDefaults:      false,                 // Ledger defaults disabled by default
 		BadgerNodeCacheMaxEntries:       10000,                 // Cache up to 10K hot nodes
 		BadgerEdgeTypeCacheMaxTypes:     50,                    // Cache up to 50 distinct edge types
 		EncryptionEnabled:               false,                 // Encryption disabled by default (opt-in)
@@ -888,6 +898,19 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		walConfig := storage.DefaultWALConfig()
 		walConfig.Dir = dataDir + "/wal"
 		walConfig.SnapshotInterval = 5 * time.Minute // Compact WAL every 5 minutes (not 1 hour!)
+		if config.WALRetentionLedgerDefaults &&
+			config.WALRetentionMaxSegments == 0 &&
+			config.WALRetentionMaxAge == 0 {
+			config.WALRetentionMaxSegments = 24
+			config.WALRetentionMaxAge = 7 * 24 * time.Hour
+		}
+		// Apply WAL retention settings from config
+		if config.WALRetentionMaxSegments > 0 {
+			walConfig.RetentionMaxSegments = config.WALRetentionMaxSegments
+		}
+		if config.WALRetentionMaxAge > 0 {
+			walConfig.RetentionMaxAge = config.WALRetentionMaxAge
+		}
 		wal, err := storage.NewWAL(walConfig.Dir, walConfig)
 		if err != nil {
 			badgerEngine.Close()
@@ -900,11 +923,15 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 		// Enable auto-compaction to prevent unbounded WAL growth
 		// This creates periodic snapshots and truncates the WAL
-		snapshotDir := dataDir + "/snapshots"
-		if err := walEngine.EnableAutoCompaction(snapshotDir); err != nil {
-			fmt.Printf("⚠️  WAL auto-compaction failed to enable: %v\n", err)
+		if config.WALAutoCompactionEnabled {
+			snapshotDir := dataDir + "/snapshots"
+			if err := walEngine.EnableAutoCompaction(snapshotDir); err != nil {
+				fmt.Printf("⚠️  WAL auto-compaction failed to enable: %v\n", err)
+			} else {
+				fmt.Printf("🗜️  WAL auto-compaction enabled (snapshot interval: %v)\n", walConfig.SnapshotInterval)
+			}
 		} else {
-			fmt.Printf("🗜️  WAL auto-compaction enabled (snapshot interval: %v)\n", walConfig.SnapshotInterval)
+			fmt.Printf("🛑 WAL auto-compaction disabled (manual snapshots required)\n")
 		}
 
 		// Optionally wrap with AsyncEngine for faster writes (eventual consistency)

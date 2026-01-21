@@ -444,6 +444,7 @@ type TransactionResponse struct {
 	Transaction   *TransactionInfo     `json:"transaction,omitempty"`   // Transaction state
 	LastBookmarks []string             `json:"lastBookmarks,omitempty"` // Bookmark for causal consistency
 	Notifications []ServerNotification `json:"notifications,omitempty"` // Server notifications
+	Receipt       interface{}          `json:"receipt,omitempty"`       // Mutation receipt (tx_id, wal_seq_start, wal_seq_end, hash)
 }
 
 // TransactionInfo holds transaction state.
@@ -767,6 +768,13 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			})
 			hasError = true
 			continue
+		}
+
+		// Extract receipt from result metadata if present (for mutations)
+		if result.Metadata != nil {
+			if receipt, ok := result.Metadata["receipt"]; ok && receipt != nil {
+				response.Receipt = receipt
+			}
 		}
 
 		// Convert result to Neo4j format with metadata
@@ -1188,6 +1196,13 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 				Message: err.Error(),
 			})
 			continue
+		}
+
+		// Extract receipt from result metadata if present (for mutations)
+		if result.Metadata != nil {
+			if receipt, ok := result.Metadata["receipt"]; ok && receipt != nil {
+				response.Receipt = receipt
+			}
 		}
 
 		qr := QueryResult{

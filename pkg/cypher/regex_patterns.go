@@ -36,6 +36,10 @@ var (
 	constraintUnnamedForRequireNodeKey = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
 	constraintOnAssertNodeKey          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+\(([^)]+)\)\s+IS\s+NODE\s+KEY`)
 
+	// Temporal no-overlap constraints (NornicDB extension)
+	constraintNamedForRequireTemporal   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?`)
+	constraintUnnamedForRequireTemporal = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?`)
+
 	// Property type constraints
 	constraintNamedForRequireType   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)
 	constraintUnnamedForRequireType = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)

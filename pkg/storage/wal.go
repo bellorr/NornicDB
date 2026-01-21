@@ -278,9 +278,9 @@ type WAL struct {
 	bytes    atomic.Int64
 	closed   atomic.Bool
 
-	segmentFirstSeq uint64
-	segmentEntries  int64
-	segmentBytes    int64
+	segmentFirstSeq  uint64
+	segmentEntries   int64
+	segmentBytes     int64
 	segmentCreatedAt time.Time
 
 	// Background sync goroutine
@@ -308,6 +308,14 @@ type WALStats struct {
 	LastSyncTime  time.Time
 	LastEntryTime time.Time
 	Closed        bool
+}
+
+// Config returns the WAL configuration (read-only access).
+func (w *WAL) Config() *WALConfig {
+	if w == nil {
+		return nil
+	}
+	return w.config
 }
 
 // NewWAL creates a new write-ahead log.

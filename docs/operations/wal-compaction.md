@@ -85,6 +85,57 @@ walEngine.DisableAutoCompaction()
 // Snapshots stop being created
 ```
 
+Configuration:
+
+```yaml
+database:
+  wal_auto_compaction_enabled: false
+```
+
+```bash
+export NORNICDB_WAL_AUTO_COMPACTION_ENABLED=false
+```
+
+### 4. Retention Settings (Immutable Segments)
+
+NornicDB stores WAL as immutable segments with a manifest. You can retain sealed segments
+for audit/ledger use cases.
+
+**YAML configuration:**
+
+```yaml
+database:
+  wal_retention_max_segments: 24
+  wal_retention_max_age: "168h" # 7 days
+```
+
+**Environment variables:**
+
+```bash
+export NORNICDB_WAL_RETENTION_MAX_SEGMENTS=24
+export NORNICDB_WAL_RETENTION_MAX_AGE=168h
+export NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS=true
+```
+
+These settings retain sealed WAL segments **after snapshots**. Auto-compaction remains
+enabled by default to preserve existing behavior; retention is **opt-in**.
+
+### 5. Txlog Query Procedures
+
+You can query WAL entries directly via Cypher:
+
+```cypher
+// Read entries by sequence range
+CALL db.txlog.entries(1000, 1200) YIELD sequence, operation, tx_id, timestamp, data
+RETURN sequence, operation, tx_id, timestamp, data
+ORDER BY sequence;
+
+// Read entries for a specific transaction
+CALL db.txlog.byTxId('tx-123', 200) YIELD sequence, operation, tx_id, timestamp, data
+RETURN sequence, operation, tx_id, timestamp, data
+ORDER BY sequence;
+```
+
 ## How It Works
 
 ### Truncation Process

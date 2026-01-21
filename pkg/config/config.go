@@ -151,6 +151,11 @@ type DatabaseConfig struct {
 	// Environment: NORNICDB_WAL_SYNC_INTERVAL
 	WALSyncInterval time.Duration
 
+	// WALAutoCompactionEnabled controls automatic snapshots + WAL truncation.
+	// Default: true (preserves existing behavior).
+	// Environment: NORNICDB_WAL_AUTO_COMPACTION_ENABLED
+	WALAutoCompactionEnabled bool
+
 	// StrictDurability enables maximum safety settings (opt-in):
 	// - WAL: immediate sync (fsync every write)
 	// - Badger: SyncWrites=true
@@ -158,6 +163,28 @@ type DatabaseConfig struct {
 	// WARNING: 2-5x slower writes. Use for financial/critical data only.
 	// Environment: NORNICDB_STRICT_DURABILITY
 	StrictDurability bool
+
+	// === WAL Retention Settings ===
+	// These control how long WAL segments are retained for audit/ledger purposes.
+	// By default, auto-compaction truncates old WAL entries after snapshots.
+
+	// WALRetentionMaxSegments keeps at most N sealed segments (0 = unlimited, default: 0).
+	// Segments are sealed when they reach MaxFileSize or MaxEntries.
+	// Set to > 0 to enable immutable segment retention for audit trails.
+	// Environment: NORNICDB_WAL_RETENTION_MAX_SEGMENTS
+	WALRetentionMaxSegments int
+
+	// WALRetentionMaxAge keeps segments newer than this duration (0 = unlimited, default: 0).
+	// Older segments are eligible for deletion after snapshots.
+	// Example: 7 * 24 * time.Hour to keep 7 days of WAL history.
+	// Environment: NORNICDB_WAL_RETENTION_MAX_AGE
+	WALRetentionMaxAge time.Duration
+
+	// WALRetentionLedgerDefaults enables ledger-grade retention defaults when no explicit
+	// retention settings are supplied. This is opt-in and defaults to false.
+	// When true, defaults to 24 segments and 7 days if no explicit retention is set.
+	// Environment: NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS
+	WALRetentionLedgerDefaults bool
 
 	// EncryptionEnabled controls whether database encryption is active
 	// Env: NORNICDB_ENCRYPTION_ENABLED
@@ -1114,6 +1141,10 @@ type YAMLConfig struct {
 		StrictDurability            bool   `yaml:"strict_durability"`
 		WALSyncMode                 string `yaml:"wal_sync_mode"`
 		WALSyncInterval             string `yaml:"wal_sync_interval"`
+		WALAutoCompactionEnabled    *bool  `yaml:"wal_auto_compaction_enabled"`
+		WALRetentionMaxSegments     int    `yaml:"wal_retention_max_segments"`
+		WALRetentionMaxAge          string `yaml:"wal_retention_max_age"`
+		WALRetentionLedgerDefaults  bool   `yaml:"wal_ledger_retention_defaults"`
 		EncryptionEnabled           bool   `yaml:"encryption_enabled"`
 		EncryptionPassword          string `yaml:"encryption_password"`
 		BadgerNodeCacheMaxEntries   int    `yaml:"badger_node_cache_max_entries"`
@@ -1314,6 +1345,10 @@ func LoadDefaults() *Config {
 	config.Database.StrictDurability = false
 	config.Database.WALSyncMode = "batch"
 	config.Database.WALSyncInterval = 100 * time.Millisecond
+	config.Database.WALAutoCompactionEnabled = true
+	config.Database.WALRetentionMaxSegments = 0 // Unlimited by default
+	config.Database.WALRetentionMaxAge = 0      // Unlimited by default
+	config.Database.WALRetentionLedgerDefaults = false
 	config.Database.EncryptionPassword = "" // disabled by default
 	config.Database.AsyncWritesEnabled = true
 	config.Database.AsyncFlushInterval = 50 * time.Millisecond
@@ -1525,6 +1560,24 @@ func applyEnvVars(config *Config) {
 	if config.Database.StrictDurability {
 		config.Database.WALSyncMode = "immediate"
 		config.Database.WALSyncInterval = 0
+	}
+
+	// WAL auto-compaction settings
+	config.Database.WALAutoCompactionEnabled = getEnvBool("NORNICDB_WAL_AUTO_COMPACTION_ENABLED", true)
+
+	// WAL retention settings
+	if v := getEnvInt("NORNICDB_WAL_RETENTION_MAX_SEGMENTS", 0); v > 0 {
+		config.Database.WALRetentionMaxSegments = v
+	}
+	if v := getEnvDuration("NORNICDB_WAL_RETENTION_MAX_AGE", 0); v > 0 {
+		config.Database.WALRetentionMaxAge = v
+	}
+	config.Database.WALRetentionLedgerDefaults = getEnvBool("NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS", false)
+	if config.Database.WALRetentionLedgerDefaults &&
+		config.Database.WALRetentionMaxSegments == 0 &&
+		config.Database.WALRetentionMaxAge == 0 {
+		config.Database.WALRetentionMaxSegments = 24
+		config.Database.WALRetentionMaxAge = 7 * 24 * time.Hour
 	}
 
 	// Async write settings
@@ -2029,6 +2082,26 @@ func LoadFromFile(configPath string) (*Config, error) {
 		if d, err := time.ParseDuration(yamlCfg.Database.WALSyncInterval); err == nil {
 			config.Database.WALSyncInterval = d
 		}
+	}
+	if yamlCfg.Database.WALAutoCompactionEnabled != nil {
+		config.Database.WALAutoCompactionEnabled = *yamlCfg.Database.WALAutoCompactionEnabled
+	}
+	if yamlCfg.Database.WALRetentionMaxSegments > 0 {
+		config.Database.WALRetentionMaxSegments = yamlCfg.Database.WALRetentionMaxSegments
+	}
+	if yamlCfg.Database.WALRetentionMaxAge != "" {
+		if d, err := time.ParseDuration(yamlCfg.Database.WALRetentionMaxAge); err == nil {
+			config.Database.WALRetentionMaxAge = d
+		}
+	}
+	if yamlCfg.Database.WALRetentionLedgerDefaults {
+		config.Database.WALRetentionLedgerDefaults = true
+	}
+	if config.Database.WALRetentionLedgerDefaults &&
+		config.Database.WALRetentionMaxSegments == 0 &&
+		config.Database.WALRetentionMaxAge == 0 {
+		config.Database.WALRetentionMaxSegments = 24
+		config.Database.WALRetentionMaxAge = 7 * 24 * time.Hour
 	}
 	// Encryption settings
 	if yamlCfg.Database.EncryptionEnabled {

@@ -497,10 +497,8 @@ func (s *Server) handleStore(ctx context.Context, args map[string]interface{}) (
 	if len(tags) > 0 {
 		props["tags"] = tags
 	}
-	if metadata != nil {
-		for k, v := range metadata {
-			props[k] = v
-		}
+	for k, v := range metadata {
+		props[k] = v
 	}
 
 	// Embeddings are internal-only - silently ignore any user-provided embedding
@@ -512,14 +510,35 @@ func (s *Server) handleStore(ctx context.Context, args map[string]interface{}) (
 	// Store in database
 	var nodeID string
 	var embedded bool
+	var receipt interface{}
 	if s.db != nil {
-		labels := []string{nodeType}
-		node, err := s.db.CreateNode(ctx, labels, props)
+		exec := s.db.GetCypherExecutor()
+		if exec == nil {
+			return nil, fmt.Errorf("cypher executor unavailable")
+		}
+		safeLabel := strings.ReplaceAll(nodeType, "`", "")
+		if strings.TrimSpace(safeLabel) == "" {
+			return nil, fmt.Errorf("invalid node type")
+		}
+		query := fmt.Sprintf("CREATE (n:`%s` $props) RETURN elementId(n) AS id", safeLabel)
+		result, err := exec.Execute(ctx, query, map[string]interface{}{"props": props})
 		if err != nil {
 			return nil, fmt.Errorf("failed to store node: %w", err)
 		}
-		nodeID = node.ID
+		if len(result.Rows) == 0 || len(result.Rows[0]) == 0 {
+			return nil, fmt.Errorf("store returned no node id")
+		}
+		id, ok := result.Rows[0][0].(string)
+		if !ok || id == "" {
+			return nil, fmt.Errorf("store returned invalid node id")
+		}
+		nodeID = id
 		embedded = true // Embeddings are generated asynchronously by the database
+		if result.Metadata != nil {
+			if rec, ok := result.Metadata["receipt"]; ok && rec != nil {
+				receipt = rec
+			}
+		}
 	} else {
 		// Fallback for testing without database
 		nodeID = fmt.Sprintf("node-%d", time.Now().UnixNano())
@@ -537,6 +556,7 @@ func (s *Server) handleStore(ctx context.Context, args map[string]interface{}) (
 		ID:       nodeID,
 		Title:    title,
 		Embedded: embedded,
+		Receipt:  receipt,
 	}, nil
 }
 
@@ -833,6 +853,7 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 	// Create edge in database
 	var edgeID string
 	var fromNode, toNode Node
+	var receipt interface{}
 
 	if s.db != nil {
 		// Verify source node exists and get its info
@@ -857,12 +878,34 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 			Title: getStringProp(tgtNode.Properties, "title"),
 		}
 
-		// Create the edge
-		edge, err := s.db.CreateEdge(ctx, from, to, strings.ToUpper(relation), edgeProps)
+		// Create the edge via Cypher to capture receipt metadata
+		exec := s.db.GetCypherExecutor()
+		if exec == nil {
+			return nil, fmt.Errorf("cypher executor unavailable")
+		}
+		edgeType := strings.ReplaceAll(strings.ToUpper(relation), "`", "")
+		query := fmt.Sprintf("MATCH (a) WHERE elementId(a) = $from MATCH (b) WHERE elementId(b) = $to CREATE (a)-[r:`%s` $props]->(b) RETURN elementId(r) AS id", edgeType)
+		result, err := exec.Execute(ctx, query, map[string]interface{}{
+			"from":  from,
+			"to":    to,
+			"props": edgeProps,
+		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create edge: %w", err)
 		}
-		edgeID = edge.ID
+		if len(result.Rows) == 0 || len(result.Rows[0]) == 0 {
+			return nil, fmt.Errorf("link returned no edge id")
+		}
+		id, ok := result.Rows[0][0].(string)
+		if !ok || id == "" {
+			return nil, fmt.Errorf("link returned invalid edge id")
+		}
+		edgeID = id
+		if result.Metadata != nil {
+			if rec, ok := result.Metadata["receipt"]; ok && rec != nil {
+				receipt = rec
+			}
+		}
 	} else {
 		// Fallback for testing
 		edgeID = fmt.Sprintf("edge-%d", time.Now().UnixNano())
@@ -871,9 +914,10 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 	}
 
 	return LinkResult{
-		EdgeID: edgeID,
-		From:   fromNode,
-		To:     toNode,
+		EdgeID:  edgeID,
+		From:    fromNode,
+		To:      toNode,
+		Receipt: receipt,
 	}, nil
 }
 
@@ -922,9 +966,29 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 			}
 			updates["updated_at"] = time.Now().Format(time.RFC3339)
 
-			updatedNode, err := s.db.UpdateNode(ctx, id, updates)
+			exec := s.db.GetCypherExecutor()
+			if exec == nil {
+				return nil, fmt.Errorf("cypher executor unavailable")
+			}
+			result, err := exec.Execute(ctx,
+				"MATCH (t:Task) WHERE elementId(t) = $id SET t += $props RETURN elementId(t) AS id",
+				map[string]interface{}{
+					"id":    id,
+					"props": updates,
+				},
+			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to update task: %w", err)
+			}
+			var receipt interface{}
+			if result.Metadata != nil {
+				if rec, ok := result.Metadata["receipt"]; ok && rec != nil {
+					receipt = rec
+				}
+			}
+			updatedNode, err := s.db.GetNode(ctx, id)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch updated task: %w", err)
 			}
 
 			return TaskResult{
@@ -935,6 +999,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 					Content:    getStringProp(updatedNode.Properties, "description"),
 					Properties: sanitizePropertiesForLLM(updatedNode.Properties),
 				},
+				Receipt: receipt,
 			}, nil
 		}
 
@@ -974,12 +1039,30 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 	}
 
 	var taskID string
+	var receipt interface{}
 	if s.db != nil {
-		node, err := s.db.CreateNode(ctx, []string{"Task"}, props)
+		exec := s.db.GetCypherExecutor()
+		if exec == nil {
+			return nil, fmt.Errorf("cypher executor unavailable")
+		}
+		query := "CREATE (t:Task $props) RETURN elementId(t) AS id"
+		result, err := exec.Execute(ctx, query, map[string]interface{}{"props": props})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create task: %w", err)
 		}
-		taskID = node.ID
+		if len(result.Rows) == 0 || len(result.Rows[0]) == 0 {
+			return nil, fmt.Errorf("task create returned no id")
+		}
+		id, ok := result.Rows[0][0].(string)
+		if !ok || id == "" {
+			return nil, fmt.Errorf("task create returned invalid id")
+		}
+		taskID = id
+		if result.Metadata != nil {
+			if rec, ok := result.Metadata["receipt"]; ok && rec != nil {
+				receipt = rec
+			}
+		}
 
 		// Create dependency edges
 		for _, depID := range dependsOn {
@@ -998,6 +1081,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 			Properties: props,
 		},
 		NextAction: "Task created. Consider adding dependencies or subtasks.",
+		Receipt:    receipt,
 	}, nil
 }
 

@@ -773,6 +773,16 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 		result, err = e.callDbmsProcedures()
 	case strings.Contains(upper, "DBMS.FUNCTIONS"):
 		result, err = e.callDbmsFunctions()
+	// Transaction log query procedures (NornicDB extension for Idea #7)
+	case strings.Contains(upper, "DB.TXLOG.ENTRIES"):
+		result, err = e.callDbTxlogEntries(ctx, cypher)
+	case strings.Contains(upper, "DB.TXLOG.BYTXID"):
+		result, err = e.callDbTxlogByTxID(ctx, cypher)
+	// Temporal helper procedures (NornicDB extension for Idea #7)
+	case strings.Contains(upper, "DB.TEMPORAL.ASSERTNOOVERLAP"):
+		result, err = e.callDbTemporalAssertNoOverlap(ctx, cypher)
+	case strings.Contains(upper, "DB.TEMPORAL.ASOF"):
+		result, err = e.callDbTemporalAsOf(ctx, cypher)
 	// Transaction metadata (Neo4j tx.setMetaData)
 	case strings.Contains(upper, "TX.SETMETADATA"):
 		result, err = e.callTxSetMetadata(cypher)

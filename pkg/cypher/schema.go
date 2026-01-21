@@ -122,6 +122,55 @@ func (e *StorageExecutor) executeCreateConstraint(ctx context.Context, cypher st
 		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
 	}
 
+	// Temporal no-overlap constraints (NornicDB extension)
+	if matches := constraintNamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
+		constraintName := matches[1]
+		label := matches[3]
+		properties := e.parseConstraintProperties(matches[4])
+		if len(properties) != 3 {
+			return nil, fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
+		}
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintTemporal,
+			Label:      label,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
+	if matches := constraintUnnamedForRequireTemporal.FindStringSubmatch(cypher); matches != nil {
+		label := matches[2]
+		properties := e.parseConstraintProperties(matches[3])
+		if len(properties) != 3 {
+			return nil, fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
+		}
+		constraintName := fmt.Sprintf("constraint_%s_%s_temporal", strings.ToLower(label), strings.ToLower(strings.Join(properties, "_")))
+
+		constraint := storage.Constraint{
+			Name:       constraintName,
+			Type:       storage.ConstraintTemporal,
+			Label:      label,
+			Properties: properties,
+		}
+
+		if err := storage.ValidateConstraintOnCreationForEngine(e.storage, constraint); err != nil {
+			return nil, err
+		}
+		if err := e.storage.GetSchema().AddConstraint(constraint); err != nil {
+			return nil, err
+		}
+		return &ExecuteResult{Columns: []string{}, Rows: [][]interface{}{}}, nil
+	}
+
 	// EXISTS / NOT NULL constraints
 	if matches := constraintNamedForRequireNotNull.FindStringSubmatch(cypher); matches != nil {
 		constraintName := matches[1]

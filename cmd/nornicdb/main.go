@@ -461,6 +461,12 @@ func runServe(cmd *cobra.Command, args []string) error {
 	dbConfig.AsyncMaxNodeCacheSize = cfg.Database.AsyncMaxNodeCacheSize
 	dbConfig.AsyncMaxEdgeCacheSize = cfg.Database.AsyncMaxEdgeCacheSize
 
+	// WAL retention settings from config
+	dbConfig.WALRetentionMaxSegments = cfg.Database.WALRetentionMaxSegments
+	dbConfig.WALRetentionMaxAge = cfg.Database.WALRetentionMaxAge
+	dbConfig.WALRetentionLedgerDefaults = cfg.Database.WALRetentionLedgerDefaults
+	dbConfig.WALAutoCompactionEnabled = cfg.Database.WALAutoCompactionEnabled
+
 	// Badger in-process cache sizing (hot read paths)
 	dbConfig.BadgerNodeCacheMaxEntries = cfg.Database.BadgerNodeCacheMaxEntries
 	dbConfig.BadgerEdgeTypeCacheMaxTypes = cfg.Database.BadgerEdgeTypeCacheMaxTypes

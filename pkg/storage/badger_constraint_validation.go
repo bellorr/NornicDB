@@ -3,6 +3,7 @@ package storage
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/dgraph-io/badger/v4"
 )
@@ -109,6 +110,37 @@ func (b *BadgerEngine) validateNodeConstraintsInTxn(txn *badger.Txn, node *Node,
 					Properties: []string{prop},
 					Message:    fmt.Sprintf("Required property %s is missing", prop),
 				}
+			}
+		case ConstraintTemporal:
+			if len(c.Properties) != 3 {
+				return fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
+			}
+			keyProp := c.Properties[0]
+			startProp := c.Properties[1]
+			endProp := c.Properties[2]
+
+			keyVal := node.Properties[keyProp]
+			if keyVal == nil {
+				return &ConstraintViolationError{
+					Type:       ConstraintTemporal,
+					Label:      c.Label,
+					Properties: c.Properties,
+					Message:    fmt.Sprintf("TEMPORAL key property %s cannot be null", keyProp),
+				}
+			}
+			start, ok := coerceTemporalTime(node.Properties[startProp])
+			if !ok {
+				return &ConstraintViolationError{
+					Type:       ConstraintTemporal,
+					Label:      c.Label,
+					Properties: c.Properties,
+					Message:    fmt.Sprintf("TEMPORAL start property %s must be a datetime", startProp),
+				}
+			}
+			end, hasEnd := coerceTemporalTime(node.Properties[endProp])
+
+			if err := b.scanForTemporalOverlapInTxn(txn, namespace, c.Label, keyProp, startProp, endProp, keyVal, start, end, hasEnd, excludeNodeID); err != nil {
+				return err
 			}
 		}
 	}
@@ -234,6 +266,85 @@ func (b *BadgerEngine) scanForNodeKeyViolationInTxn(txn *badger.Txn, namespace, 
 				Label:      label,
 				Properties: properties,
 				Message:    fmt.Sprintf("Node with key %v=%v already exists (nodeID: %s)", properties, values, existingNode.ID),
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *BadgerEngine) scanForTemporalOverlapInTxn(txn *badger.Txn, namespace, label, keyProp, startProp, endProp string, keyValue interface{}, start time.Time, end time.Time, hasEnd bool, excludeNodeID NodeID) error {
+	prefix := labelIndexPrefix(label)
+	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
+
+	iter := txn.NewIterator(opts)
+	defer iter.Close()
+
+	labelLen := len(strings.ToLower(label))
+	nsPrefix := namespace + ":"
+	for iter.Seek(prefix); iter.ValidForPrefix(prefix); iter.Next() {
+		key := iter.Item().Key()
+		nodeID := extractNodeIDFromLabelIndex(key, labelLen)
+		if nodeID == "" || nodeID == excludeNodeID {
+			continue
+		}
+		if !strings.HasPrefix(string(nodeID), nsPrefix) {
+			continue
+		}
+
+		item, err := txn.Get(nodeKey(nodeID))
+		if err != nil {
+			continue
+		}
+
+		var nodeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			nodeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			continue
+		}
+
+		existingNode, err := decodeNode(nodeBytes)
+		if err != nil {
+			continue
+		}
+
+		existingKey, ok := existingNode.Properties[keyProp]
+		if !ok || existingKey == nil {
+			continue
+		}
+		if !compareValues(existingKey, keyValue) {
+			continue
+		}
+
+		existingStart, ok := coerceTemporalTime(existingNode.Properties[startProp])
+		if !ok {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message:    fmt.Sprintf("TEMPORAL constraint requires %s for node %s", startProp, existingNode.ID),
+			}
+		}
+		existingEnd, existingHasEnd := coerceTemporalTime(existingNode.Properties[endProp])
+
+		if intervalsOverlap(temporalInterval{
+			start:  start,
+			end:    end,
+			hasEnd: hasEnd,
+		}, temporalInterval{
+			start:  existingStart,
+			end:    existingEnd,
+			hasEnd: existingHasEnd,
+		}) {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with node %s for %s=%v",
+					existingNode.ID, keyProp, keyValue),
 			}
 		}
 	}

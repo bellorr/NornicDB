@@ -3,6 +3,7 @@ package storage
 
 import (
 	"fmt"
+	"sort"
 	"time"
 )
 
@@ -22,6 +23,8 @@ func ValidateConstraintOnCreationForEngine(engine Engine, c Constraint) error {
 		return validateNodeKeyConstraintOnCreationWithEngine(engine, c)
 	case ConstraintExists:
 		return validateExistenceConstraintOnCreationWithEngine(engine, c)
+	case ConstraintTemporal:
+		return validateTemporalConstraintOnCreationWithEngine(engine, c)
 	default:
 		return fmt.Errorf("unknown constraint type: %s", c.Type)
 	}
@@ -81,7 +84,7 @@ func validateNodeKeyConstraintOnCreationWithEngine(engine Engine, c Constraint) 
 		// Extract all property values
 		values := make([]interface{}, len(c.Properties))
 		hasAllValues := true
-		
+
 		for i, prop := range c.Properties {
 			val := node.Properties[prop]
 			if val == nil {
@@ -148,11 +151,81 @@ func validateExistenceConstraintOnCreationWithEngine(engine Engine, c Constraint
 	return nil
 }
 
+// validateTemporalConstraintOnCreationWithEngine enforces no-overlap for temporal intervals.
+func validateTemporalConstraintOnCreationWithEngine(engine Engine, c Constraint) error {
+	if len(c.Properties) != 3 {
+		return fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
+	}
+
+	keyProp := c.Properties[0]
+	startProp := c.Properties[1]
+	endProp := c.Properties[2]
+
+	nodes, err := engine.GetNodesByLabel(c.Label)
+	if err != nil {
+		return fmt.Errorf("scanning nodes: %w", err)
+	}
+
+	byKey := make(map[string][]temporalInterval)
+	for _, node := range nodes {
+		keyVal := node.Properties[keyProp]
+		if keyVal == nil {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("Cannot create TEMPORAL constraint: node %s has null %s", node.ID, keyProp),
+			}
+		}
+		key := fmt.Sprint(keyVal)
+
+		start, ok := coerceTemporalTime(node.Properties[startProp])
+		if !ok {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: c.Properties,
+				Message:    fmt.Sprintf("Cannot create TEMPORAL constraint: node %s has invalid %s", node.ID, startProp),
+			}
+		}
+		end, hasEnd := coerceTemporalTime(node.Properties[endProp])
+
+		interval := temporalInterval{
+			start:  start,
+			end:    end,
+			hasEnd: hasEnd,
+			nodeID: node.ID,
+		}
+		byKey[key] = append(byKey[key], interval)
+	}
+
+	for _, intervals := range byKey {
+		sort.Slice(intervals, func(i, j int) bool {
+			return intervals[i].start.Before(intervals[j].start)
+		})
+		for i := 1; i < len(intervals); i++ {
+			prev := intervals[i-1]
+			curr := intervals[i]
+			if intervalsOverlap(prev, curr) {
+				return &ConstraintViolationError{
+					Type:       ConstraintTemporal,
+					Label:      c.Label,
+					Properties: c.Properties,
+					Message: fmt.Sprintf("Cannot create TEMPORAL constraint: overlap between %s and %s",
+						prev.nodeID, curr.nodeID),
+				}
+			}
+		}
+	}
+
+	return nil
+}
+
 // RelationshipConstraint represents a constraint on relationship properties.
 type RelationshipConstraint struct {
 	Name       string
 	Type       ConstraintType
-	RelType    string   // Relationship type (e.g., "KNOWS", "FOLLOWS")
+	RelType    string // Relationship type (e.g., "KNOWS", "FOLLOWS")
 	Properties []string
 }
 
@@ -254,11 +327,11 @@ type PropertyTypeConstraint struct {
 type PropertyType string
 
 const (
-	PropertyTypeString  PropertyType = "STRING"
-	PropertyTypeInteger PropertyType = "INTEGER"
-	PropertyTypeFloat   PropertyType = "FLOAT"
-	PropertyTypeBoolean PropertyType = "BOOLEAN"
-	PropertyTypeDate    PropertyType = "DATE"
+	PropertyTypeString   PropertyType = "STRING"
+	PropertyTypeInteger  PropertyType = "INTEGER"
+	PropertyTypeFloat    PropertyType = "FLOAT"
+	PropertyTypeBoolean  PropertyType = "BOOLEAN"
+	PropertyTypeDate     PropertyType = "DATE"
 	PropertyTypeDateTime PropertyType = "DATETIME"
 )
 
