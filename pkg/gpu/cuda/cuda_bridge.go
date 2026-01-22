@@ -260,7 +260,17 @@ int cuda_normalize_vectors(CudaDevice* dev, CudaBuffer* vectors,
 
     // Copy norms to host for scaling
     float* host_norms = (float*)malloc(n * sizeof(float));
-    cuda_buffer_copy_to_host(norms, host_norms, n);
+    if (!host_norms) {
+        cuda_set_error("Failed to allocate host norms buffer");
+        cuda_release_buffer(norms);
+        return -1;
+    }
+    if (cuda_buffer_copy_to_host(norms, host_norms, n) != 0) {
+        cuda_set_error("Failed to copy norms to host");
+        free(host_norms);
+        cuda_release_buffer(norms);
+        return -1;
+    }
 
     // Scale each vector by 1/norm
     for (unsigned int i = 0; i < n; i++) {

@@ -223,8 +223,8 @@ __global__ void kernel_normalize_vectors(
     }
 }
 
-// Wrapper function for normalize
-int cuda_normalize_vectors(
+// Wrapper function for normalize (internal kernel version)
+static int cuda_normalize_vectors_kernel(
     float* d_vectors,
     uint32_t n,
     uint32_t dimensions,
