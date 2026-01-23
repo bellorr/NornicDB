@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dgraph-io/badger/v4"
+	"github.com/google/uuid"
 )
 
 // BadgerTransaction wraps Badger's native transaction with constraint validation.
@@ -43,6 +44,15 @@ type BadgerTransaction struct {
 	deletedEdges map[EdgeID]struct{}
 	operations   []Operation
 
+	// Buffered writes - collected during transaction, flushed at commit
+	// This batches all writes together for better performance while maintaining ACID guarantees
+	pendingWrites  map[string][]byte // key -> value for Set operations
+	pendingDeletes map[string]bool   // key -> true for Delete operations
+	// When true, skip per-operation constraint checks and validate at commit only.
+	deferConstraintValidation bool
+	// When true, skip read-before-write existence checks for CREATE operations.
+	skipCreateExistenceCheck bool
+
 	// Transaction metadata (for logging/debugging)
 	Metadata map[string]interface{}
 }
@@ -57,17 +67,19 @@ func (b *BadgerEngine) BeginTransaction() (*BadgerTransaction, error) {
 	}
 
 	return &BadgerTransaction{
-		ID:           generateTxID(),
-		StartTime:    time.Now(),
-		Status:       TxStatusActive,
-		badgerTx:     b.db.NewTransaction(true), // Read-write transaction
-		engine:       b,
-		pendingNodes: make(map[NodeID]*Node),
-		pendingEdges: make(map[EdgeID]*Edge),
-		deletedNodes: make(map[NodeID]struct{}),
-		deletedEdges: make(map[EdgeID]struct{}),
-		operations:   make([]Operation, 0),
-		Metadata:     make(map[string]interface{}),
+		ID:             generateTxID(),
+		StartTime:      time.Now(),
+		Status:         TxStatusActive,
+		badgerTx:       b.db.NewTransaction(true), // Read-write transaction
+		engine:         b,
+		pendingNodes:   make(map[NodeID]*Node),
+		pendingEdges:   make(map[EdgeID]*Edge),
+		deletedNodes:   make(map[NodeID]struct{}),
+		deletedEdges:   make(map[EdgeID]struct{}),
+		operations:     make([]Operation, 0),
+		pendingWrites:  make(map[string][]byte),
+		pendingDeletes: make(map[string]bool),
+		Metadata:       make(map[string]interface{}),
 	}, nil
 }
 
@@ -76,6 +88,86 @@ func (tx *BadgerTransaction) IsActive() bool {
 	tx.mu.Lock()
 	defer tx.mu.Unlock()
 	return tx.Status == TxStatusActive
+}
+
+// SetDeferredConstraintValidation controls per-operation constraint checks.
+// When enabled, constraints are enforced at commit time only.
+func (tx *BadgerTransaction) SetDeferredConstraintValidation(deferValidation bool) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if tx.Status != TxStatusActive {
+		return ErrTransactionClosed
+	}
+
+	tx.deferConstraintValidation = deferValidation
+	return nil
+}
+
+// SetSkipCreateExistenceCheck controls read-before-write checks for CREATE.
+// When enabled, CREATE skips the storage existence read for UUID IDs.
+func (tx *BadgerTransaction) SetSkipCreateExistenceCheck(skip bool) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if tx.Status != TxStatusActive {
+		return ErrTransactionClosed
+	}
+
+	tx.skipCreateExistenceCheck = skip
+	return nil
+}
+
+// bufferSet buffers a write operation to be applied at commit time.
+// If the key was previously marked for deletion, it's removed from deletes.
+func (tx *BadgerTransaction) bufferSet(key []byte, value []byte) {
+	keyStr := string(key)
+	// Remove from deletes if it was marked for deletion
+	delete(tx.pendingDeletes, keyStr)
+	// Buffer the write (copy value to avoid aliasing)
+	valueCopy := make([]byte, len(value))
+	copy(valueCopy, value)
+	tx.pendingWrites[keyStr] = valueCopy
+}
+
+// bufferDelete buffers a delete operation to be applied at commit time.
+// If the key was previously buffered for write, it's removed from writes.
+func (tx *BadgerTransaction) bufferDelete(key []byte) {
+	keyStr := string(key)
+	// Remove from writes if it was buffered
+	delete(tx.pendingWrites, keyStr)
+	// Mark for deletion
+	tx.pendingDeletes[keyStr] = true
+}
+
+// flushBufferedWrites applies all buffered writes and deletes to the Badger transaction.
+// This is called at commit time to batch all writes together.
+func (tx *BadgerTransaction) flushBufferedWrites() error {
+	// Apply deletes first (in case a key is both written and deleted, delete wins)
+	for keyStr := range tx.pendingDeletes {
+		key := []byte(keyStr)
+		if err := tx.badgerTx.Delete(key); err != nil {
+			return fmt.Errorf("flushing delete for key %s: %w", keyStr, err)
+		}
+	}
+
+	// Apply writes (only keys that weren't deleted)
+	for keyStr, value := range tx.pendingWrites {
+		// Skip if this key was also deleted (delete wins)
+		if tx.pendingDeletes[keyStr] {
+			continue
+		}
+		key := []byte(keyStr)
+		if err := tx.badgerTx.Set(key, value); err != nil {
+			return fmt.Errorf("flushing write for key %s: %w", keyStr, err)
+		}
+	}
+
+	// Clear buffers after successful flush
+	tx.pendingWrites = make(map[string][]byte)
+	tx.pendingDeletes = make(map[string]bool)
+
+	return nil
 }
 
 // CreateNode adds a node to the transaction with constraint validation.
@@ -95,8 +187,10 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	}
 
 	// Validate constraints BEFORE writing
-	if err := tx.validateNodeConstraints(node); err != nil {
-		return "", err
+	if !tx.deferConstraintValidation {
+		if err := tx.validateNodeConstraints(node); err != nil {
+			return "", err
+		}
 	}
 
 	// Check for duplicates in pending
@@ -105,34 +199,56 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	}
 
 	// Check if exists in storage (read from Badger)
-	if _, deleted := tx.deletedNodes[node.ID]; !deleted {
-		key := nodeKey(node.ID)
-		_, err := tx.badgerTx.Get(key)
-		if err == nil {
-			return "", ErrAlreadyExists
-		}
-		if err != badger.ErrKeyNotFound {
-			return "", fmt.Errorf("checking node existence: %w", err)
+	skipExistenceCheck := tx.skipCreateExistenceCheck && shouldSkipCreateExistenceCheck(node.ID)
+	if !skipExistenceCheck {
+		if _, deleted := tx.deletedNodes[node.ID]; !deleted {
+			key := nodeKey(node.ID)
+			_, err := tx.badgerTx.Get(key)
+			if err == nil {
+				return "", ErrAlreadyExists
+			}
+			if err != badger.ErrKeyNotFound {
+				return "", fmt.Errorf("checking node existence: %w", err)
+			}
 		}
 	}
 
-	// Serialize and write to Badger
-	nodeBytes, err := serializeNode(node)
+	// PERFORMANCE OPTIMIZATION: Buffer all writes and flush at commit time
+	// This batches all writes together for better performance while maintaining ACID guarantees
+
+	// Serialize node (may store embeddings separately if too large)
+	data, embeddingsSeparate, err := encodeNode(node)
 	if err != nil {
 		return "", fmt.Errorf("serializing node: %w", err)
 	}
 
 	key := nodeKey(node.ID)
-	if err := tx.badgerTx.Set(key, nodeBytes); err != nil {
-		return "", fmt.Errorf("writing node to transaction: %w", err)
+	// Buffer node write
+	tx.bufferSet(key, data)
+
+	// If embeddings are stored separately, buffer them
+	if embeddingsSeparate {
+		for i, emb := range node.ChunkEmbeddings {
+			embKey := embeddingKey(node.ID, i)
+			embData, err := encodeEmbedding(emb)
+			if err != nil {
+				return "", fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+			}
+			tx.bufferSet(embKey, embData)
+		}
 	}
 
-	// Update label indexes
+	// Buffer all label index writes
 	for _, label := range node.Labels {
 		indexKey := labelIndexKey(label, node.ID)
-		if err := tx.badgerTx.Set(indexKey, []byte{}); err != nil {
-			return "", fmt.Errorf("writing label index: %w", err)
-		}
+		tx.bufferSet(indexKey, []byte{})
+	}
+
+	// Add to pending embeddings index if needed
+	if !isSystemNamespaceID(string(node.ID)) &&
+		(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
+		NodeNeedsEmbedding(node) {
+		tx.bufferSet(pendingEmbedKey(node.ID), []byte{})
 	}
 
 	// Track for read-your-writes and constraint validation
@@ -160,8 +276,10 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	}
 
 	// Validate constraints
-	if err := tx.validateNodeConstraints(node); err != nil {
-		return err
+	if !tx.deferConstraintValidation {
+		if err := tx.validateNodeConstraints(node); err != nil {
+			return err
+		}
 	}
 
 	// Check if node exists
@@ -193,16 +311,14 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 		}
 	}
 
-	// Write updated node
+	// Buffer updated node write
 	nodeBytes, err := serializeNode(node)
 	if err != nil {
 		return fmt.Errorf("serializing node: %w", err)
 	}
 
 	key := nodeKey(node.ID)
-	if err := tx.badgerTx.Set(key, nodeBytes); err != nil {
-		return fmt.Errorf("writing node: %w", err)
-	}
+	tx.bufferSet(key, nodeBytes)
 
 	// Update label indexes if changed
 	oldLabelSet := make(map[string]bool)
@@ -214,11 +330,9 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	for _, label := range node.Labels {
 		newLabelSet[label] = true
 		if !oldLabelSet[label] {
-			// New label - add index
+			// New label - buffer index write
 			indexKey := labelIndexKey(label, node.ID)
-			if err := tx.badgerTx.Set(indexKey, []byte{}); err != nil {
-				return fmt.Errorf("writing label index: %w", err)
-			}
+			tx.bufferSet(indexKey, []byte{})
 		}
 	}
 
@@ -226,9 +340,7 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	for _, label := range oldNode.Labels {
 		if !newLabelSet[label] {
 			indexKey := labelIndexKey(label, node.ID)
-			if err := tx.badgerTx.Delete(indexKey); err != nil {
-				return fmt.Errorf("deleting label index: %w", err)
-			}
+			tx.bufferDelete(indexKey)
 		}
 	}
 
@@ -245,6 +357,131 @@ func (tx *BadgerTransaction) UpdateNode(node *Node) error {
 	})
 
 	return nil
+}
+
+// deleteNodeBuffered deletes a node and all its edges/embeddings, buffering all writes.
+// This is the buffering version of BadgerEngine.deleteNodeInTxn.
+func (tx *BadgerTransaction) deleteNodeBuffered(nodeID NodeID, oldNode *Node) (edgesDeleted int64, deletedEdgeIDs []EdgeID, err error) {
+	key := nodeKey(nodeID)
+
+	// Buffer deletion of separately stored embeddings
+	embPrefix := embeddingPrefix(nodeID)
+	opts := badger.DefaultIteratorOptions
+	opts.Prefix = embPrefix
+	it := tx.badgerTx.NewIterator(opts)
+	defer it.Close()
+	for it.Rewind(); it.Valid(); it.Next() {
+		tx.bufferDelete(it.Item().Key())
+	}
+
+	// Get node for label cleanup (if not already provided)
+	var deletedNode *Node
+	if oldNode != nil {
+		deletedNode = oldNode
+	} else {
+		item, err := tx.badgerTx.Get(key)
+		if err == badger.ErrKeyNotFound {
+			// Node doesn't exist, but we've already buffered embedding cleanup.
+			// Also buffer pending embeddings index deletion.
+			tx.bufferDelete(pendingEmbedKey(nodeID))
+			return 0, nil, ErrNotFound
+		}
+		if err != nil {
+			return 0, nil, err
+		}
+
+		if err := item.Value(func(val []byte) error {
+			var decodeErr error
+			// Extract nodeID from key (skip prefix byte)
+			nodeIDFromKey := NodeID(key[1:])
+			deletedNode, decodeErr = decodeNodeWithEmbeddings(tx.badgerTx, val, nodeIDFromKey)
+			return decodeErr
+		}); err != nil {
+			return 0, nil, err
+		}
+	}
+
+	// Buffer label index deletions
+	for _, label := range deletedNode.Labels {
+		tx.bufferDelete(labelIndexKey(label, nodeID))
+	}
+
+	// Delete outgoing edges (and track count)
+	outPrefix := outgoingIndexPrefix(nodeID)
+	outCount, outIDs, err := tx.deleteEdgesWithPrefixBuffered(outPrefix)
+	if err != nil {
+		return 0, nil, err
+	}
+	edgesDeleted += outCount
+	deletedEdgeIDs = append(deletedEdgeIDs, outIDs...)
+
+	// Delete incoming edges (and track count)
+	inPrefix := incomingIndexPrefix(nodeID)
+	inCount, inIDs, err := tx.deleteEdgesWithPrefixBuffered(inPrefix)
+	if err != nil {
+		return 0, nil, err
+	}
+	edgesDeleted += inCount
+	deletedEdgeIDs = append(deletedEdgeIDs, inIDs...)
+
+	// Buffer pending embeddings index deletion
+	tx.bufferDelete(pendingEmbedKey(nodeID))
+
+	// Buffer node deletion
+	tx.bufferDelete(key)
+
+	return edgesDeleted, deletedEdgeIDs, nil
+}
+
+// deleteEdgesWithPrefixBuffered deletes all edges with a given prefix, buffering writes.
+func (tx *BadgerTransaction) deleteEdgesWithPrefixBuffered(prefix []byte) (int64, []EdgeID, error) {
+	opts := badger.DefaultIteratorOptions
+	opts.PrefetchValues = false
+	it := tx.badgerTx.NewIterator(opts)
+	defer it.Close()
+
+	var edgeIDs []EdgeID
+	for it.Seek(prefix); it.ValidForPrefix(prefix); it.Next() {
+		edgeID := extractEdgeIDFromIndexKey(it.Item().Key())
+		edgeIDs = append(edgeIDs, edgeID)
+	}
+
+	var deletedCount int64
+	var deletedIDs []EdgeID
+	for _, edgeID := range edgeIDs {
+		// Get edge to delete its indexes
+		edgeKey := edgeKey(edgeID)
+		item, err := tx.badgerTx.Get(edgeKey)
+		if err == badger.ErrKeyNotFound {
+			continue
+		}
+		if err != nil {
+			return 0, nil, err
+		}
+
+		var edgeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			edgeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			return 0, nil, err
+		}
+
+		edge, err := deserializeEdge(edgeBytes)
+		if err != nil {
+			return 0, nil, err
+		}
+
+		// Buffer edge and index deletions
+		tx.bufferDelete(edgeKey)
+		tx.bufferDelete(outgoingIndexKey(edge.StartNode, edgeID))
+		tx.bufferDelete(incomingIndexKey(edge.EndNode, edgeID))
+
+		deletedCount++
+		deletedIDs = append(deletedIDs, edgeID)
+	}
+
+	return deletedCount, deletedIDs, nil
 }
 
 // DeleteNode deletes a node from the transaction.
@@ -282,8 +519,8 @@ func (tx *BadgerTransaction) DeleteNode(nodeID NodeID) error {
 	}
 
 	// Delete with the same semantics as BadgerEngine.DeleteNode (cascade edges + embedding cleanup),
-	// but within the transaction for atomicity.
-	edgesDeleted, deletedEdgeIDs, _, err := tx.engine.deleteNodeInTxn(tx.badgerTx, nodeID)
+	// but buffer all writes for batch commit.
+	edgesDeleted, deletedEdgeIDs, err := tx.deleteNodeBuffered(nodeID, oldNode)
 	if err != nil {
 		return err
 	}
@@ -326,27 +563,21 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 		return ErrAlreadyExists
 	}
 
-	// Serialize and write
+	// Serialize and buffer write
 	edgeBytes, err := serializeEdge(edge)
 	if err != nil {
 		return fmt.Errorf("serializing edge: %w", err)
 	}
 
 	key := edgeKey(edge.ID)
-	if err := tx.badgerTx.Set(key, edgeBytes); err != nil {
-		return fmt.Errorf("writing edge: %w", err)
-	}
+	tx.bufferSet(key, edgeBytes)
 
-	// Update edge indexes
+	// Buffer edge indexes
 	outKey := outgoingIndexKey(edge.StartNode, edge.ID)
-	if err := tx.badgerTx.Set(outKey, []byte{}); err != nil {
-		return fmt.Errorf("writing outgoing index: %w", err)
-	}
+	tx.bufferSet(outKey, []byte{})
 
 	inKey := incomingIndexKey(edge.EndNode, edge.ID)
-	if err := tx.badgerTx.Set(inKey, []byte{}); err != nil {
-		return fmt.Errorf("writing incoming index: %w", err)
-	}
+	tx.bufferSet(inKey, []byte{})
 
 	// Track for read-your-writes
 	edgeCopy := copyEdge(edge)
@@ -399,22 +630,16 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 		}
 	}
 
-	// Delete edge
+	// Buffer edge deletion
 	key := edgeKey(edgeID)
-	if err := tx.badgerTx.Delete(key); err != nil {
-		return fmt.Errorf("deleting edge: %w", err)
-	}
+	tx.bufferDelete(key)
 
-	// Delete indexes
+	// Buffer index deletions
 	outKey := outgoingIndexKey(edge.StartNode, edgeID)
-	if err := tx.badgerTx.Delete(outKey); err != nil {
-		return fmt.Errorf("deleting outgoing index: %w", err)
-	}
+	tx.bufferDelete(outKey)
 
 	inKey := incomingIndexKey(edge.EndNode, edgeID)
-	if err := tx.badgerTx.Delete(inKey); err != nil {
-		return fmt.Errorf("deleting incoming index: %w", err)
-	}
+	tx.bufferDelete(inKey)
 
 	// Track deletion
 	delete(tx.pendingEdges, edgeID)
@@ -486,6 +711,14 @@ func (tx *BadgerTransaction) Commit() error {
 	// Log metadata
 	if len(tx.Metadata) > 0 {
 		log.Printf("[Transaction %s] Committing with metadata: %v", tx.ID, tx.Metadata)
+	}
+
+	// Flush all buffered writes before committing
+	// This batches all writes together for better performance while maintaining ACID guarantees
+	if err := tx.flushBufferedWrites(); err != nil {
+		tx.badgerTx.Discard()
+		tx.Status = TxStatusRolledBack
+		return fmt.Errorf("flushing buffered writes: %w", err)
 	}
 
 	// Commit Badger transaction (atomic!)
@@ -619,6 +852,9 @@ func (tx *BadgerTransaction) Rollback() error {
 	}
 
 	tx.badgerTx.Discard()
+	// Clear buffered writes on rollback
+	tx.pendingWrites = make(map[string][]byte)
+	tx.pendingDeletes = make(map[string]bool)
 	tx.Status = TxStatusRolledBack
 	return nil
 }
@@ -687,6 +923,17 @@ func (tx *BadgerTransaction) nodeExists(nodeID NodeID) bool {
 	// Check Badger
 	key := nodeKey(nodeID)
 	_, err := tx.badgerTx.Get(key)
+	return err == nil
+}
+
+// shouldSkipCreateExistenceCheck avoids a read-before-write for UUID-based IDs.
+// UUID collisions are negligible for generated IDs, so we skip the read to save I/O.
+func shouldSkipCreateExistenceCheck(nodeID NodeID) bool {
+	_, rawID, ok := ParseDatabasePrefix(string(nodeID))
+	if !ok {
+		return false
+	}
+	_, err := uuid.Parse(rawID)
 	return err == nil
 }
 

@@ -23,6 +23,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Parse CREATE pattern
 	pattern := cypher[6:] // Skip "CREATE"
@@ -104,7 +105,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 			Properties: nodePattern.properties,
 		}
 
-		actualID, err := e.storage.CreateNode(node)
+		actualID, err := store.CreateNode(node)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create node: %w", err)
 		}
@@ -154,7 +155,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 					Labels:     sourcePattern.labels,
 					Properties: sourcePattern.properties,
 				}
-				actualID, err := e.storage.CreateNode(sourceNode)
+				actualID, err := store.CreateNode(sourceNode)
 				if err != nil {
 					return nil, fmt.Errorf("failed to create source node: %w", err)
 				}
@@ -180,7 +181,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 					Labels:     targetPattern.labels,
 					Properties: targetPattern.properties,
 				}
-				actualID, err := e.storage.CreateNode(targetNode)
+				actualID, err := store.CreateNode(targetNode)
 				if err != nil {
 					return nil, fmt.Errorf("failed to create target node: %w", err)
 				}
@@ -230,7 +231,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 				Type:       relType,
 				Properties: relProps,
 			}
-			if err := e.storage.CreateEdge(edge); err != nil {
+			if err := store.CreateEdge(edge); err != nil {
 				return nil, fmt.Errorf("failed to create relationship: %w", err)
 			}
 			if relVar != "" {
@@ -370,6 +371,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Parse CREATE pattern
 	pattern := cypher[6:] // Skip "CREATE"
@@ -418,7 +420,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 			Properties: nodePattern.properties,
 		}
 
-		actualID, err := e.storage.CreateNode(node)
+		actualID, err := store.CreateNode(node)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("failed to create node: %w", err)
 		}
@@ -465,7 +467,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 					Labels:     sourcePattern.labels,
 					Properties: sourcePattern.properties,
 				}
-				actualID, err := e.storage.CreateNode(sourceNode)
+				actualID, err := store.CreateNode(sourceNode)
 				if err != nil {
 					return nil, nil, nil, fmt.Errorf("failed to create source node: %w", err)
 				}
@@ -490,7 +492,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 					Labels:     targetPattern.labels,
 					Properties: targetPattern.properties,
 				}
-				actualID, err := e.storage.CreateNode(targetNode)
+				actualID, err := store.CreateNode(targetNode)
 				if err != nil {
 					return nil, nil, nil, fmt.Errorf("failed to create target node: %w", err)
 				}
@@ -531,7 +533,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 				Properties: relProps,
 			}
 
-			if err := e.storage.CreateEdge(edge); err != nil {
+			if err := store.CreateEdge(edge); err != nil {
 				return nil, nil, nil, fmt.Errorf("failed to create relationship: %w", err)
 			}
 
@@ -1097,6 +1099,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Split into MATCH and CREATE parts
 	createIdx := findKeywordIndex(block, "CREATE")
@@ -1246,9 +1249,9 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			// Find ALL matching nodes for this pattern (for cartesian product)
 			var matchingNodes []*storage.Node
 			if len(nodeInfo.labels) > 0 {
-				matchingNodes, _ = e.storage.GetNodesByLabel(nodeInfo.labels[0])
+				matchingNodes, _ = store.GetNodesByLabel(nodeInfo.labels[0])
 			} else {
-				matchingNodes, _ = e.storage.AllNodes()
+				matchingNodes, _ = store.AllNodes()
 			}
 
 			// Filter by additional labels
@@ -1395,7 +1398,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 
 		// PASS 1: Create all nodes first
 		for _, np := range allNodePatterns {
-			err := e.processCreateNode(np, combinedNodeVars, result)
+			err := e.processCreateNode(np, combinedNodeVars, result, store)
 			if err != nil {
 				return nil, err
 			}
@@ -1403,7 +1406,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 
 		// PASS 2: Create all relationships (now nodes are available)
 		for _, rp := range allRelPatterns {
-			err := e.processCreateRelationship(rp, combinedNodeVars, edgeVars, result)
+			err := e.processCreateRelationship(rp, combinedNodeVars, edgeVars, result, store)
 			if err != nil {
 				return nil, err
 			}
@@ -1435,24 +1438,24 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 	// Execute DELETE if present (MATCH...CREATE...WITH...DELETE pattern)
 	if deleteTarget != "" {
 		if edge, exists := edgeVars[deleteTarget]; exists {
-			if err := e.storage.DeleteEdge(edge.ID); err == nil {
+			if err := store.DeleteEdge(edge.ID); err == nil {
 				result.Stats.RelationshipsDeleted++
 			}
 		} else if node, exists := nodeVars[deleteTarget]; exists {
 			// Delete connected edges first
-			outEdges, _ := e.storage.GetOutgoingEdges(node.ID)
-			inEdges, _ := e.storage.GetIncomingEdges(node.ID)
+			outEdges, _ := store.GetOutgoingEdges(node.ID)
+			inEdges, _ := store.GetIncomingEdges(node.ID)
 			for _, edge := range outEdges {
-				if err := e.storage.DeleteEdge(edge.ID); err == nil {
+				if err := store.DeleteEdge(edge.ID); err == nil {
 					result.Stats.RelationshipsDeleted++
 				}
 			}
 			for _, edge := range inEdges {
-				if err := e.storage.DeleteEdge(edge.ID); err == nil {
+				if err := store.DeleteEdge(edge.ID); err == nil {
 					result.Stats.RelationshipsDeleted++
 				}
 			}
-			if err := e.storage.DeleteNode(node.ID); err == nil {
+			if err := store.DeleteNode(node.ID); err == nil {
 				result.Stats.NodesDeleted++
 			}
 		}
@@ -1522,7 +1525,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 }
 
 // processCreateNode creates a new node and adds it to the nodeVars map
-func (e *StorageExecutor) processCreateNode(pattern string, nodeVars map[string]*storage.Node, result *ExecuteResult) error {
+func (e *StorageExecutor) processCreateNode(pattern string, nodeVars map[string]*storage.Node, result *ExecuteResult, store storage.Engine) error {
 	nodeInfo := e.parseNodePattern(pattern)
 
 	// Create the node
@@ -1532,7 +1535,7 @@ func (e *StorageExecutor) processCreateNode(pattern string, nodeVars map[string]
 		Properties: nodeInfo.properties,
 	}
 
-	actualID, err := e.storage.CreateNode(node)
+	actualID, err := store.CreateNode(node)
 	if err != nil {
 		return fmt.Errorf("failed to create node: %w", err)
 	}
@@ -1550,7 +1553,7 @@ func (e *StorageExecutor) processCreateNode(pattern string, nodeVars map[string]
 }
 
 // processCreateRelationship creates a relationship between nodes in nodeVars
-func (e *StorageExecutor) processCreateRelationship(pattern string, nodeVars map[string]*storage.Node, edgeVars map[string]*storage.Edge, result *ExecuteResult) error {
+func (e *StorageExecutor) processCreateRelationship(pattern string, nodeVars map[string]*storage.Node, edgeVars map[string]*storage.Edge, result *ExecuteResult, store storage.Engine) error {
 	// Parse the relationship pattern: (a)-[r:TYPE {props}]->(b)
 	// Supports both simple variable refs and inline node definitions
 	// Uses pre-compiled patterns from regex_patterns.go for performance
@@ -1589,13 +1592,13 @@ func (e *StorageExecutor) processCreateRelationship(pattern string, nodeVars map
 	}
 
 	// Resolve source node - could be a variable reference or inline node definition
-	sourceNode, err := e.resolveOrCreateNode(sourceContent, nodeVars, result)
+	sourceNode, err := e.resolveOrCreateNode(sourceContent, nodeVars, result, store)
 	if err != nil {
 		return fmt.Errorf("failed to resolve source node: %w", err)
 	}
 
 	// Resolve target node - could be a variable reference or inline node definition
-	targetNode, err := e.resolveOrCreateNode(targetContent, nodeVars, result)
+	targetNode, err := e.resolveOrCreateNode(targetContent, nodeVars, result, store)
 	if err != nil {
 		return fmt.Errorf("failed to resolve target node: %w", err)
 	}
@@ -1615,7 +1618,7 @@ func (e *StorageExecutor) processCreateRelationship(pattern string, nodeVars map
 		Properties: relProps,
 	}
 
-	if err := e.storage.CreateEdge(edge); err != nil {
+	if err := store.CreateEdge(edge); err != nil {
 		return fmt.Errorf("failed to create relationship: %w", err)
 	}
 
@@ -1633,7 +1636,7 @@ func (e *StorageExecutor) processCreateRelationship(pattern string, nodeVars map
 // Supports:
 //   - Simple variable: "p" -> looks up in nodeVars
 //   - Inline definition: "c:Company {name: 'Acme'}" -> creates node and adds to nodeVars
-func (e *StorageExecutor) resolveOrCreateNode(content string, nodeVars map[string]*storage.Node, result *ExecuteResult) (*storage.Node, error) {
+func (e *StorageExecutor) resolveOrCreateNode(content string, nodeVars map[string]*storage.Node, result *ExecuteResult, store storage.Engine) (*storage.Node, error) {
 	content = strings.TrimSpace(content)
 
 	// Check if this is a simple variable reference (just alphanumeric)
@@ -1662,7 +1665,7 @@ func (e *StorageExecutor) resolveOrCreateNode(content string, nodeVars map[strin
 		Properties: nodeInfo.properties,
 	}
 
-	actualID, err := e.storage.CreateNode(node)
+	actualID, err := store.CreateNode(node)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create node: %w", err)
 	}
@@ -1715,6 +1718,7 @@ func (e *StorageExecutor) executeCompoundCreateWithDelete(ctx context.Context, c
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Find clause boundaries
 	withIdx := findKeywordIndex(cypher, "WITH")
@@ -1762,18 +1766,18 @@ func (e *StorageExecutor) executeCompoundCreateWithDelete(ctx context.Context, c
 		// This avoids 2 unnecessary storage lookups per delete operation.
 		for varName, edge := range createdEdges {
 			if edge.StartNode == node.ID || edge.EndNode == node.ID {
-				if err := e.storage.DeleteEdge(edge.ID); err == nil {
+				if err := store.DeleteEdge(edge.ID); err == nil {
 					result.Stats.RelationshipsDeleted++
 					delete(createdEdges, varName) // Mark as deleted
 				}
 			}
 		}
-		if err := e.storage.DeleteNode(node.ID); err != nil {
+		if err := store.DeleteNode(node.ID); err != nil {
 			return nil, fmt.Errorf("DELETE failed: %w", err)
 		}
 		result.Stats.NodesDeleted++
 	} else if edge, exists := createdEdges[deleteTarget]; exists {
-		if err := e.storage.DeleteEdge(edge.ID); err != nil {
+		if err := store.DeleteEdge(edge.ID); err != nil {
 			return nil, fmt.Errorf("DELETE failed: %w", err)
 		}
 		result.Stats.RelationshipsDeleted++
@@ -1813,6 +1817,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Normalize whitespace for index finding (newlines/tabs become spaces)
 	normalized := strings.ReplaceAll(strings.ReplaceAll(cypher, "\n", " "), "\t", " ")
@@ -1856,7 +1861,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	// Check for property merge operator: n += $properties
 	if strings.Contains(setPart, "+=") {
 		// Handle property merge on created entities
-		err := e.applySetMergeToCreated(setPart, createdNodes, createdEdges, result)
+		err := e.applySetMergeToCreated(setPart, createdNodes, createdEdges, result, store)
 		if err != nil {
 			return nil, err
 		}
@@ -1883,7 +1888,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 						// Add label to existing node
 						if !containsString(node.Labels, newLabel) {
 							node.Labels = append(node.Labels, newLabel)
-							if err := e.storage.UpdateNode(node); err != nil {
+							if err := store.UpdateNode(node); err != nil {
 								return nil, fmt.Errorf("failed to add label: %w", err)
 							}
 							result.Stats.LabelsAdded++
@@ -1914,13 +1919,13 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 			// Apply to created node or edge
 			if node, exists := createdNodes[varName]; exists {
 				node.Properties[propName] = value
-				if err := e.storage.UpdateNode(node); err != nil {
+				if err := store.UpdateNode(node); err != nil {
 					return nil, fmt.Errorf("failed to update node property: %w", err)
 				}
 				result.Stats.PropertiesSet++
 			} else if edge, exists := createdEdges[varName]; exists {
 				edge.Properties[propName] = value
-				if err := e.storage.UpdateEdge(edge); err != nil {
+				if err := store.UpdateEdge(edge); err != nil {
 					return nil, fmt.Errorf("failed to update edge property: %w", err)
 				}
 				result.Stats.PropertiesSet++
@@ -1985,7 +1990,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 }
 
 // applySetMergeToCreated applies SET += property merge to created entities.
-func (e *StorageExecutor) applySetMergeToCreated(setPart string, createdNodes map[string]*storage.Node, createdEdges map[string]*storage.Edge, result *ExecuteResult) error {
+func (e *StorageExecutor) applySetMergeToCreated(setPart string, createdNodes map[string]*storage.Node, createdEdges map[string]*storage.Edge, result *ExecuteResult, store storage.Engine) error {
 	// Parse: n += {prop: value, ...}
 	parts := strings.SplitN(setPart, "+=", 2)
 	if len(parts) != 2 {
@@ -2007,7 +2012,7 @@ func (e *StorageExecutor) applySetMergeToCreated(setPart string, createdNodes ma
 			node.Properties[k] = v
 			result.Stats.PropertiesSet++
 		}
-		if err := e.storage.UpdateNode(node); err != nil {
+		if err := store.UpdateNode(node); err != nil {
 			return fmt.Errorf("failed to update node: %w", err)
 		}
 	} else if edge, exists := createdEdges[varName]; exists {
@@ -2015,7 +2020,7 @@ func (e *StorageExecutor) applySetMergeToCreated(setPart string, createdNodes ma
 			edge.Properties[k] = v
 			result.Stats.PropertiesSet++
 		}
-		if err := e.storage.UpdateEdge(edge); err != nil {
+		if err := store.UpdateEdge(edge); err != nil {
 			return fmt.Errorf("failed to update edge: %w", err)
 		}
 	} else {
@@ -2205,6 +2210,7 @@ func (e *StorageExecutor) splitMultipleCreates(cypher string) []string {
 func (e *StorageExecutor) executeCreateNodeSegment(ctx context.Context, createStmt string) (*storage.Node, string, error) {
 	// Extract the pattern after CREATE
 	pattern := strings.TrimSpace(createStmt[6:]) // Skip "CREATE"
+	store := e.getStorage(ctx)
 
 	// Parse node pattern to get variable name and properties
 	nodePattern := e.parseNodePattern(pattern)
@@ -2241,7 +2247,7 @@ func (e *StorageExecutor) executeCreateNodeSegment(ctx context.Context, createSt
 		Properties: nodePattern.properties,
 	}
 
-	actualID, err := e.storage.CreateNode(node)
+	actualID, err := store.CreateNode(node)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to create node: %w", err)
 	}
@@ -2263,6 +2269,7 @@ func (e *StorageExecutor) executeCreateNodeSegment(ctx context.Context, createSt
 func (e *StorageExecutor) executeCreateRelSegment(ctx context.Context, createStmt string, nodeContext map[string]*storage.Node, edgeContext map[string]*storage.Edge, result *ExecuteResult) error {
 	// Extract relationship pattern
 	pattern := strings.TrimSpace(createStmt[6:]) // Skip "CREATE"
+	store := e.getStorage(ctx)
 
 	// Parse relationship pattern: (varA)-[varR:Type {props}]->(varB)
 	sourceVar, relContent, targetVar, isReverse, _, err := e.parseCreateRelPatternWithVars(pattern)
@@ -2336,7 +2343,7 @@ func (e *StorageExecutor) executeCreateRelSegment(ctx context.Context, createStm
 		Properties: props,
 	}
 
-	if err := e.storage.CreateEdge(edge); err != nil {
+	if err := store.CreateEdge(edge); err != nil {
 		return fmt.Errorf("failed to create edge: %w", err)
 	}
 

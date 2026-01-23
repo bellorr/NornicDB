@@ -622,6 +622,7 @@ func (e *StorageExecutor) callApocLoadCsvParams(ctx context.Context, cypher stri
 // callApocImportJson imports JSON graph data directly.
 // Syntax: CALL apoc.import.json(urlOrFile) YIELD nodes, relationships
 func (e *StorageExecutor) callApocImportJson(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	store := e.getStorage(ctx)
 	urlOrFile := e.extractApocLoadArg(cypher, "JSON")
 	if urlOrFile == "" {
 		// Try IMPORT marker
@@ -688,7 +689,7 @@ func (e *StorageExecutor) callApocImportJson(ctx context.Context, cypher string)
 					}
 
 					if node.ID != "" {
-						if _, err := e.storage.CreateNode(node); err == nil {
+						if _, err := store.CreateNode(node); err == nil {
 							nodesImported++
 						}
 					}
@@ -721,7 +722,7 @@ func (e *StorageExecutor) callApocImportJson(ctx context.Context, cypher string)
 					}
 
 					if edge.ID != "" && edge.StartNode != "" && edge.EndNode != "" {
-						if err := e.storage.CreateEdge(edge); err == nil {
+						if err := store.CreateEdge(edge); err == nil {
 							relsImported++
 						}
 					}

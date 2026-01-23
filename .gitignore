@@ -65,3 +65,4 @@ copilot-data/
 kmeans-test-data
 nornic_vs_qdrant
 neural/models/
+llama.cpp/

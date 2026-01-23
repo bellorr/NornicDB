@@ -297,7 +297,7 @@ func (e *StorageExecutor) callDbIndexVectorQueryRelationships(cypher string) (*E
 			}
 		}
 
-		if edgeEmbedding == nil || len(edgeEmbedding) == 0 {
+		if len(edgeEmbedding) == 0 {
 			continue
 		}
 
@@ -663,6 +663,7 @@ func (e *StorageExecutor) parseStringArray(s string) []string {
 // callDbCreateSetNodeVectorProperty sets a vector property on a node - Neo4j db.create.setNodeVectorProperty()
 // Syntax: CALL db.create.setNodeVectorProperty(node, propertyKey, vector)
 func (e *StorageExecutor) callDbCreateSetNodeVectorProperty(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	store := e.getStorage(ctx)
 	// Parse: CALL db.create.setNodeVectorProperty(nodeId, 'propertyKey', [vector])
 	upper := strings.ToUpper(cypher)
 	idx := strings.Index(upper, "SETNODEVECTORPROPERTY")
@@ -708,14 +709,14 @@ func (e *StorageExecutor) callDbCreateSetNodeVectorProperty(ctx context.Context,
 
 	// Get and update the node
 	nodeID := storage.NodeID(nodeIDStr)
-	node, err := e.storage.GetNode(nodeID)
+	node, err := store.GetNode(nodeID)
 	if err != nil {
 		return nil, fmt.Errorf("node not found: %s", nodeIDStr)
 	}
 
 	// Set the vector property
 	node.Properties[propertyKey] = vector
-	err = e.storage.UpdateNode(node)
+	err = store.UpdateNode(node)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update node: %w", err)
 	}
@@ -729,6 +730,7 @@ func (e *StorageExecutor) callDbCreateSetNodeVectorProperty(ctx context.Context,
 // callDbCreateSetRelationshipVectorProperty sets a vector property on a relationship - Neo4j db.create.setRelationshipVectorProperty()
 // Syntax: CALL db.create.setRelationshipVectorProperty(relationship, propertyKey, vector)
 func (e *StorageExecutor) callDbCreateSetRelationshipVectorProperty(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	store := e.getStorage(ctx)
 	// Parse: CALL db.create.setRelationshipVectorProperty(relId, 'propertyKey', [vector])
 	upper := strings.ToUpper(cypher)
 	idx := strings.Index(upper, "SETRELATIONSHIPVECTORPROPERTY")
@@ -774,14 +776,14 @@ func (e *StorageExecutor) callDbCreateSetRelationshipVectorProperty(ctx context.
 
 	// Get and update the relationship
 	relID := storage.EdgeID(relIDStr)
-	rel, err := e.storage.GetEdge(relID)
+	rel, err := store.GetEdge(relID)
 	if err != nil {
 		return nil, fmt.Errorf("relationship not found: %s", relIDStr)
 	}
 
 	// Set the vector property
 	rel.Properties[propertyKey] = vector
-	err = e.storage.UpdateEdge(rel)
+	err = store.UpdateEdge(rel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to update relationship: %w", err)
 	}

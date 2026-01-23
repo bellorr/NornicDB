@@ -59,11 +59,17 @@ type AsyncEngine struct {
 
 	// Background flush
 	flushInterval    time.Duration
+	minFlushInterval time.Duration
+	maxFlushInterval time.Duration
+	targetFlushSize  int
+	adaptiveFlush    bool
 	flushTicker      *time.Ticker
 	stopChan         chan struct{}
 	wg               sync.WaitGroup
 	maxNodeCacheSize int
 	maxEdgeCacheSize int
+
+	lastFlush time.Time
 
 	// Stats
 	pendingWrites int64
@@ -139,6 +145,24 @@ type AsyncEngineConfig struct {
 	// Default: 50ms
 	FlushInterval time.Duration
 
+	// AdaptiveFlush enables volume-based flush timing.
+	// When enabled, the flush loop ticks at MinFlushInterval and only
+	// flushes when the adaptive interval has elapsed.
+	AdaptiveFlush bool
+
+	// MinFlushInterval is the shortest interval between flushes when adaptive flush is enabled.
+	// Default: 10ms
+	MinFlushInterval time.Duration
+
+	// MaxFlushInterval is the longest interval between flushes when adaptive flush is enabled.
+	// Default: 200ms
+	MaxFlushInterval time.Duration
+
+	// TargetFlushSize is the pending write count at which we reach MaxFlushInterval.
+	// Smaller batches flush more frequently; larger batches flush less frequently.
+	// Default: 1000 pending writes
+	TargetFlushSize int
+
 	// MaxNodeCacheSize is the maximum number of nodes to buffer before forcing a flush.
 	// When this limit is reached, CreateNode will block and flush synchronously.
 	// This prevents unbounded memory growth during bulk inserts.
@@ -160,6 +184,10 @@ func DefaultAsyncEngineConfig() *AsyncEngineConfig {
 		FlushInterval:    50 * time.Millisecond,
 		MaxNodeCacheSize: 50000,  // 50K nodes (~35MB)
 		MaxEdgeCacheSize: 100000, // 100K edges (~50MB)
+		AdaptiveFlush:    true,
+		MinFlushInterval: 10 * time.Millisecond,
+		MaxFlushInterval: 200 * time.Millisecond,
+		TargetFlushSize:  1000,
 	}
 }
 
@@ -175,6 +203,18 @@ func NewAsyncEngine(engine Engine, config *AsyncEngineConfig) *AsyncEngine {
 	if config == nil {
 		config = DefaultAsyncEngineConfig()
 	}
+	if config.MinFlushInterval <= 0 {
+		config.MinFlushInterval = 10 * time.Millisecond
+	}
+	if config.MaxFlushInterval <= 0 {
+		config.MaxFlushInterval = 200 * time.Millisecond
+	}
+	if config.TargetFlushSize <= 0 {
+		config.TargetFlushSize = 1000
+	}
+	if config.MinFlushInterval > config.MaxFlushInterval {
+		config.MinFlushInterval = config.MaxFlushInterval
+	}
 
 	ae := &AsyncEngine{
 		engine:           engine,
@@ -188,13 +228,22 @@ func NewAsyncEngine(engine Engine, config *AsyncEngineConfig) *AsyncEngine {
 		updateEdges:      make(map[EdgeID]bool),
 		labelIndex:       make(map[string]map[NodeID]bool),
 		flushInterval:    config.FlushInterval,
+		minFlushInterval: config.MinFlushInterval,
+		maxFlushInterval: config.MaxFlushInterval,
+		targetFlushSize:  config.TargetFlushSize,
+		adaptiveFlush:    config.AdaptiveFlush,
 		maxNodeCacheSize: config.MaxNodeCacheSize,
 		maxEdgeCacheSize: config.MaxEdgeCacheSize,
 		stopChan:         make(chan struct{}),
+		lastFlush:        time.Now(),
 	}
 
 	// Start background flush goroutine
-	ae.flushTicker = time.NewTicker(config.FlushInterval)
+	if ae.adaptiveFlush {
+		ae.flushTicker = time.NewTicker(config.MinFlushInterval)
+	} else {
+		ae.flushTicker = time.NewTicker(config.FlushInterval)
+	}
 	ae.wg.Add(1)
 	go ae.flushLoop()
 
@@ -208,7 +257,22 @@ func (ae *AsyncEngine) flushLoop() {
 	for {
 		select {
 		case <-ae.flushTicker.C:
-			ae.Flush()
+			if ae.adaptiveFlush {
+				pending := ae.pendingWriteCount()
+				if pending == 0 {
+					continue
+				}
+				interval := ae.adaptiveFlushInterval(pending)
+				ae.flushMu.RLock()
+				lastFlush := ae.lastFlush
+				ae.flushMu.RUnlock()
+				if time.Since(lastFlush) < interval {
+					continue
+				}
+			}
+			if err := ae.Flush(); err != nil {
+				log.Printf("async flush failed: %v", err)
+			}
 		case <-ae.stopChan:
 			// Final flush on shutdown
 			ae.Flush()
@@ -255,6 +319,9 @@ func (ae *AsyncEngine) Flush() error {
 	if result.HasErrors() {
 		return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed",
 			result.NodesFailed, result.EdgesFailed, result.DeletesFailed)
+	}
+	if result.NodesWritten+result.EdgesWritten+result.NodesDeleted+result.EdgesDeleted > 0 {
+		ae.lastFlush = time.Now()
 	}
 	return nil
 }
@@ -1864,6 +1931,27 @@ func (ae *AsyncEngine) HasPendingWrites() bool {
 	defer ae.mu.RUnlock()
 	return len(ae.nodeCache) > 0 || len(ae.edgeCache) > 0 ||
 		len(ae.deleteNodes) > 0 || len(ae.deleteEdges) > 0
+}
+
+func (ae *AsyncEngine) pendingWriteCount() int {
+	ae.mu.RLock()
+	defer ae.mu.RUnlock()
+	return len(ae.nodeCache) + len(ae.edgeCache) + len(ae.deleteNodes) + len(ae.deleteEdges)
+}
+
+func (ae *AsyncEngine) adaptiveFlushInterval(pending int) time.Duration {
+	if pending <= 0 || ae.targetFlushSize <= 0 {
+		return ae.maxFlushInterval
+	}
+	if ae.maxFlushInterval <= ae.minFlushInterval {
+		return ae.minFlushInterval
+	}
+	ratio := float64(pending) / float64(ae.targetFlushSize)
+	if ratio > 1 {
+		ratio = 1
+	}
+	span := ae.maxFlushInterval - ae.minFlushInterval
+	return ae.minFlushInterval + time.Duration(ratio*float64(span))
 }
 
 // FindNodeNeedingEmbedding returns a node that needs embedding.

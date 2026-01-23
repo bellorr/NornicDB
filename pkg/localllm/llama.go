@@ -51,6 +51,8 @@ package localllm
 
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
+#include <unistd.h>
 #include "llama.h"
 
 // Initialize backend once (handles GPU detection)
@@ -58,6 +60,13 @@ static int initialized = 0;
 
 void init_backend() {
     if (!initialized) {
+        // Suppress verbose llama.cpp logs (tensor loading, etc.)
+        // Set log level to WARN to suppress INFO/DEBUG messages
+        // Note: This may not be available in all llama.cpp versions
+        #ifdef llama_log_set
+            llama_log_set(LLAMA_LOG_LEVEL_WARN);
+        #endif
+
         llama_backend_init();
 
         #ifdef _WIN32
@@ -79,6 +88,21 @@ int get_n_layers(struct llama_model* model) {
 // n_gpu_layers: -1 = all layers on GPU, 0 = CPU only, N = N layers on GPU
 struct llama_model* load_model(const char* path, int n_gpu_layers) {
     init_backend();
+
+    // Suppress verbose tensor loading logs by redirecting stderr to /dev/null (or NUL on Windows)
+    // Save original stderr file descriptor
+    int original_stderr = -1;
+    FILE* dev_null = NULL;
+    #ifdef _WIN32
+        dev_null = fopen("NUL", "w");
+    #else
+        dev_null = fopen("/dev/null", "w");
+    #endif
+    if (dev_null) {
+        original_stderr = dup(2);
+        dup2(fileno(dev_null), 2);  // Redirect stderr (fd 2) to /dev/null or NUL
+    }
+
     struct llama_model_params params = llama_model_default_params();
 
     // Memory mapping for low memory usage
@@ -97,7 +121,16 @@ struct llama_model* load_model(const char* path, int n_gpu_layers) {
         params.n_gpu_layers = n_gpu_layers;
     }
 
-    return llama_model_load_from_file(path, params);
+    struct llama_model* model = llama_model_load_from_file(path, params);
+
+    // Restore original stderr
+    if (dev_null && original_stderr >= 0) {
+        dup2(original_stderr, 2);  // Restore stderr
+        close(original_stderr);
+        fclose(dev_null);
+    }
+
+    return model;
 }
 
 // Create embedding context with Metal/GPU optimizations

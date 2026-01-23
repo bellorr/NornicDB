@@ -22,6 +22,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Extract the main MERGE pattern - use word boundary detection
 	mergeIdx := findKeywordIndex(cypher, "MERGE")
@@ -117,7 +118,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			Labels:     labels,
 			Properties: matchProps,
 		}
-		actualID, err := e.storage.CreateNode(node)
+		actualID, err := store.CreateNode(node)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 		}
@@ -137,7 +138,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	var existingNode *storage.Node
 	if len(labels) > 0 && len(matchProps) > 0 {
 		// Search for node with matching label and properties
-		nodes, _ := e.storage.GetNodesByLabel(labels[0])
+		nodes, _ := store.GetNodesByLabel(labels[0])
 		for _, n := range nodes {
 			matches := true
 			for key, val := range matchProps {
@@ -166,7 +167,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			}
 			setClause := strings.TrimSpace(cypher[onMatchIdx+13 : setEnd])
 			e.applySetToNode(node, varName, setClause)
-			e.storage.UpdateNode(node)
+			store.UpdateNode(node)
 		}
 	} else {
 		// Node doesn't exist - create it
@@ -175,7 +176,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			Labels:     labels,
 			Properties: matchProps,
 		}
-		actualID, err := e.storage.CreateNode(node)
+		actualID, err := store.CreateNode(node)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 		}
@@ -211,7 +212,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 
 	// Persist updates
 	if existingNode != nil || setIdx > 0 || onCreateIdx > 0 {
-		e.storage.UpdateNode(node)
+		store.UpdateNode(node)
 	}
 
 	// Handle RETURN clause
@@ -312,6 +313,7 @@ func (e *StorageExecutor) executeCompoundMatchMerge(ctx context.Context, cypher 
 // like (a)<-[:REL]-(b)-[:REL]->(c).
 func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClause string) ([]map[string]*storage.Node, map[string]*storage.Edge, error) {
 	relMatches := make(map[string]*storage.Edge)
+	store := e.getStorage(ctx)
 
 	upper := strings.ToUpper(matchClause)
 
@@ -358,9 +360,9 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 
 		var candidates []*storage.Node
 		if len(nodeInfo.labels) > 0 {
-			candidates, _ = e.storage.GetNodesByLabel(nodeInfo.labels[0])
+			candidates, _ = store.GetNodesByLabel(nodeInfo.labels[0])
 		} else {
-			candidates = e.storage.GetAllNodes()
+			candidates = store.GetAllNodes()
 		}
 
 		// Filter by properties
@@ -417,6 +419,7 @@ func (e *StorageExecutor) executeMatchForContext(ctx context.Context, matchClaus
 // It executes the MATCH query and extracts variable bindings from the results.
 func (e *StorageExecutor) executeMatchForContextWithRelationships(ctx context.Context, matchClause, patternPart string) ([]map[string]*storage.Node, map[string]*storage.Edge, error) {
 	relMatches := make(map[string]*storage.Edge)
+	store := e.getStorage(ctx)
 
 	// Extract all variable names from the pattern
 	varNames := e.extractVariableNamesFromPattern(patternPart)
@@ -472,11 +475,11 @@ func (e *StorageExecutor) executeMatchForContextWithRelationships(ctx context.Co
 				// Look for an ID property or _id
 				if id, ok := v["_id"]; ok {
 					if nodeID, ok := id.(string); ok {
-						node, _ = e.storage.GetNode(storage.NodeID(nodeID))
+						node, _ = store.GetNode(storage.NodeID(nodeID))
 					}
 				} else if id, ok := v["id"]; ok {
 					if nodeID, ok := id.(string); ok {
-						node, _ = e.storage.GetNode(storage.NodeID(nodeID))
+						node, _ = store.GetNode(storage.NodeID(nodeID))
 					}
 				}
 				// If we still don't have a node, try to find by properties
@@ -625,6 +628,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Find clauses - use word boundary detection
 	mergeIdx := findKeywordIndex(cypher, "MERGE")
@@ -728,7 +732,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	// Try to find existing node
 	var existingNode *storage.Node
 	if len(labels) > 0 && len(matchProps) > 0 {
-		nodes, _ := e.storage.GetNodesByLabel(labels[0])
+		nodes, _ := store.GetNodesByLabel(labels[0])
 		for _, n := range nodes {
 			matches := true
 			for key, val := range matchProps {
@@ -756,7 +760,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 			}
 			setClause := strings.TrimSpace(cypher[onMatchIdx+13 : setEnd])
 			e.applySetToNodeWithContext(node, varName, setClause, nodeContext, relContext)
-			e.storage.UpdateNode(node)
+		store.UpdateNode(node)
 		}
 	} else {
 		node = &storage.Node{
@@ -764,7 +768,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 			Labels:     labels,
 			Properties: matchProps,
 		}
-		actualID, err := e.storage.CreateNode(node)
+		actualID, err := store.CreateNode(node)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 		}
@@ -802,7 +806,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 	}
 
 	// Save updates
-	e.storage.UpdateNode(node)
+	store.UpdateNode(node)
 
 	// Add this node to context for subsequent MERGEs
 	nodeContext[varName] = node
@@ -836,6 +840,7 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Use word boundary detection
 	returnIdx := findKeywordIndex(cypher, "RETURN")
@@ -897,7 +902,7 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 	}
 
 	// Check if relationship exists
-	existingEdge := e.storage.GetEdgeBetween(startNode.ID, endNode.ID, relType)
+	existingEdge := store.GetEdgeBetween(startNode.ID, endNode.ID, relType)
 
 	var edge *storage.Edge
 	if existingEdge != nil {
@@ -911,12 +916,12 @@ func (e *StorageExecutor) executeMergeRelationshipWithContext(ctx context.Contex
 			EndNode:    endNode.ID,
 			Properties: relProps,
 		}
-		err := e.storage.CreateEdge(edge)
+		err := store.CreateEdge(edge)
 		if err != nil {
 			// If already exists error, ignore it (MERGE semantics)
 			if err == storage.ErrAlreadyExists {
 				// Try to find the existing edge again
-				existingEdge = e.storage.GetEdgeBetween(startNode.ID, endNode.ID, relType)
+				existingEdge = store.GetEdgeBetween(startNode.ID, endNode.ID, relType)
 				if existingEdge != nil {
 					edge = existingEdge
 				}
@@ -1496,6 +1501,7 @@ func (e *StorageExecutor) splitMergeChainSegments(cypher string) []string {
 
 // executeMergeNodeSegment executes the initial MERGE (node) part and returns the node and variable name.
 func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment string) (*storage.Node, string, error) {
+	store := e.getStorage(ctx)
 	// Parse: MERGE (varName:Label {props}) [ON CREATE SET ...] [ON MATCH SET ...]
 	mergeIdx := findKeywordIndex(segment, "MERGE")
 	if mergeIdx == -1 {
@@ -1522,7 +1528,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 	// Try to find existing node
 	var existingNode *storage.Node
 	if len(labels) > 0 && len(props) > 0 {
-		nodes, _ := e.storage.GetNodesByLabel(labels[0])
+		nodes, _ := store.GetNodesByLabel(labels[0])
 		for _, n := range nodes {
 			matches := true
 			for key, val := range props {
@@ -1551,7 +1557,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			}
 			setClause := strings.TrimSpace(segment[onMatchIdx+12 : setEnd])
 			e.applySetToNode(node, varName, setClause)
-			e.storage.UpdateNode(node)
+			store.UpdateNode(node)
 		}
 	} else {
 		// Create new node
@@ -1560,7 +1566,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			Labels:     labels,
 			Properties: props,
 		}
-		actualID, err := e.storage.CreateNode(node)
+		actualID, err := store.CreateNode(node)
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to create node: %w", err)
 		}
@@ -1577,7 +1583,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			}
 			setClause := strings.TrimSpace(segment[onCreateIdx+13 : setEnd])
 			e.applySetToNode(node, varName, setClause)
-			e.storage.UpdateNode(node)
+			store.UpdateNode(node)
 		}
 	}
 
@@ -1586,6 +1592,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 
 // executeMatchSegment executes a MATCH segment and returns the matched node.
 func (e *StorageExecutor) executeMatchSegment(ctx context.Context, segment string, nodeContext map[string]*storage.Node) (*storage.Node, string, error) {
+	store := e.getStorage(ctx)
 	// Parse: MATCH (varName:Label {props}) [MERGE ...]
 	matchIdx := findKeywordIndex(segment, "MATCH")
 	if matchIdx == -1 {
@@ -1616,9 +1623,9 @@ func (e *StorageExecutor) executeMatchSegment(ctx context.Context, segment strin
 	var nodes []*storage.Node
 	var err error
 	if len(nodePattern.labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(nodePattern.labels[0])
+		nodes, err = store.GetNodesByLabel(nodePattern.labels[0])
 	} else {
-		nodes, err = e.storage.AllNodes()
+		nodes, err = store.AllNodes()
 	}
 	if err != nil {
 		return nil, "", err
@@ -1644,6 +1651,7 @@ func (e *StorageExecutor) executeMatchSegment(ctx context.Context, segment strin
 
 // executeMergeRelSegment executes a MERGE relationship segment like (e)-[:REL]->(c)
 func (e *StorageExecutor) executeMergeRelSegment(ctx context.Context, pattern string, nodeContext map[string]*storage.Node) error {
+	store := e.getStorage(ctx)
 	// Parse relationship pattern: (startVar)-[:TYPE]->(endVar) or (startVar)-[:TYPE {props}]->(endVar)
 	pattern = strings.TrimSpace(pattern)
 
@@ -1706,7 +1714,7 @@ func (e *StorageExecutor) executeMergeRelSegment(ctx context.Context, pattern st
 	}
 
 	// Check if relationship already exists
-	edges, _ := e.storage.GetOutgoingEdges(startNode.ID)
+	edges, _ := store.GetOutgoingEdges(startNode.ID)
 	for _, edge := range edges {
 		if edge.Type == relType && edge.EndNode == endNode.ID {
 			// Relationship already exists
@@ -1723,7 +1731,7 @@ func (e *StorageExecutor) executeMergeRelSegment(ctx context.Context, pattern st
 		Properties: relProps,
 	}
 
-	return e.storage.CreateEdge(edge)
+	return store.CreateEdge(edge)
 }
 
 // executeMultipleMerges handles queries with multiple MERGE statements without WITH:

@@ -781,6 +781,17 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 		return nil, fmt.Errorf("failed to start implicit transaction: %w", err)
 	}
 
+	// Defer constraint validation to commit for implicit transactions.
+	// This avoids duplicate per-operation checks and improves write throughput.
+	if err := tx.SetDeferredConstraintValidation(true); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("failed to configure implicit transaction: %w", err)
+	}
+	if err := tx.SetSkipCreateExistenceCheck(true); err != nil {
+		_ = tx.Rollback()
+		return nil, fmt.Errorf("failed to configure implicit transaction: %w", err)
+	}
+
 	// Optional WAL transaction markers for receipts.
 	var wal *storage.WAL
 	var walSeqStart uint64

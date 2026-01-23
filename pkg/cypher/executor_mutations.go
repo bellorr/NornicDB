@@ -74,6 +74,7 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Parse: MATCH (n) WHERE ... DELETE n or DETACH DELETE n
 	upper := strings.ToUpper(cypher)
@@ -184,7 +185,7 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 
 			// Handle relationship deletion
 			if edgeID != "" {
-				if err := e.storage.DeleteEdge(storage.EdgeID(edgeID)); err == nil {
+				if err := store.DeleteEdge(storage.EdgeID(edgeID)); err == nil {
 					result.Stats.RelationshipsDeleted++
 				}
 				continue
@@ -199,18 +200,18 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				// Count edges that will be deleted with the node (for stats)
 				// DeleteNode() automatically deletes connected edges and updates counts internally
 				// We just need to count them for the result stats
-				outgoingEdges, _ := e.storage.GetOutgoingEdges(storage.NodeID(nodeID))
-				incomingEdges, _ := e.storage.GetIncomingEdges(storage.NodeID(nodeID))
+				outgoingEdges, _ := store.GetOutgoingEdges(storage.NodeID(nodeID))
+				incomingEdges, _ := store.GetIncomingEdges(storage.NodeID(nodeID))
 				edgesCount := len(outgoingEdges) + len(incomingEdges)
 
 				// DeleteNode() handles edge deletion internally and updates internal counts
-				if err := e.storage.DeleteNode(storage.NodeID(nodeID)); err == nil {
+				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
 					result.Stats.RelationshipsDeleted += edgesCount
 				}
 			} else {
 				// Non-detach delete - just delete the node (will fail if edges exist)
-				if err := e.storage.DeleteNode(storage.NodeID(nodeID)); err == nil {
+				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
 				}
 			}
@@ -281,6 +282,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		Rows:    [][]interface{}{},
 		Stats:   &QueryStats{},
 	}
+	store := e.getStorage(ctx)
 
 	// Normalize whitespace for index finding (newlines/tabs become spaces)
 	normalized := strings.ReplaceAll(strings.ReplaceAll(cypher, "\n", " "), "\t", " ")
@@ -370,7 +372,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 							}
 							if !hasLabel {
 								node.Labels = append(node.Labels, labelName)
-								if err := e.storage.UpdateNode(node); err == nil {
+								if err := store.UpdateNode(node); err == nil {
 									result.Stats.LabelsAdded++
 								}
 							}
@@ -404,7 +406,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 				}
 				// Use setNodeProperty to properly route "embedding" to node.ChunkEmbeddings (always stored as array of arrays)
 				setNodeProperty(node, propName, propValue)
-				if err := e.storage.UpdateNode(node); err == nil {
+				if err := store.UpdateNode(node); err == nil {
 					result.Stats.PropertiesSet++
 				}
 			}
@@ -479,6 +481,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 //
 // Parameters are retrieved from context (stored during query execution).
 func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *ExecuteResult, setPart string, result *ExecuteResult, cypher string, returnIdx int) (*ExecuteResult, error) {
+	store := e.getStorage(ctx)
 	// Parse: n += $properties or n += {key: value}
 	plusEqIdx := strings.Index(setPart, "+=")
 	if plusEqIdx == -1 {
@@ -560,7 +563,7 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 					setNodeProperty(node, k, v)
 					result.Stats.PropertiesSet++
 				}
-				_ = e.storage.UpdateNode(node)
+				_ = store.UpdateNode(node)
 				updatedNodes = append(updatedNodes, node)
 				continue
 			}
@@ -577,7 +580,7 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 				setNodeProperty(node, k, v)
 				result.Stats.PropertiesSet++
 			}
-			_ = e.storage.UpdateNode(node)
+			_ = store.UpdateNode(node)
 			updatedNodes = append(updatedNodes, node)
 		}
 	}
@@ -634,6 +637,7 @@ func normalizePropsMap(value interface{}, source string) (map[string]interface{}
 // executeRemove handles MATCH ... REMOVE queries for property removal.
 // Syntax: MATCH (n:Label) REMOVE n.property [, n.property2] [RETURN ...]
 func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	store := e.getStorage(ctx)
 	// Substitute parameters AFTER routing to avoid keyword detection issues
 	if params := getParamsFromContext(ctx); params != nil {
 		cypher = e.substituteParams(cypher, params)
@@ -690,7 +694,7 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 					result.Stats.PropertiesSet++ // Neo4j counts removals as properties set
 				}
 			}
-			_ = e.storage.UpdateNode(node)
+			_ = store.UpdateNode(node)
 		}
 	}
 

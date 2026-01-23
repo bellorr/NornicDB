@@ -23,12 +23,17 @@ func (b *BadgerEngine) CreateEdge(edge *Edge) error {
 		return err
 	}
 
-	err := b.withUpdate(func(txn *badger.Txn) error {
+	// PERFORMANCE OPTIMIZATION: Use WriteBatch to batch all writes (edge + indexes)
+	// This reduces write amplification from 4 separate writes to 1 batch operation.
+	// We still validate existence via a read transaction first.
+	var exists bool
+	err := b.db.View(func(txn *badger.Txn) error {
 		// Check if edge already exists
 		key := edgeKey(edge.ID)
 		_, err := txn.Get(key)
 		if err == nil {
-			return ErrAlreadyExists
+			exists = true
+			return nil
 		}
 		if err != badger.ErrKeyNotFound {
 			return err
@@ -52,37 +57,54 @@ func (b *BadgerEngine) CreateEdge(edge *Edge) error {
 			return err
 		}
 
-		// Serialize edge
-		data, err := encodeEdge(edge)
-		if err != nil {
-			return fmt.Errorf("failed to encode edge: %w", err)
-		}
-
-		// Store edge
-		if err := txn.Set(key, data); err != nil {
-			return err
-		}
-
-		// Create outgoing index
-		outKey := outgoingIndexKey(edge.StartNode, edge.ID)
-		if err := txn.Set(outKey, []byte{}); err != nil {
-			return err
-		}
-
-		// Create incoming index
-		inKey := incomingIndexKey(edge.EndNode, edge.ID)
-		if err := txn.Set(inKey, []byte{}); err != nil {
-			return err
-		}
-
-		// Create edge type index
-		edgeTypeKey := edgeTypeIndexKey(edge.Type, edge.ID)
-		if err := txn.Set(edgeTypeKey, []byte{}); err != nil {
-			return err
-		}
-
 		return nil
 	})
+
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrAlreadyExists
+	}
+
+	// Serialize edge
+	data, err := encodeEdge(edge)
+	if err != nil {
+		return fmt.Errorf("failed to encode edge: %w", err)
+	}
+
+	// Use WriteBatch to batch all writes together
+	wb := b.db.NewWriteBatch()
+	defer wb.Cancel()
+
+	key := edgeKey(edge.ID)
+	// Store edge
+	if err := wb.Set(key, data); err != nil {
+		return err
+	}
+
+	// Create outgoing index
+	outKey := outgoingIndexKey(edge.StartNode, edge.ID)
+	if err := wb.Set(outKey, []byte{}); err != nil {
+		return err
+	}
+
+	// Create incoming index
+	inKey := incomingIndexKey(edge.EndNode, edge.ID)
+	if err := wb.Set(inKey, []byte{}); err != nil {
+		return err
+	}
+
+	// Create edge type index
+	edgeTypeKey := edgeTypeIndexKey(edge.Type, edge.ID)
+	if err := wb.Set(edgeTypeKey, []byte{}); err != nil {
+		return err
+	}
+
+	// Flush all writes in single batch operation (atomic)
+	if err := wb.Flush(); err != nil {
+		return err
+	}
 
 	// Invalidate only this edge type (not entire cache)
 	if err == nil {
