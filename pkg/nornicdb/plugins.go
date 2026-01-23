@@ -58,24 +58,35 @@ var errHeimdallContextRequired = errors.New("heimdall plugin requires subsystem 
 //   - Heimdall plugins → Register with Heimdall SubsystemManager
 func LoadPluginsFromDir(dir string, heimdallCtx *heimdall.SubsystemContext) error {
 	if dir == "" {
+		fmt.Printf("   [Plugin Debug] LoadPluginsFromDir called with empty directory\n")
 		return nil
 	}
 
-	info, err := os.Stat(dir)
+	// Resolve relative paths to absolute
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		fmt.Printf("   [Plugin Debug] Failed to resolve path %s: %v\n", dir, err)
+		return fmt.Errorf("resolving plugins directory: %w", err)
+	}
+	fmt.Printf("   [Plugin Debug] Loading plugins from: %s (resolved from %s)\n", absDir, dir)
+
+	info, err := os.Stat(absDir)
 	if os.IsNotExist(err) {
+		fmt.Printf("   [Plugin Debug] Directory does not exist: %s\n", absDir)
 		return nil // No plugins directory
 	}
 	if err != nil {
 		return fmt.Errorf("checking plugins directory: %w", err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("not a directory: %s", dir)
+		return fmt.Errorf("not a directory: %s", absDir)
 	}
 
-	matches, err := filepath.Glob(filepath.Join(dir, "*.so"))
+	matches, err := filepath.Glob(filepath.Join(absDir, "*.so"))
 	if err != nil {
 		return fmt.Errorf("scanning directory: %w", err)
 	}
+	fmt.Printf("   [Plugin Debug] Found %d .so files: %v\n", len(matches), matches)
 	if len(matches) == 0 {
 		return nil
 	}
@@ -394,10 +405,16 @@ type reflectHeimdallWrapper struct {
 	val reflect.Value
 }
 
-func (w *reflectHeimdallWrapper) Name() string        { s, _ := callStringMethod(w.val, "Name"); return s }
-func (w *reflectHeimdallWrapper) Version() string     { s, _ := callStringMethod(w.val, "Version"); return s }
-func (w *reflectHeimdallWrapper) Type() string        { s, _ := callStringMethod(w.val, "Type"); return s }
-func (w *reflectHeimdallWrapper) Description() string { s, _ := callStringMethod(w.val, "Description"); return s }
+func (w *reflectHeimdallWrapper) Name() string { s, _ := callStringMethod(w.val, "Name"); return s }
+func (w *reflectHeimdallWrapper) Version() string {
+	s, _ := callStringMethod(w.val, "Version")
+	return s
+}
+func (w *reflectHeimdallWrapper) Type() string { s, _ := callStringMethod(w.val, "Type"); return s }
+func (w *reflectHeimdallWrapper) Description() string {
+	s, _ := callStringMethod(w.val, "Description")
+	return s
+}
 
 func (w *reflectHeimdallWrapper) Initialize(ctx heimdall.SubsystemContext) error {
 	method := w.val.MethodByName("Initialize")
@@ -408,8 +425,8 @@ func (w *reflectHeimdallWrapper) Initialize(ctx heimdall.SubsystemContext) error
 	return nil
 }
 
-func (w *reflectHeimdallWrapper) Start() error  { return w.callErrorMethod("Start") }
-func (w *reflectHeimdallWrapper) Stop() error   { return w.callErrorMethod("Stop") }
+func (w *reflectHeimdallWrapper) Start() error    { return w.callErrorMethod("Start") }
+func (w *reflectHeimdallWrapper) Stop() error     { return w.callErrorMethod("Stop") }
 func (w *reflectHeimdallWrapper) Shutdown() error { return w.callErrorMethod("Shutdown") }
 
 func (w *reflectHeimdallWrapper) Status() heimdall.SubsystemStatus {

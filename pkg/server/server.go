@@ -730,14 +730,20 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			// Auto-detects plugin types: function plugins (APOC) and Heimdall plugins
 			// APOC plugins provide Cypher functions, Heimdall plugins provide AI actions
 			if config.PluginsDir != "" {
+				log.Printf("   [Debug] Loading APOC plugins from: %s", config.PluginsDir)
 				if err := nornicdb.LoadPluginsFromDir(config.PluginsDir, &subsystemCtx); err != nil {
 					log.Printf("   ⚠️  Failed to load APOC plugins from %s: %v", config.PluginsDir, err)
 				}
 			}
 			if config.HeimdallPluginsDir != "" && config.HeimdallPluginsDir != config.PluginsDir {
+				log.Printf("   [Debug] Loading Heimdall plugins from: %s", config.HeimdallPluginsDir)
 				if err := nornicdb.LoadPluginsFromDir(config.HeimdallPluginsDir, &subsystemCtx); err != nil {
 					log.Printf("   ⚠️  Failed to load Heimdall plugins from %s: %v", config.HeimdallPluginsDir, err)
 				}
+			} else if config.HeimdallPluginsDir == "" {
+				log.Printf("   [Debug] HeimdallPluginsDir is empty")
+			} else {
+				log.Printf("   [Debug] HeimdallPluginsDir (%s) same as PluginsDir (%s), skipping", config.HeimdallPluginsDir, config.PluginsDir)
 			}
 
 			// Log loaded plugins
