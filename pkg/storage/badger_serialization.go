@@ -13,7 +13,9 @@ import (
 func init() {
 	// Register primitive types that can appear in Properties map
 	gob.Register(int(0))
+	gob.Register(int32(0))
 	gob.Register(int64(0))
+	gob.Register(float32(0))
 	gob.Register(float64(0))
 	gob.Register("")
 	gob.Register(true)
@@ -23,8 +25,11 @@ func init() {
 	gob.Register([]interface{}{})
 	gob.Register([]string{})
 	gob.Register([]int{})
+	gob.Register([]int32{})
 	gob.Register([]int64{})
+	gob.Register([]float32{})
 	gob.Register([]float64{})
+	gob.Register([]bool{})
 
 	// Register map types for nested properties
 	gob.Register(map[string]interface{}{})

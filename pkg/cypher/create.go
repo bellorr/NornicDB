@@ -602,6 +602,7 @@ func (e *StorageExecutor) splitCreatePatterns(pattern string) []string {
 	inRelationship := false
 	inString := false
 	stringChar := byte(0) // Track which quote character started the string
+	braceDepth := 0
 
 	for i := 0; i < len(pattern); i++ {
 		c := pattern[i]
@@ -629,31 +630,47 @@ func (e *StorageExecutor) splitCreatePatterns(pattern string) []string {
 
 		// Normal parsing outside string literals
 		switch c {
+		case '{':
+			braceDepth++
+			current.WriteByte(c)
+		case '}':
+			if braceDepth > 0 {
+				braceDepth--
+			}
+			current.WriteByte(c)
 		case '(':
-			depth++
-			current.WriteByte(c)
+			if braceDepth == 0 {
+				depth++
+				current.WriteByte(c)
+			} else {
+				current.WriteByte(c)
+			}
 		case ')':
-			depth--
-			current.WriteByte(c)
-			if depth == 0 {
-				// Check if next non-whitespace is a relationship operator
-				j := i + 1
-				for j < len(pattern) && (pattern[j] == ' ' || pattern[j] == '\t' || pattern[j] == '\n' || pattern[j] == '\r') {
-					j++
+			if braceDepth == 0 {
+				depth--
+				current.WriteByte(c)
+				if depth == 0 {
+					// Check if next non-whitespace is a relationship operator
+					j := i + 1
+					for j < len(pattern) && (pattern[j] == ' ' || pattern[j] == '\t' || pattern[j] == '\n' || pattern[j] == '\r') {
+						j++
+					}
+					if j < len(pattern) && (pattern[j] == '-' || pattern[j] == '<') {
+						// This is part of a relationship pattern, continue accumulating
+						inRelationship = true
+					} else if !inRelationship {
+						// End of a standalone node pattern
+						patterns = append(patterns, current.String())
+						current.Reset()
+					} else {
+						// End of a relationship pattern
+						patterns = append(patterns, current.String())
+						current.Reset()
+						inRelationship = false
+					}
 				}
-				if j < len(pattern) && (pattern[j] == '-' || pattern[j] == '<') {
-					// This is part of a relationship pattern, continue accumulating
-					inRelationship = true
-				} else if !inRelationship {
-					// End of a standalone node pattern
-					patterns = append(patterns, current.String())
-					current.Reset()
-				} else {
-					// End of a relationship pattern
-					patterns = append(patterns, current.String())
-					current.Reset()
-					inRelationship = false
-				}
+			} else {
+				current.WriteByte(c)
 			}
 		case ',':
 			if depth == 0 && !inRelationship {
@@ -817,28 +834,71 @@ func (e *StorageExecutor) splitNodePatterns(pattern string) []string {
 	var patterns []string
 	var current strings.Builder
 	depth := 0
+	braceDepth := 0
+	inString := false
+	stringChar := byte(0)
 
-	for _, c := range pattern {
+	for i := 0; i < len(pattern); i++ {
+		c := pattern[i]
+		if (c == '\'' || c == '"') && (i == 0 || pattern[i-1] != '\\') {
+			if !inString {
+				inString = true
+				stringChar = c
+			} else if c == stringChar {
+				inString = false
+				stringChar = 0
+			}
+			if depth > 0 {
+				current.WriteByte(c)
+			}
+			continue
+		}
+		if inString {
+			if depth > 0 {
+				current.WriteByte(c)
+			}
+			continue
+		}
 		switch c {
+		case '{':
+			if depth > 0 {
+				braceDepth++
+				current.WriteByte(c)
+			}
+		case '}':
+			if depth > 0 {
+				if braceDepth > 0 {
+					braceDepth--
+				}
+				current.WriteByte(c)
+			}
 		case '(':
-			depth++
-			current.WriteRune(c)
+			if braceDepth == 0 {
+				depth++
+				current.WriteByte(c)
+			} else {
+				current.WriteByte(c)
+			}
 		case ')':
-			depth--
-			current.WriteRune(c)
-			if depth == 0 {
-				patterns = append(patterns, current.String())
-				current.Reset()
+			if braceDepth == 0 {
+				depth--
+				current.WriteByte(c)
+				if depth == 0 {
+					patterns = append(patterns, current.String())
+					current.Reset()
+				}
+			} else {
+				current.WriteByte(c)
 			}
 		case ',':
 			if depth == 0 {
 				// Skip comma between patterns
 				continue
 			}
-			current.WriteRune(c)
+			current.WriteByte(c)
 		default:
 			if depth > 0 {
-				current.WriteRune(c)
+				current.WriteByte(c)
 			}
 		}
 	}

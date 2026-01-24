@@ -10,6 +10,8 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"runtime/pprof"
+	"strconv"
 	"testing"
 	"time"
 
@@ -547,7 +549,26 @@ func TestBoltBenchmarkCreateDeleteRelationship_Badger(t *testing.T) {
 
 	// Benchmark
 	iterations := 100
+	if v := os.Getenv("BOLT_PROFILE_ITERATIONS"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			iterations = parsed
+		}
+	}
 	t.Logf("Running %d iterations over Bolt (BadgerDB, 100 actors + 150 movies)", iterations)
+
+	cpuProfilePath := os.Getenv("BOLT_PROFILE_CPU")
+	var cpuFile *os.File
+	if cpuProfilePath != "" {
+		file, err := os.Create(cpuProfilePath)
+		if err != nil {
+			t.Fatalf("Failed to create CPU profile: %v", err)
+		}
+		cpuFile = file
+		if err := pprof.StartCPUProfile(cpuFile); err != nil {
+			_ = cpuFile.Close()
+			t.Fatalf("Failed to start CPU profile: %v", err)
+		}
+	}
 
 	start := time.Now()
 	for i := 0; i < iterations; i++ {
@@ -561,6 +582,24 @@ func TestBoltBenchmarkCreateDeleteRelationship_Badger(t *testing.T) {
 		ReadSuccess(t, conn)
 	}
 	elapsed := time.Since(start)
+
+	if cpuFile != nil {
+		pprof.StopCPUProfile()
+		_ = cpuFile.Close()
+	}
+
+	if memProfilePath := os.Getenv("BOLT_PROFILE_MEM"); memProfilePath != "" {
+		runtime.GC()
+		file, err := os.Create(memProfilePath)
+		if err != nil {
+			t.Fatalf("Failed to create mem profile: %v", err)
+		}
+		if err := pprof.WriteHeapProfile(file); err != nil {
+			_ = file.Close()
+			t.Fatalf("Failed to write mem profile: %v", err)
+		}
+		_ = file.Close()
+	}
 
 	opsPerSec := float64(iterations) / elapsed.Seconds()
 	t.Logf("Bolt Performance (BadgerDB, large dataset): %.2f ops/sec, %.3f ms/op", opsPerSec, elapsed.Seconds()*1000/float64(iterations))

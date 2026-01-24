@@ -712,6 +712,196 @@ type TransactionCapableEngine interface {
 	BeginTransaction() (*storage.BadgerTransaction, error)
 }
 
+type implicitTxEngines struct {
+	txEngine    TransactionCapableEngine
+	asyncEngine *storage.AsyncEngine
+	namespace   string
+}
+
+func (e *StorageExecutor) resolveImplicitTxEngines() implicitTxEngines {
+	engine := e.storage
+	visited := make(map[storage.Engine]bool)
+	out := implicitTxEngines{}
+
+	for engine != nil && !visited[engine] {
+		visited[engine] = true
+
+		if out.namespace == "" {
+			if ns, ok := engine.(interface{ Namespace() string }); ok {
+				out.namespace = ns.Namespace()
+			}
+		}
+		if out.asyncEngine == nil {
+			if ae, ok := engine.(*storage.AsyncEngine); ok {
+				out.asyncEngine = ae
+			}
+		}
+		if out.txEngine == nil {
+			if tc, ok := engine.(TransactionCapableEngine); ok {
+				out.txEngine = tc
+			}
+		}
+
+		switch wrapper := engine.(type) {
+		case interface{ GetUnderlying() storage.Engine }:
+			engine = wrapper.GetUnderlying()
+		case interface{ GetEngine() storage.Engine }:
+			engine = wrapper.GetEngine()
+		case interface{ GetInnerEngine() storage.Engine }:
+			engine = wrapper.GetInnerEngine()
+		default:
+			engine = nil
+		}
+	}
+
+	return out
+}
+
+func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher string) (*ExecuteResult, error, bool) {
+	upper := strings.ToUpper(strings.TrimSpace(cypher))
+	if !strings.HasPrefix(upper, "CREATE") {
+		return nil, nil, false
+	}
+	for _, keyword := range []string{
+		"MATCH",
+		"MERGE",
+		"SET",
+		"DELETE",
+		"DETACH",
+		"REMOVE",
+		"WITH",
+		"CALL",
+		"UNWIND",
+		"FOREACH",
+		"LOAD",
+		"OPTIONAL",
+	} {
+		if containsKeywordOutsideStrings(cypher, keyword) {
+			return nil, nil, false
+		}
+	}
+
+	returnIdx := findKeywordIndex(cypher, "RETURN")
+	createPart := cypher
+	if returnIdx > 0 {
+		createPart = strings.TrimSpace(cypher[:returnIdx])
+	}
+
+	createClauses := createKeywordPattern.Split(createPart, -1)
+	if len(createClauses) == 0 {
+		return nil, nil, false
+	}
+
+	var nodePatterns []string
+	for _, clause := range createClauses {
+		clause = strings.TrimSpace(clause)
+		if clause == "" {
+			continue
+		}
+		patterns := e.splitCreatePatterns(clause)
+		for _, pat := range patterns {
+			pat = strings.TrimSpace(pat)
+			if pat == "" {
+				continue
+			}
+			if containsOutsideStrings(pat, "->") ||
+				containsOutsideStrings(pat, "<-") ||
+				containsOutsideStrings(pat, "]-") ||
+				containsOutsideStrings(pat, "-[") {
+				return nil, nil, false
+			}
+			nodePatterns = append(nodePatterns, pat)
+		}
+	}
+
+	if len(nodePatterns) == 0 {
+		return nil, nil, false
+	}
+
+	result := &ExecuteResult{
+		Columns: []string{},
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+
+	createdNodes := make(map[string]*storage.Node)
+	nodes := make([]*storage.Node, 0, len(nodePatterns))
+	for _, nodePatternStr := range nodePatterns {
+		nodePattern := e.parseNodePattern(nodePatternStr)
+
+		for _, label := range nodePattern.labels {
+			if !isValidIdentifier(label) {
+				return nil, fmt.Errorf("invalid label name: %q (must be alphanumeric starting with letter or underscore)", label), true
+			}
+			if containsReservedKeyword(label) {
+				return nil, fmt.Errorf("invalid label name: %q (contains reserved keyword)", label), true
+			}
+		}
+
+		for key, val := range nodePattern.properties {
+			if !isValidIdentifier(key) {
+				return nil, fmt.Errorf("invalid property key: %q (must be alphanumeric starting with letter or underscore)", key), true
+			}
+			if _, ok := val.(invalidPropertyValue); ok {
+				return nil, fmt.Errorf("invalid property value for key %q: malformed syntax", key), true
+			}
+		}
+
+		node := &storage.Node{
+			ID:         storage.NodeID(e.generateID()),
+			Labels:     nodePattern.labels,
+			Properties: nodePattern.properties,
+		}
+		nodes = append(nodes, node)
+		if nodePattern.variable != "" {
+			createdNodes[nodePattern.variable] = node
+		}
+	}
+
+	store := e.getStorage(ctx)
+	if err := store.BulkCreateNodes(nodes); err != nil {
+		return nil, err, true
+	}
+
+	for _, node := range nodes {
+		e.notifyNodeCreated(string(node.ID))
+	}
+	result.Stats.NodesCreated += len(nodes)
+
+	if returnIdx > 0 {
+		returnPart := strings.TrimSpace(cypher[returnIdx+6:])
+		returnItems := e.parseReturnItems(returnPart)
+
+		result.Columns = make([]string, len(returnItems))
+		row := make([]interface{}, len(returnItems))
+		for i, item := range returnItems {
+			if item.alias != "" {
+				result.Columns[i] = item.alias
+			} else {
+				result.Columns[i] = item.expr
+			}
+
+			for variable, node := range createdNodes {
+				if strings.HasPrefix(item.expr, variable) || item.expr == variable {
+					row[i] = e.resolveReturnItem(item, variable, node)
+					break
+				}
+			}
+
+			if row[i] == nil {
+				if varName := extractVariableNameFromReturnItem(item.expr); varName != "" {
+					if node, ok := createdNodes[varName]; ok {
+						row[i] = e.resolveReturnItem(item, varName, node)
+					}
+				}
+			}
+		}
+		result.Rows = [][]interface{}{row}
+	}
+
+	return result, nil, true
+}
+
 // executeImplicitAsync executes a single query using implicit transactions for writes.
 // For write operations, wraps execution in an implicit transaction that can be
 // rolled back on error, preventing partial data corruption from failed queries.
@@ -724,6 +914,12 @@ func (e *StorageExecutor) executeImplicitAsync(ctx context.Context, cypher strin
 	// For write operations, use implicit transaction for atomicity
 	// This ensures partial writes are rolled back on error
 	if isWrite {
+		engines := e.resolveImplicitTxEngines()
+		if engines.asyncEngine != nil {
+			if result, err, handled := e.tryAsyncCreateNodeBatch(ctx, cypher); handled {
+				return result, err
+			}
+		}
 		return e.executeWithImplicitTransaction(ctx, cypher, upperQuery)
 	}
 
@@ -735,20 +931,10 @@ func (e *StorageExecutor) executeImplicitAsync(ctx context.Context, cypher strin
 // If any part of the query fails, all changes are rolled back atomically.
 // This prevents data corruption from partially executed queries.
 func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, error) {
-	// Try to get a transaction-capable engine
-	var txEngine TransactionCapableEngine
-	var asyncEngine *storage.AsyncEngine
-
-	// Check if storage is transaction-capable (BadgerEngine, MemoryEngine, or AsyncEngine wrapping one)
-	if tc, ok := e.storage.(TransactionCapableEngine); ok {
-		txEngine = tc
-	} else if ae, ok := e.storage.(*storage.AsyncEngine); ok {
-		asyncEngine = ae
-		// AsyncEngine wraps another engine - get underlying
-		if tc, ok := ae.GetUnderlying().(TransactionCapableEngine); ok {
-			txEngine = tc
-		}
-	}
+	// Try to get a transaction-capable engine and async wrapper (if present)
+	engines := e.resolveImplicitTxEngines()
+	txEngine := engines.txEngine
+	asyncEngine := engines.asyncEngine
 
 	// If no transaction support, fall back to direct execution (legacy mode)
 	// This is less safe but maintains backward compatibility
@@ -811,7 +997,16 @@ func (e *StorageExecutor) executeWithImplicitTransaction(ctx context.Context, cy
 	// Create a transactional wrapper that routes writes through the transaction
 	// CRITICAL: We pass the wrapper through context instead of modifying e.storage
 	// because e.storage modification is NOT thread-safe for concurrent executions.
-	txWrapper := &transactionStorageWrapper{tx: tx, underlying: e.storage}
+	separator := ":"
+	if engines.namespace == "" {
+		separator = ""
+	}
+	txWrapper := &transactionStorageWrapper{
+		tx:         tx,
+		underlying: e.storage,
+		namespace:  engines.namespace,
+		separator:  separator,
+	}
 
 	// Execute with transaction wrapper via context
 	txCtx := context.WithValue(ctx, ctxKeyTxStorage, txWrapper)
@@ -922,32 +1117,62 @@ func (e *StorageExecutor) resolveWALAndDatabase() (*storage.WAL, string) {
 type transactionStorageWrapper struct {
 	tx         *storage.BadgerTransaction
 	underlying storage.Engine // For read operations not supported by transaction
+	namespace  string
+	separator  string
 }
 
 // Write operations - go through transaction for atomicity
 func (w *transactionStorageWrapper) CreateNode(node *storage.Node) (storage.NodeID, error) {
-	return w.tx.CreateNode(node)
+	if w.namespace == "" {
+		return w.tx.CreateNode(node)
+	}
+	namespaced := storage.CopyNode(node)
+	namespaced.ID = w.prefixNodeID(node.ID)
+	actualID, err := w.tx.CreateNode(namespaced)
+	if err != nil {
+		return "", err
+	}
+	return w.unprefixNodeID(actualID), nil
 }
 
 func (w *transactionStorageWrapper) UpdateNode(node *storage.Node) error {
-	return w.tx.UpdateNode(node)
+	if w.namespace == "" {
+		return w.tx.UpdateNode(node)
+	}
+	namespaced := storage.CopyNode(node)
+	namespaced.ID = w.prefixNodeID(node.ID)
+	return w.tx.UpdateNode(namespaced)
 }
 
 func (w *transactionStorageWrapper) DeleteNode(id storage.NodeID) error {
-	return w.tx.DeleteNode(id)
+	return w.tx.DeleteNode(w.prefixNodeID(id))
 }
 
 func (w *transactionStorageWrapper) CreateEdge(edge *storage.Edge) error {
-	return w.tx.CreateEdge(edge)
+	if w.namespace == "" {
+		return w.tx.CreateEdge(edge)
+	}
+	namespaced := storage.CopyEdge(edge)
+	namespaced.ID = w.prefixEdgeID(edge.ID)
+	namespaced.StartNode = w.prefixNodeID(edge.StartNode)
+	namespaced.EndNode = w.prefixNodeID(edge.EndNode)
+	return w.tx.CreateEdge(namespaced)
 }
 
 func (w *transactionStorageWrapper) DeleteEdge(id storage.EdgeID) error {
-	return w.tx.DeleteEdge(id)
+	return w.tx.DeleteEdge(w.prefixEdgeID(id))
 }
 
 // Read operations - transaction supports GetNode, forward others to underlying
 func (w *transactionStorageWrapper) GetNode(id storage.NodeID) (*storage.Node, error) {
-	return w.tx.GetNode(id)
+	node, err := w.tx.GetNode(w.prefixNodeID(id))
+	if err != nil {
+		return nil, err
+	}
+	if w.namespace == "" {
+		return node, nil
+	}
+	return w.toUserNode(node), nil
 }
 
 func (w *transactionStorageWrapper) GetEdge(id storage.EdgeID) (*storage.Edge, error) {
@@ -1014,7 +1239,15 @@ func (w *transactionStorageWrapper) GetSchema() *storage.SchemaManager {
 func (w *transactionStorageWrapper) BulkCreateNodes(nodes []*storage.Node) error {
 	// For bulk operations within transaction, create one by one
 	for _, node := range nodes {
-		if _, err := w.tx.CreateNode(node); err != nil {
+		if w.namespace == "" {
+			if _, err := w.tx.CreateNode(node); err != nil {
+				return err
+			}
+			continue
+		}
+		namespaced := storage.CopyNode(node)
+		namespaced.ID = w.prefixNodeID(node.ID)
+		if _, err := w.tx.CreateNode(namespaced); err != nil {
 			return err
 		}
 	}
@@ -1023,7 +1256,17 @@ func (w *transactionStorageWrapper) BulkCreateNodes(nodes []*storage.Node) error
 
 func (w *transactionStorageWrapper) BulkCreateEdges(edges []*storage.Edge) error {
 	for _, edge := range edges {
-		if err := w.tx.CreateEdge(edge); err != nil {
+		if w.namespace == "" {
+			if err := w.tx.CreateEdge(edge); err != nil {
+				return err
+			}
+			continue
+		}
+		namespaced := storage.CopyEdge(edge)
+		namespaced.ID = w.prefixEdgeID(edge.ID)
+		namespaced.StartNode = w.prefixNodeID(edge.StartNode)
+		namespaced.EndNode = w.prefixNodeID(edge.EndNode)
+		if err := w.tx.CreateEdge(namespaced); err != nil {
 			return err
 		}
 	}
@@ -1032,7 +1275,7 @@ func (w *transactionStorageWrapper) BulkCreateEdges(edges []*storage.Edge) error
 
 func (w *transactionStorageWrapper) BulkDeleteNodes(ids []storage.NodeID) error {
 	for _, id := range ids {
-		if err := w.tx.DeleteNode(id); err != nil {
+		if err := w.tx.DeleteNode(w.prefixNodeID(id)); err != nil {
 			return err
 		}
 	}
@@ -1041,11 +1284,58 @@ func (w *transactionStorageWrapper) BulkDeleteNodes(ids []storage.NodeID) error 
 
 func (w *transactionStorageWrapper) BulkDeleteEdges(ids []storage.EdgeID) error {
 	for _, id := range ids {
-		if err := w.tx.DeleteEdge(id); err != nil {
+		if err := w.tx.DeleteEdge(w.prefixEdgeID(id)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (w *transactionStorageWrapper) prefixNodeID(id storage.NodeID) storage.NodeID {
+	if w.namespace == "" {
+		return id
+	}
+	return storage.NodeID(w.namespace + w.separator + string(id))
+}
+
+func (w *transactionStorageWrapper) unprefixNodeID(id storage.NodeID) storage.NodeID {
+	if w.namespace == "" {
+		return id
+	}
+	prefix := w.namespace + w.separator
+	s := string(id)
+	if strings.HasPrefix(s, prefix) {
+		return storage.NodeID(s[len(prefix):])
+	}
+	return id
+}
+
+func (w *transactionStorageWrapper) prefixEdgeID(id storage.EdgeID) storage.EdgeID {
+	if w.namespace == "" {
+		return id
+	}
+	return storage.EdgeID(w.namespace + w.separator + string(id))
+}
+
+func (w *transactionStorageWrapper) unprefixEdgeID(id storage.EdgeID) storage.EdgeID {
+	if w.namespace == "" {
+		return id
+	}
+	prefix := w.namespace + w.separator
+	s := string(id)
+	if strings.HasPrefix(s, prefix) {
+		return storage.EdgeID(s[len(prefix):])
+	}
+	return id
+}
+
+func (w *transactionStorageWrapper) toUserNode(node *storage.Node) *storage.Node {
+	if node == nil {
+		return nil
+	}
+	out := storage.CopyNode(node)
+	out.ID = w.unprefixNodeID(out.ID)
+	return out
 }
 
 func (w *transactionStorageWrapper) BatchGetNodes(ids []storage.NodeID) (map[storage.NodeID]*storage.Node, error) {

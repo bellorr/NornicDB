@@ -177,6 +177,9 @@ func extractNodeIDFromLabelIndex(key []byte, labelLen int) NodeID {
 // If the node exceeds maxNodeSize, embeddings are stored separately and a flag is set.
 // Returns: (nodeData, embeddingsStoredSeparately, error)
 func encodeNode(n *Node) ([]byte, bool, error) {
+	if err := validatePropertiesForStorage(n.Properties); err != nil {
+		return nil, false, fmt.Errorf("invalid node properties: %w", err)
+	}
 	// First, try encoding with embeddings
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(n); err != nil {
@@ -298,6 +301,9 @@ func decodeNodeWithEmbeddings(txn *badger.Txn, data []byte, nodeID NodeID) (*Nod
 
 // encodeEdge serializes an Edge using gob (preserves Go types).
 func encodeEdge(e *Edge) ([]byte, error) {
+	if err := validatePropertiesForStorage(e.Properties); err != nil {
+		return nil, fmt.Errorf("invalid edge properties: %w", err)
+	}
 	var buf bytes.Buffer
 	if err := gob.NewEncoder(&buf).Encode(e); err != nil {
 		return nil, err

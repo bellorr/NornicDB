@@ -309,8 +309,8 @@ type DeferrableExecutor interface {
 
 // QueryResult holds the result of a query.
 type QueryResult struct {
-	Columns []string
-	Rows    [][]any
+	Columns  []string
+	Rows     [][]any
 	Metadata map[string]any
 }
 
@@ -761,8 +761,8 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	session := &Session{
 		conn:       conn,
-		reader:     bufio.NewReaderSize(conn, 8192), // 8KB read buffer
-		writer:     bufio.NewWriterSize(conn, 8192), // 8KB write buffer
+		reader:     bufio.NewReaderSize(conn, s.config.ReadBufferSize),
+		writer:     bufio.NewWriterSize(conn, s.config.WriteBufferSize),
 		server:     s,
 		executor:   s.executor,
 		messageBuf: make([]byte, 0, 4096), // Pre-allocate 4KB message buffer
@@ -839,6 +839,7 @@ type Session struct {
 	// Deferred commit state (Neo4j-style optimization)
 	// Writes are buffered in AsyncEngine until PULL completes
 	pendingFlush bool
+	flushPending bool
 
 	// Query metadata for Neo4j driver compatibility
 	queryId          int64          // Query ID counter for qid field
@@ -1354,16 +1355,22 @@ func (s *Session) handleRun(data []byte) error {
 	// Note: Neo4j only sends qid for EXPLICIT transactions, not implicit/autocommit
 	// For implicit transactions, only send fields and t_first
 	if s.inTransaction {
-		return s.sendSuccess(map[string]any{
+		if err := s.sendSuccessNoFlush(map[string]any{
 			"fields":  result.Columns,
 			"t_first": int64(0),
 			"qid":     s.queryId,
-		})
+		}); err != nil {
+			return err
+		}
+		return s.flushIfPending()
 	}
-	return s.sendSuccess(map[string]any{
+	if err := s.sendSuccessNoFlush(map[string]any{
 		"fields":  result.Columns,
 		"t_first": int64(0),
-	})
+	}); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // truncateQuery truncates a query for logging.
@@ -1423,7 +1430,10 @@ func (s *Session) parseRunMessage(data []byte) (string, map[string]any, map[stri
 func (s *Session) handlePull(data []byte) error {
 	if s.lastResult == nil {
 		// Neo4j doesn't send has_more when false - just empty metadata
-		return s.sendSuccess(map[string]any{})
+		if err := s.sendSuccessNoFlush(map[string]any{}); err != nil {
+			return err
+		}
+		return s.flushIfPending()
 	}
 
 	// Parse PULL options (n = number of records to pull)
@@ -1514,13 +1524,19 @@ func (s *Session) handlePull(data []byte) error {
 		}
 
 		// Note: Neo4j does NOT send has_more when it's false
-		return s.sendSuccess(metadata)
+		if err := s.sendSuccessNoFlush(metadata); err != nil {
+			return err
+		}
+		return s.flushIfPending()
 	}
 
 	// When there are more records, send has_more: true
-	return s.sendSuccess(map[string]any{
+	if err := s.sendSuccessNoFlush(map[string]any{
 		"has_more": true,
-	})
+	}); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // handleDiscard handles the DISCARD message.
@@ -1528,17 +1544,23 @@ func (s *Session) handleDiscard(data []byte) error {
 	s.lastResult = nil
 	s.resultIndex = 0
 	// Neo4j doesn't send has_more when false - just empty metadata
-	return s.sendSuccess(map[string]any{})
+	if err := s.sendSuccessNoFlush(map[string]any{}); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // handleRoute handles the ROUTE message (for cluster routing).
 func (s *Session) handleRoute(data []byte) error {
-	return s.sendSuccess(map[string]any{
+	if err := s.sendSuccessNoFlush(map[string]any{
 		"rt": map[string]any{
 			"ttl":     300,
 			"servers": []map[string]any{},
 		},
-	})
+	}); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // handleReset handles the RESET message.
@@ -1556,7 +1578,10 @@ func (s *Session) handleReset(data []byte) error {
 	s.txMetadata = nil
 	s.lastResult = nil
 	s.resultIndex = 0
-	return s.sendSuccess(nil)
+	if err := s.sendSuccessNoFlush(nil); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // handleBegin handles the BEGIN message.
@@ -1582,7 +1607,10 @@ func (s *Session) handleBegin(data []byte) error {
 	}
 
 	s.inTransaction = true
-	return s.sendSuccess(nil)
+	if err := s.sendSuccessNoFlush(nil); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // handleCommit handles the COMMIT message.
@@ -1611,9 +1639,12 @@ func (s *Session) handleCommit(data []byte) error {
 	bookmark := s.generateBookmark()
 
 	// Return bookmark for client tracking
-	return s.sendSuccess(map[string]any{
+	if err := s.sendSuccessNoFlush(map[string]any{
 		"bookmark": bookmark,
-	})
+	}); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // generateBookmark generates a unique bookmark for causal consistency tracking.
@@ -1769,7 +1800,10 @@ func (s *Session) validateBookmarks(bookmarks []any) error {
 func (s *Session) handleRollback(data []byte) error {
 	if !s.inTransaction {
 		// Not an error to rollback when not in transaction (Neo4j behavior)
-		return s.sendSuccess(nil)
+		if err := s.sendSuccessNoFlush(nil); err != nil {
+			return err
+		}
+		return s.flushIfPending()
 	}
 
 	// If executor supports transactions, rollback
@@ -1779,13 +1813,19 @@ func (s *Session) handleRollback(data []byte) error {
 			// Rollback failed, but we still clear state
 			s.inTransaction = false
 			s.txMetadata = nil
-			return s.sendFailure("Neo.TransactionError.Rollback", err.Error())
+			if err := s.sendFailure("Neo.TransactionError.Rollback", err.Error()); err != nil {
+				return err
+			}
+			return s.flushIfPending()
 		}
 	}
 
 	s.inTransaction = false
 	s.txMetadata = nil
-	return s.sendSuccess(nil)
+	if err := s.sendSuccessNoFlush(nil); err != nil {
+		return err
+	}
+	return s.flushIfPending()
 }
 
 // sendRecord sends a RECORD response.
@@ -1883,6 +1923,24 @@ func (s *Session) sendSuccess(metadata map[string]any) error {
 	return err
 }
 
+func (s *Session) sendSuccessNoFlush(metadata map[string]any) error {
+	buf := s.recordBuf
+	if cap(buf) < 16*1024 {
+		buf = make([]byte, 0, 16*1024)
+	}
+	buf = buf[:0]
+
+	buf = append(buf, successHeader...)
+	buf = encodePackStreamMapInto(buf, metadata)
+
+	if err := s.writeMessageNoFlush(buf); err != nil {
+		return err
+	}
+	s.recordBuf = buf[:0]
+	s.flushPending = true
+	return nil
+}
+
 // sendFailure sends a FAILURE response.
 // Uses buffer pooling to reduce allocations.
 func (s *Session) sendFailure(code, message string) error {
@@ -1911,6 +1969,14 @@ func (s *Session) sendChunk(data []byte) error {
 	if err := s.writeMessageNoFlush(data); err != nil {
 		return err
 	}
+	return s.writer.Flush()
+}
+
+func (s *Session) flushIfPending() error {
+	if !s.flushPending {
+		return nil
+	}
+	s.flushPending = false
 	return s.writer.Flush()
 }
 

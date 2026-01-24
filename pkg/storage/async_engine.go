@@ -283,15 +283,18 @@ func (ae *AsyncEngine) flushLoop() {
 
 // FlushResult tracks the outcome of a flush operation for observability.
 type FlushResult struct {
-	NodesWritten  int
-	NodesFailed   int
-	EdgesWritten  int
-	EdgesFailed   int
-	NodesDeleted  int
-	EdgesDeleted  int
-	DeletesFailed int
-	FailedNodeIDs []NodeID // IDs that failed - still in cache for retry
-	FailedEdgeIDs []EdgeID // IDs that failed - still in cache for retry
+	NodesWritten     int
+	NodesFailed      int
+	EdgesWritten     int
+	EdgesFailed      int
+	NodesDeleted     int
+	EdgesDeleted     int
+	DeletesFailed    int
+	FailedNodeIDs    []NodeID // IDs that failed - still in cache for retry
+	FailedEdgeIDs    []EdgeID // IDs that failed - still in cache for retry
+	FirstNodeError   string
+	FirstEdgeError   string
+	FirstDeleteError string
 }
 
 // HasErrors returns true if any flush operations failed.
@@ -317,6 +320,18 @@ func (ae *AsyncEngine) Flush() error {
 
 	result := ae.FlushWithResult()
 	if result.HasErrors() {
+		details := ""
+		if result.FirstNodeError != "" {
+			details = result.FirstNodeError
+		} else if result.FirstEdgeError != "" {
+			details = result.FirstEdgeError
+		} else if result.FirstDeleteError != "" {
+			details = result.FirstDeleteError
+		}
+		if details != "" {
+			return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed (%s)",
+				result.NodesFailed, result.EdgesFailed, result.DeletesFailed, details)
+		}
 		return fmt.Errorf("flush incomplete: %d nodes failed, %d edges failed, %d deletes failed",
 			result.NodesFailed, result.EdgesFailed, result.DeletesFailed)
 	}
@@ -387,10 +402,16 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 			nodeIDs = append(nodeIDs, id)
 		}
 		if err := ae.engine.BulkDeleteNodes(nodeIDs); err != nil {
+			if result.FirstDeleteError == "" {
+				result.FirstDeleteError = err.Error()
+			}
 			// Bulk failed - try individual deletes
 			for _, id := range nodeIDs {
 				if err := ae.engine.DeleteNode(id); err != nil {
 					result.DeletesFailed++
+					if result.FirstDeleteError == "" {
+						result.FirstDeleteError = err.Error()
+					}
 				} else {
 					successfulNodeDeletes[id] = true
 					result.NodesDeleted++
@@ -410,10 +431,16 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 			edgeIDs = append(edgeIDs, id)
 		}
 		if err := ae.engine.BulkDeleteEdges(edgeIDs); err != nil {
+			if result.FirstDeleteError == "" {
+				result.FirstDeleteError = err.Error()
+			}
 			// Bulk failed - try individual deletes
 			for _, id := range edgeIDs {
 				if err := ae.engine.DeleteEdge(id); err != nil {
 					result.DeletesFailed++
+					if result.FirstDeleteError == "" {
+						result.FirstDeleteError = err.Error()
+					}
 				} else {
 					successfulEdgeDeletes[id] = true
 					result.EdgesDeleted++
@@ -437,6 +464,9 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 					// CRITICAL FIX: Track failed node - DON'T remove from cache
 					result.NodesFailed++
 					result.FailedNodeIDs = append(result.FailedNodeIDs, node.ID)
+					if result.FirstNodeError == "" {
+						result.FirstNodeError = err.Error()
+					}
 				} else {
 					successfulNodeWrites[node.ID] = true
 					result.NodesWritten++
@@ -454,6 +484,9 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 		}
 		if len(edges) > 0 {
 			if err := ae.engine.BulkCreateEdges(edges); err != nil {
+				if result.FirstEdgeError == "" {
+					result.FirstEdgeError = err.Error()
+				}
 				// Bulk failed - try individual creates
 				for _, edge := range edges {
 					if err := ae.engine.CreateEdge(edge); err != nil {
@@ -461,6 +494,9 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 						if err := ae.engine.UpdateEdge(edge); err != nil {
 							result.EdgesFailed++
 							result.FailedEdgeIDs = append(result.FailedEdgeIDs, edge.ID)
+							if result.FirstEdgeError == "" {
+								result.FirstEdgeError = err.Error()
+							}
 						} else {
 							successfulEdgeWrites[edge.ID] = true
 							result.EdgesWritten++
@@ -524,6 +560,9 @@ func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
 	if node == nil {
 		return "", ErrInvalidData
 	}
+	if err := validatePropertiesForStorage(node.Properties); err != nil {
+		return "", err
+	}
 	if err := ae.validateNodeConstraints(node); err != nil {
 		return "", err
 	}
@@ -580,6 +619,9 @@ func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
 func (ae *AsyncEngine) UpdateNode(node *Node) error {
 	if node == nil {
 		return ErrInvalidData
+	}
+	if err := validatePropertiesForStorage(node.Properties); err != nil {
+		return err
 	}
 	if err := ae.validateNodeConstraints(node); err != nil {
 		return err
@@ -729,6 +771,12 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 
 // CreateEdge adds to cache and returns immediately.
 func (ae *AsyncEngine) CreateEdge(edge *Edge) error {
+	if edge == nil {
+		return ErrInvalidData
+	}
+	if err := validatePropertiesForStorage(edge.Properties); err != nil {
+		return err
+	}
 	// Check cache size limit BEFORE acquiring lock to avoid deadlock
 	// If cache is full, flush synchronously to make room
 	if ae.maxEdgeCacheSize > 0 {
@@ -765,6 +813,12 @@ func (ae *AsyncEngine) CreateEdge(edge *Edge) error {
 
 // UpdateEdge adds to cache and returns immediately.
 func (ae *AsyncEngine) UpdateEdge(edge *Edge) error {
+	if edge == nil {
+		return ErrInvalidData
+	}
+	if err := validatePropertiesForStorage(edge.Properties); err != nil {
+		return err
+	}
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
@@ -1548,6 +1602,14 @@ func (ae *AsyncEngine) BulkCreateNodes(nodes []*Node) error {
 	if err := ae.validateBulkNodeConstraints(nodes); err != nil {
 		return err
 	}
+	for _, node := range nodes {
+		if node == nil {
+			return ErrInvalidData
+		}
+		if err := validatePropertiesForStorage(node.Properties); err != nil {
+			return err
+		}
+	}
 
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
@@ -1870,6 +1932,15 @@ func (ae *AsyncEngine) checkExistenceConstraint(node *Node, c Constraint) error 
 
 // BulkCreateEdges creates edges in batch (async).
 func (ae *AsyncEngine) BulkCreateEdges(edges []*Edge) error {
+	for _, edge := range edges {
+		if edge == nil {
+			return ErrInvalidData
+		}
+		if err := validatePropertiesForStorage(edge.Properties); err != nil {
+			return err
+		}
+	}
+
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
