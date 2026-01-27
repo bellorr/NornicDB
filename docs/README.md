@@ -1,6 +1,6 @@
 # NornicDB Documentation
 
-Welcome to **NornicDB** - A production-ready graph database with GPU acceleration, Neo4j compatibility, and advanced AI integration.
+Welcome to **NornicDB** - A high-performance graph database with GPU acceleration, Neo4j compatibility, and advanced AI integration.
 
 ## 🚀 Quick Start Paths
 
