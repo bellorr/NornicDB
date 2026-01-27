@@ -142,6 +142,16 @@ func (s *Server) invalidateExecutor(dbName string) {
 	delete(s.executors, dbName)
 }
 
+// invalidateAllExecutors clears all cached executors to force fresh database manager references.
+// This is used when database metadata changes (e.g., dropping databases) to ensure
+// all executors see the updated state.
+func (s *Server) invalidateAllExecutors() {
+	s.executorsMu.Lock()
+	defer s.executorsMu.Unlock()
+	// Clear all executors - they will be recreated with fresh database manager references
+	s.executors = make(map[string]*cypher.StorageExecutor)
+}
+
 // databaseManagerAdapter wraps multidb.DatabaseManager to implement
 // cypher.DatabaseManagerInterface, avoiding import cycles.
 type databaseManagerAdapter struct {
@@ -165,6 +175,9 @@ func (a *databaseManagerAdapter) DropDatabase(name string) error {
 	// Invalidate cached executor for dropped database
 	if a.server != nil {
 		a.server.invalidateExecutor(name)
+		// Also invalidate all executors to ensure fresh database manager references
+		// This ensures queries from other databases see the updated database list
+		a.server.invalidateAllExecutors()
 	}
 	return nil
 }
@@ -238,8 +251,15 @@ func (a *databaseManagerAdapter) DropCompositeDatabase(name string) error {
 	if err := a.manager.DropCompositeDatabase(name); err != nil {
 		return err
 	}
-	// Note: Composite databases don't have their own executors cached
-	// since queries go through constituent databases. No cleanup needed.
+	// Invalidate any cached executors that might reference this composite database
+	// Note: Composite databases don't have their own executors cached, but we should
+	// invalidate the executor for the database we're querying from (usually "nornic")
+	// to ensure subsequent queries see the updated state
+	if a.server != nil {
+		// Invalidate executor cache to force fresh database manager reference
+		// This ensures all executors see the updated database list
+		a.server.invalidateAllExecutors()
+	}
 	return nil
 }
 

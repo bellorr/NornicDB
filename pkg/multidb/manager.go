@@ -379,7 +379,14 @@ func (m *DatabaseManager) DropDatabase(name string) error {
 	delete(m.databases, name)
 	delete(m.engines, name) // Clear cached engine
 
-	return m.persistMetadata()
+	if err := m.persistMetadata(); err != nil {
+		// If persistence fails, restore the database to maintain consistency
+		// This prevents the database from being dropped in memory but still existing in storage
+		m.databases[name] = info
+		return fmt.Errorf("failed to persist metadata after drop: %w", err)
+	}
+
+	return nil
 }
 
 // GetStorage returns a namespaced storage engine for the specified database.
