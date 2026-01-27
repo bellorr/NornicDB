@@ -576,6 +576,11 @@ func runServe(cmd *cobra.Command, args []string) error {
 			fmt.Println("   ⚠️  No JWT secret configured - tokens will invalidate on restart!")
 		}
 
+		// Use configured default admin username (from env/config, default: "admin")
+		if cfg.Auth.InitialUsername != "" {
+			authConfig.DefaultAdminUsername = cfg.Auth.InitialUsername
+		}
+
 		// Get system database storage for user persistence
 		systemStorage, storageErr := dbManager.GetStorage("system")
 		if storageErr != nil {
@@ -588,13 +593,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("creating authenticator: %w", authErr)
 		}
 
-		// Create admin user
-		_, err := authenticator.CreateUser("admin", adminPassword, []auth.Role{auth.RoleAdmin})
+		// Create admin user with configured username
+		adminUsername := authConfig.DefaultAdminUsername
+		if adminUsername == "" {
+			adminUsername = "admin" // Fallback to default
+		}
+		_, err := authenticator.CreateUser(adminUsername, adminPassword, []auth.Role{auth.RoleAdmin})
 		if err != nil {
 			// User might already exist
 			fmt.Printf("   ⚠️  Admin user: %v\n", err)
 		} else {
-			fmt.Println("   ✅ Admin user created (admin)")
+			fmt.Printf("   ✅ Admin user created (%s)\n", adminUsername)
 		}
 	}
 	// Note: Auth status logged at server startup

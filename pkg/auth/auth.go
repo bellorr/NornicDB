@@ -341,6 +341,10 @@ type AuthConfig struct {
 	MaxFailedLogins int
 	LockoutDuration time.Duration
 
+	// Default admin username (never gets locked out)
+	// This ensures the root admin account is always accessible
+	DefaultAdminUsername string
+
 	// Feature flags
 	SecurityEnabled bool
 }
@@ -349,12 +353,13 @@ type AuthConfig struct {
 // Matches Mimir's defaults for compatibility.
 func DefaultAuthConfig() AuthConfig {
 	return AuthConfig{
-		MinPasswordLength: 8,
-		BcryptCost:        bcrypt.DefaultCost,
-		TokenExpiry:       0, // Never expire by default (Mimir behavior)
-		MaxFailedLogins:   5,
-		LockoutDuration:   15 * time.Minute,
-		SecurityEnabled:   true,
+		MinPasswordLength:    8,
+		BcryptCost:           bcrypt.DefaultCost,
+		TokenExpiry:          0, // Never expire by default (Mimir behavior)
+		MaxFailedLogins:      5,
+		LockoutDuration:      15 * time.Minute,
+		DefaultAdminUsername: "admin", // Default root admin username
+		SecurityEnabled:      true,
 	}
 }
 
@@ -991,8 +996,9 @@ func (a *Authenticator) Authenticate(username, password, ipAddress, userAgent st
 		return nil, nil, ErrInvalidCredentials // Don't reveal if user exists
 	}
 
-	// Check if account is locked
-	if !user.LockedUntil.IsZero() && time.Now().Before(user.LockedUntil) {
+	// Check if account is locked (default admin account is never locked)
+	isDefaultAdmin := a.config.DefaultAdminUsername != "" && username == a.config.DefaultAdminUsername
+	if !isDefaultAdmin && !user.LockedUntil.IsZero() && time.Now().Before(user.LockedUntil) {
 		a.logAudit(AuditEvent{
 			EventType: "login",
 			Username:  username,
@@ -1021,25 +1027,39 @@ func (a *Authenticator) Authenticate(username, password, ipAddress, userAgent st
 
 	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(password)); err != nil {
-		// Increment failed login counter
-		user.FailedLogins++
-		if user.FailedLogins >= a.config.MaxFailedLogins {
-			user.LockedUntil = time.Now().Add(a.config.LockoutDuration)
+		// Default admin account ("admin") is never locked - skip lockout logic
+		if !isDefaultAdmin {
+			// Increment failed login counter
+			user.FailedLogins++
+			if user.FailedLogins >= a.config.MaxFailedLogins {
+				user.LockedUntil = time.Now().Add(a.config.LockoutDuration)
+			}
+			user.UpdatedAt = time.Now()
+
+			// Persist failed login state
+			a.saveUser(user) // Ignore error - don't fail on storage issues
+
+			a.logAudit(AuditEvent{
+				EventType: "login",
+				Username:  username,
+				UserID:    user.ID,
+				IPAddress: ipAddress,
+				UserAgent: userAgent,
+				Success:   false,
+				Details:   fmt.Sprintf("invalid password (attempt %d/%d)", user.FailedLogins, a.config.MaxFailedLogins),
+			})
+		} else {
+			// Default admin failed login - log but don't lock (ensures admin access is always available)
+			a.logAudit(AuditEvent{
+				EventType: "login",
+				Username:  username,
+				UserID:    user.ID,
+				IPAddress: ipAddress,
+				UserAgent: userAgent,
+				Success:   false,
+				Details:   fmt.Sprintf("invalid password (root admin account %s - no lockout)", username),
+			})
 		}
-		user.UpdatedAt = time.Now()
-
-		// Persist failed login state
-		a.saveUser(user) // Ignore error - don't fail on storage issues
-
-		a.logAudit(AuditEvent{
-			EventType: "login",
-			Username:  username,
-			UserID:    user.ID,
-			IPAddress: ipAddress,
-			UserAgent: userAgent,
-			Success:   false,
-			Details:   fmt.Sprintf("invalid password (attempt %d/%d)", user.FailedLogins, a.config.MaxFailedLogins),
-		})
 		return nil, nil, ErrInvalidCredentials
 	}
 
