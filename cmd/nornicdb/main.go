@@ -139,6 +139,8 @@ Features:
 	serveCmd.Flags().Bool("headless", getEnvBool("NORNICDB_HEADLESS", false), "Disable web UI and browser-related endpoints")
 	// Base path for reverse proxy deployment
 	serveCmd.Flags().String("base-path", getEnvStr("NORNICDB_BASE_PATH", ""), "Base URL path for reverse proxy deployment (e.g., /nornicdb)")
+	// Pprof profiling (development/testing only) - commented out, can be enabled for profiling
+	// serveCmd.Flags().Bool("enable-pprof", getEnvBool("NORNICDB_ENABLE_PPROF", false), "Enable /debug/pprof endpoints for performance profiling (WARNING: development/testing only)")
 
 	// Replication / HA (pkg/replication). These map to NORNICDB_CLUSTER_* env vars.
 	serveCmd.Flags().String("cluster-mode", getEnvStr("NORNICDB_CLUSTER_MODE", ""), "Cluster mode: standalone|ha_standby|raft|multi_region (empty disables clustering)")
@@ -257,6 +259,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	logQueries, _ := cmd.Flags().GetBool("log-queries")
 	headless, _ := cmd.Flags().GetBool("headless")
 	basePath, _ := cmd.Flags().GetString("base-path")
+	// enablePprof, _ := cmd.Flags().GetBool("enable-pprof") // Commented out - can be enabled for profiling
 
 	// Apply cluster flags as env vars so pkg/replication (and nornicdb.Open) can pick them up.
 	// This keeps the replication config source-of-truth in NORNICDB_CLUSTER_* while providing a CLI UX.
@@ -613,6 +616,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	serverConfig.ModelsDir = cfg.Memory.ModelsDir
 	serverConfig.Headless = headless
 	serverConfig.BasePath = basePath
+	// serverConfig.EnablePprof = enablePprof // Commented out - can be enabled for profiling
 	serverConfig.Features = &cfg.Features // Pass features loaded from YAML config
 	// Pass plugin directories from loaded config
 	serverConfig.PluginsDir = cfg.Server.PluginsDir

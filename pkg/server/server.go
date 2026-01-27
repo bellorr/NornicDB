@@ -18,6 +18,7 @@
 //   - GDPR compliance endpoints (/gdpr/export, /gdpr/delete)
 //   - Admin endpoints (/admin/stats, /admin/config)
 //   - GPU acceleration control (/admin/gpu/*)
+//   - HTTP/2 support (always enabled, backwards compatible with HTTP/1.1)
 //
 // Example Usage:
 //
@@ -171,6 +172,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
@@ -263,6 +267,17 @@ type Config struct {
 	// TLSKeyFile for HTTPS
 	TLSKeyFile string
 
+	// HTTP/2 Configuration
+	// HTTP/2 is always enabled (backwards compatible with HTTP/1.1)
+	// HTTP/2 provides multiplexing, header compression, and improved performance
+	// HTTP/1.1 clients continue to work normally
+	// HTTP2MaxConcurrentStreams limits the number of concurrent streams per connection (default: 100)
+	// - 100: Industry standard, recommended for most workloads (default)
+	// - 250: Go's internal default, good for moderate concurrency
+	// - 500-1000: High concurrency scenarios, uses more memory per connection
+	// - Very high values (>1000) are not recommended due to DoS attack risk
+	HTTP2MaxConcurrentStreams uint32
+
 	// MCP Configuration (Model Context Protocol)
 	// MCPEnabled controls whether the MCP server is started (default: true)
 	// Set to false to disable MCP tools entirely
@@ -323,6 +338,12 @@ type Config struct {
 	// Features configuration (passed from main config loading)
 	// This contains feature flags like HeimdallEnabled loaded from YAML/env
 	Features *nornicConfig.FeatureFlagsConfig
+
+	// Debug/Profiling Configuration (commented out - can be enabled for profiling)
+	// EnablePprof enables /debug/pprof endpoints for performance profiling
+	// WARNING: Only enable in development/testing environments
+	// Env: NORNICDB_ENABLE_PPROF=true|false
+	// EnablePprof bool
 }
 
 // DefaultConfig returns Neo4j-compatible default server configuration.
@@ -415,6 +436,19 @@ func DefaultConfig() *Config {
 		//   NORNICDB_HEADLESS=true
 		//   --headless flag
 		Headless: false,
+
+		// Pprof disabled by default (security: profiling endpoints expose internals)
+		// Override via:
+		//   NORNICDB_ENABLE_PPROF=true
+		// EnablePprof: false, // Commented out - can be enabled for profiling
+
+		// HTTP/2 always enabled (backwards compatible with HTTP/1.1)
+		// MaxConcurrentStreams: 100 is the industry standard default
+		// - Matches Go's recommended value (TODO in Go source suggests 100)
+		// - Adequate for typical workloads (100 concurrent requests per connection)
+		// - Protects against DoS attacks (prevents memory exhaustion)
+		// - Can be increased for high-concurrency scenarios (e.g., 500-1000)
+		HTTP2MaxConcurrentStreams: 100,
 	}
 }
 
@@ -978,6 +1012,25 @@ func (s *Server) Start() error {
 		ReadTimeout:  s.config.ReadTimeout,
 		WriteTimeout: s.config.WriteTimeout,
 		IdleTimeout:  s.config.IdleTimeout,
+	}
+
+	// Configure HTTP/2 (always enabled, backwards compatible with HTTP/1.1)
+	http2Config := &http2.Server{
+		MaxConcurrentStreams: s.config.HTTP2MaxConcurrentStreams,
+	}
+
+	if s.config.TLSCertFile != "" && s.config.TLSKeyFile != "" {
+		// HTTPS mode: HTTP/2 is automatically enabled via ALPN
+		// Configure HTTP/2 settings for TLS connections
+		if err := http2.ConfigureServer(s.httpServer, http2Config); err != nil {
+			return fmt.Errorf("failed to configure HTTP/2 for TLS: %w", err)
+		}
+		log.Println("🚀 HTTP/2 enabled (HTTPS mode)")
+	} else {
+		// HTTP mode: Use h2c (HTTP/2 cleartext) for backwards compatibility
+		// h2c allows HTTP/2 over plain TCP, falling back to HTTP/1.1 for older clients
+		s.httpServer.Handler = h2c.NewHandler(mux, http2Config)
+		log.Println("🚀 HTTP/2 enabled (h2c cleartext mode, backwards compatible with HTTP/1.1)")
 	}
 
 	// Start serving
