@@ -9,6 +9,229 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
+## [Unreleased] - Changes since v1.0.11-preview
+
+### Added
+
+- **Qdrant gRPC Compatibility Layer**: Full implementation of Qdrant gRPC API (v1.16.x) enabling existing Qdrant SDKs (Python, Go, Rust, JavaScript) to connect without modification
+  - Collections service: Create, Get, List, Delete, Update, CollectionExists
+  - Points service: Upsert, Get, Delete, Count, Search, Query, Scroll, payload operations, vector operations
+  - Snapshots service: Create, List, Delete, CreateFull
+  - Text queries via `Points.Query` with `VectorInput.Document` support
+  - RBAC enforcement with per-RPC permissions configuration
+  - Feature flag: `NORNICDB_QDRANT_GRPC_ENABLED=true` (disabled by default)
+  - Files: `pkg/qdrantgrpc/*`, `pkg/server/server_qdrantgrpc.go`, `docs/user-guides/qdrant-grpc.md`
+
+- **Canonical Graph Ledger**: Temporal DDL, transaction log queries, and receipts for audit-grade mutation tracking
+  - Temporal constraints with validity windows (no-overlap enforcement)
+  - Transaction log queries via `CALL db.txlog.*` procedures
+  - Receipts with tx_id, wal_seq_start/end, and hash for auditability
+  - WAL retention configuration for ledger-grade retention
+  - Files: `pkg/cypher/call_temporal.go`, `pkg/cypher/call_txlog.go`, `pkg/storage/receipt.go`, `pkg/storage/temporal_constraint.go`, `docs/user-guides/canonical-graph-ledger.md`
+
+- **Temporal Procedures**: New Cypher procedures for temporal data management
+  - `CALL db.temporal.createConstraint()`, `CALL db.temporal.dropConstraint()`
+  - `CALL db.temporal.listConstraints()`, `CALL db.temporal.validate()`
+  - `CALL db.txlog.scan()`, `CALL db.txlog.getReceipt()`
+  - Files: `pkg/cypher/call_temporal.go`, `pkg/cypher/temporal_procedures_test.go`
+
+- **Vector Search Improvements**: Major refactoring and performance enhancements
+  - HNSW configuration system with integration tests
+  - Candidate generation strategies: GPU K-means, IVF-HNSW hybrid, vector ID collapse
+  - Vector pipeline with query specification and strategy benchmarking
+  - Vector registry for named vector management
+  - ARM64 Metal acceleration for HNSW operations
+  - Files: `pkg/search/hnsw_config.go`, `pkg/search/vector_pipeline.go`, `pkg/search/vector_query_spec.go`, `pkg/search/gpu_kmeans_candidate_gen.go`, `pkg/search/hnsw_metal.go`, `pkg/vectorspace/registry.go`
+
+- **Storage Serialization**: New msgpack serializer option and serializer migration tools
+  - Msgpack serializer for improved performance and smaller storage footprint
+  - Serializer detection and migration utilities
+  - Serialization benchmarks and comprehensive tests
+  - Files: `pkg/storage/badger_serialization.go`, `pkg/storage/serializer_migration.go`, `pkg/storage/serialization_bench_test.go`, `docs/operations/storage-serialization.md`
+
+- **Property Validation**: Type validation and constraint enforcement for node properties
+  - Property type validation with comprehensive test coverage
+  - Integration with schema persistence system
+  - Files: `pkg/storage/property_validation.go`, `pkg/storage/property_validation_test.go`, `docs/user-guides/property-data-types.md`
+
+- **Schema Persistence**: Persistent schema storage with constraint validation
+  - Schema persistence across restarts
+  - Constraint validation layer with namespace support
+  - Files: `pkg/storage/schema_persistence.go`, `pkg/storage/badger_schema.go`, `pkg/storage/badger_constraint_validation.go`
+
+- **Storage Recovery**: Enhanced recovery mechanisms for WAL corruption and data integrity
+  - WAL repair utilities with corruption detection
+  - WAL segments management with retention policies
+  - Storage recovery tests and validation
+  - Files: `pkg/storage/wal_repair.go`, `pkg/storage/wal_segments.go`, `pkg/nornicdb/storage_recovery.go`, `docs/operations/wal-compaction.md`
+
+- **Auto-Embedding Inference**: Automatic embedding generation with intelligent chunking
+  - Auto-embedding inference system with query chunking
+  - Embedding invalidation and regeneration support
+  - Files: `pkg/nornicdb/auto_embed_inference.go`, `pkg/cypher/query_embed_chunk.go`, `pkg/util/text_chunk.go`
+
+- **ARM64 SIMD Optimizations**: NEON SIMD implementation for ARM64 platforms
+  - Native NEON SIMD operations for vector math
+  - C++ bridge for optimal performance
+  - Files: `pkg/simd/neon_simd.go`, `pkg/simd/neon_simd_arm64.cpp`, `docs/architecture/neon-simd-implementation.md`
+
+- **Query Autocomplete Plugin**: Intelligent query autocomplete for Cypher queries
+  - Plugin system for query autocomplete
+  - Integration with Heimdall AI assistant
+  - Files: `pkg/heimdall/plugin.go` (enhanced), `docs/features/autocomplete-plugin.md`, `ui/src/components/browser/QueryAutocomplete.tsx`
+
+- **Auth Caching**: Performance improvements for authentication
+  - Auth cache with TTL and invalidation
+  - Reduced authentication overhead for high-throughput scenarios
+  - Files: `pkg/auth/auth_cache.go`, `pkg/auth/auth_cache_test.go`
+
+- **Replication Enhancements**: TLS support and shared-secret authentication
+  - TLS transport security for replication
+  - Shared-secret authentication
+  - Codec improvements and transport roundtrip tests
+  - Replicated engine with comprehensive test coverage
+  - Files: `pkg/replication/transport_security.go`, `pkg/replication/codec.go`, `pkg/replication/replicated_engine.go`, `pkg/replication/handlers.go`
+
+- **NornicDB gRPC Search Service**: Native gRPC search service
+  - Protobuf definitions and generated code
+  - Search service implementation with tests
+  - Files: `pkg/nornicgrpc/*`, `docs/architecture/embedding-search-architecture.md`
+
+- **Performance Documentation**: Comprehensive performance guides
+  - HTTP/2 implementation documentation
+  - HTTP optimization options guide
+  - Max concurrent streams comparison
+  - Single request benchmark analysis
+  - pprof quick guide
+  - Files: `docs/performance/http2-implementation.md`, `docs/performance/http-optimization-options.md`, `docs/performance/maxconcurrentstreams-comparison.md`, `docs/performance/single-request-benchmark.md`, `docs/performance/pprof-quick-guide.md`
+
+- **UI Improvements**: Refactored browser UI with new components
+  - Query autocomplete component
+  - Node details panel with editing capabilities
+  - Search panel enhancements
+  - Query results table improvements
+  - Files: `ui/src/components/browser/*`, `ui/src/pages/Browser.tsx`
+
+- **Neural Training**: Cypher query training infrastructure
+  - Training scripts for Cypher query generation
+  - Model export and conversion utilities
+  - Files: `neural/train_nornicdb_cypher.py`, `neural/scripts/*`, `neural/NEXT_STEPS.md`
+
+### Changed
+
+- **Bolt Protocol**: Enhanced PackStream implementation with hash support and improved chunking
+  - PackStream hash calculation for message integrity
+  - Improved chunked message handling
+  - Integer comparison fixes for ID handling
+  - Files: `pkg/bolt/packstream.go`, `pkg/bolt/packstream_hash_test.go`, `docs/api-reference/bolt-protocol.md`
+
+- **Cypher Executor**: Major improvements to query execution
+  - Enhanced CREATE with return path and relationship support
+  - Improved DELETE handling within queries
+  - Long query resilience improvements
+  - Identifier unquoting fixes
+  - Files: `pkg/cypher/executor.go`, `pkg/cypher/create.go`, `pkg/cypher/delete_in_query_test.go`
+
+- **Storage Engine**: Significant improvements to Badger storage
+  - Fast path for nodes by label and ID
+  - Enhanced transaction handling for edges
+  - Improved async engine with callback deadlock prevention
+  - Namespace prefix handling improvements
+  - Label-to-nodeID lookup optimization
+  - Files: `pkg/storage/badger*.go`, `pkg/storage/async_engine.go`, `pkg/storage/label_nodeid_lookup.go`
+
+- **Search Service**: Major refactoring for performance and maintainability
+  - Vector pipeline architecture
+  - Query specification system
+  - Strategy benchmarking framework
+  - Files: `pkg/search/search.go`, `pkg/search/vector_pipeline.go`, `pkg/search/vector_query_spec.go`
+
+- **WAL System**: Enhanced durability and operability
+  - WAL segments with retention policies
+  - Corruption detection and repair
+  - Improved compaction and truncation
+  - Files: `pkg/storage/wal.go`, `pkg/storage/wal_segments.go`, `pkg/storage/wal_repair.go`, `docs/operations/wal-compaction.md`
+
+- **GPU Operations**: Improved CUDA and Metal support
+  - CUDA sync pointer checks
+  - Metal build fixes
+  - GPU K-means candidate generation
+  - Files: `pkg/gpu/cuda/cuda_bridge.go`, `pkg/gpu/gpu.go`, `pkg/search/hnsw_metal.go`
+
+- **Replication**: Enhanced multi-region and HA standby support
+  - Improved storage adapter with benchmarks
+  - Enhanced transport layer
+  - Standby startup improvements
+  - Files: `pkg/replication/storage_adapter.go`, `pkg/replication/ha_standby.go`, `pkg/replication/multi_region.go`
+
+- **Configuration**: Extended configuration options
+  - Qdrant gRPC configuration
+  - Temporal constraint configuration
+  - WAL retention configuration
+  - Files: `pkg/config/config.go`, `nornicdb.example.yaml`
+
+- **Heimdall**: Enhanced AI assistant capabilities
+  - Improved plugin system
+  - Metrics and discovery chunk testing
+  - Scheduler improvements
+  - Files: `pkg/heimdall/*`
+
+### Fixed
+
+- **Edge Index Tracking**: Fixed edge index tracking on CREATE operations
+- **Auto-TLP Trigger**: Fixed Auto-TLP trigger after async embeddings persist
+- **Orphaned Vectors**: Prevented orphaned vectors on node reindex/delete
+- **Badger Transactions**: Fixed transaction handling for edges in executor
+- **WAL Corruption Detection**: Improved corruption detection on startup
+- **SET with Map Variables**: Added support for `SET n += mapVar` syntax
+- **Create Return ID**: Fixed ID return in CREATE RETURN statements
+- **Integer Comparison**: Fixed integer comparison to ID in Bolt protocol
+- **Auth Cache**: Fixed auth cache for all users
+- **Create Relationship**: Fixed issue #14 with create relationship
+- **IN id() Evaluation**: Fixed IN id() evaluation in queries
+- **Deletion Mechanism**: Fixed deletion mechanism edge cases
+- **Server Shutdown**: Fixed server shutdown and deadlock issues
+- **Replication Connections**: Fixed replication connection settings
+- **Path Return on Create**: Fixed path return on CREATE operations
+- **Flaky Tests**: Fixed flaky test issues
+- **Default Account Lockout**: Prevented default account lockout
+- **Memory Allocations**: Reduced memory allocations by reusing and caching services per DB
+
+### Performance
+
+- **Write Performance**: Enhanced write performance for Badger with optimizations
+- **Drop Database**: Improved drop database performance using Badger prefix drop
+- **Memory Allocations**: Reduced allocations by reusing and caching services per database
+- **Fast Path Queries**: Added fast path for nodes by label and ID
+- **HTTP/2**: HTTP/2 implementation with max concurrent streams optimization
+- **Vector Search**: Major performance improvements through pipeline refactoring
+- **GPU Acceleration**: ARM64 Metal acceleration for HNSW operations
+- **SIMD Optimizations**: ARM64 NEON SIMD for vector operations
+
+### Documentation
+
+- **Qdrant gRPC Guide**: Comprehensive guide for Qdrant gRPC compatibility (`docs/user-guides/qdrant-grpc.md`)
+- **Canonical Graph Ledger**: Complete guide for canonical graph implementation (`docs/user-guides/canonical-graph-ledger.md`)
+- **Property Data Types**: Complete reference for all supported property types (`docs/user-guides/property-data-types.md`)
+- **Embedding Search Architecture**: Detailed architecture documentation (`docs/architecture/embedding-search-architecture.md`)
+- **HTTP/2 Implementation**: Performance guide for HTTP/2 (`docs/performance/http2-implementation.md`)
+- **Storage Serialization**: Guide for storage serialization options (`docs/operations/storage-serialization.md`)
+- **WAL Compaction**: WAL compaction and retention guide (`docs/operations/wal-compaction.md`)
+- **Performance Guides**: Multiple performance analysis documents
+
+### Technical Details
+
+- **Statistics**: 369 files changed, 48,599 insertions(+), 4,857 deletions(-)
+- **New Packages**: `pkg/qdrantgrpc`, `pkg/nornicgrpc`, `pkg/vectorspace`, `pkg/util` (hash, text_chunk)
+- **Major Refactors**: Search service, storage serialization, WAL system, replication transport
+- **Test Coverage**: Extensive new test files across all major features
+- **Benchmarks**: New benchmark tests for vector search, storage operations, and replication
+
+### Notable Files Changed
+
+- Added: `pkg/qdrantgrpc/*`, `pkg/nornicgrpc/*`, `pkg/vectorspace/*`, `pkg/cypher/call_temporal.go`, `pkg/cypher/call_txlog.go`, `pkg/storage/receipt.go`, `pkg/storage/temporal_constraint.go`, `pkg/storage/schema_persistence.go`, `pkg/storage/wal_repair.go`, `pkg/storage/wal_segments.go`, `pkg/search/vector_pipeline.go`, `pkg/search/hnsw_config.go`, `pkg/simd/neon_simd*.go`, `docs/user-guides/qdrant-grpc.md`, `docs/user-guides/canonical-graph-ledger.md`, `docs/user-guides/property-data-types.md`
+- Modified: `pkg/cypher/*`, `pkg/storage/*`, `pkg/search/*`, `pkg/replication/*`, `pkg/auth/*`, `pkg/bolt/*`, `pkg/server/*`, `pkg/nornicdb/*`, `ui/*`
+
 ## [1.0.10] - 2025-12-21
 
 ### Added
