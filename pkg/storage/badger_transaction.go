@@ -476,6 +476,7 @@ func (tx *BadgerTransaction) deleteEdgesWithPrefixBuffered(prefix []byte) (int64
 		tx.bufferDelete(edgeKey)
 		tx.bufferDelete(outgoingIndexKey(edge.StartNode, edgeID))
 		tx.bufferDelete(incomingIndexKey(edge.EndNode, edgeID))
+		tx.bufferDelete(edgeTypeIndexKey(edge.Type, edgeID))
 
 		deletedCount++
 		deletedIDs = append(deletedIDs, edgeID)
@@ -579,6 +580,11 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 	inKey := incomingIndexKey(edge.EndNode, edge.ID)
 	tx.bufferSet(inKey, []byte{})
 
+	// Buffer edge type index for GetEdgesByType().
+	// Without this, edges created inside implicit/explicit transactions are invisible
+	// to type-based scans and Cypher fast-paths that rely on the edge-type index.
+	tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
+
 	// Track for read-your-writes
 	edgeCopy := copyEdge(edge)
 	tx.pendingEdges[edge.ID] = edgeCopy
@@ -640,6 +646,9 @@ func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 
 	inKey := incomingIndexKey(edge.EndNode, edgeID)
 	tx.bufferDelete(inKey)
+
+	// Buffer edge type index deletion.
+	tx.bufferDelete(edgeTypeIndexKey(edge.Type, edgeID))
 
 	// Track deletion
 	delete(tx.pendingEdges, edgeID)
