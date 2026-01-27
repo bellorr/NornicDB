@@ -1067,10 +1067,10 @@ func (tx *BadgerTransaction) validateNodeConstraints(node *Node) error {
 			if err := tx.checkExistenceConstraint(node, constraint); err != nil {
 				return err
 			}
-			case ConstraintTemporal:
-				if err := tx.checkTemporalConstraint(node, constraint); err != nil {
-					return err
-				}
+		case ConstraintTemporal:
+			if err := tx.checkTemporalConstraint(node, constraint); err != nil {
+				return err
+			}
 		}
 	}
 
