@@ -83,6 +83,9 @@ package inference
 
 import (
 	"context"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -259,6 +262,36 @@ type coAccessKey struct {
 type SimilarityResult struct {
 	ID    string
 	Score float64
+}
+
+func normalizeVectorResultIDToNodeID(id string) string {
+	// Chunk IDs are formatted as: "{nodeID}-chunk-{i}"
+	// Named IDs are formatted as: "{nodeID}-named-{vectorName}"
+	// Property-vector IDs are formatted as: "{nodeID}-prop-{propertyKey}"
+	//
+	// Node IDs can contain '-' (UUIDs etc.), so only treat these as suffixes when they match
+	// the known patterns (and for chunks: when the suffix is an integer).
+	if idx := strings.LastIndex(id, "-chunk-"); idx >= 0 {
+		suffix := id[idx+len("-chunk-"):]
+		if suffix != "" {
+			if _, err := strconv.Atoi(suffix); err == nil {
+				return id[:idx]
+			}
+		}
+	}
+	if idx := strings.LastIndex(id, "-named-"); idx >= 0 {
+		suffix := id[idx+len("-named-"):]
+		if suffix != "" {
+			return id[:idx]
+		}
+	}
+	if idx := strings.LastIndex(id, "-prop-"); idx >= 0 {
+		suffix := id[idx+len("-prop-"):]
+		if suffix != "" {
+			return id[:idx]
+		}
+	}
+	return id
 }
 
 // New creates a new inference Engine with the given configuration.
@@ -498,28 +531,94 @@ func (e *Engine) GetHeimdallQC() *HeimdallQC {
 func (e *Engine) OnStore(ctx context.Context, nodeID string, embedding []float32) ([]EdgeSuggestion, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	return e.onStoreBestOfChunksLocked(ctx, nodeID, [][]float32{embedding})
+}
 
+// OnStoreBestOfChunks is called when a new node is stored (or later embedded) and has
+// multiple chunk embeddings available.
+//
+// It runs similarity search once per chunk embedding, then collapses candidates to unique
+// node IDs and keeps the best (highest) similarity score per node ("best-of-chunks").
+// The merged semantic suggestions are then combined with topology integration (if enabled),
+// and optionally sent through Heimdall QC.
+func (e *Engine) OnStoreBestOfChunks(ctx context.Context, nodeID string, embeddings [][]float32) ([]EdgeSuggestion, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.onStoreBestOfChunksLocked(ctx, nodeID, embeddings)
+}
+
+func (e *Engine) onStoreBestOfChunksLocked(ctx context.Context, nodeID string, embeddings [][]float32) ([]EdgeSuggestion, error) {
 	suggestions := make([]EdgeSuggestion, 0)
 
-	// 1. Similarity-based suggestions (semantic)
-	if e.similaritySearch != nil && len(embedding) > 0 {
-		similar, err := e.similaritySearch(ctx, embedding, e.config.SimilarityTopK)
-		if err == nil {
+	// Choose a representative embedding for downstream consumers (e.g., Heimdall augment pool).
+	// Prefer the chunk that produced the strongest semantic match; fall back to first non-empty.
+	var repEmbedding []float32
+	for _, emb := range embeddings {
+		if len(emb) > 0 {
+			repEmbedding = emb
+			break
+		}
+	}
+
+	// 1. Similarity-based suggestions (semantic) using best-of-chunks.
+	if e.similaritySearch != nil && len(embeddings) > 0 {
+		topK := e.config.SimilarityTopK
+		if topK <= 0 {
+			topK = 10
+		}
+
+		bestScore := make(map[string]float64)
+		bestObserved := -1.0
+
+		for _, emb := range embeddings {
+			if len(emb) == 0 {
+				continue
+			}
+
+			similar, err := e.similaritySearch(ctx, emb, topK)
+			if err != nil {
+				continue
+			}
+
 			for _, result := range similar {
-				if result.ID == nodeID {
+				targetID := normalizeVectorResultIDToNodeID(result.ID)
+				if targetID == nodeID {
 					continue // Skip self
 				}
-				if result.Score >= e.config.SimilarityThreshold {
-					conf := e.scoreToConfidence(result.Score)
-					suggestions = append(suggestions, EdgeSuggestion{
-						SourceID:   nodeID,
-						TargetID:   result.ID,
-						Type:       "RELATES_TO",
-						Confidence: conf,
-						Reason:     "High embedding similarity",
-						Method:     "similarity",
-					})
+				if result.Score < e.config.SimilarityThreshold {
+					continue
 				}
+
+				if prev, ok := bestScore[targetID]; !ok || result.Score > prev {
+					bestScore[targetID] = result.Score
+				}
+				if result.Score > bestObserved {
+					bestObserved = result.Score
+					repEmbedding = emb
+				}
+			}
+		}
+
+		if len(bestScore) > 0 {
+			results := make([]SimilarityResult, 0, len(bestScore))
+			for id, score := range bestScore {
+				results = append(results, SimilarityResult{ID: id, Score: score})
+			}
+			sort.Slice(results, func(i, j int) bool { return results[i].Score > results[j].Score })
+			if len(results) > topK {
+				results = results[:topK]
+			}
+
+			for _, result := range results {
+				conf := e.scoreToConfidence(result.Score)
+				suggestions = append(suggestions, EdgeSuggestion{
+					SourceID:   nodeID,
+					TargetID:   result.ID,
+					Type:       "RELATES_TO",
+					Confidence: conf,
+					Reason:     "High embedding similarity",
+					Method:     "similarity",
+				})
 			}
 		}
 	}
@@ -542,7 +641,7 @@ func (e *Engine) OnStore(ctx context.Context, nodeID string, embedding []float32
 	// 3. Heimdall QC validation (if enabled)
 	// Each suggestion is sent to the SLM for approval before returning
 	if e.heimdallQC != nil && config.IsAutoTLPLLMQCEnabled() {
-		suggestions = e.validateSuggestionsWithHeimdall(ctx, nodeID, embedding, suggestions)
+		suggestions = e.validateSuggestionsWithHeimdall(ctx, nodeID, repEmbedding, suggestions)
 	}
 
 	return suggestions, nil

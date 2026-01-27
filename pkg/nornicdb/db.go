@@ -1286,11 +1286,11 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	// from ALL databases (node IDs are fully-qualified, e.g. "nornic:<id>").
 	db.embedQueue = NewEmbedQueue(embedder, db.baseStorage, db.embedWorkerConfig)
 
-	// Set callback to update search index after embedding.
+	// Set callback to update search index after embedding and run inference.
 	// Note: IndexNode is idempotent (uses map keyed by node ID), so if the storage
 	// OnNodeUpdated callback also calls IndexNode, no double-counting occurs.
 	db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
-		db.indexNodeFromEvent(node)
+		db.onNodeEmbedded(node)
 	})
 
 	// Start timer-based k-means clustering instead of trigger-based.
@@ -1673,10 +1673,17 @@ func (db *DB) Store(ctx context.Context, mem *Memory) (*Memory, error) {
 	}
 
 	// Run auto-relationship inference if enabled (per-database, default DB here).
-	if len(mem.ChunkEmbeddings) > 0 && len(mem.ChunkEmbeddings[0]) > 0 {
+	hasEmbedding := false
+	for _, emb := range mem.ChunkEmbeddings {
+		if len(emb) > 0 {
+			hasEmbedding = true
+			break
+		}
+	}
+	if hasEmbedding {
 		inferEngine, _ := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage)
 		if inferEngine != nil {
-			suggestions, err := inferEngine.OnStore(ctx, mem.ID, mem.ChunkEmbeddings[0]) // Use first chunk for inference
+			suggestions, err := inferEngine.OnStoreBestOfChunks(ctx, mem.ID, mem.ChunkEmbeddings)
 			if err == nil {
 				for _, suggestion := range suggestions {
 					edge := &storage.Edge{
