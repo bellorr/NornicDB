@@ -37,6 +37,71 @@ func (b *BadgerEngine) cacheStoreNode(node *Node) {
 	b.nodeCacheMu.Unlock()
 }
 
+func (b *BadgerEngine) labelCacheGetFirst(label string) (NodeID, bool) {
+	if label == "" {
+		return "", false
+	}
+	normalized := normalizeLabel(label)
+	b.labelFirstNodeCacheMu.RLock()
+	id, ok := b.labelFirstNodeCache[normalized]
+	b.labelFirstNodeCacheMu.RUnlock()
+	return id, ok
+}
+
+func (b *BadgerEngine) labelCacheSetFirst(label string, id NodeID) {
+	if label == "" || id == "" {
+		return
+	}
+	normalized := normalizeLabel(label)
+	b.labelFirstNodeCacheMu.Lock()
+	if b.labelFirstCacheMax > 0 && len(b.labelFirstNodeCache) > b.labelFirstCacheMax {
+		b.labelFirstNodeCache = make(map[string]NodeID, b.labelFirstCacheMax)
+	}
+	b.labelFirstNodeCache[normalized] = id
+	b.labelFirstNodeCacheMu.Unlock()
+}
+
+func (b *BadgerEngine) labelCacheInvalidateForNodeLabels(labels []string, nodeID NodeID) {
+	if len(labels) == 0 || nodeID == "" {
+		return
+	}
+	b.labelFirstNodeCacheMu.Lock()
+	for _, label := range labels {
+		normalized := normalizeLabel(label)
+		if cached, ok := b.labelFirstNodeCache[normalized]; ok && cached == nodeID {
+			delete(b.labelFirstNodeCache, normalized)
+		}
+	}
+	b.labelFirstNodeCacheMu.Unlock()
+}
+
+func (b *BadgerEngine) labelCacheInvalidateForRemovedLabels(oldLabels, newLabels []string, nodeID NodeID) {
+	if len(oldLabels) == 0 || nodeID == "" {
+		return
+	}
+	if len(newLabels) == 0 {
+		b.labelCacheInvalidateForNodeLabels(oldLabels, nodeID)
+		return
+	}
+
+	newSet := make(map[string]struct{}, len(newLabels))
+	for _, label := range newLabels {
+		newSet[normalizeLabel(label)] = struct{}{}
+	}
+
+	b.labelFirstNodeCacheMu.Lock()
+	for _, label := range oldLabels {
+		normalized := normalizeLabel(label)
+		if _, ok := newSet[normalized]; ok {
+			continue
+		}
+		if cached, ok := b.labelFirstNodeCache[normalized]; ok && cached == nodeID {
+			delete(b.labelFirstNodeCache, normalized)
+		}
+	}
+	b.labelFirstNodeCacheMu.Unlock()
+}
+
 func (b *BadgerEngine) cacheDeleteNode(id NodeID) {
 	if id == "" {
 		return
@@ -54,6 +119,13 @@ func (b *BadgerEngine) cacheOnNodeCreated(node *Node) {
 
 func (b *BadgerEngine) cacheOnNodeUpdated(node *Node) {
 	b.cacheStoreNode(node)
+}
+
+func (b *BadgerEngine) cacheOnNodeUpdatedWithOldNode(node *Node, oldNode *Node) {
+	b.cacheStoreNode(node)
+	if oldNode != nil {
+		b.labelCacheInvalidateForRemovedLabels(oldNode.Labels, node.Labels, node.ID)
+	}
 }
 
 func (b *BadgerEngine) cacheOnNodesCreated(nodes []*Node) {
@@ -95,6 +167,23 @@ func (b *BadgerEngine) cacheOnNodeDeleted(id NodeID, edgesDeleted int64) {
 	if edgesDeleted > 0 {
 		b.edgeCount.Add(-edgesDeleted)
 		b.addNamespaceEdgeCountFromNode(id, -edgesDeleted)
+		// We don't know which types were removed cheaply; invalidate whole type cache.
+		b.InvalidateEdgeTypeCache()
+	}
+}
+
+func (b *BadgerEngine) cacheOnNodeDeletedWithLabels(nodeID NodeID, labels []string, edgesDeleted int64) {
+	b.cacheDeleteNode(nodeID)
+	b.labelCacheInvalidateForNodeLabels(labels, nodeID)
+
+	// Decrement cached node count for O(1) stats.
+	b.nodeCount.Add(-1)
+	b.addNamespaceNodeCount(nodeID, -1)
+
+	// Decrement cached edge count for edges deleted with this node.
+	if edgesDeleted > 0 {
+		b.edgeCount.Add(-edgesDeleted)
+		b.addNamespaceEdgeCountFromNode(nodeID, -edgesDeleted)
 		// We don't know which types were removed cheaply; invalidate whole type cache.
 		b.InvalidateEdgeTypeCache()
 	}
@@ -188,6 +277,58 @@ func (b *BadgerEngine) cacheOnNodesDeleted(deletedNodeIDs []NodeID, deletedNodeC
 	namespaces := make(map[string]int64)
 	for _, nodeID := range deletedNodeIDs {
 		prefix, ok := namespacePrefixFromID(string(nodeID))
+		if !ok {
+			continue
+		}
+		namespaces[prefix]--
+	}
+	if len(namespaces) > 0 {
+		b.namespaceCountsMu.Lock()
+		for prefix, delta := range namespaces {
+			b.namespaceNodeCounts[prefix] += delta
+		}
+		b.namespaceCountsMu.Unlock()
+	}
+
+	if totalEdgesDeleted > 0 {
+		b.edgeCount.Add(-totalEdgesDeleted)
+
+		// We only have an aggregate edge delete count. If the deleted nodes span
+		// multiple namespaces, we can't attribute edges precisely.
+		if len(namespaces) == 1 {
+			for prefix := range namespaces {
+				b.namespaceCountsMu.Lock()
+				b.namespaceEdgeCounts[prefix] -= totalEdgesDeleted
+				b.namespaceCountsMu.Unlock()
+				break
+			}
+		}
+
+		b.InvalidateEdgeTypeCache()
+	}
+}
+
+func (b *BadgerEngine) cacheOnNodesDeletedWithLabels(deletedNodes []*Node, deletedNodeCount, totalEdgesDeleted int64) {
+	if deletedNodeCount <= 0 {
+		return
+	}
+
+	for _, node := range deletedNodes {
+		if node == nil {
+			continue
+		}
+		b.cacheDeleteNode(node.ID)
+		b.labelCacheInvalidateForNodeLabels(node.Labels, node.ID)
+	}
+	b.nodeCount.Add(-deletedNodeCount)
+
+	// Update per-namespace node counts.
+	namespaces := make(map[string]int64)
+	for _, node := range deletedNodes {
+		if node == nil {
+			continue
+		}
+		prefix, ok := namespacePrefixFromID(string(node.ID))
 		if !ok {
 			continue
 		}

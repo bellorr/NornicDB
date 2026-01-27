@@ -381,7 +381,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 				}
 			}
 
-			b.cacheOnNodeUpdated(node)
+			b.cacheOnNodeUpdatedWithOldNode(node, existingNode)
 			// Notify listeners to re-index the updated node
 			b.notifyNodeUpdated(node)
 		}
@@ -589,7 +589,11 @@ func (b *BadgerEngine) DeleteNode(id NodeID) error {
 			}
 		}
 
-		b.cacheOnNodeDeleted(id, totalEdgesDeleted)
+		if deletedNode != nil {
+			b.cacheOnNodeDeletedWithLabels(id, deletedNode.Labels, totalEdgesDeleted)
+		} else {
+			b.cacheOnNodeDeleted(id, totalEdgesDeleted)
+		}
 
 		// Notify listeners about deleted edges
 		for _, edgeID := range deletedEdgeIDs {

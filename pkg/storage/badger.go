@@ -33,6 +33,7 @@ const maxNodeSize = 50 * 1024 // 50KB
 const (
 	defaultBadgerNodeCacheMaxEntries   = 10000
 	defaultBadgerEdgeTypeCacheMaxTypes = 50
+	defaultBadgerLabelFirstCacheMax    = 1000
 )
 
 // BadgerEngine provides persistent storage using BadgerDB.
@@ -87,10 +88,16 @@ type BadgerEngine struct {
 	edgeTypeCache   map[string][]*Edge // edgeType -> edges of that type
 	edgeTypeCacheMu sync.RWMutex
 
+	// Fast label lookup cache: label -> first node ID
+	// Used by ID-only label scans to avoid repeated index iteration.
+	labelFirstNodeCache   map[string]NodeID
+	labelFirstNodeCacheMu sync.RWMutex
+
 	// Cache sizing (tunable via config/options).
 	// Used by the cache invalidation helpers to preserve invariants.
 	nodeCacheMaxEntries   int
 	edgeTypeCacheMaxTypes int
+	labelFirstCacheMax    int
 
 	// Cached counts for O(1) stats lookups (updated on create/delete)
 	// Eliminates expensive full table scans for node/edge counts
@@ -275,6 +282,11 @@ type BadgerOptions struct {
 	// for GetEdgesByType. When exceeded, the cache is cleared.
 	// Set to 0 to use the default.
 	EdgeTypeCacheMaxTypes int
+
+	// LabelFirstNodeCacheMaxEntries is the maximum number of labels cached for
+	// fast label-first lookups. When exceeded, the cache is cleared.
+	// Set to 0 to use the default.
+	LabelFirstNodeCacheMaxEntries int
 }
 
 // NewBadgerEngine creates a new persistent storage engine with default settings.
@@ -495,6 +507,7 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 
 		nodeCacheMaxEntries:   opts.NodeCacheMaxEntries,
 		edgeTypeCacheMaxTypes: opts.EdgeTypeCacheMaxTypes,
+		labelFirstCacheMax:    opts.LabelFirstNodeCacheMaxEntries,
 	}
 
 	if engine.nodeCacheMaxEntries <= 0 {
@@ -503,9 +516,13 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	if engine.edgeTypeCacheMaxTypes <= 0 {
 		engine.edgeTypeCacheMaxTypes = defaultBadgerEdgeTypeCacheMaxTypes
 	}
+	if engine.labelFirstCacheMax <= 0 {
+		engine.labelFirstCacheMax = defaultBadgerLabelFirstCacheMax
+	}
 
 	engine.nodeCache = make(map[NodeID]*Node, engine.nodeCacheMaxEntries)
 	engine.edgeTypeCache = make(map[string][]*Edge, engine.edgeTypeCacheMaxTypes)
+	engine.labelFirstNodeCache = make(map[string]NodeID, engine.labelFirstCacheMax)
 	engine.namespaceNodeCounts = make(map[string]int64)
 	engine.namespaceEdgeCounts = make(map[string]int64)
 

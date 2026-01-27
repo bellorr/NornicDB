@@ -841,10 +841,14 @@ func (tx *BadgerTransaction) Commit() error {
 			tx.engine.cacheOnNodeCreated(op.Node)
 			tx.engine.notifyNodeCreated(op.Node)
 		case OpUpdateNode:
-			tx.engine.cacheOnNodeUpdated(op.Node)
+			tx.engine.cacheOnNodeUpdatedWithOldNode(op.Node, op.OldNode)
 			tx.engine.notifyNodeUpdated(op.Node)
 		case OpDeleteNode:
-			tx.engine.cacheOnNodeDeleted(op.NodeID, op.EdgesDeleted)
+			if op.OldNode != nil {
+				tx.engine.cacheOnNodeDeletedWithLabels(op.NodeID, op.OldNode.Labels, op.EdgesDeleted)
+			} else {
+				tx.engine.cacheOnNodeDeleted(op.NodeID, op.EdgesDeleted)
+			}
 			for _, edgeID := range op.DeletedEdgeIDs {
 				tx.engine.notifyEdgeDeleted(edgeID)
 			}

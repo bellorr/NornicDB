@@ -312,6 +312,38 @@ func (n *NamespacedEngine) GetFirstNodeByLabel(label string) (*Node, error) {
 	return nodes[0], nil
 }
 
+// ForEachNodeIDByLabel streams node IDs for a label, filtered to the namespace.
+// Stops early when visit returns false.
+func (n *NamespacedEngine) ForEachNodeIDByLabel(label string, visit func(NodeID) bool) error {
+	if visit == nil {
+		return nil
+	}
+
+	if lookup, ok := n.inner.(LabelNodeIDLookupEngine); ok {
+		prefix := n.namespace + n.separator
+		return lookup.ForEachNodeIDByLabel(label, func(id NodeID) bool {
+			if !strings.HasPrefix(string(id), prefix) {
+				return true
+			}
+			return visit(n.unprefixNodeID(id))
+		})
+	}
+
+	nodes, err := n.GetNodesByLabel(label)
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if !visit(node.ID) {
+			return nil
+		}
+	}
+	return nil
+}
+
 func (n *NamespacedEngine) GetOutgoingEdges(nodeID NodeID) ([]*Edge, error) {
 	// Always prefix the ID (user-facing API always receives unprefixed IDs)
 	namespacedID := n.prefixNodeID(nodeID)

@@ -450,7 +450,7 @@ func (b *BadgerEngine) BulkDeleteNodes(ids []NodeID) error {
 			}
 		}
 
-		b.cacheOnNodesDeleted(deletedNodeIDs, deletedNodeCount, totalEdgesDeleted)
+		b.cacheOnNodesDeletedWithLabels(deletedNodes, deletedNodeCount, totalEdgesDeleted)
 
 		// Notify listeners about deleted edges
 		for _, edgeID := range deletedEdgeIDs {

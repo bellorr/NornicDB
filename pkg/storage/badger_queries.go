@@ -47,6 +47,65 @@ func (b *BadgerEngine) GetFirstNodeByLabel(label string) (*Node, error) {
 	return node, err
 }
 
+// ForEachNodeIDByLabel streams node IDs for a label without decoding nodes.
+// Stops early when visit returns false.
+func (b *BadgerEngine) ForEachNodeIDByLabel(label string, visit func(NodeID) bool) error {
+	if visit == nil {
+		return nil
+	}
+	if err := b.ensureOpen(); err != nil {
+		return err
+	}
+
+	cachedID, cachedOK := b.labelCacheGetFirst(label)
+	cachedValid := false
+
+	err := b.withView(func(txn *badger.Txn) error {
+		if cachedOK && cachedID != "" {
+			_, err := txn.Get(labelIndexKey(label, cachedID))
+			switch err {
+			case nil:
+				cachedValid = true
+				if !visit(cachedID) {
+					return ErrIterationStopped
+				}
+			case badger.ErrKeyNotFound:
+				b.labelCacheInvalidateForNodeLabels([]string{label}, cachedID)
+			default:
+				return err
+			}
+		}
+
+		prefix := labelIndexPrefix(label)
+		it := txn.NewIterator(badgerIterOptsKeyOnly(prefix))
+		defer it.Close()
+
+		labelLen := len(normalizeLabel(label))
+		for it.Rewind(); it.Valid(); it.Next() {
+			nodeID := extractNodeIDFromLabelIndex(it.Item().Key(), labelLen)
+			if nodeID == "" {
+				continue
+			}
+			if cachedValid && nodeID == cachedID {
+				continue
+			}
+			if !cachedValid {
+				b.labelCacheSetFirst(label, nodeID)
+				cachedValid = true
+			}
+			if !visit(nodeID) {
+				return ErrIterationStopped
+			}
+		}
+
+		return nil
+	})
+	if err == ErrIterationStopped {
+		return nil
+	}
+	return err
+}
+
 // GetNodesByLabel returns all nodes with the specified label.
 func (b *BadgerEngine) GetNodesByLabel(label string) ([]*Node, error) {
 	// Single-pass: iterate label index and fetch nodes in same transaction

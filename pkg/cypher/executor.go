@@ -1425,26 +1425,31 @@ func (e *StorageExecutor) tryFastPathCompoundQuery(ctx context.Context, cypher s
 // executeFastPathCreateDeleteRel executes the fast-path for MATCH...CREATE...DELETE patterns.
 // If prop1/prop2 are empty, uses GetFirstNodeByLabel. Otherwise uses property lookup.
 func (e *StorageExecutor) executeFastPathCreateDeleteRel(label1, label2, prop1 string, val1 any, prop2 string, val2 any, relType string) (*ExecuteResult, bool) {
-	var node1, node2 *storage.Node
 	var err error
 
 	// Get node1
 	if prop1 == "" {
-		node1, err = e.storage.GetFirstNodeByLabel(label1)
+		_, err = storage.FirstNodeIDByLabel(e.storage, label1)
 	} else {
-		node1 = e.findNodeByLabelAndProperty(label1, prop1, val1)
+		node1 := e.findNodeByLabelAndProperty(label1, prop1, val1)
+		if node1 == nil {
+			return nil, false
+		}
 	}
-	if err != nil || node1 == nil {
+	if err != nil {
 		return nil, false
 	}
 
 	// Get node2
 	if prop2 == "" {
-		node2, err = e.storage.GetFirstNodeByLabel(label2)
+		_, err = storage.FirstNodeIDByLabel(e.storage, label2)
 	} else {
-		node2 = e.findNodeByLabelAndProperty(label2, prop2, val2)
+		node2 := e.findNodeByLabelAndProperty(label2, prop2, val2)
+		if node2 == nil {
+			return nil, false
+		}
 	}
-	if err != nil || node2 == nil {
+	if err != nil {
 		return nil, false
 	}
 
@@ -1466,24 +1471,29 @@ func (e *StorageExecutor) executeFastPathCreateDeleteRel(label1, label2, prop1 s
 }
 
 func (e *StorageExecutor) executeFastPathCreateDeleteRelCount(label1, label2, prop1 string, val1 any, prop2 string, val2 any, relType string, relVar string) (*ExecuteResult, bool) {
-	var node1, node2 *storage.Node
 	var err error
 
 	if prop1 == "" {
-		node1, err = e.storage.GetFirstNodeByLabel(label1)
+		_, err = storage.FirstNodeIDByLabel(e.storage, label1)
 	} else {
-		node1 = e.findNodeByLabelAndProperty(label1, prop1, val1)
+		node1 := e.findNodeByLabelAndProperty(label1, prop1, val1)
+		if node1 == nil {
+			return nil, false
+		}
 	}
-	if err != nil || node1 == nil {
+	if err != nil {
 		return nil, false
 	}
 
 	if prop2 == "" {
-		node2, err = e.storage.GetFirstNodeByLabel(label2)
+		_, err = storage.FirstNodeIDByLabel(e.storage, label2)
 	} else {
-		node2 = e.findNodeByLabelAndProperty(label2, prop2, val2)
+		node2 := e.findNodeByLabelAndProperty(label2, prop2, val2)
+		if node2 == nil {
+			return nil, false
+		}
 	}
-	if err != nil || node2 == nil {
+	if err != nil {
 		return nil, false
 	}
 

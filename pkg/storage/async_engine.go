@@ -913,6 +913,71 @@ func (ae *AsyncEngine) GetEdge(id EdgeID) (*Edge, error) {
 	return ae.engine.GetEdge(id)
 }
 
+// ForEachNodeIDByLabel streams node IDs for a label, combining cache + engine.
+// Stops early when visit returns false.
+func (ae *AsyncEngine) ForEachNodeIDByLabel(label string, visit func(NodeID) bool) error {
+	if visit == nil {
+		return nil
+	}
+
+	normalLabel := strings.ToLower(label)
+
+	ae.mu.RLock()
+	deletedIDs := make(map[NodeID]bool, len(ae.deleteNodes))
+	for id := range ae.deleteNodes {
+		deletedIDs[id] = true
+	}
+	cachedIDs := make([]NodeID, 0, len(ae.labelIndex[normalLabel]))
+	for id := range ae.labelIndex[normalLabel] {
+		if !deletedIDs[id] {
+			cachedIDs = append(cachedIDs, id)
+		}
+	}
+	ae.mu.RUnlock()
+
+	seen := make(map[NodeID]struct{}, len(cachedIDs))
+	for _, id := range cachedIDs {
+		seen[id] = struct{}{}
+		if !visit(id) {
+			return nil
+		}
+	}
+
+	if lookup, ok := ae.engine.(LabelNodeIDLookupEngine); ok {
+		return lookup.ForEachNodeIDByLabel(label, func(id NodeID) bool {
+			if deletedIDs[id] {
+				return true
+			}
+			if _, ok := seen[id]; ok {
+				return true
+			}
+			seen[id] = struct{}{}
+			return visit(id)
+		})
+	}
+
+	nodes, err := ae.engine.GetNodesByLabel(label)
+	if err != nil {
+		return err
+	}
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if deletedIDs[node.ID] {
+			continue
+		}
+		if _, ok := seen[node.ID]; ok {
+			continue
+		}
+		seen[node.ID] = struct{}{}
+		if !visit(node.ID) {
+			return nil
+		}
+	}
+	return nil
+}
+
 // GetNodesByLabel checks cache and merges with engine results.
 // Uses case-insensitive label matching for Neo4j compatibility.
 // Snapshots cache state quickly, then releases lock before engine I/O.
