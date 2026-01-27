@@ -1180,8 +1180,14 @@ func (w *transactionStorageWrapper) GetEdge(id storage.EdgeID) (*storage.Edge, e
 }
 
 func (w *transactionStorageWrapper) UpdateEdge(edge *storage.Edge) error {
-	// BadgerTransaction doesn't have UpdateEdge, use underlying
-	return w.underlying.UpdateEdge(edge)
+	if w.namespace == "" {
+		return w.tx.UpdateEdge(edge)
+	}
+	namespaced := storage.CopyEdge(edge)
+	namespaced.ID = w.prefixEdgeID(edge.ID)
+	namespaced.StartNode = w.prefixNodeID(edge.StartNode)
+	namespaced.EndNode = w.prefixNodeID(edge.EndNode)
+	return w.tx.UpdateEdge(namespaced)
 }
 
 func (w *transactionStorageWrapper) GetNodesByLabel(label string) ([]*storage.Node, error) {

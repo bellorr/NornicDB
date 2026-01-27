@@ -599,6 +599,102 @@ func (tx *BadgerTransaction) CreateEdge(edge *Edge) error {
 	return nil
 }
 
+// UpdateEdge updates an existing edge within the transaction.
+//
+// This is required so Cypher can do CREATE ... SET r.prop = ... in a single query
+// while using implicit/explicit transactions (writes must remain isolated until commit).
+func (tx *BadgerTransaction) UpdateEdge(edge *Edge) error {
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+
+	if edge == nil {
+		return ErrInvalidData
+	}
+	if edge.ID == "" {
+		return ErrInvalidID
+	}
+	if tx.Status != TxStatusActive {
+		return ErrTransactionClosed
+	}
+	if _, deleted := tx.deletedEdges[edge.ID]; deleted {
+		return ErrNotFound
+	}
+
+	// Load existing edge (pending or committed) for index maintenance.
+	var oldEdge *Edge
+	if pending, exists := tx.pendingEdges[edge.ID]; exists {
+		oldEdge = copyEdge(pending)
+	} else {
+		key := edgeKey(edge.ID)
+		item, err := tx.badgerTx.Get(key)
+		if err == badger.ErrKeyNotFound {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("reading edge: %w", err)
+		}
+
+		var edgeBytes []byte
+		if err := item.Value(func(val []byte) error {
+			edgeBytes = append([]byte{}, val...)
+			return nil
+		}); err != nil {
+			return fmt.Errorf("reading edge value: %w", err)
+		}
+
+		oldEdge, err = deserializeEdge(edgeBytes)
+		if err != nil {
+			return fmt.Errorf("deserializing edge: %w", err)
+		}
+	}
+
+	// If endpoints changed, verify they exist and update outgoing/incoming indexes.
+	if oldEdge.StartNode != edge.StartNode || oldEdge.EndNode != edge.EndNode {
+		if !tx.nodeExists(edge.StartNode) {
+			return fmt.Errorf("start node %s does not exist", edge.StartNode)
+		}
+		if !tx.nodeExists(edge.EndNode) {
+			return fmt.Errorf("end node %s does not exist", edge.EndNode)
+		}
+
+		tx.bufferDelete(outgoingIndexKey(oldEdge.StartNode, edge.ID))
+		tx.bufferDelete(incomingIndexKey(oldEdge.EndNode, edge.ID))
+		tx.bufferSet(outgoingIndexKey(edge.StartNode, edge.ID), []byte{})
+		tx.bufferSet(incomingIndexKey(edge.EndNode, edge.ID), []byte{})
+	}
+
+	// If type changed, update edge type index.
+	if oldEdge.Type != edge.Type {
+		if oldEdge.Type != "" {
+			tx.bufferDelete(edgeTypeIndexKey(oldEdge.Type, edge.ID))
+		}
+		if edge.Type != "" {
+			tx.bufferSet(edgeTypeIndexKey(edge.Type, edge.ID), []byte{})
+		}
+	}
+
+	// Serialize and buffer updated edge record.
+	edgeBytes, err := serializeEdge(edge)
+	if err != nil {
+		return fmt.Errorf("serializing edge: %w", err)
+	}
+	tx.bufferSet(edgeKey(edge.ID), edgeBytes)
+
+	// Track for read-your-writes.
+	edgeCopy := copyEdge(edge)
+	tx.pendingEdges[edge.ID] = edgeCopy
+
+	tx.operations = append(tx.operations, Operation{
+		Type:      OpUpdateEdge,
+		Timestamp: time.Now(),
+		EdgeID:    edge.ID,
+		Edge:      edgeCopy,
+		OldEdge:   oldEdge,
+	})
+
+	return nil
+}
+
 // DeleteEdge deletes an edge from the transaction.
 func (tx *BadgerTransaction) DeleteEdge(edgeID EdgeID) error {
 	tx.mu.Lock()
@@ -971,6 +1067,10 @@ func (tx *BadgerTransaction) validateNodeConstraints(node *Node) error {
 			if err := tx.checkExistenceConstraint(node, constraint); err != nil {
 				return err
 			}
+			case ConstraintTemporal:
+				if err := tx.checkTemporalConstraint(node, constraint); err != nil {
+					return err
+				}
 		}
 	}
 
@@ -1242,6 +1342,93 @@ func (tx *BadgerTransaction) checkExistenceConstraint(node *Node, c Constraint) 
 	}
 
 	return nil
+}
+
+// checkTemporalConstraint enforces TEMPORAL NO OVERLAP constraints within a transaction.
+//
+// It must validate against:
+// - other pending nodes in this transaction (read-your-writes), and
+// - existing committed nodes in storage (via the label index scan).
+func (tx *BadgerTransaction) checkTemporalConstraint(node *Node, c Constraint) error {
+	if len(c.Properties) != 3 {
+		return fmt.Errorf("TEMPORAL constraint requires 3 properties (key, valid_from, valid_to)")
+	}
+
+	keyProp := c.Properties[0]
+	startProp := c.Properties[1]
+	endProp := c.Properties[2]
+
+	keyVal := node.Properties[keyProp]
+	if keyVal == nil {
+		return &ConstraintViolationError{
+			Type:       ConstraintTemporal,
+			Label:      c.Label,
+			Properties: c.Properties,
+			Message:    fmt.Sprintf("TEMPORAL key property %s cannot be null", keyProp),
+		}
+	}
+
+	start, ok := coerceTemporalTime(node.Properties[startProp])
+	if !ok {
+		return &ConstraintViolationError{
+			Type:       ConstraintTemporal,
+			Label:      c.Label,
+			Properties: c.Properties,
+			Message:    fmt.Sprintf("TEMPORAL start property %s must be a datetime", startProp),
+		}
+	}
+	end, hasEnd := coerceTemporalTime(node.Properties[endProp])
+
+	dbName, _, ok := ParseDatabasePrefix(string(node.ID))
+	if !ok {
+		return fmt.Errorf("node ID must be prefixed with namespace, got: %s", node.ID)
+	}
+	nsPrefix := dbName + ":"
+
+	// Check overlaps against pending nodes in this transaction (namespace + label + key match).
+	for id, other := range tx.pendingNodes {
+		if id == node.ID {
+			continue
+		}
+		if !strings.HasPrefix(string(id), nsPrefix) {
+			continue
+		}
+		if !hasLabel(other.Labels, c.Label) {
+			continue
+		}
+
+		otherKey := other.Properties[keyProp]
+		if otherKey == nil || !compareValues(otherKey, keyVal) {
+			continue
+		}
+
+		otherStart, ok := coerceTemporalTime(other.Properties[startProp])
+		if !ok {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message:    fmt.Sprintf("TEMPORAL constraint requires %s for node %s", startProp, id),
+			}
+		}
+		otherEnd, otherHasEnd := coerceTemporalTime(other.Properties[endProp])
+
+		if intervalsOverlap(
+			temporalInterval{start: start, end: end, hasEnd: hasEnd},
+			temporalInterval{start: otherStart, end: otherEnd, hasEnd: otherHasEnd},
+		) {
+			return &ConstraintViolationError{
+				Type:       ConstraintTemporal,
+				Label:      c.Label,
+				Properties: []string{keyProp, startProp, endProp},
+				Message: fmt.Sprintf("TEMPORAL constraint violation: overlap with node %s for %s=%v",
+					id, keyProp, keyVal),
+			}
+		}
+	}
+
+	// Check overlaps against committed storage using the label index scan.
+	return tx.engine.scanForTemporalOverlapInTxn(tx.badgerTx, dbName, c.Label, keyProp, startProp, endProp, keyVal, start, end, hasEnd, node.ID)
 }
 
 // validateAllConstraints performs final validation before commit.
