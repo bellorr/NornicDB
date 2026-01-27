@@ -42,6 +42,7 @@ database:
   default_database: "nornic"  # Default database name (like Neo4j's "neo4j")
   max_connections: 100
   connection_timeout: 30s
+  storage_serializer: msgpack # gob or msgpack (default: msgpack)
 ```
 
 **Multi-Database Support:**
@@ -57,6 +58,7 @@ database:
 **Environment Variables:**
 - `NORNICDB_DEFAULT_DATABASE` - Set default database name
 - `NEO4J_dbms_default__database` - Neo4j-compatible env var (backwards compat)
+- `NORNICDB_STORAGE_SERIALIZER` - Storage serializer (`gob` or `msgpack`)
 
 ### Server Settings
 

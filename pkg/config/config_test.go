@@ -871,6 +871,7 @@ func clearEnvVars(t *testing.T) {
 		"NORNICDB_ASYNC_MAX_EDGE_CACHE_SIZE",
 		"NORNICDB_BADGER_NODE_CACHE_MAX_ENTRIES",
 		"NORNICDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES",
+		"NORNICDB_STORAGE_SERIALIZER",
 	}
 	for _, v := range envVars {
 		os.Unsetenv(v)
@@ -914,6 +915,9 @@ func TestLoadFromEnv_AsyncWriteDefaults(t *testing.T) {
 	}
 	if cfg.Database.BadgerEdgeTypeCacheMaxTypes != 50 {
 		t.Errorf("expected BadgerEdgeTypeCacheMaxTypes 50, got %d", cfg.Database.BadgerEdgeTypeCacheMaxTypes)
+	}
+	if cfg.Database.StorageSerializer != "msgpack" {
+		t.Errorf("expected StorageSerializer msgpack, got %s", cfg.Database.StorageSerializer)
 	}
 }
 
@@ -1014,6 +1018,7 @@ func TestLoadFromEnv_AsyncWriteSettings(t *testing.T) {
 				"NORNICDB_ASYNC_MAX_EDGE_CACHE_SIZE":        "8000",
 				"NORNICDB_BADGER_NODE_CACHE_MAX_ENTRIES":    "20000",
 				"NORNICDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES": "75",
+				"NORNICDB_STORAGE_SERIALIZER":               "msgpack",
 			},
 			validate: func(t *testing.T, cfg *Config) {
 				if !cfg.Database.AsyncWritesEnabled {
@@ -1033,6 +1038,9 @@ func TestLoadFromEnv_AsyncWriteSettings(t *testing.T) {
 				}
 				if cfg.Database.BadgerEdgeTypeCacheMaxTypes != 75 {
 					t.Errorf("expected BadgerEdgeTypeCacheMaxTypes 75, got %d", cfg.Database.BadgerEdgeTypeCacheMaxTypes)
+				}
+				if cfg.Database.StorageSerializer != "msgpack" {
+					t.Errorf("expected StorageSerializer msgpack, got %s", cfg.Database.StorageSerializer)
 				}
 			},
 		},
@@ -1074,5 +1082,8 @@ func TestLoadDefaults_AsyncWriteValues(t *testing.T) {
 	}
 	if cfg.Database.BadgerEdgeTypeCacheMaxTypes != 50 {
 		t.Errorf("expected BadgerEdgeTypeCacheMaxTypes 50 in defaults, got %d", cfg.Database.BadgerEdgeTypeCacheMaxTypes)
+	}
+	if cfg.Database.StorageSerializer != "msgpack" {
+		t.Errorf("expected StorageSerializer msgpack in defaults, got %s", cfg.Database.StorageSerializer)
 	}
 }

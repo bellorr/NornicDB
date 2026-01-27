@@ -232,6 +232,10 @@ type DatabaseConfig struct {
 	// When exceeded, the cache is cleared (simple eviction).
 	// Env: NORNICDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES (default: 50)
 	BadgerEdgeTypeCacheMaxTypes int
+
+	// StorageSerializer selects the storage serialization format ("gob", "msgpack").
+	// Env: NORNICDB_STORAGE_SERIALIZER (default: gob)
+	StorageSerializer string
 }
 
 // ServerConfig holds server settings.
@@ -1085,6 +1089,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid embedding dimensions: %d", c.Memory.EmbeddingDimensions)
 	}
 
+	switch strings.ToLower(strings.TrimSpace(c.Database.StorageSerializer)) {
+	case "", "gob", "msgpack":
+	default:
+		return fmt.Errorf("invalid storage serializer: %s", c.Database.StorageSerializer)
+	}
+
 	return nil
 }
 
@@ -1149,6 +1159,7 @@ type YAMLConfig struct {
 		EncryptionPassword          string `yaml:"encryption_password"`
 		BadgerNodeCacheMaxEntries   int    `yaml:"badger_node_cache_max_entries"`
 		BadgerEdgeTypeCacheMaxTypes int    `yaml:"badger_edge_type_cache_max_types"`
+		StorageSerializer           string `yaml:"storage_serializer"`
 	} `yaml:"database"`
 
 	// Storage alias for database
@@ -1356,6 +1367,7 @@ func LoadDefaults() *Config {
 	config.Database.AsyncMaxEdgeCacheSize = 100000 // ~50MB assuming 500 bytes/edge
 	config.Database.BadgerNodeCacheMaxEntries = 10000
 	config.Database.BadgerEdgeTypeCacheMaxTypes = 50
+	config.Database.StorageSerializer = "msgpack"
 
 	// Server defaults - Bolt
 	config.Server.BoltEnabled = true
@@ -1600,6 +1612,9 @@ func applyEnvVars(config *Config) {
 	}
 	if v := getEnvInt("NORNICDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES", -1); v >= 0 {
 		config.Database.BadgerEdgeTypeCacheMaxTypes = v
+	}
+	if v := getEnv("NORNICDB_STORAGE_SERIALIZER", ""); v != "" {
+		config.Database.StorageSerializer = strings.ToLower(v)
 	}
 
 	// Server settings - Bolt
@@ -2118,6 +2133,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Database.BadgerEdgeTypeCacheMaxTypes > 0 {
 		config.Database.BadgerEdgeTypeCacheMaxTypes = yamlCfg.Database.BadgerEdgeTypeCacheMaxTypes
+	}
+	if yamlCfg.Database.StorageSerializer != "" {
+		config.Database.StorageSerializer = strings.ToLower(yamlCfg.Database.StorageSerializer)
 	}
 
 	// === Authentication ===

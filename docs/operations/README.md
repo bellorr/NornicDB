@@ -12,6 +12,7 @@
 - **[Backup & Restore](backup-restore.md)** - Data protection
 - **[WAL Compaction](wal-compaction.md)** - Automatic disk space management
 - **[Durability Configuration](durability.md)** - Data safety vs performance tuning
+- **[Storage Serialization](storage-serialization.md)** - gob vs msgpack and migration
 - **[Scaling](scaling.md)** - Horizontal and vertical scaling
 - **[Cluster Security](cluster-security.md)** - Authentication for clusters
 - **[Troubleshooting](troubleshooting.md)** - Common issues and solutions

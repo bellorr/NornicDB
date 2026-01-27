@@ -347,6 +347,9 @@ type Config struct {
 	BadgerNodeCacheMaxEntries   int `yaml:"badger_node_cache_max_entries"`    // Max hot nodes cached in-process (default: 10000)
 	BadgerEdgeTypeCacheMaxTypes int `yaml:"badger_edge_type_cache_max_types"` // Max edge types cached for GetEdgesByType (default: 50)
 
+	// Storage serialization format ("gob", "msgpack")
+	StorageSerializer string `yaml:"storage_serializer"`
+
 	// Encryption (data-at-rest) - AES-256 full database encryption
 	// Disabled by default for performance. Enable for HIPAA/GDPR/SOC2 compliance.
 	// When enabled, ALL data is encrypted at the storage level - all or nothing.
@@ -420,8 +423,9 @@ func DefaultConfig() *Config {
 		WALRetentionLedgerDefaults:      false,                 // Ledger defaults disabled by default
 		BadgerNodeCacheMaxEntries:       10000,                 // Cache up to 10K hot nodes
 		BadgerEdgeTypeCacheMaxTypes:     50,                    // Cache up to 50 distinct edge types
-		EncryptionEnabled:               false,                 // Encryption disabled by default (opt-in)
-		EncryptionPassword:              "",                    // Must be set if encryption enabled
+		StorageSerializer:               "msgpack",
+		EncryptionEnabled:               false, // Encryption disabled by default (opt-in)
+		EncryptionPassword:              "",    // Must be set if encryption enabled
 		BoltPort:                        7687,
 		HTTPPort:                        7474,
 		KmeansClusterInterval:           15 * time.Minute, // Run k-means every 15 min (skips if no changes)
@@ -801,6 +805,13 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			LowMemory:             config.LowMemoryMode,
 			NodeCacheMaxEntries:   config.BadgerNodeCacheMaxEntries,
 			EdgeTypeCacheMaxTypes: config.BadgerEdgeTypeCacheMaxTypes,
+		}
+		if config.StorageSerializer != "" {
+			serializer, err := storage.ParseStorageSerializer(config.StorageSerializer)
+			if err != nil {
+				return nil, err
+			}
+			badgerOpts.Serializer = serializer
 		}
 		if config.LowMemoryMode {
 			fmt.Println("⚡ Using low-memory storage mode (reduced RAM usage)")

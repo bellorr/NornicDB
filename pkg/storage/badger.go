@@ -6,6 +6,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"sync"
 	"sync/atomic"
 
@@ -273,6 +274,10 @@ type BadgerOptions struct {
 	// Leave empty to disable encryption.
 	EncryptionKey []byte
 
+	// Serializer selects the storage serialization format ("gob", "msgpack").
+	// Empty means default (gob).
+	Serializer StorageSerializer
+
 	// NodeCacheMaxEntries is the maximum number of nodes held in the in-process
 	// hot node cache (used by GetNode). When exceeded, the cache is cleared.
 	// Set to 0 to use the default.
@@ -429,6 +434,13 @@ func NewBadgerEngine(dataDir string) (*BadgerEngine, error) {
 //
 //	Safe for concurrent use from multiple goroutines.
 func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
+	configuredSerializer := opts.Serializer
+	if configuredSerializer == "" {
+		configuredSerializer = StorageSerializerMsgpack
+	}
+	if _, err := ParseStorageSerializer(string(configuredSerializer)); err != nil {
+		return nil, err
+	}
 	badgerOpts := badger.DefaultOptions(opts.DataDir)
 
 	if opts.InMemory {
@@ -498,6 +510,26 @@ func NewBadgerEngineWithOptions(opts BadgerOptions) (*BadgerEngine, error) {
 	db, err := badger.Open(badgerOpts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open BadgerDB: %w", err)
+	}
+
+	detectedSerializer, hasData, err := detectStoredSerializer(db)
+	if err != nil {
+		db.Close()
+		return nil, fmt.Errorf("detecting storage serializer: %w", err)
+	}
+
+	activeSerializer := configuredSerializer
+	if hasData {
+		activeSerializer = detectedSerializer
+		if detectedSerializer != configuredSerializer {
+			log.Printf("⚠️  Storage serializer mismatch for %s: configured=%s detected=%s. Using detected serializer for this database. New databases will use configured value.",
+				opts.DataDir, configuredSerializer, detectedSerializer)
+		}
+	}
+
+	if err := SetStorageSerializer(activeSerializer); err != nil {
+		db.Close()
+		return nil, err
 	}
 
 	engine := &BadgerEngine{

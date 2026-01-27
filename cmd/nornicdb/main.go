@@ -470,6 +470,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	// Badger in-process cache sizing (hot read paths)
 	dbConfig.BadgerNodeCacheMaxEntries = cfg.Database.BadgerNodeCacheMaxEntries
 	dbConfig.BadgerEdgeTypeCacheMaxTypes = cfg.Database.BadgerEdgeTypeCacheMaxTypes
+	dbConfig.StorageSerializer = cfg.Database.StorageSerializer
 
 	// Open database
 	fmt.Println("📂 Opening database...")

@@ -2,8 +2,6 @@
 package storage
 
 import (
-	"bytes"
-	"encoding/gob"
 	"fmt"
 	"strings"
 
@@ -181,12 +179,10 @@ func encodeNode(n *Node) ([]byte, bool, error) {
 		return nil, false, fmt.Errorf("invalid node properties: %w", err)
 	}
 	// First, try encoding with embeddings
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(n); err != nil {
+	data, err := encodeValue(n)
+	if err != nil {
 		return nil, false, err
 	}
-
-	data := buf.Bytes()
 
 	// If size is acceptable, return as-is
 	if len(data) <= maxNodeSize {
@@ -200,11 +196,6 @@ func encodeNode(n *Node) ([]byte, bool, error) {
 	nodeCopy.ChunkEmbeddings = nil // Remove embeddings for encoding
 
 	// Re-encode without embeddings
-	buf.Reset()
-	if err := gob.NewEncoder(&buf).Encode(&nodeCopy); err != nil {
-		return nil, false, err
-	}
-
 	// Set flag in properties to indicate embeddings are stored separately
 	if nodeCopy.Properties == nil {
 		nodeCopy.Properties = make(map[string]any)
@@ -213,27 +204,23 @@ func encodeNode(n *Node) ([]byte, bool, error) {
 	nodeCopy.Properties["_embedding_chunk_count"] = len(embeddingsToStore)
 
 	// Final encode with flag
-	buf.Reset()
-	if err := gob.NewEncoder(&buf).Encode(&nodeCopy); err != nil {
+	data, err = encodeValue(&nodeCopy)
+	if err != nil {
 		return nil, false, err
 	}
 
-	return buf.Bytes(), true, nil
+	return data, true, nil
 }
 
 // encodeEmbedding serializes a single embedding chunk.
 func encodeEmbedding(emb []float32) ([]byte, error) {
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(emb); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return encodeValue(emb)
 }
 
 // decodeEmbedding deserializes a single embedding chunk.
 func decodeEmbedding(data []byte) ([]float32, error) {
 	var emb []float32
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&emb); err != nil {
+	if err := decodeValue(data, &emb); err != nil {
 		return nil, err
 	}
 	return emb, nil
@@ -242,7 +229,7 @@ func decodeEmbedding(data []byte) ([]float32, error) {
 // decodeNode deserializes a Node from gob and loads embeddings separately if needed.
 func decodeNode(data []byte) (*Node, error) {
 	var node Node
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&node); err != nil {
+	if err := decodeValue(data, &node); err != nil {
 		return nil, err
 	}
 	return &node, nil
@@ -299,22 +286,18 @@ func decodeNodeWithEmbeddings(txn *badger.Txn, data []byte, nodeID NodeID) (*Nod
 	return node, nil
 }
 
-// encodeEdge serializes an Edge using gob (preserves Go types).
+// encodeEdge serializes an Edge using the active storage serializer.
 func encodeEdge(e *Edge) ([]byte, error) {
 	if err := validatePropertiesForStorage(e.Properties); err != nil {
 		return nil, fmt.Errorf("invalid edge properties: %w", err)
 	}
-	var buf bytes.Buffer
-	if err := gob.NewEncoder(&buf).Encode(e); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	return encodeValue(e)
 }
 
-// decodeEdge deserializes an Edge from gob.
+// decodeEdge deserializes an Edge using the active storage serializer.
 func decodeEdge(data []byte) (*Edge, error) {
 	var edge Edge
-	if err := gob.NewDecoder(bytes.NewReader(data)).Decode(&edge); err != nil {
+	if err := decodeValue(data, &edge); err != nil {
 		return nil, err
 	}
 	return &edge, nil
