@@ -8,6 +8,57 @@ import logging
 from typing import Optional, Dict
 import torch
 
+# Disable SSL verification globally - MUST be done before any HTTP imports
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['HF_HUB_DISABLE_SSL'] = '1'
+
+# Patch requests/urllib3 to disable SSL verification
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    pass
+
+# Patch requests before transformers imports (transformers uses huggingface_hub which uses requests)
+# This MUST happen before any imports that use requests
+try:
+    import requests
+    # Store original methods BEFORE patching (critical to avoid recursion)
+    _original_session_request = requests.Session.request
+    _original_session_send = requests.Session.send
+    
+    # Disable SSL verification for all requests by patching the Session class
+    def patched_request(self, method, url, **kwargs):
+        # Force verify=False for all requests
+        kwargs['verify'] = False
+        # Call the ORIGINAL method, not the patched one
+        return _original_session_request(self, method, url, **kwargs)
+    requests.Session.request = patched_request
+    
+    # Also patch the send method
+    def patched_send(self, request, **kwargs):
+        kwargs['verify'] = False
+        # Call the ORIGINAL method, not the patched one
+        return _original_session_send(self, request, **kwargs)
+    requests.Session.send = patched_send
+    
+    # Disable warnings
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        pass
+    try:
+        requests.packages.urllib3.disable_warnings()
+    except (ImportError, AttributeError):
+        pass
+except Exception as e:
+    # If patching fails, continue anyway
+    pass
+
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
@@ -193,6 +244,7 @@ class NornicTrainer:
     def load_model(self):
         """Load base model with optional quantization."""
         logger.info(f"📦 Loading model: {self.config.base_model}")
+        logger.info("⚠️  SSL verification disabled (ignoring certificate errors)")
         
         # Quantization config for QLoRA (4-bit training)
         quantization_config = None
@@ -245,6 +297,7 @@ class NornicTrainer:
         """Load tokenizer."""
         logger.info("📝 Loading tokenizer")
         
+        # Disable SSL for tokenizer too
         self.tokenizer = AutoTokenizer.from_pretrained(
             self.config.base_model,
             trust_remote_code=True,

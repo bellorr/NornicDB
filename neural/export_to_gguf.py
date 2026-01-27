@@ -21,11 +21,63 @@ Example usage:
     python export_to_gguf.py --model_dir models/trained --merge_only --output merged/
 """
 
-import argparse
+import os
 import sys
 import logging
 from pathlib import Path
 
+# Disable SSL verification globally - MUST be done before any HTTP imports
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['HF_HUB_DISABLE_SSL'] = '1'  # HuggingFace specific
+
+# Patch requests/urllib3 to disable SSL verification
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    pass
+
+# Patch requests before transformers imports (transformers uses huggingface_hub which uses requests)
+# This MUST happen before any imports that use requests
+try:
+    import requests
+    # Store original methods BEFORE patching (critical to avoid recursion)
+    _original_session_request = requests.Session.request
+    _original_session_send = requests.Session.send
+    
+    # Disable SSL verification for all requests by patching the Session class
+    def patched_request(self, method, url, **kwargs):
+        # Force verify=False for all requests
+        kwargs['verify'] = False
+        # Call the ORIGINAL method, not the patched one
+        return _original_session_request(self, method, url, **kwargs)
+    requests.Session.request = patched_request
+    
+    # Also patch the send method
+    def patched_send(self, request, **kwargs):
+        kwargs['verify'] = False
+        # Call the ORIGINAL method, not the patched one
+        return _original_session_send(self, request, **kwargs)
+    requests.Session.send = patched_send
+    
+    # Disable warnings
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        pass
+    try:
+        requests.packages.urllib3.disable_warnings()
+    except (ImportError, AttributeError):
+        pass
+except Exception as e:
+    # If patching fails, continue anyway
+    pass
+
+import argparse
 from export import GGUFConverter, merge_lora_adapters, print_usage_instructions
 
 logger = logging.getLogger(__name__)
@@ -124,6 +176,8 @@ def main():
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         level=logging.INFO,
     )
+    
+    logger.info("⚠️  SSL verification disabled (ignoring certificate errors)")
     
     # Parse arguments
     args = parse_args()

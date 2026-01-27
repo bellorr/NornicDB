@@ -10,6 +10,8 @@ accelerate>=0.25.0  # Multi-GPU and optimization
 pandas>=2.0.0
 numpy>=1.24.0
 tqdm>=4.65.0
+PyYAML>=6.0.0  # For configuration files
+pypdf>=4.0.0
 
 # Model Export & Conversion
 safetensors>=0.4.0

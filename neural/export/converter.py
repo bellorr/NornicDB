@@ -10,6 +10,57 @@ import subprocess
 from pathlib import Path
 from typing import Optional, List
 
+# Disable SSL verification globally - MUST be done before any HTTP imports
+import ssl
+ssl._create_default_https_context = ssl._create_unverified_context
+os.environ['CURL_CA_BUNDLE'] = ''
+os.environ['REQUESTS_CA_BUNDLE'] = ''
+os.environ['HF_HUB_DISABLE_SSL'] = '1'  # HuggingFace specific
+
+# Patch requests/urllib3 to disable SSL verification
+try:
+    import urllib3
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+except ImportError:
+    pass
+
+# Patch requests before transformers imports (transformers uses huggingface_hub which uses requests)
+# This MUST happen before any imports that use requests
+try:
+    import requests
+    # Store original methods BEFORE patching (critical to avoid recursion)
+    _original_session_request = requests.Session.request
+    _original_session_send = requests.Session.send
+    
+    # Disable SSL verification for all requests by patching the Session class
+    def patched_request(self, method, url, **kwargs):
+        # Force verify=False for all requests
+        kwargs['verify'] = False
+        # Call the ORIGINAL method, not the patched one
+        return _original_session_request(self, method, url, **kwargs)
+    requests.Session.request = patched_request
+    
+    # Also patch the send method
+    def patched_send(self, request, **kwargs):
+        kwargs['verify'] = False
+        # Call the ORIGINAL method, not the patched one
+        return _original_session_send(self, request, **kwargs)
+    requests.Session.send = patched_send
+    
+    # Disable warnings
+    try:
+        import urllib3
+        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    except ImportError:
+        pass
+    try:
+        requests.packages.urllib3.disable_warnings()
+    except (ImportError, AttributeError):
+        pass
+except Exception as e:
+    # If patching fails, continue anyway
+    pass
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,7 +110,8 @@ class GGUFConverter:
         
         for loc in locations:
             path = Path(loc).expanduser()
-            if path.exists() and (path / "convert.py").exists():
+            # Check for new convert_hf_to_gguf.py or old convert.py
+            if path.exists() and ((path / "convert_hf_to_gguf.py").exists() or (path / "convert.py").exists()):
                 return str(path)
         
         return None
@@ -74,24 +126,38 @@ class GGUFConverter:
             logger.error(f"Missing dependency: {e}")
             return False
         
-        # Check for llama-cpp-python
+        # Check for llama.cpp convert script (primary method)
+        if self.llama_cpp_path:
+            convert_script = Path(self.llama_cpp_path) / "convert_hf_to_gguf.py"
+            if not convert_script.exists():
+                # Fallback to old convert.py name
+                convert_script = Path(self.llama_cpp_path) / "convert.py"
+            if convert_script.exists():
+                logger.info(f"✓ llama.cpp conversion script available: {convert_script.name}")
+                return True
+            else:
+                logger.warning(f"llama.cpp path found but conversion script missing: {self.llama_cpp_path}")
+        
+        # Check for llama-cpp-python (secondary, mainly for inference)
         try:
             import llama_cpp
-            logger.info("✓ llama-cpp-python available")
-            return True
+            logger.info("✓ llama-cpp-python available (for inference)")
+            logger.warning("⚠️  llama.cpp repository required for conversion")
+            logger.warning("   Clone: git clone https://github.com/ggerganov/llama.cpp")
+            return False  # Can't convert without llama.cpp repo
         except ImportError:
             logger.info("llama-cpp-python not found")
         
-        # Check for llama.cpp convert script
-        if self.llama_cpp_path:
-            convert_script = Path(self.llama_cpp_path) / "convert.py"
-            if convert_script.exists():
-                logger.info("✓ llama.cpp convert.py available")
-                return True
-        
         logger.error("No conversion method available")
-        logger.error("Install with: pip install llama-cpp-python")
-        logger.error("Or clone llama.cpp: git clone https://github.com/ggerganov/llama.cpp")
+        logger.error("")
+        logger.error("Required: llama.cpp repository with convert.py")
+        logger.error("  git clone https://github.com/ggml-org/llama.cpp")
+        logger.error("  cd llama.cpp")
+        logger.error("  cmake -B build")
+        logger.error("  cmake --build build --config Release")
+        logger.error("")
+        logger.error("Optional: llama-cpp-python (for inference only)")
+        logger.error("  pip install llama-cpp-python")
         return False
     
     def convert_to_fp16(
@@ -112,13 +178,43 @@ class GGUFConverter:
         logger.info(f"Converting {model_dir} to FP16 GGUF...")
         
         if not self.llama_cpp_path:
-            logger.error("llama.cpp not found")
+            logger.error("="*60)
+            logger.error("llama.cpp repository not found!")
+            logger.error("="*60)
+            logger.error("")
+            logger.error("The conversion requires the llama.cpp repository (not just llama-cpp-python).")
+            logger.error("")
+            logger.error("Option 1: Clone llama.cpp repository")
+            logger.error("  cd ..")
+            logger.error("  git clone https://github.com/ggml-org/llama.cpp")
+            logger.error("  cd llama.cpp")
+            logger.error("  cmake -B build")
+            logger.error("  cmake --build build --config Release")
+            logger.error("  cd ../neural")
+            logger.error("  python export_to_gguf.py --llama_cpp_path ../llama.cpp ...")
+            logger.error("")
+            logger.error("Option 2: Use llama-cpp-python conversion (if available)")
+            logger.error("  pip install llama-cpp-python[convert]")
+            logger.error("")
+            logger.error("Option 3: Manual conversion")
+            logger.error("  Use HuggingFace's convert_to_gguf.py or similar tools")
+            logger.error("="*60)
             return False
         
-        convert_script = Path(self.llama_cpp_path) / "convert.py"
+        # Try new script name first, then fallback to old name
+        convert_script = Path(self.llama_cpp_path) / "convert_hf_to_gguf.py"
+        if not convert_script.exists():
+            convert_script = Path(self.llama_cpp_path) / "convert.py"
+        
+        if not convert_script.exists():
+            logger.error(f"Conversion script not found at: {self.llama_cpp_path}")
+            logger.error("Expected: convert_hf_to_gguf.py or convert.py")
+            logger.error("Make sure llama.cpp is properly cloned")
+            return False
         
         try:
-            # Run convert.py
+            # Run conversion script
+            # Both scripts use --outfile and --outtype
             cmd = [
                 sys.executable,
                 str(convert_script),
@@ -173,11 +269,18 @@ class GGUFConverter:
             logger.error("llama.cpp not found")
             return False
         
-        quantize_bin = Path(self.llama_cpp_path) / "quantize"
+        # Check for quantize binary in CMake build directory
+        quantize_bin = Path(self.llama_cpp_path) / "build" / "bin" / "llama-quantize"
+        if not quantize_bin.exists():
+            # Fallback to old location (root directory)
+            quantize_bin = Path(self.llama_cpp_path) / "quantize"
         
         if not quantize_bin.exists():
             logger.error(f"quantize binary not found: {quantize_bin}")
-            logger.error("Build llama.cpp first: cd llama.cpp && make quantize")
+            logger.error("Build llama.cpp first:")
+            logger.error("  cd llama.cpp")
+            logger.error("  cmake -B build")
+            logger.error("  cmake --build build --config Release")
             return False
         
         try:
@@ -273,6 +376,7 @@ def merge_lora_adapters(
         True if successful
     """
     logger.info("Merging LoRA adapters into base model...")
+    logger.info("⚠️  SSL verification disabled (ignoring certificate errors)")
     
     try:
         from transformers import AutoModelForCausalLM, AutoTokenizer
