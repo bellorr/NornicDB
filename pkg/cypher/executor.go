@@ -294,7 +294,7 @@ func NewStorageExecutor(store storage.Engine) *StorageExecutor {
 		planCache:         NewQueryPlanCache(500),   // Cache 500 parsed query plans
 		analyzer:          NewQueryAnalyzer(1000),   // Cache 1000 parsed query ASTs
 		nodeLookupCache:   make(map[string]*storage.Node, 1000),
-		searchService:     search.NewService(store),
+		searchService:     nil, // Lazy initialization - will be set via SetSearchService() to reuse DB's cached service
 		vectorRegistry:    vectorspace.NewIndexRegistry(),
 		vectorIndexSpaces: make(map[string]vectorspace.VectorSpaceKey),
 	}

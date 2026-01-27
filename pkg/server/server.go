@@ -178,6 +178,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/graphql"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
@@ -339,11 +340,11 @@ type Config struct {
 	// This contains feature flags like HeimdallEnabled loaded from YAML/env
 	Features *nornicConfig.FeatureFlagsConfig
 
-	// Debug/Profiling Configuration (commented out - can be enabled for profiling)
+	// Debug/Profiling Configuration
 	// EnablePprof enables /debug/pprof endpoints for performance profiling
 	// WARNING: Only enable in development/testing environments
 	// Env: NORNICDB_ENABLE_PPROF=true|false
-	// EnablePprof bool
+	EnablePprof bool
 }
 
 // DefaultConfig returns Neo4j-compatible default server configuration.
@@ -440,7 +441,7 @@ func DefaultConfig() *Config {
 		// Pprof disabled by default (security: profiling endpoints expose internals)
 		// Override via:
 		//   NORNICDB_ENABLE_PPROF=true
-		// EnablePprof: false, // Commented out - can be enabled for profiling
+		EnablePprof: getEnvBool("NORNICDB_ENABLE_PPROF", false),
 
 		// HTTP/2 always enabled (backwards compatible with HTTP/1.1)
 		// MaxConcurrentStreams: 250 matches Go's internal default
@@ -538,6 +539,10 @@ type Server struct {
 	// Cached search services per database (namespace-aware indexes)
 	searchServicesMu sync.RWMutex
 	searchServices   map[string]*search.Service
+
+	// Cached Cypher executors per database (thread-safe, reusable)
+	executorsMu sync.RWMutex
+	executors   map[string]*cypher.StorageExecutor
 }
 
 // IPRateLimiter provides IP-based rate limiting to prevent DoS attacks.
@@ -932,6 +937,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		rateLimiter:     rateLimiter,
 		basicAuthCache:  auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
 		searchServices:  make(map[string]*search.Service),
+		executors:       make(map[string]*cypher.StorageExecutor),
 	}
 
 	// Initialize OAuth manager if authenticator is available

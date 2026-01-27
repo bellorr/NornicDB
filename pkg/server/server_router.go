@@ -5,7 +5,7 @@ import (
 	"log"
 	"net/http"
 
-	// _ "net/http/pprof" // Register pprof handlers (commented out - can be enabled for profiling)
+	// _ "net/http/pprof" // Register pprof handlers
 	"os"
 	"time"
 
@@ -30,7 +30,7 @@ func (s *Server) buildRouter() http.Handler {
 	s.registerMCPRoutes(mux)
 	s.registerHeimdallRoutes(mux)
 	s.registerGraphQLRoutes(mux)
-	// s.registerDebugRoutes(mux) // Pprof endpoints (commented out - can be enabled for profiling)
+	// s.registerDebugRoutes(mux) // Pprof endpoints
 
 	return s.wrapWithMiddleware(mux)
 }
@@ -259,38 +259,35 @@ func (s *Server) registerGraphQLRoutes(mux *http.ServeMux) {
 	log.Println("📊 GraphQL API enabled at /graphql")
 }
 
-// registerDebugRoutes registers pprof profiling endpoints (commented out - can be enabled for profiling)
-// To enable: uncomment this function, uncomment the import "_ net/http/pprof", and uncomment the call in buildRouter()
-/*
-func (s *Server) registerDebugRoutes(mux *http.ServeMux) {
-	// ==========================================================================
-	// Debug/Profiling Endpoints (development/testing only)
-	// ==========================================================================
-	if !s.config.EnablePprof {
-		return
-	}
-
-	// Register pprof handlers at /debug/pprof/*
-	// These are provided by net/http/pprof package
-	mux.HandleFunc("/debug/pprof/", func(w http.ResponseWriter, r *http.Request) {
-		http.DefaultServeMux.ServeHTTP(w, r)
-	})
-	mux.HandleFunc("/debug/pprof/cmdline", func(w http.ResponseWriter, r *http.Request) {
-		http.DefaultServeMux.ServeHTTP(w, r)
-	})
-	mux.HandleFunc("/debug/pprof/profile", func(w http.ResponseWriter, r *http.Request) {
-		http.DefaultServeMux.ServeHTTP(w, r)
-	})
-	mux.HandleFunc("/debug/pprof/symbol", func(w http.ResponseWriter, r *http.Request) {
-		http.DefaultServeMux.ServeHTTP(w, r)
-	})
-	mux.HandleFunc("/debug/pprof/trace", func(w http.ResponseWriter, r *http.Request) {
-		http.DefaultServeMux.ServeHTTP(w, r)
-	})
-
-	log.Println("🔍 Pprof profiling enabled at /debug/pprof/")
-}
-*/
+// registerDebugRoutes registers pprof profiling endpoints
+// func (s *Server) registerDebugRoutes(mux *http.ServeMux) {
+// 	// ==========================================================================
+// 	// Debug/Profiling Endpoints (development/testing only)
+// 	// ==========================================================================
+// 	if !s.config.EnablePprof {
+// 		return
+// 	}
+//
+// 	// Register pprof handlers at /debug/pprof/*
+// 	// These are provided by net/http/pprof package
+// 	mux.HandleFunc("/debug/pprof/", func(w http.ResponseWriter, r *http.Request) {
+// 		http.DefaultServeMux.ServeHTTP(w, r)
+// 	})
+// 	mux.HandleFunc("/debug/pprof/cmdline", func(w http.ResponseWriter, r *http.Request) {
+// 		http.DefaultServeMux.ServeHTTP(w, r)
+// 	})
+// 	mux.HandleFunc("/debug/pprof/profile", func(w http.ResponseWriter, r *http.Request) {
+// 		http.DefaultServeMux.ServeHTTP(w, r)
+// 	})
+// 	mux.HandleFunc("/debug/pprof/symbol", func(w http.ResponseWriter, r *http.Request) {
+// 		http.DefaultServeMux.ServeHTTP(w, r)
+// 	})
+// 	mux.HandleFunc("/debug/pprof/trace", func(w http.ResponseWriter, r *http.Request) {
+// 		http.DefaultServeMux.ServeHTTP(w, r)
+// 	})
+//
+// 	log.Println("🔍 Pprof profiling enabled at /debug/pprof/")
+// }
 
 func (s *Server) wrapWithMiddleware(next http.Handler) http.Handler {
 	// Wrap with middleware (order matters: outermost runs first)
