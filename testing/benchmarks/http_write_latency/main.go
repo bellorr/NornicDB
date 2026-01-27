@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -80,11 +81,21 @@ func main() {
 		},
 	}
 
-	// Prepare auth header
+	// Prepare auth header - use JWT token if auth provided (more efficient than Basic Auth per request)
 	authHeader := ""
 	if *auth != "" {
-		username, password, _ := parseAuth(*auth)
-		authHeader = basicAuth(username, password)
+		username, password, ok := parseAuth(*auth)
+		if ok {
+			// Get JWT token once and reuse it (avoids per-request auth overhead and lockout issues)
+			token, err := getJWTToken(*url, username, password)
+			if err != nil {
+				fmt.Printf("Warning: Failed to get JWT token, falling back to Basic Auth: %v\n", err)
+				authHeader = basicAuth(username, password)
+			} else {
+				authHeader = "Bearer " + token
+				fmt.Printf("Using JWT token for authentication (more efficient)\n")
+			}
+		}
 	}
 
 	// Warmup phase
@@ -342,39 +353,38 @@ func parseAuth(auth string) (username, password string, ok bool) {
 
 func basicAuth(username, password string) string {
 	auth := username + ":" + password
-	return "Basic " + base64Encode(auth)
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(auth))
 }
 
-func base64Encode(s string) string {
-	encoding := "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-	result := make([]byte, 0, (len(s)*4+2)/3)
-	
-	i := 0
-	for i < len(s) {
-		var b1, b2, b3 byte
-		b1 = s[i]
-		i++
-		if i < len(s) {
-			b2 = s[i]
-			i++
-		}
-		if i < len(s) {
-			b3 = s[i]
-			i++
-		}
-
-		result = append(result, encoding[b1>>2])
-		result = append(result, encoding[((b1&0x3)<<4)|(b2>>4)])
-		if i-2 < len(s) {
-			result = append(result, encoding[((b2&0xf)<<2)|(b3>>6)])
-		} else {
-			result = append(result, '=')
-		}
-		if i-1 < len(s) {
-			result = append(result, encoding[b3&0x3f])
-		} else {
-			result = append(result, '=')
-		}
+// getJWTToken obtains a JWT token from the /auth/token endpoint
+func getJWTToken(baseURL, username, password string) (string, error) {
+	reqBody := map[string]string{
+		"username": username,
+		"password": password,
 	}
-	return string(result)
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := http.Post(baseURL+"/auth/token", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("token request failed: %d %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+		return "", err
+	}
+
+	return tokenResp.AccessToken, nil
 }

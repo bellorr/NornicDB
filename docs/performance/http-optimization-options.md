@@ -148,7 +148,7 @@ HTTP/2 is automatically enabled for all connections:
 // HTTP/2 is automatically configured in server.Start()
 // No additional configuration required
 config := server.DefaultConfig()
-config.HTTP2MaxConcurrentStreams = 1000 // Optional: adjust concurrent streams
+config.HTTP2MaxConcurrentStreams = 500 // Optional: adjust concurrent streams (default: 250)
 
 server, err := server.New(db, auth, config)
 ```
@@ -160,7 +160,7 @@ server, err := server.New(db, auth, config)
 - ✅ Automatic protocol negotiation
 
 **Configuration:**
-- `HTTP2MaxConcurrentStreams`: Maximum concurrent streams per connection (default: 1000)
+- `HTTP2MaxConcurrentStreams`: Maximum concurrent streams per connection (default: 250, matches Go's internal default)
 
 **See:** [HTTP/2 Implementation Guide](http2-implementation.md) for details.
 

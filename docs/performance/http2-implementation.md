@@ -30,7 +30,7 @@ HTTP/2 is automatically enabled with the following configuration:
 ```go
 type Config struct {
     // HTTP/2 is always enabled (backwards compatible)
-    HTTP2MaxConcurrentStreams uint32 // Default: 1000
+    HTTP2MaxConcurrentStreams uint32 // Default: 250 (matches Go's internal default)
 }
 ```
 
@@ -64,7 +64,7 @@ HTTP/2 is enabled by default. No configuration required:
 
 ```go
 config := server.DefaultConfig()
-config.HTTP2MaxConcurrentStreams = 1000 // Optional: adjust concurrent streams
+config.HTTP2MaxConcurrentStreams = 500 // Optional: adjust concurrent streams (default: 250)
 
 server, err := server.New(db, auth, config)
 ```
@@ -126,27 +126,28 @@ HTTP/2 has less impact for:
 Controls the maximum number of concurrent streams per HTTP/2 connection:
 
 ```go
-config.HTTP2MaxConcurrentStreams = 100 // Default (industry standard)
+config.HTTP2MaxConcurrentStreams = 250 // Default (matches Go's internal default)
 ```
 
-**Default Value: 100**
+**Default Value: 250**
 
-The default of **100** is based on:
-- **Industry best practice:** 100 is the recommended default for HTTP/2 servers
-- **Go's recommendation:** Go's HTTP/2 implementation has a TODO suggesting 100 (currently uses 250 internally)
-- **Security:** Protects against DoS attacks (prevents memory exhaustion from malicious clients)
-- **Typical workloads:** Adequate for most use cases (100 concurrent requests per connection)
+The default of **250** matches Go's standard library `http2.Server` default:
+- **Go's standard:** Matches `golang.org/x/net/http2` internal default (250)
+- **Good balance:** Provides adequate concurrency without excessive memory usage
+- **Security:** Reasonable protection against DoS attacks while allowing good performance
+- **Typical workloads:** Sufficient for most use cases (250 concurrent requests per connection)
 
 **Recommendations by Use Case:**
 
-- **Default (most cases):** 100 streams
-  - Industry standard
-  - Good security posture
-  - Adequate for typical API workloads
-
-- **Moderate concurrency (10-50 clients):** 250 streams
+- **Default (most cases):** 250 streams
   - Matches Go's internal default
   - Good balance of performance and security
+  - Adequate for typical API workloads
+
+- **Lower memory usage:** 100 streams
+  - Industry standard recommendation
+  - Better security posture
+  - Good for resource-constrained environments
 
 - **High concurrency (50-200 clients):** 500-1000 streams
   - For scenarios with many concurrent clients

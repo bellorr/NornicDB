@@ -271,9 +271,9 @@ type Config struct {
 	// HTTP/2 is always enabled (backwards compatible with HTTP/1.1)
 	// HTTP/2 provides multiplexing, header compression, and improved performance
 	// HTTP/1.1 clients continue to work normally
-	// HTTP2MaxConcurrentStreams limits the number of concurrent streams per connection (default: 100)
-	// - 100: Industry standard, recommended for most workloads (default)
-	// - 250: Go's internal default, good for moderate concurrency
+	// HTTP2MaxConcurrentStreams limits the number of concurrent streams per connection (default: 250)
+	// - 250: Go's internal default, matches standard library behavior (default)
+	// - 100: Lower memory usage, good for resource-constrained environments
 	// - 500-1000: High concurrency scenarios, uses more memory per connection
 	// - Very high values (>1000) are not recommended due to DoS attack risk
 	HTTP2MaxConcurrentStreams uint32
@@ -443,12 +443,12 @@ func DefaultConfig() *Config {
 		// EnablePprof: false, // Commented out - can be enabled for profiling
 
 		// HTTP/2 always enabled (backwards compatible with HTTP/1.1)
-		// MaxConcurrentStreams: 100 is the industry standard default
-		// - Matches Go's recommended value (TODO in Go source suggests 100)
-		// - Adequate for typical workloads (100 concurrent requests per connection)
-		// - Protects against DoS attacks (prevents memory exhaustion)
-		// - Can be increased for high-concurrency scenarios (e.g., 500-1000)
-		HTTP2MaxConcurrentStreams: 100,
+		// MaxConcurrentStreams: 250 matches Go's internal default
+		// - Matches standard library http2.Server default (250)
+		// - Good balance between performance and memory usage
+		// - Can be reduced to 100 for lower-memory environments
+		// - Can be increased to 500+ for high-concurrency scenarios
+		HTTP2MaxConcurrentStreams: 250,
 	}
 }
 
