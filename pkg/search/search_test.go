@@ -820,6 +820,63 @@ func TestSearchService_RemoveNode_OnlyRemovesTargetNode(t *testing.T) {
 	assert.True(t, found, "Remaining node 'should-remain-1' should be searchable")
 }
 
+func TestSearchService_IndexNode_ReplacesExistingVectors_NoOrphansOnDelete(t *testing.T) {
+	t.Run("chunk embeddings: shrinking chunk count removes old chunk IDs", func(t *testing.T) {
+		baseEngine := newNamespacedEngine(t)
+		engine := storage.NewNamespacedEngine(baseEngine, "test")
+		svc := NewServiceWithDimensions(engine, 4)
+
+		node := &storage.Node{
+			ID:              "node1",
+			Labels:          []string{"Document"},
+			Properties:      map[string]any{},
+			ChunkEmbeddings: [][]float32{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+
+		require.NoError(t, svc.IndexNode(node))
+		// For multi-chunk nodes: main at node ID + each chunk at node-id-chunk-N.
+		require.Equal(t, 4, svc.EmbeddingCount(), "expected main + 3 chunk vectors")
+
+		// Re-index same node with fewer chunks (should remove the old extra chunk vector).
+		node.ChunkEmbeddings = [][]float32{{1, 0, 0, 0}, {0, 1, 0, 0}}
+		require.NoError(t, svc.IndexNode(node))
+		require.Equal(t, 3, svc.EmbeddingCount(), "expected main + 2 chunk vectors after re-index")
+
+		// Delete should remove all vectors for this node (no orphaned chunk IDs).
+		require.NoError(t, svc.RemoveNode("node1"))
+		require.Equal(t, 0, svc.EmbeddingCount())
+	})
+
+	t.Run("named embeddings: removing a named vector removes its old vector ID", func(t *testing.T) {
+		baseEngine := newNamespacedEngine(t)
+		engine := storage.NewNamespacedEngine(baseEngine, "test")
+		svc := NewServiceWithDimensions(engine, 4)
+
+		node := &storage.Node{
+			ID:              "node2",
+			Labels:          []string{"Document"},
+			Properties:      map[string]any{},
+			NamedEmbeddings: map[string][]float32{"title": {1, 0, 0, 0}, "content": {0, 1, 0, 0}},
+		}
+		_, err := engine.CreateNode(node)
+		require.NoError(t, err)
+
+		require.NoError(t, svc.IndexNode(node))
+		require.Equal(t, 2, svc.EmbeddingCount(), "expected 2 named vectors")
+
+		// Re-index with one named vector removed (should remove old named vector ID).
+		node.NamedEmbeddings = map[string][]float32{"title": {1, 0, 0, 0}}
+		require.NoError(t, svc.IndexNode(node))
+		require.Equal(t, 1, svc.EmbeddingCount(), "expected 1 named vector after re-index")
+
+		// Delete should remove remaining named vectors.
+		require.NoError(t, svc.RemoveNode("node2"))
+		require.Equal(t, 0, svc.EmbeddingCount())
+	})
+}
+
 // TestSearchService_HybridSearch tests the hybrid RRF search.
 func TestSearchService_HybridSearch(t *testing.T) {
 	baseEngine := newNamespacedEngine(t)
@@ -983,6 +1040,7 @@ func TestHybridSearch_DoesNotHoldServiceLockWhileWaitingForPipeline(t *testing.T
 	locked := make(chan struct{})
 	go func() {
 		svc.mu.Lock()
+		_ = svc.vectorIndex // make critical section non-empty (also exercises safe field access)
 		svc.mu.Unlock()
 		close(locked)
 	}()

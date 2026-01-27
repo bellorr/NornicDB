@@ -921,6 +921,13 @@ func (s *Service) IndexNode(node *storage.Node) error {
 
 	nodeIDStr := string(node.ID)
 	if nodeIDStr != "" {
+		// CRITICAL: IndexNode is called for both creates and updates.
+		// When a node is re-indexed with fewer chunks or fewer named vectors,
+		// we must remove the old vector IDs first, otherwise they become orphaned
+		// in the in-memory index and EmbeddingCount() will drift upward over time.
+		s.removeNodeLocked(nodeIDStr)
+	}
+	if nodeIDStr != "" {
 		labelsCopy := make([]string, len(node.Labels))
 		copy(labelsCopy, node.Labels)
 		s.nodeLabels[nodeIDStr] = labelsCopy
@@ -1084,20 +1091,26 @@ func (s *Service) IndexNode(node *storage.Node) error {
 	return nil
 }
 
-// RemoveNode removes a node from all search indexes.
-// Also removes all chunk embeddings (for nodes with multiple chunks).
-func (s *Service) RemoveNode(nodeID storage.NodeID) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	nodeIDStr := string(nodeID)
+// removeNodeLocked removes a node from all search indexes.
+// Caller MUST hold s.mu (write lock).
+//
+// This is used by both RemoveNode (delete path) and IndexNode (update path) to ensure
+// vector IDs never become orphaned when embeddings change shape over time.
+func (s *Service) removeNodeLocked(nodeIDStr string) {
+	if nodeIDStr == "" {
+		return
+	}
 
 	// Remove main embedding
-	s.vectorIndex.Remove(nodeIDStr)
+	if s.vectorIndex != nil {
+		s.vectorIndex.Remove(nodeIDStr)
+	}
 	if s.gpuEmbeddingIndex != nil {
 		_ = s.gpuEmbeddingIndex.Remove(nodeIDStr)
 	}
-	s.fulltextIndex.Remove(nodeIDStr)
+	if s.fulltextIndex != nil {
+		s.fulltextIndex.Remove(nodeIDStr)
+	}
 
 	// Also remove from HNSW index if it exists
 	s.hnswMu.RLock()
@@ -1116,7 +1129,9 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	// Remove property vectors tracked for Cypher compatibility.
 	if props := s.nodePropVector[nodeIDStr]; len(props) > 0 {
 		for _, propID := range props {
-			s.vectorIndex.Remove(propID)
+			if s.vectorIndex != nil {
+				s.vectorIndex.Remove(propID)
+			}
 			if s.gpuEmbeddingIndex != nil {
 				_ = s.gpuEmbeddingIndex.Remove(propID)
 			}
@@ -1135,7 +1150,9 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	// Remove all named embeddings (they're indexed as "node-id-named-{vectorName}")
 	if named := s.nodeNamedVector[nodeIDStr]; len(named) > 0 {
 		for _, namedID := range named {
-			s.vectorIndex.Remove(namedID)
+			if s.vectorIndex != nil {
+				s.vectorIndex.Remove(namedID)
+			}
 			if s.gpuEmbeddingIndex != nil {
 				_ = s.gpuEmbeddingIndex.Remove(namedID)
 			}
@@ -1157,7 +1174,9 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	// Remove all chunk embeddings (they're indexed as "node-id-chunk-0", "node-id-chunk-1", etc.)
 	if chunkIDs := s.nodeChunkVectors[nodeIDStr]; len(chunkIDs) > 0 {
 		for _, chunkID := range chunkIDs {
-			s.vectorIndex.Remove(chunkID)
+			if s.vectorIndex != nil {
+				s.vectorIndex.Remove(chunkID)
+			}
 			if s.gpuEmbeddingIndex != nil {
 				_ = s.gpuEmbeddingIndex.Remove(chunkID)
 			}
@@ -1175,6 +1194,15 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 		}
 	}
 	delete(s.nodeChunkVectors, nodeIDStr)
+}
+
+// RemoveNode removes a node from all search indexes.
+// Also removes all chunk embeddings (for nodes with multiple chunks).
+func (s *Service) RemoveNode(nodeID storage.NodeID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.removeNodeLocked(string(nodeID))
 
 	return nil
 }

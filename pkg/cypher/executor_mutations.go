@@ -372,6 +372,8 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 							}
 							if !hasLabel {
 								node.Labels = append(node.Labels, labelName)
+								// Labels are part of the embedding text; invalidate managed embeddings so they regenerate.
+								invalidateManagedEmbeddings(node)
 								if err := store.UpdateNode(node); err == nil {
 									result.Stats.LabelsAdded++
 								}
@@ -687,12 +689,19 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 			if !ok || node == nil {
 				continue
 			}
+			invalidated := false
 			// Remove specified properties
 			for _, prop := range propsToRemove {
 				if _, exists := node.Properties[prop]; exists {
 					delete(node.Properties, prop)
 					result.Stats.PropertiesSet++ // Neo4j counts removals as properties set
+					if !isEmbeddingMetadataPropertyKey(prop) {
+						invalidated = true
+					}
 				}
+			}
+			if invalidated {
+				invalidateManagedEmbeddings(node)
 			}
 			_ = store.UpdateNode(node)
 		}

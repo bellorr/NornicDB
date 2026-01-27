@@ -108,10 +108,60 @@ func setNodeProperty(node *storage.Node, propName string, value interface{}) {
 		}
 		return
 	}
+
+	// For managed embeddings (ChunkEmbeddings), any mutation to non-metadata properties
+	// should invalidate the embedding so it can be regenerated. This prevents stale
+	// embeddings after SET/REMOVE operations.
+	if !isEmbeddingMetadataPropertyKey(propName) {
+		invalidateManagedEmbeddings(node)
+	}
+
 	if node.Properties == nil {
 		node.Properties = make(map[string]interface{})
 	}
 	node.Properties[propName] = value
+}
+
+func isEmbeddingMetadataPropertyKey(key string) bool {
+	switch key {
+	// Internal embedding fields / markers
+	case "embedding",
+		"has_embedding",
+		"embedding_skipped",
+		"embedding_model",
+		"embedding_dimensions",
+		"embedded_at",
+		"has_chunks",
+		"chunk_count",
+		// Common identity/timestamps that should not affect embedding text
+		"createdAt",
+		"updatedAt",
+		"id":
+		return true
+	default:
+		return false
+	}
+}
+
+func invalidateManagedEmbeddings(node *storage.Node) {
+	if node == nil {
+		return
+	}
+
+	// Managed embeddings live in ChunkEmbeddings (embed worker output).
+	node.ChunkEmbeddings = nil
+
+	// Clear embedding-related metadata so Cypher queries reflect reality until regeneration completes.
+	if node.Properties != nil {
+		delete(node.Properties, "embedding")
+		delete(node.Properties, "has_embedding")
+		delete(node.Properties, "embedding_skipped")
+		delete(node.Properties, "embedding_model")
+		delete(node.Properties, "embedding_dimensions")
+		delete(node.Properties, "embedded_at")
+		delete(node.Properties, "has_chunks")
+		delete(node.Properties, "chunk_count")
+	}
 }
 
 // splitSetAssignments splits a SET clause into individual assignments,
