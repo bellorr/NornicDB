@@ -444,7 +444,32 @@ func TestMemoryEngine_UpdateEdge(t *testing.T) {
 		require.NoError(t, err)
 
 		updated, _ := engine.GetEdge(EdgeID(prefixTestID("edge-1")))
-		assert.Equal(t, 5, updated.Properties["weight"])
+		// Gob may decode integers as different types (int, int8, int16, int32, int64, etc.)
+		// Normalize to int for comparison
+		var weightVal int
+		switch v := updated.Properties["weight"].(type) {
+		case int:
+			weightVal = v
+		case int8:
+			weightVal = int(v)
+		case int16:
+			weightVal = int(v)
+		case int32:
+			weightVal = int(v)
+		case int64:
+			weightVal = int(v)
+		case uint8:
+			weightVal = int(v)
+		case uint16:
+			weightVal = int(v)
+		case uint32:
+			weightVal = int(v)
+		case uint64:
+			weightVal = int(v)
+		default:
+			t.Fatalf("unexpected type for 'weight': %T", v)
+		}
+		assert.Equal(t, 5, weightVal)
 	})
 
 	t.Run("success - change endpoints", func(t *testing.T) {

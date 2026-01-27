@@ -317,8 +317,30 @@ func TestCallDbCreateSetRelationshipVectorProperty(t *testing.T) {
 		rel, err := engine.GetEdge("rel1")
 		require.NoError(t, err)
 
-		features, ok := rel.Properties["features"].([]float64)
-		require.True(t, ok, "features should be []float64")
+		// Handle both []float64 and []interface{} (msgpack may convert types)
+		var features []float64
+		switch v := rel.Properties["features"].(type) {
+		case []float64:
+			features = v
+		case []interface{}:
+			features = make([]float64, len(v))
+			for i, val := range v {
+				switch f := val.(type) {
+				case float64:
+					features[i] = f
+				case float32:
+					features[i] = float64(f)
+				case int:
+					features[i] = float64(f)
+				case int64:
+					features[i] = float64(f)
+				default:
+					t.Fatalf("unexpected type in vector: %T", val)
+				}
+			}
+		default:
+			t.Fatalf("features should be []float64 or []interface{}, got %T", rel.Properties["features"])
+		}
 		assert.Equal(t, []float64{1.0, 2.0, 3.0}, features)
 	})
 

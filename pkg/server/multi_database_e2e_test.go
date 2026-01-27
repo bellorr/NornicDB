@@ -530,6 +530,13 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 			},
 		}, "Bearer "+token)
 		require.Equal(t, http.StatusOK, resp.Code)
+		// Check for errors
+		var dropResult TransactionResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&dropResult))
+		if len(dropResult.Errors) > 0 {
+			t.Fatalf("DROP COMPOSITE DATABASE test_composite failed: %v", dropResult.Errors)
+		}
+		t.Logf("DROP COMPOSITE DATABASE result: %+v", dropResult)
 
 		// Verify composite database was dropped
 		resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
@@ -542,6 +549,19 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 		var result TransactionResponse
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 		require.Len(t, result.Results, 1)
+		// Debug: log what we got
+		var foundNames []string
+		for _, row := range result.Results[0].Data {
+			if len(row.Row) > 0 {
+				if name, ok := row.Row[0].(string); ok {
+					foundNames = append(foundNames, name)
+					if name == "test_composite" {
+						t.Logf("ERROR: Found test_composite in SHOW COMPOSITE DATABASES after dropping!")
+					}
+				}
+			}
+		}
+		t.Logf("Composite databases after drop: %v", foundNames)
 		// Should not have test_composite anymore
 		found := false
 		for _, row := range result.Results[0].Data {
@@ -552,7 +572,7 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 				}
 			}
 		}
-		assert.False(t, found, "test_composite should not exist after dropping")
+		assert.False(t, found, "test_composite should not exist after dropping. Found: %v", foundNames)
 
 		// Verify constituent databases still exist
 		resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
@@ -564,8 +584,18 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 		require.Len(t, result.Results, 1)
-		// Should still have test_db_a and test_db_b
-		assert.GreaterOrEqual(t, len(result.Results[0].Data), 4, "should still have constituent databases")
+		// Debug: log what databases we have
+		var dbNames []string
+		for _, row := range result.Results[0].Data {
+			if len(row.Row) > 0 {
+				if name, ok := row.Row[0].(string); ok {
+					dbNames = append(dbNames, name)
+				}
+			}
+		}
+		t.Logf("Databases after dropping composite: %v (count: %d)", dbNames, len(result.Results[0].Data))
+		// Should still have test_db_a and test_db_b (plus nornic and system = 4 total)
+		assert.GreaterOrEqual(t, len(result.Results[0].Data), 4, "should still have constituent databases. Found: %v", dbNames)
 	})
 
 	// Step 13: Cleanup - Drop test databases
@@ -577,6 +607,12 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 			},
 		}, "Bearer "+token)
 		require.Equal(t, http.StatusOK, resp.Code)
+		// Check for errors
+		var dropResult TransactionResponse
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&dropResult))
+		if len(dropResult.Errors) > 0 {
+			t.Fatalf("DROP DATABASE test_db_a failed: %v", dropResult.Errors)
+		}
 
 		// Drop second test database
 		resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
@@ -585,6 +621,11 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 			},
 		}, "Bearer "+token)
 		require.Equal(t, http.StatusOK, resp.Code)
+		// Check for errors
+		require.NoError(t, json.NewDecoder(resp.Body).Decode(&dropResult))
+		if len(dropResult.Errors) > 0 {
+			t.Fatalf("DROP DATABASE test_db_b failed: %v", dropResult.Errors)
+		}
 
 		// Verify databases were dropped
 		resp = makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
@@ -597,8 +638,18 @@ func TestMultiDatabase_E2E_FullSequence(t *testing.T) {
 		var result TransactionResponse
 		require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 		require.Len(t, result.Results, 1)
+		// Debug: log what databases we have
+		var dbNames []string
+		for _, row := range result.Results[0].Data {
+			if len(row.Row) > 0 {
+				if name, ok := row.Row[0].(string); ok {
+					dbNames = append(dbNames, name)
+				}
+			}
+		}
+		t.Logf("Databases after dropping test databases: %v (count: %d)", dbNames, len(result.Results[0].Data))
 		// Should only have nornic and system
-		assert.LessOrEqual(t, len(result.Results[0].Data), 2, "should only have default and system databases")
+		assert.LessOrEqual(t, len(result.Results[0].Data), 2, "should only have default and system databases. Found: %v", dbNames)
 	})
 }
 

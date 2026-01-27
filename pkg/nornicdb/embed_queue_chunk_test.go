@@ -23,7 +23,7 @@ func TestNonFileNodeChunking(t *testing.T) {
 
 		// Create a node with small content (single chunk)
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("small-node"),
+			ID:     storage.NodeID("small-node"),
 			Labels: []string{"Document"},
 			Properties: map[string]any{
 				"content": "Short content",
@@ -74,7 +74,7 @@ func TestNonFileNodeChunking(t *testing.T) {
 		// So we need content large enough that after adding labels/title, it exceeds chunkSize
 		largeContent := strings.Repeat("This is a sentence with various words and tokens. ", 500)
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("large-doc-node"),
+			ID:     storage.NodeID("large-doc-node"),
 			Labels: []string{"Document"},
 			Properties: map[string]any{
 				"content": largeContent,
@@ -149,7 +149,7 @@ func TestNonFileNodeChunking(t *testing.T) {
 		// Create a node with large content
 		largeContent := strings.Repeat("Test content for chunking. ", 500)
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("test-node"),
+			ID:     storage.NodeID("test-node"),
 			Labels: []string{"Article"},
 			Properties: map[string]any{
 				"content": largeContent,
@@ -216,7 +216,7 @@ func TestChunkEmbeddingSearch(t *testing.T) {
 	// Create a node with large content (will be chunked)
 	largeContent := strings.Repeat("Machine learning algorithms are fascinating. ", 500)
 	_, err := engine.CreateNode(&storage.Node{
-		ID: storage.NodeID("ml-doc"),
+		ID:     storage.NodeID("ml-doc"),
 		Labels: []string{"Document"},
 		Properties: map[string]any{
 			"content": largeContent,
@@ -247,27 +247,24 @@ func TestChunkEmbeddingSearch(t *testing.T) {
 	}
 	worker.Close()
 
-	// Manually index the node (since MemoryEngine doesn't have callbacks)
+	// Verify the node has chunk embeddings before indexing
 	node, err := engine.GetNode("ml-doc")
 	require.NoError(t, err)
-	err = searchService.IndexNode(node)
-	require.NoError(t, err)
+	require.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings after worker processing")
+	chunkCount := len(node.ChunkEmbeddings)
+	require.Greater(t, chunkCount, 0, "Node should have at least one chunk embedding")
 
-	// Build search indexes (for any other nodes)
+	// Build search indexes (this will index all nodes including our test node)
 	err = searchService.BuildIndexes(context.Background())
 	require.NoError(t, err)
 
 	// Verify all chunk embeddings are indexed
 	embeddingCount := searchService.EmbeddingCount()
-	chunkCount, ok := node.Properties["chunk_count"].(int)
-	if !ok {
-		// If no chunk_count, it means single chunk
-		chunkCount = 0
-	}
 
 	// Embedding count should include: 1 main embedding (at node.ID) + N chunk embeddings (for multi-chunk nodes)
 	// For single chunk: 1 main embedding
-	// For multi-chunk: 1 main embedding + N chunk embeddings
+	// For multi-chunk: 1 main embedding + N chunk embeddings (chunk 0 is indexed as both main and chunk-0)
+	// So for N chunks: 1 main + N chunks = N+1 total
 	expectedCount := 1 + chunkCount
 	assert.Equal(t, expectedCount, embeddingCount, "Should have main embedding plus all chunk embeddings indexed")
 
@@ -311,7 +308,7 @@ func TestChunkEmbeddingRemoval(t *testing.T) {
 	// Create a node with large content
 	largeContent := strings.Repeat("Test content. ", 500)
 	_, err := engine.CreateNode(&storage.Node{
-		ID: storage.NodeID("temp-doc"),
+		ID:     storage.NodeID("temp-doc"),
 		Labels: []string{"Document"},
 		Properties: map[string]any{
 			"content": largeContent,
@@ -344,18 +341,16 @@ func TestChunkEmbeddingRemoval(t *testing.T) {
 	// Reload node to get latest state with chunk_embeddings
 	node, err := engine.GetNode("temp-doc")
 	require.NoError(t, err)
+	require.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings after worker processing")
+	chunkCount := len(node.ChunkEmbeddings)
+	require.Greater(t, chunkCount, 0, "Node should have at least one chunk embedding")
 
-	// Manually index the node (since MemoryEngine doesn't have callbacks)
-	err = searchService.IndexNode(node)
-	require.NoError(t, err)
-
-	// Build indexes (for any other nodes)
+	// Build indexes (this will index all nodes including our test node)
 	err = searchService.BuildIndexes(context.Background())
 	require.NoError(t, err)
 
 	// Verify embeddings are indexed (should include main + chunk embeddings)
 	initialCount := searchService.EmbeddingCount()
-	chunkCount, _ := node.Properties["chunk_count"].(int)
 	expectedCount := 1 + chunkCount // 1 main embedding (at node.ID) + N chunk embeddings
 	assert.Equal(t, expectedCount, initialCount, "Should have main embedding plus all chunk embeddings indexed")
 

@@ -245,7 +245,43 @@ func decodeNodeWithEmbeddings(txn *badger.Txn, data []byte, nodeID NodeID) (*Nod
 
 	// Check if embeddings are stored separately
 	if storedSeparately, ok := node.Properties["_embeddings_stored_separately"].(bool); ok && storedSeparately {
-		chunkCount, _ := node.Properties["_embedding_chunk_count"].(int)
+		// Handle various integer types (gob may decode as different types depending on value size)
+		var chunkCount int
+		switch v := node.Properties["_embedding_chunk_count"].(type) {
+		case int:
+			chunkCount = v
+		case int8:
+			chunkCount = int(v)
+		case int16:
+			chunkCount = int(v)
+		case int32:
+			chunkCount = int(v)
+		case int64:
+			chunkCount = int(v)
+		case uint:
+			chunkCount = int(v)
+		case uint8:
+			chunkCount = int(v)
+		case uint16:
+			chunkCount = int(v)
+		case uint32:
+			chunkCount = int(v)
+		case uint64:
+			chunkCount = int(v)
+		case float64:
+			// JSON numbers might be decoded as float64
+			chunkCount = int(v)
+		default:
+			// Try to convert via fmt.Sprintf and strconv if needed
+			if v != nil {
+				// Last resort: try string conversion
+				if str, ok := v.(string); ok {
+					if parsed, err := fmt.Sscanf(str, "%d", &chunkCount); err == nil && parsed == 1 {
+						// Successfully parsed
+					}
+				}
+			}
+		}
 		if chunkCount > 0 {
 			node.ChunkEmbeddings = make([][]float32, 0, chunkCount)
 

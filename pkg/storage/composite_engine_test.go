@@ -435,7 +435,32 @@ func TestCompositeEngine_UpdateEdge(t *testing.T) {
 	// Verify update
 	retrieved, err := composite.GetEdge(edge1.ID)
 	require.NoError(t, err)
-	assert.Equal(t, 2020, retrieved.Properties["since"])
+	// Gob may decode integers as different types (int, int8, int16, int32, int64, uint16, etc.)
+	// Normalize to int for comparison
+	var sinceVal int
+	switch v := retrieved.Properties["since"].(type) {
+	case int:
+		sinceVal = v
+	case int8:
+		sinceVal = int(v)
+	case int16:
+		sinceVal = int(v)
+	case int32:
+		sinceVal = int(v)
+	case int64:
+		sinceVal = int(v)
+	case uint8:
+		sinceVal = int(v)
+	case uint16:
+		sinceVal = int(v)
+	case uint32:
+		sinceVal = int(v)
+	case uint64:
+		sinceVal = int(v)
+	default:
+		t.Fatalf("unexpected type for 'since': %T", v)
+	}
+	assert.Equal(t, 2020, sinceVal)
 }
 
 func TestCompositeEngine_DeleteEdge(t *testing.T) {

@@ -114,7 +114,7 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 
 	// Set DatabaseManager for system commands (CREATE/DROP/SHOW DATABASE)
 	// Wrap DatabaseManager to implement the interface expected by executor
-	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db})
+	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db, server: s})
 
 	// Reuse DB's cached search service instead of creating a new one
 	// This eliminates duplicate search service allocations (major memory optimization)
@@ -135,11 +135,19 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 	return executor, nil
 }
 
+// invalidateExecutor removes a cached executor for a dropped database.
+func (s *Server) invalidateExecutor(dbName string) {
+	s.executorsMu.Lock()
+	defer s.executorsMu.Unlock()
+	delete(s.executors, dbName)
+}
+
 // databaseManagerAdapter wraps multidb.DatabaseManager to implement
 // cypher.DatabaseManagerInterface, avoiding import cycles.
 type databaseManagerAdapter struct {
 	manager *multidb.DatabaseManager
 	db      *nornicdb.DB
+	server  *Server // Reference to server for cache invalidation
 }
 
 func (a *databaseManagerAdapter) CreateDatabase(name string) error {
@@ -153,6 +161,10 @@ func (a *databaseManagerAdapter) DropDatabase(name string) error {
 	if a.db != nil {
 		a.db.ResetSearchService(name)
 		a.db.ResetInferenceService(name)
+	}
+	// Invalidate cached executor for dropped database
+	if a.server != nil {
+		a.server.invalidateExecutor(name)
 	}
 	return nil
 }
@@ -223,7 +235,12 @@ func (a *databaseManagerAdapter) CreateCompositeDatabase(name string, constituen
 }
 
 func (a *databaseManagerAdapter) DropCompositeDatabase(name string) error {
-	return a.manager.DropCompositeDatabase(name)
+	if err := a.manager.DropCompositeDatabase(name); err != nil {
+		return err
+	}
+	// Note: Composite databases don't have their own executors cached
+	// since queries go through constituent databases. No cleanup needed.
+	return nil
 }
 
 func (a *databaseManagerAdapter) AddConstituent(compositeName string, constituent interface{}) error {
