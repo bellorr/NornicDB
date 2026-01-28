@@ -22,7 +22,8 @@
   <a href="#quick-start">Quick Start</a> •
   <a href="#features">Features</a> •
   <a href="#docker-images">Docker</a> •
-  <a href="#documentation">Docs</a>
+  <a href="#documentation">Docs</a> •
+  <a href="#contributors">Contributors</a>
 </p>
 
 ---
@@ -521,6 +522,10 @@ make cross-all             # All platforms
 - [x] Metadata/Property Indexing
 - [x] SIMD Implementation
 - [x] Clustering support
+
+## Contributors
+
+Special thanks to everyone who helps make NornicDB better. See [CONTRIBUTORS.md](CONTRIBUTORS.md) for a list of community contributors.
 
 ## License
 
