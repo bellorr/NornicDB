@@ -183,6 +183,22 @@ search:
   min_similarity: 0.3             # Lower threshold for AI assistants
 ```
 
+## Heimdall AI Assistant
+
+Heimdall is the cognitive guardian and AI chat assistant. It supports **local** (GGUF BYOM), **ollama**, and **openai** providers—matching the embedding subsystem style.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NORNICDB_HEIMDALL_ENABLED` | `false` | Enable the AI assistant |
+| `NORNICDB_HEIMDALL_PROVIDER` | `local` | Backend: `local`, `ollama`, or `openai` |
+| `NORNICDB_HEIMDALL_API_URL` | (see below) | API base URL for ollama/openai (ollama: `http://localhost:11434`) |
+| `NORNICDB_HEIMDALL_API_KEY` | (empty) | API key for OpenAI (required when provider=openai) |
+| `NORNICDB_HEIMDALL_MODEL` | (varies) | Model name (GGUF file, Ollama model, or OpenAI model) |
+
+Streaming (SSE) is supported for chat completions when the client requests it; the OpenAI and Ollama providers stream tokens as they are generated.
+
+See [Heimdall AI Assistant](../user-guides/heimdall-ai-assistant.md) for full configuration, provider examples, and YAML.
+
 ## Memory Decay Configuration
 
 ```yaml
