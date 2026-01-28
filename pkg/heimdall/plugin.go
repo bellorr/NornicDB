@@ -14,7 +14,7 @@
 //
 // How it works:
 //  1. User sends chat message: "Check for graph anomalies"
-//  2. SLM interprets intent and maps to registered action: "heimdall.anomaly.detect"
+//  2. SLM interprets intent and maps to registered action: "heimdall_anomaly_detect"
 //  3. Action handler is invoked with context
 //  4. Results returned to user via chat
 //
@@ -26,11 +26,11 @@
 // Built-in Heimdall Plugins:
 //
 // Core Heimdall plugins ship with NornicDB:
-//   - watcher: SLM management (heimdall.watcher.*) - the core guardian
-//   - anomaly: Graph anomaly detection (heimdall.anomaly.*)
-//   - health: Runtime health diagnosis (heimdall.health.*)
-//   - curator: Memory curation (heimdall.curator.*)
-//   - optimizer: Query optimization (heimdall.optimizer.*)
+//   - watcher: SLM management (heimdall_watcher_*) - the core guardian
+//   - anomaly: Graph anomaly detection (heimdall_anomaly_*)
+//   - health: Runtime health diagnosis (heimdall_health_*)
+//   - curator: Memory curation (heimdall_curator_*)
+//   - optimizer: Query optimization (heimdall_optimizer_*)
 //
 // Custom Heimdall Plugins:
 //
@@ -79,6 +79,10 @@ import (
 	"sync"
 	"time"
 )
+
+// DefaultActionInputSchema is the MCP-compatible JSON Schema when an action
+// does not declare parameters (type "object" with no required properties).
+var DefaultActionInputSchema = []byte(`{"type":"object","properties":{},"additionalProperties":true}`)
 
 // PluginType identifies the type of plugin.
 const PluginTypeHeimdall = "heimdall"
@@ -204,14 +208,14 @@ type SubsystemContext struct {
 // events and trigger appropriate responses.
 //
 // Example: A security plugin monitors failed auth events and after N failures
-// triggers "heimdall.security.analyze" to investigate.
+// triggers "heimdall_security_analyze" to investigate.
 type HeimdallInvoker interface {
 	// InvokeAction directly invokes a registered action by name.
-	// The action must be registered (e.g., "heimdall.watcher.status").
+	// The action must be registered (e.g., "heimdall_watcher_status").
 	// Results are returned synchronously.
 	//
 	// Example:
-	//   result, err := ctx.Heimdall.InvokeAction("heimdall.anomaly.detect", map[string]interface{}{
+	//   result, err := ctx.Heimdall.InvokeAction("heimdall_anomaly_detect", map[string]interface{}{
 	//       "threshold": 0.8,
 	//   })
 	InvokeAction(action string, params map[string]interface{}) (*ActionResult, error)
@@ -492,12 +496,16 @@ type SubsystemEvent struct {
 }
 
 // ActionFunc represents an action function provided by an SLM plugin.
-// This mirrors PluginFunction from pkg/nornicdb/plugins.go
+// Aligned with MCP (Model Context Protocol) tool format: name, description, inputSchema.
+// Invocation uses the same shape as MCP tools/call: action name + params (arguments).
 type ActionFunc struct {
-	Name        string                                         // Full name: slm.{plugin}.{action}
+	Name        string                                         // Full name: heimdall.{plugin}.{action} (MCP tool "name")
 	Handler     func(ctx ActionContext) (*ActionResult, error) // The action handler
-	Description string                                         // Human-readable description
+	Description string                                         // Human-readable description (MCP "description")
 	Category    string                                         // Grouping: monitoring, optimization, curation
+	// InputSchema is optional JSON Schema for parameters (MCP "inputSchema").
+	// When nil or empty, ActionsAsMCPTools() uses DefaultActionInputSchema.
+	InputSchema json.RawMessage
 }
 
 // ActionContext provides context for action execution.
@@ -527,6 +535,25 @@ type ActionResult struct {
 	Success bool                   `json:"success"`
 	Message string                 `json:"message"`
 	Data    map[string]interface{} `json:"data,omitempty"`
+}
+
+// FormatActionResultForModel formats an action result for the LLM to read (any provider).
+// Used in the agentic loop so the model can infer and format the final response.
+func FormatActionResultForModel(result *ActionResult) string {
+	if result == nil {
+		return `{"success":false,"message":"no result"}`
+	}
+	b, _ := json.Marshal(result)
+	return string(b)
+}
+
+// MCPTool is the MCP (Model Context Protocol) tool definition shape.
+// Use ActionsAsMCPTools() to export Heimdall actions as MCP tools.
+// Same fields as MCP Tool: name, description, inputSchema (JSON Schema).
+type MCPTool struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
 // DatabaseReader provides read-only database access for actions.
@@ -703,7 +730,7 @@ func (m *SubsystemManager) RegisterPlugin(p HeimdallPlugin, path string, builtin
 
 	// Register all actions from this plugin
 	for actionName, action := range p.Actions() {
-		fullName := fmt.Sprintf("heimdall.%s.%s", name, actionName)
+		fullName := fmt.Sprintf("heimdall_%s_%s", name, actionName)
 		action.Name = fullName
 		m.actions[fullName] = action
 	}
@@ -724,7 +751,7 @@ func (m *SubsystemManager) GetPlugin(name string) (HeimdallPlugin, bool) {
 	return nil, false
 }
 
-// GetAction returns an action by full name (e.g., "heimdall.plugin.action").
+// GetAction returns an action by full name (e.g., "heimdall_plugin_action").
 func (m *SubsystemManager) GetAction(name string) (ActionFunc, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1052,7 +1079,7 @@ func (p *reflectHeimdallPlugin) PostExecute(ctx *PostExecuteContext) {
 	method.Call([]reflect.Value{reflect.ValueOf(ctx)})
 }
 
-// GetHeimdallAction returns an action by full name (e.g., "heimdall.anomaly.detect").
+// GetHeimdallAction returns an action by full name (e.g., "heimdall_anomaly_detect").
 func GetHeimdallAction(name string) (ActionFunc, bool) {
 	m := GetSubsystemManager()
 	m.mu.RLock()
@@ -1257,6 +1284,29 @@ func ActionCatalog() map[string][]ActionFunc {
 	return catalog
 }
 
+// ActionsAsMCPTools returns all registered Heimdall actions in MCP tool format.
+// Use this to expose Heimdall actions to MCP clients or to merge with pkg/mcp tool list.
+// Each tool has name, description, and inputSchema (JSON Schema); when an action
+// has no InputSchema set, DefaultActionInputSchema is used.
+func ActionsAsMCPTools() []MCPTool {
+	catalog := ActionCatalog()
+	var tools []MCPTool
+	for _, actions := range catalog {
+		for _, a := range actions {
+			schema := a.InputSchema
+			if len(schema) == 0 {
+				schema = DefaultActionInputSchema
+			}
+			tools = append(tools, MCPTool{
+				Name:        a.Name,
+				Description: a.Description,
+				InputSchema: schema,
+			})
+		}
+	}
+	return tools
+}
+
 // HeimdallPluginsInitialized returns true if SLM plugins have been loaded.
 func HeimdallPluginsInitialized() bool {
 	m := GetSubsystemManager()
@@ -1265,14 +1315,22 @@ func HeimdallPluginsInitialized() bool {
 	return m.initialized
 }
 
+// Builtin action input schemas (MCP-compatible JSON Schema).
+var (
+	builtinHelpInputSchema    = json.RawMessage(DefaultActionInputSchema)
+	builtinStatusInputSchema  = json.RawMessage(DefaultActionInputSchema)
+	builtinSuggestInputSchema = json.RawMessage([]byte(`{"type":"object","properties":{"query":{"type":"string","description":"Partial Cypher query to complete"}},"required":["query"]}`))
+)
+
 // BuiltinActions returns the default built-in actions.
 // These are registered automatically when the SLM package initializes.
 func BuiltinActions() []ActionFunc {
 	return []ActionFunc{
 		{
-			Name:        "heimdall.help",
+			Name:        "heimdall_help",
 			Description: "List all available SLM actions",
 			Category:    "system",
+			InputSchema: builtinHelpInputSchema,
 			Handler: func(ctx ActionContext) (*ActionResult, error) {
 				catalog := ActionCatalog()
 				return &ActionResult{
@@ -1283,9 +1341,10 @@ func BuiltinActions() []ActionFunc {
 			},
 		},
 		{
-			Name:        "heimdall.status",
+			Name:        "heimdall_status",
 			Description: "Get SLM system status",
 			Category:    "system",
+			InputSchema: builtinStatusInputSchema,
 			Handler: func(ctx ActionContext) (*ActionResult, error) {
 				plugins := ListHeimdallPlugins()
 				actions := ListHeimdallActions()
@@ -1300,9 +1359,10 @@ func BuiltinActions() []ActionFunc {
 			},
 		},
 		{
-			Name:        "heimdall.autocomplete.suggest",
+			Name:        "heimdall_autocomplete_suggest",
 			Description: "Generate Cypher query autocomplete suggestions based on database schema",
 			Category:    "query",
+			InputSchema: builtinSuggestInputSchema,
 			Handler: func(ctx ActionContext) (*ActionResult, error) {
 				// Get query from params
 				query, _ := ctx.Params["query"].(string)

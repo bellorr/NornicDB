@@ -58,12 +58,9 @@ func NewMockGenerator(modelPath string) *MockGenerator {
 // mockResponseForPrompt generates predictable responses based on prompt content.
 // It extracts the last user message from the prompt to determine the response.
 func mockResponseForPrompt(prompt string) string {
-	// Extract the last user message from the ChatML format
-	// Look for the last "<|im_start|>user\n" section
-	userStart := strings.LastIndex(prompt, "<|im_start|>user\n")
 	userContent := prompt
-	if userStart != -1 {
-		// Extract from after the user tag to the next tag or end
+	// Try ChatML format first
+	if userStart := strings.LastIndex(prompt, "<|im_start|>user\n"); userStart != -1 {
 		contentStart := userStart + len("<|im_start|>user\n")
 		contentEnd := strings.Index(prompt[contentStart:], "<|im_end|>")
 		if contentEnd != -1 {
@@ -71,6 +68,19 @@ func mockResponseForPrompt(prompt string) string {
 		} else {
 			userContent = prompt[contentStart:]
 		}
+	} else if idx := strings.LastIndex(prompt, "\n\nUser: "); idx != -1 {
+		// Agentic prompt-based format: "...\n\nUser: <message>\n\nRespond..." or "\n\nBased on..."
+		contentStart := idx + len("\n\nUser: ")
+		if end := strings.Index(prompt[contentStart:], "\n\nRespond"); end != -1 {
+			userContent = prompt[contentStart : contentStart+end]
+		} else if end := strings.Index(prompt[contentStart:], "\n\nBased on"); end != -1 {
+			userContent = prompt[contentStart : contentStart+end]
+		} else if end := strings.Index(prompt[contentStart:], "\n\nAssistant:"); end != -1 {
+			userContent = prompt[contentStart : contentStart+end]
+		} else {
+			userContent = prompt[contentStart:]
+		}
+		userContent = strings.TrimSpace(userContent)
 	}
 
 	lower := strings.ToLower(userContent)
@@ -78,27 +88,27 @@ func mockResponseForPrompt(prompt string) string {
 	// Health check - explicit status/health queries
 	if strings.Contains(lower, "health") ||
 		(strings.Contains(lower, "status") && !strings.Contains(lower, "who")) {
-		return `{"action": "heimdall.watcher.health", "params": {}}`
+		return `{"action": "heimdall_watcher_health", "params": {}}`
 	}
 
 	// Anomaly detection - check for "anomal" to catch "anomaly", "anomalies", etc.
 	if strings.Contains(lower, "anomal") || strings.Contains(lower, "unusual") {
-		return `{"action": "heimdall.anomaly.detect", "params": {"threshold": 0.8}}`
+		return `{"action": "heimdall_anomaly_detect", "params": {"threshold": 0.8}}`
 	}
 
 	// Help request
 	if strings.Contains(lower, "help") || strings.Contains(lower, "command") {
-		return `{"action": "heimdall.help", "params": {}}`
+		return `{"action": "heimdall_help", "params": {}}`
 	}
 
 	// Configuration
 	if strings.Contains(lower, "config") || strings.Contains(lower, "setting") {
-		return `{"action": "heimdall.watcher.config", "params": {}}`
+		return `{"action": "heimdall_watcher_config", "params": {}}`
 	}
 
 	// Metrics
 	if strings.Contains(lower, "metric") || strings.Contains(lower, "stats") {
-		return `{"action": "heimdall.watcher.metrics", "params": {}}`
+		return `{"action": "heimdall_watcher_metrics", "params": {}}`
 	}
 
 	// Default conversational response
@@ -333,7 +343,7 @@ func TestManager_Generate(t *testing.T) {
 	result, err := manager.Generate(ctx, prompt, params)
 
 	require.NoError(t, err)
-	assert.Contains(t, result, "heimdall.watcher.health")
+	assert.Contains(t, result, "heimdall_watcher_health")
 	assert.Equal(t, int64(1), mockGen.GetGenerateCount())
 }
 
@@ -617,16 +627,16 @@ func TestMockResponseForPrompt(t *testing.T) {
 		prompt   string
 		contains string
 	}{
-		{"Check system health", "heimdall.watcher.health"},
-		{"What's the status?", "heimdall.watcher.health"},
-		{"Detect anomalies", "heimdall.anomaly.detect"},
-		{"Find unusual patterns", "heimdall.anomaly.detect"},
-		{"Show help", "heimdall.help"},
-		{"List commands", "heimdall.help"},
-		{"Get configuration", "heimdall.watcher.config"},
-		{"Show settings", "heimdall.watcher.config"},
-		{"Display metrics", "heimdall.watcher.metrics"},
-		{"Show stats", "heimdall.watcher.metrics"},
+		{"Check system health", "heimdall_watcher_health"},
+		{"What's the status?", "heimdall_watcher_health"},
+		{"Detect anomalies", "heimdall_anomaly_detect"},
+		{"Find unusual patterns", "heimdall_anomaly_detect"},
+		{"Show help", "heimdall_help"},
+		{"List commands", "heimdall_help"},
+		{"Get configuration", "heimdall_watcher_config"},
+		{"Show settings", "heimdall_watcher_config"},
+		{"Display metrics", "heimdall_watcher_metrics"},
+		{"Show stats", "heimdall_watcher_metrics"},
 		{"Hello there", "Heimdall"}, // Default response
 	}
 

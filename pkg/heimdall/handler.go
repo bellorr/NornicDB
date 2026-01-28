@@ -206,7 +206,7 @@ func (h *Handler) handleAutocomplete(w http.ResponseWriter, r *http.Request) {
 		Bifrost:  h.bifrost,
 	}
 
-	result, err := ExecuteAction("heimdall.autocomplete.suggest", ctx)
+	result, err := ExecuteAction("heimdall_autocomplete_suggest", ctx)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Autocomplete error: %v", err), http.StatusInternalServerError)
 		return
@@ -529,18 +529,65 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	}
 
 	if req.Stream {
-		h.handleStreamingResponse(w, ctx, prompt, params, req.Model, lifecycleCtx)
+		if h.manager.SupportsTools() {
+			h.handleStreamingWithTools(w, ctx, prompt, params, req.Model, lifecycleCtx)
+		} else {
+			h.handleStreamingResponse(w, ctx, prompt, params, req.Model, lifecycleCtx)
+		}
 	} else {
 		h.handleNonStreamingResponse(w, ctx, prompt, params, req.Model, lifecycleCtx)
 	}
 }
 
 // requestLifecycle holds state through the request lifecycle for hooks.
+// When StreamWriter is set (streaming + tools path), the agentic loop sends
+// PreExecute/PostExecute notifications as SSE chunks and the handler streams the final response.
 type requestLifecycle struct {
-	promptCtx *PromptContext
-	requestID string
-	database  DatabaseReader
-	metrics   MetricsReader
+	promptCtx     *PromptContext
+	requestID     string
+	database      DatabaseReader
+	metrics       MetricsReader
+	StreamWriter  http.ResponseWriter // optional: for streaming notifications during agentic loop
+	StreamFlusher http.Flusher        // optional: flush after each SSE chunk
+	StreamModel   string               // optional: model name for SSE chunk payloads
+}
+
+// sendStreamNotifications writes queued notifications as SSE chunks (used when streaming with tools).
+func (h *Handler) sendStreamNotifications(lifecycle *requestLifecycle, notifs []QueuedNotification) {
+	if lifecycle.StreamWriter == nil || lifecycle.StreamFlusher == nil || lifecycle.StreamModel == "" {
+		return
+	}
+	for _, notif := range notifs {
+		icon := "ℹ️"
+		switch notif.Type {
+		case "error":
+			icon = "❌"
+		case "warning":
+			icon = "⚠️"
+		case "success":
+			icon = "✅"
+		case "progress":
+			icon = "🔄"
+		}
+		chunk := ChatResponse{
+			ID:      lifecycle.requestID,
+			Object:  "chat.completion.chunk",
+			Model:   lifecycle.StreamModel,
+			Created: time.Now().Unix(),
+			Choices: []ChatChoice{
+				{
+					Index: 0,
+					Delta: &ChatMessage{
+						Role:    "heimdall",
+						Content: fmt.Sprintf("[Heimdall]: %s %s: %s\n", icon, notif.Title, notif.Message),
+					},
+				},
+			},
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(lifecycle.StreamWriter, "data: %s\n\n", data)
+		lifecycle.StreamFlusher.Flush()
+	}
 }
 
 // defaultExamples returns built-in examples for action mapping.
@@ -548,170 +595,199 @@ type requestLifecycle struct {
 func defaultExamples() []PromptExample {
 	return []PromptExample{
 		// === STATUS & METRICS ===
-		{UserSays: "status", ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`},
-		{UserSays: "what is the status", ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`},
-		{UserSays: "show me metrics", ActionJSON: `{"action": "heimdall.watcher.metrics", "params": {}}`},
-		{UserSays: "database stats", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
-		{UserSays: "health check", ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`},
+		{UserSays: "status", ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`},
+		{UserSays: "what is the status", ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`},
+		{UserSays: "show me metrics", ActionJSON: `{"action": "heimdall_watcher_metrics", "params": {}}`},
+		{UserSays: "database stats", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
+		{UserSays: "health check", ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`},
 
 		// === CLUSTERING & EMBEDDINGS (db_stats) ===
-		{UserSays: "how many k-means clusters", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
-		{UserSays: "show clustering info", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
-		{UserSays: "how many embeddings", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
-		{UserSays: "what features are enabled", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
-		{UserSays: "show feature flags", ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`},
+		{UserSays: "how many k-means clusters", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
+		{UserSays: "show clustering info", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
+		{UserSays: "how many embeddings", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
+		{UserSays: "what features are enabled", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
+		{UserSays: "show feature flags", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
 
 		// === COUNTING & STATISTICS ===
-		{UserSays: "how many nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) RETURN count(n) AS total_nodes"}}`},
-		{UserSays: "count all relationships", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH ()-[r]->() RETURN count(r) AS total_relationships"}}`},
-		{UserSays: "what labels exist", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "CALL db.labels() YIELD label RETURN label"}}`},
-		{UserSays: "show relationship types", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"}}`},
+		{UserSays: "how many nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN count(n) AS total_nodes"}}`},
+		{UserSays: "count all relationships", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH ()-[r]->() RETURN count(r) AS total_relationships"}}`},
+		{UserSays: "what labels exist", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "CALL db.labels() YIELD label RETURN label"}}`},
+		{UserSays: "show relationship types", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"}}`},
 
 		// === SAMPLING & EXPLORATION ===
-		{UserSays: "show me some nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) RETURN n LIMIT 10"}}`},
-		{UserSays: "sample Person nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n:Person) RETURN n LIMIT 5"}}`},
-		{UserSays: "show relationships", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (a)-[r]->(b) RETURN a, type(r), b LIMIT 10"}}`},
+		{UserSays: "show me some nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN n LIMIT 10"}}`},
+		{UserSays: "sample Person nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n:Person) RETURN n LIMIT 5"}}`},
+		{UserSays: "show relationships", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (a)-[r]->(b) RETURN a, type(r), b LIMIT 10"}}`},
 
 		// === SEARCHING ===
-		{UserSays: "find nodes with name Alice", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n {name: 'Alice'}) RETURN n"}}`},
-		{UserSays: "search for nodes containing test", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) WHERE n.name CONTAINS 'test' RETURN n LIMIT 20"}}`},
+		{UserSays: "find nodes with name Alice", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n {name: 'Alice'}) RETURN n"}}`},
+		{UserSays: "search for nodes containing test", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) WHERE n.name CONTAINS 'test' RETURN n LIMIT 20"}}`},
 
 		// === AGGREGATIONS ===
-		{UserSays: "nodes per label", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) RETURN labels(n) AS label, count(n) AS count ORDER BY count DESC"}}`},
-		{UserSays: "relationship distribution", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH ()-[r]->() RETURN type(r) AS type, count(r) AS count ORDER BY count DESC"}}`},
+		{UserSays: "nodes per label", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN labels(n) AS label, count(n) AS count ORDER BY count DESC"}}`},
+		{UserSays: "relationship distribution", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH ()-[r]->() RETURN type(r) AS type, count(r) AS count ORDER BY count DESC"}}`},
 
 		// === GRAPH ANALYSIS ===
-		{UserSays: "find highly connected nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n)-[r]-() RETURN n, count(r) AS connections ORDER BY connections DESC LIMIT 10"}}`},
-		{UserSays: "orphan nodes", ActionJSON: `{"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) WHERE NOT (n)--() RETURN n LIMIT 20"}}`},
+		{UserSays: "find highly connected nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n)-[r]-() RETURN n, count(r) AS connections ORDER BY connections DESC LIMIT 10"}}`},
+		{UserSays: "orphan nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) WHERE NOT (n)--() RETURN n LIMIT 20"}}`},
 
 		// === SEMANTIC SEARCH (discover) ===
 		// Generic examples - domain-specific examples come from domain plugins
-		{UserSays: "search for X", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "X"}}`},
-		{UserSays: "find information about Y", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "Y"}}`},
-		{UserSays: "what do we know about Z", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "Z"}}`},
-		{UserSays: "tell me about topic", ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "topic"}}`},
+		{UserSays: "search for X", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "X"}}`},
+		{UserSays: "find information about Y", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "Y"}}`},
+		{UserSays: "what do we know about Z", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "Z"}}`},
+		{UserSays: "tell me about topic", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "topic"}}`},
 	}
 }
 
+// runAgenticLoop runs the agentic loop for any provider: execute actions, feed results back, repeat until final answer.
+// For tool-capable providers (OpenAI/Ollama) uses GenerateWithTools; for local GGUF uses prompt-based multi-round.
+func (h *Handler) runAgenticLoop(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, params GenerateParams) (finalResponse string, err error) {
+	tools := ActionsAsMCPTools()
+	if h.manager.SupportsTools() && len(tools) > 0 {
+		return h.runAgenticLoopWithTools(ctx, lifecycle, userMessage, tools, params)
+	}
+	return h.runAgenticLoopPromptBased(ctx, lifecycle, systemPrompt, userMessage, params)
+}
+
+// runAgenticLoopWithTools uses native tool calling (OpenAI/Ollama). Execute toolCalls, append results, repeat.
+func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *requestLifecycle, userMessage string, tools []MCPTool, params GenerateParams) (string, error) {
+	messages := []ToolRoundMessage{
+		{Role: "system", Content: AgenticSystemPromptTools},
+		{Role: "user", Content: userMessage},
+	}
+	var lastContent string
+	for round := 0; round < MaxAgenticRounds; round++ {
+		content, toolCalls, err := h.manager.GenerateWithTools(ctx, messages, tools, params)
+		if err != nil {
+			return "", err
+		}
+		lastContent = content
+		if len(toolCalls) == 0 {
+			if lastContent != "" {
+				return lastContent, nil
+			}
+			continue
+		}
+		// Append assistant message with tool_calls
+		assistantMsg := ToolRoundMessage{Role: "assistant", Content: content, ToolCalls: toolCalls}
+		for i := range assistantMsg.ToolCalls {
+			if assistantMsg.ToolCalls[i].Id == "" {
+				assistantMsg.ToolCalls[i].Id = "call_" + generateID()
+			}
+		}
+		messages = append(messages, assistantMsg)
+		// Execute each tool and append tool result messages
+		for _, tc := range toolCalls {
+			var paramsMap map[string]interface{}
+			if tc.Arguments != "" {
+				_ = json.Unmarshal([]byte(tc.Arguments), &paramsMap)
+			}
+			if paramsMap == nil {
+				paramsMap = make(map[string]interface{})
+			}
+			preExecCtx := &PreExecuteContext{
+				RequestID: lifecycle.requestID, RequestTime: lifecycle.promptCtx.RequestTime,
+				Action: tc.Name, Params: paramsMap, PluginData: lifecycle.promptCtx.PluginData,
+				Database: lifecycle.database, Metrics: lifecycle.metrics,
+			}
+			preExecCtx.SetBifrost(h.bifrost)
+			preExecResult := CallPreExecuteHooks(preExecCtx)
+			h.sendStreamNotifications(lifecycle, preExecCtx.DrainNotifications())
+			if preExecCtx.Cancelled() {
+				messages = append(messages, ToolRoundMessage{Role: "tool", ToolCallID: tc.Id, Content: "Cancelled: " + preExecCtx.CancelReason()})
+				continue
+			}
+			if !preExecResult.Continue {
+				messages = append(messages, ToolRoundMessage{Role: "tool", ToolCallID: tc.Id, Content: preExecResult.AbortMessage})
+				continue
+			}
+			if preExecResult.ModifiedParams != nil {
+				paramsMap = preExecResult.ModifiedParams
+			}
+			actCtx := ActionContext{Context: ctx, UserMessage: userMessage, Params: paramsMap, Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics}
+			startTime := time.Now()
+			result, execErr := ExecuteAction(tc.Name, actCtx)
+			execDuration := time.Since(startTime)
+			if execErr != nil {
+				messages = append(messages, ToolRoundMessage{Role: "tool", ToolCallID: tc.Id, Content: FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()})})
+				continue
+			}
+			postExecCtx := &PostExecuteContext{RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
+			CallPostExecuteHooks(postExecCtx)
+			h.sendStreamNotifications(lifecycle, postExecCtx.DrainNotifications())
+			messages = append(messages, ToolRoundMessage{Role: "tool", ToolCallID: tc.Id, Content: FormatActionResultForModel(result)})
+		}
+	}
+	if lastContent != "" {
+		return lastContent, nil
+	}
+	return "I've completed the available actions. Is there anything else?", nil
+}
+
+// runAgenticLoopPromptBased uses prompt-based multi-round for local GGUF (or any provider without native tools).
+func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, params GenerateParams) (string, error) {
+	prompt := systemPrompt + "\n\nUser: " + userMessage + "\n\nRespond with either {\"action\": \"...\", \"params\": {...}} or a direct answer.\n\nAssistant: "
+	var lastResponse string
+	for round := 0; round < MaxAgenticRounds; round++ {
+		response, err := h.manager.Generate(ctx, prompt, params)
+		if err != nil {
+			return "", err
+		}
+		response = strings.TrimSpace(response)
+		lastResponse = response
+		parsedAction, actionError := h.tryParseAction(response)
+		if actionError != "" {
+			return actionError, nil
+		}
+		if parsedAction == nil {
+			return response, nil
+		}
+		preExecCtx := &PreExecuteContext{
+			RequestID: lifecycle.requestID, RequestTime: lifecycle.promptCtx.RequestTime,
+			Action: parsedAction.Action, Params: parsedAction.Params, RawResponse: response, PluginData: lifecycle.promptCtx.PluginData,
+			Database: lifecycle.database, Metrics: lifecycle.metrics,
+		}
+		preExecCtx.SetBifrost(h.bifrost)
+		preExecResult := CallPreExecuteHooks(preExecCtx)
+		if preExecCtx.Cancelled() {
+			return preExecCtx.CancelReason(), nil
+		}
+		if !preExecResult.Continue {
+			if preExecResult.AbortMessage != "" {
+				return preExecResult.AbortMessage, nil
+			}
+			return "Action aborted.", nil
+		}
+		paramsToUse := parsedAction.Params
+		if preExecResult.ModifiedParams != nil {
+			paramsToUse = preExecResult.ModifiedParams
+		}
+		actCtx := ActionContext{Context: ctx, UserMessage: userMessage, Params: paramsToUse, Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics}
+		startTime := time.Now()
+		result, execErr := ExecuteAction(parsedAction.Action, actCtx)
+		execDuration := time.Since(startTime)
+		if execErr != nil {
+			prompt = prompt + response + "\n\nTool result: " + FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()}) + "\n\nBased on the above, respond with another action or a final answer.\n\nAssistant: "
+			continue
+		}
+		CallPostExecuteHooks(&PostExecuteContext{RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
+		resultStr := FormatActionResultForModel(result)
+		prompt = prompt + response + "\n\nTool result: " + resultStr + "\n\nBased on the tool result, respond with another action JSON or a final answer to the user.\n\nAssistant: "
+	}
+	return lastResponse, nil
+}
+
 // handleNonStreamingResponse generates complete response with lifecycle hooks.
+// Uses agentic loop for any provider: execute actions, feed results back, LLM infers and formats final response.
 func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.Context, prompt string, params GenerateParams, model string, lifecycle *requestLifecycle) {
-	response, err := h.manager.Generate(ctx, prompt, params)
+	finalResponse, err := h.runAgenticLoop(ctx, lifecycle, lifecycle.promptCtx.BuildFinalPrompt(), lifecycle.promptCtx.UserMessage, params)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Generation error: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Try to parse action command from response
-	log.Printf("[Bifrost] SLM response: %s", response)
-	finalResponse := response
-	parsedAction, actionError := h.tryParseAction(response)
-
-	// Handle action not found error
-	if actionError != "" {
-		finalResponse = actionError
-	} else if parsedAction != nil {
-		log.Printf("[Bifrost] Action detected: %s with params: %v", parsedAction.Action, parsedAction.Params)
-
-		// === Phase 4: PreExecute hooks ===
-		preExecCtx := &PreExecuteContext{
-			RequestID:   lifecycle.requestID,
-			RequestTime: lifecycle.promptCtx.RequestTime,
-			Action:      parsedAction.Action,
-			Params:      parsedAction.Params,
-			RawResponse: response,
-			PluginData:  lifecycle.promptCtx.PluginData,
-			Database:    lifecycle.database,
-			Metrics:     lifecycle.metrics,
-		}
-		// Set Bifrost for notifications (fire-and-forget SSE messages)
-		preExecCtx.SetBifrost(h.bifrost)
-
-		// === Phase 4: PreExecute hooks (optional) ===
-		// Plugins that implement PreExecuteHook can validate/modify params
-		preExecResult := CallPreExecuteHooks(preExecCtx)
-		if preExecCtx.Cancelled() {
-			log.Printf("[Bifrost] Request cancelled by %s: %s", preExecCtx.CancelledBy(), preExecCtx.CancelReason())
-			h.sendCancellationResponse(w, lifecycle.requestID, "PreExecute", preExecCtx.CancelledBy(), preExecCtx.CancelReason())
-			return
-		}
-
-		if !preExecResult.Continue {
-			finalResponse = preExecResult.AbortMessage
-			if finalResponse == "" {
-				finalResponse = "Action aborted by plugin"
-			}
-		} else {
-			// === Phase 5: Execute action ===
-			startTime := time.Now()
-			actCtx := ActionContext{
-				Context:     ctx,
-				UserMessage: prompt,
-				Params:      parsedAction.Params,
-				Bifrost:     h.bifrost,
-				Database:    h.database,
-				Metrics:     h.metrics,
-			}
-			result, err := ExecuteAction(parsedAction.Action, actCtx)
-			execDuration := time.Since(startTime)
-
-			if err != nil {
-				log.Printf("[Bifrost] Action execution failed: %v", err)
-				finalResponse = fmt.Sprintf("Action failed: %v", err)
-			} else if result != nil {
-				log.Printf("[Bifrost] Action result: success=%v message=%s", result.Success, result.Message)
-
-				// === Phase 6: PostExecute hooks ===
-				// Uses optional interface - plugins that don't implement PostExecuteHook are skipped
-				postExecCtx := &PostExecuteContext{
-					RequestID:  lifecycle.requestID,
-					Action:     parsedAction.Action,
-					Params:     parsedAction.Params,
-					Result:     result,
-					Duration:   execDuration,
-					PluginData: lifecycle.promptCtx.PluginData,
-				}
-				CallPostExecuteHooks(postExecCtx)
-
-				// === Phase 7: Synthesis hooks ===
-				// Allow plugins to provide custom response formatting
-				synthCtx := &SynthesisContext{
-					RequestID:    lifecycle.requestID,
-					UserQuestion: lifecycle.promptCtx.UserMessage,
-					Action:       parsedAction.Action,
-					Result:       result,
-					PluginData:   lifecycle.promptCtx.PluginData,
-					Database:     h.database,
-				}
-
-				// First, try plugin synthesis hooks
-				if pluginResponse := CallSynthesisHooks(synthCtx); pluginResponse != "" {
-					log.Printf("[Bifrost] Using plugin-provided synthesis")
-					finalResponse = pluginResponse
-				} else {
-					// Fall back to simple formatting (no LLM synthesis)
-					// Plugins should implement SynthesisHook for rich responses
-					log.Printf("[Bifrost] Using default format (no plugin synthesis)")
-					finalResponse = h.defaultFormatResponse(result)
-				}
-			}
-
-			// Note: PostExecute already called above when result != nil
-			if result == nil {
-				// Only call if we haven't already (err case doesn't have result)
-				postExecCtx := &PostExecuteContext{
-					RequestID:  lifecycle.requestID,
-					Action:     parsedAction.Action,
-					Params:     parsedAction.Params,
-					Result:     nil,
-					Duration:   execDuration,
-					PluginData: lifecycle.promptCtx.PluginData,
-				}
-				CallPostExecuteHooks(postExecCtx)
-			}
-		}
-	} else {
-		log.Printf("[Bifrost] No action detected in response")
-	}
+	log.Printf("[Bifrost] Agentic loop finished: %s", finalResponse)
 
 	resp := ChatResponse{
 		ID:      lifecycle.requestID,
@@ -734,8 +810,70 @@ func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.
 	json.NewEncoder(w).Encode(resp)
 }
 
+// handleStreamingWithTools runs the agentic loop (tools path) and streams the final response.
+// Used when stream=true and the provider supports tools (OpenAI/Ollama). The LLM sees tool
+// results and produces a final answer (e.g. "Here's what a node looks like: ..."); we stream
+// that answer and send PreExecute/PostExecute notifications during the loop.
+func (h *Handler) handleStreamingWithTools(w http.ResponseWriter, ctx context.Context, prompt string, params GenerateParams, model string, lifecycle *requestLifecycle) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no")
+
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	// Set stream writer so PrePrompt and agentic-loop notifications use the same path
+	lifecycle.StreamWriter = w
+	lifecycle.StreamFlusher = flusher
+	lifecycle.StreamModel = model
+	h.sendStreamNotifications(lifecycle, lifecycle.promptCtx.DrainNotifications())
+
+	finalResponse, err := h.runAgenticLoop(ctx, lifecycle, lifecycle.promptCtx.BuildFinalPrompt(), lifecycle.promptCtx.UserMessage, params)
+	if err != nil {
+		chunk := ChatResponse{
+			ID: lifecycle.requestID, Object: "chat.completion.chunk", Model: model, Created: time.Now().Unix(),
+			Choices: []ChatChoice{{
+				Index: 0,
+				Delta: &ChatMessage{Content: fmt.Sprintf("Error: %v", err)},
+			}},
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	} else if finalResponse != "" {
+		// Stream the final assistant response as one content chunk (OpenAI format)
+		chunk := ChatResponse{
+			ID:      lifecycle.requestID,
+			Object:  "chat.completion.chunk",
+			Model:   model,
+			Created: time.Now().Unix(),
+			Choices: []ChatChoice{{
+				Index: 0,
+				Delta: &ChatMessage{Content: finalResponse},
+			}},
+		}
+		data, _ := json.Marshal(chunk)
+		fmt.Fprintf(w, "data: %s\n\n", data)
+		flusher.Flush()
+	}
+
+	// Send finish chunk and [DONE]
+	doneChunk := ChatResponse{
+		ID: lifecycle.requestID, Object: "chat.completion.chunk", Model: model, Created: time.Now().Unix(),
+		Choices: []ChatChoice{{Index: 0, Delta: &ChatMessage{}, FinishReason: "stop"}},
+	}
+	data, _ := json.Marshal(doneChunk)
+	fmt.Fprintf(w, "data: %s\n\n", data)
+	fmt.Fprintf(w, "data: [DONE]\n\n")
+	flusher.Flush()
+}
+
 // tryParseAction parses action JSON from SLM response.
-// Format: {"action": "heimdall.watcher.status", "params": {}}
+// Format: {"action": "heimdall_watcher_status", "params": {}}
 // Returns (parsedAction, errorMessage). If errorMessage is set, action is invalid.
 func (h *Handler) tryParseAction(response string) (*ParsedAction, string) {
 	response = strings.TrimSpace(response)

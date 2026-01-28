@@ -42,11 +42,12 @@ type openAIGenerator struct {
 
 // openAIChatRequest is the request body for OpenAI chat completions.
 type openAIChatRequest struct {
-	Model       string      `json:"model"`
-	Messages    []openAIMsg `json:"messages"`
-	Stream      bool        `json:"stream,omitempty"`
-	MaxTokens   int         `json:"max_tokens,omitempty"`
-	Temperature float32     `json:"temperature,omitempty"`
+	Model       string          `json:"model"`
+	Messages    []openAIMsgWire `json:"messages"`
+	Tools       []openAITool    `json:"tools,omitempty"`
+	Stream      bool            `json:"stream,omitempty"`
+	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature float32         `json:"temperature,omitempty"`
 }
 
 type openAIMsg struct {
@@ -54,11 +55,38 @@ type openAIMsg struct {
 	Content string `json:"content"`
 }
 
+// openAIMsgWire is the wire format for messages (can include tool_calls and tool_call_id).
+type openAIMsgWire struct {
+	Role       string               `json:"role"`
+	Content    string               `json:"content,omitempty"`
+	ToolCalls  []openAIToolCallWire `json:"tool_calls,omitempty"`
+	ToolCallID string               `json:"tool_call_id,omitempty"`
+}
+
+type openAIToolCallWire struct {
+	Id       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+type openAITool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	} `json:"function"`
+}
+
 // openAIChatResponse is the non-streaming response.
 type openAIChatResponse struct {
 	Choices []struct {
 		Message struct {
-			Content string `json:"content"`
+			Content   string               `json:"content"`
+			ToolCalls []openAIToolCallWire `json:"tool_calls,omitempty"`
 		} `json:"message"`
 		FinishReason string `json:"finish_reason"`
 	} `json:"choices"`
@@ -72,6 +100,10 @@ type openAIChatChunk struct {
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
+}
+
+func init() {
+	RegisterHeimdallProvider("openai", newOpenAIGenerator)
 }
 
 // newOpenAIGenerator creates a Generator that uses the OpenAI chat completions API.
@@ -102,7 +134,7 @@ func newOpenAIGenerator(cfg Config) (Generator, error) {
 func (g *openAIGenerator) Generate(ctx context.Context, prompt string, params GenerateParams) (string, error) {
 	reqBody := openAIChatRequest{
 		Model: g.model,
-		Messages: []openAIMsg{
+		Messages: []openAIMsgWire{
 			{Role: "user", Content: prompt},
 		},
 		Stream:      false,
@@ -147,11 +179,93 @@ func (g *openAIGenerator) Generate(ctx context.Context, prompt string, params Ge
 	return chatResp.Choices[0].Message.Content, nil
 }
 
+// GenerateWithTools implements GeneratorWithTools (agentic loop, one round).
+func (g *openAIGenerator) GenerateWithTools(ctx context.Context, messages []ToolRoundMessage, tools []MCPTool, params GenerateParams) (content string, toolCalls []ParsedToolCall, err error) {
+	wire := make([]openAIMsgWire, 0, len(messages))
+	for _, m := range messages {
+		msg := openAIMsgWire{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
+		if len(m.ToolCalls) > 0 {
+			msg.ToolCalls = make([]openAIToolCallWire, len(m.ToolCalls))
+			for i, tc := range m.ToolCalls {
+				msg.ToolCalls[i] = openAIToolCallWire{
+					Id:   tc.Id,
+					Type: "function",
+					Function: struct {
+						Name      string `json:"name"`
+						Arguments string `json:"arguments"`
+					}{Name: tc.Name, Arguments: tc.Arguments},
+				}
+			}
+		}
+		wire = append(wire, msg)
+	}
+	openAITools := make([]openAITool, len(tools))
+	for i, t := range tools {
+		openAITools[i] = openAITool{
+			Type: "function",
+			Function: struct {
+				Name        string          `json:"name"`
+				Description string          `json:"description"`
+				Parameters  json.RawMessage `json:"parameters"`
+			}{Name: t.Name, Description: t.Description, Parameters: t.InputSchema},
+		}
+	}
+	maxTok := params.MaxTokens
+	if maxTok == 0 {
+		maxTok = 1024
+	}
+	reqBody := openAIChatRequest{
+		Model:       g.model,
+		Messages:    wire,
+		Tools:       openAITools,
+		Stream:      false,
+		MaxTokens:   maxTok,
+		Temperature: params.Temperature,
+	}
+	body, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", nil, fmt.Errorf("openai request: %w", err)
+	}
+	url := g.baseURL + openAIChatPath
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	if err != nil {
+		return "", nil, fmt.Errorf("openai request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+g.apiKey)
+	resp, err := g.client.Do(httpReq)
+	if err != nil {
+		return "", nil, fmt.Errorf("openai request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return "", nil, fmt.Errorf("openai returned %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+	var chatResp openAIChatResponse
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+		return "", nil, fmt.Errorf("openai decode: %w", err)
+	}
+	if len(chatResp.Choices) == 0 {
+		return "", nil, fmt.Errorf("openai: no choices in response")
+	}
+	msg := chatResp.Choices[0].Message
+	content = msg.Content
+	for _, tc := range msg.ToolCalls {
+		toolCalls = append(toolCalls, ParsedToolCall{
+			Id:        tc.Id,
+			Name:      tc.Function.Name,
+			Arguments: tc.Function.Arguments,
+		})
+	}
+	return content, toolCalls, nil
+}
+
 // GenerateStream implements Generator.
 func (g *openAIGenerator) GenerateStream(ctx context.Context, prompt string, params GenerateParams, callback func(token string) error) error {
 	reqBody := openAIChatRequest{
 		Model: g.model,
-		Messages: []openAIMsg{
+		Messages: []openAIMsgWire{
 			{Role: "user", Content: prompt},
 		},
 		Stream:      true,

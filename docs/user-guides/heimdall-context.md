@@ -21,8 +21,8 @@ Heimdall uses a **single-shot command architecture** - each request is independe
 │  │  │ "You are Heimdall, the AI assistant..."            │  │   │
 │  │  ├────────────────────────────────────────────────────┤  │   │
 │  │  │ Available Actions (~200-500 tokens)                │  │   │
-│  │  │ - heimdall.watcher.status                          │  │   │
-│  │  │ - heimdall.watcher.query                           │  │   │
+│  │  │ - heimdall_watcher_status                          │  │   │
+│  │  │ - heimdall_watcher_query                           │  │   │
 │  │  │ - [plugin-registered actions]                      │  │   │
 │  │  ├────────────────────────────────────────────────────┤  │   │
 │  │  │ Cypher Query Primer (~400 tokens)                  │  │   │
@@ -72,6 +72,30 @@ Heimdall also enforces a **prompt construction budget** (so plugins can’t blow
 | `NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS` | 8192 | Total prompt budget (system + user) |
 | `NORNICDB_HEIMDALL_MAX_SYSTEM_TOKENS` | 6000 | System prompt budget (base + plugins) |
 | `NORNICDB_HEIMDALL_MAX_USER_TOKENS` | 2000 | User message budget |
+
+The same settings apply to **all providers** (local GGUF, Ollama, OpenAI). Override via the env vars above or via YAML (`heimdall.max_context_tokens`, `max_system_tokens`, `max_user_tokens`).
+
+### Higher token budgets for remote providers (Ollama/OpenAI)
+
+For **remote providers** (Ollama, OpenAI), inference runs on the provider’s infrastructure, so there is no local GPU memory limit. You can safely **increase** the token budgets to match the model’s context window (e.g. 32K or 128K).
+
+Example — 32K context (e.g. GPT-4, many Ollama models):
+
+```bash
+export NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS=32768
+export NORNICDB_HEIMDALL_MAX_SYSTEM_TOKENS=24000
+export NORNICDB_HEIMDALL_MAX_USER_TOKENS=8000
+```
+
+Example — 128K context (e.g. **GPT-4o-mini**, GPT-4 Turbo, Claude, or large Ollama models):
+
+```bash
+export NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS=131072
+export NORNICDB_HEIMDALL_MAX_SYSTEM_TOKENS=100000
+export NORNICDB_HEIMDALL_MAX_USER_TOKENS=30000
+```
+
+Keep `max_system_tokens` + `max_user_tokens` within your model’s context size and leave headroom for the response. Startup logs show the active budget, e.g. `Token budget: 32K context = 24K system + 8K user`.
 
 ## How Multi-Batch Prefill Works
 
@@ -123,7 +147,7 @@ If plugins add too many instructions and the system prompt exceeds the system bu
 ACTIONS:
 [plugin actions only]
 
-For queries: {"action": "heimdall.watcher.query", "params": {"cypher": "..."}}
+For queries: {"action": "heimdall_watcher_query", "params": {"cypher": "..."}}
 Respond with JSON only."
 ```
 

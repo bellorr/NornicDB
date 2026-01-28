@@ -825,7 +825,7 @@ func TestHandler_TryParseAction(t *testing.T) {
 	// Register a test action
 	testActionExecuted := false
 	RegisterBuiltinAction(ActionFunc{
-		Name:        "heimdall.test.parse_test",
+		Name:        "heimdall_test_parse_test",
 		Description: "Test action for parsing",
 		Category:    "test",
 		Handler: func(ctx ActionContext) (*ActionResult, error) {
@@ -840,7 +840,7 @@ func TestHandler_TryParseAction(t *testing.T) {
 		// Clean up
 		m := GetSubsystemManager()
 		m.mu.Lock()
-		delete(m.actions, "heimdall.test.parse_test")
+		delete(m.actions, "heimdall_test_parse_test")
 		m.mu.Unlock()
 	}()
 
@@ -851,12 +851,12 @@ func TestHandler_TryParseAction(t *testing.T) {
 	}{
 		{
 			name:      "valid action JSON",
-			response:  `{"action": "heimdall.test.parse_test", "params": {}}`,
+			response:  `{"action": "heimdall_test_parse_test", "params": {}}`,
 			wantParse: true,
 		},
 		{
 			name:      "action with params",
-			response:  `{"action": "heimdall.test.parse_test", "params": {"key": "value"}}`,
+			response:  `{"action": "heimdall_test_parse_test", "params": {"key": "value"}}`,
 			wantParse: true,
 		},
 		{
@@ -866,7 +866,7 @@ func TestHandler_TryParseAction(t *testing.T) {
 		},
 		{
 			name:      "unregistered action",
-			response:  `{"action": "heimdall.unknown.action", "params": {}}`,
+			response:  `{"action": "heimdall_unknown_action", "params": {}}`,
 			wantParse: false,
 		},
 		{
@@ -881,7 +881,7 @@ func TestHandler_TryParseAction(t *testing.T) {
 		},
 		{
 			name:      "json with extra text",
-			response:  `{"action": "heimdall.test.parse_test"} extra text`,
+			response:  `{"action": "heimdall_test_parse_test"} extra text`,
 			wantParse: true,
 		},
 	}
@@ -891,7 +891,7 @@ func TestHandler_TryParseAction(t *testing.T) {
 			result, _ := handler.tryParseAction(tt.response)
 			if tt.wantParse {
 				assert.NotNil(t, result)
-				assert.Equal(t, "heimdall.test.parse_test", result.Action)
+				assert.Equal(t, "heimdall_test_parse_test", result.Action)
 			} else {
 				assert.Nil(t, result)
 			}
@@ -915,7 +915,7 @@ func TestHandler_ActionExecution(t *testing.T) {
 		},
 	}
 	RegisterBuiltinAction(ActionFunc{
-		Name:        "heimdall.test.hello_action",
+		Name:        "heimdall_test_hello_action",
 		Description: "Say hello - test action",
 		Category:    "test",
 		Handler: func(ctx ActionContext) (*ActionResult, error) {
@@ -926,13 +926,16 @@ func TestHandler_ActionExecution(t *testing.T) {
 		// Clean up
 		m := GetSubsystemManager()
 		m.mu.Lock()
-		delete(m.actions, "heimdall.test.hello_action")
+		delete(m.actions, "heimdall_test_hello_action")
 		m.mu.Unlock()
 	}()
 
-	// Mock generator returns action JSON
+	// Mock generator: first round returns action JSON; after seeing tool result, return final answer (agentic loop)
 	mockGen.generateFunc = func(ctx context.Context, prompt string, params GenerateParams) (string, error) {
-		return `{"action": "heimdall.test.hello_action", "params": {}}`, nil
+		if strings.Contains(prompt, "Tool result") {
+			return "Hello from test action!", nil
+		}
+		return `{"action": "heimdall_test_hello_action", "params": {}}`, nil
 	}
 
 	chatReq := ChatRequest{
@@ -1075,16 +1078,16 @@ func TestRequestLifecycle_Structure(t *testing.T) {
 func TestPreExecuteContext_Fields(t *testing.T) {
 	ctx := &PreExecuteContext{
 		RequestID:   "req-456",
-		Action:      "heimdall.watcher.status",
+		Action:      "heimdall_watcher_status",
 		Params:      map[string]interface{}{"param1": "value1"},
-		RawResponse: `{"action": "heimdall.watcher.status"}`,
+		RawResponse: `{"action": "heimdall_watcher_status"}`,
 		PluginData:  map[string]interface{}{"from_preprompt": true},
 		Database:    &mockDBReader{},
 		Metrics:     &mockMetricsReader{},
 	}
 
 	assert.Equal(t, "req-456", ctx.RequestID)
-	assert.Equal(t, "heimdall.watcher.status", ctx.Action)
+	assert.Equal(t, "heimdall_watcher_status", ctx.Action)
 	assert.Equal(t, "value1", ctx.Params["param1"])
 	assert.NotNil(t, ctx.Database)
 	assert.NotNil(t, ctx.Metrics)
@@ -1126,7 +1129,7 @@ func TestPreExecuteResult_Continue(t *testing.T) {
 func TestPostExecuteContext_Duration(t *testing.T) {
 	ctx := &PostExecuteContext{
 		RequestID: "req-789",
-		Action:    "heimdall.watcher.query",
+		Action:    "heimdall_watcher_query",
 		Params:    map[string]interface{}{"cypher": "MATCH (n) RETURN n"},
 		Result: &ActionResult{
 			Success: true,
@@ -1138,7 +1141,7 @@ func TestPostExecuteContext_Duration(t *testing.T) {
 	}
 
 	assert.Equal(t, "req-789", ctx.RequestID)
-	assert.Equal(t, "heimdall.watcher.query", ctx.Action)
+	assert.Equal(t, "heimdall_watcher_query", ctx.Action)
 	assert.True(t, ctx.Result.Success)
 }
 
@@ -1146,7 +1149,7 @@ func TestHandler_LifecycleFlow_NonStreaming(t *testing.T) {
 	// Register a test action
 	actionExecuted := false
 	RegisterBuiltinAction(ActionFunc{
-		Name:        "heimdall.test.lifecycle",
+		Name:        "heimdall_test_lifecycle",
 		Description: "Test lifecycle action",
 		Category:    "test",
 		Handler: func(ctx ActionContext) (*ActionResult, error) {
@@ -1160,7 +1163,7 @@ func TestHandler_LifecycleFlow_NonStreaming(t *testing.T) {
 	defer func() {
 		m := GetSubsystemManager()
 		m.mu.Lock()
-		delete(m.actions, "heimdall.test.lifecycle")
+		delete(m.actions, "heimdall_test_lifecycle")
 		m.mu.Unlock()
 	}()
 
@@ -1170,7 +1173,7 @@ func TestHandler_LifecycleFlow_NonStreaming(t *testing.T) {
 
 	// Mock generator returns action
 	mockGen.generateFunc = func(ctx context.Context, prompt string, params GenerateParams) (string, error) {
-		return `{"action": "heimdall.test.lifecycle", "params": {}}`, nil
+		return `{"action": "heimdall_test_lifecycle", "params": {}}`, nil
 	}
 
 	chatReq := ChatRequest{
@@ -1194,7 +1197,7 @@ func TestHandler_LifecycleFlow_Streaming(t *testing.T) {
 	// Register a test action
 	actionExecuted := false
 	RegisterBuiltinAction(ActionFunc{
-		Name:        "heimdall.test.stream_lifecycle",
+		Name:        "heimdall_test_stream_lifecycle",
 		Description: "Test streaming lifecycle",
 		Category:    "test",
 		Handler: func(ctx ActionContext) (*ActionResult, error) {
@@ -1208,7 +1211,7 @@ func TestHandler_LifecycleFlow_Streaming(t *testing.T) {
 	defer func() {
 		m := GetSubsystemManager()
 		m.mu.Lock()
-		delete(m.actions, "heimdall.test.stream_lifecycle")
+		delete(m.actions, "heimdall_test_stream_lifecycle")
 		m.mu.Unlock()
 	}()
 
@@ -1219,7 +1222,7 @@ func TestHandler_LifecycleFlow_Streaming(t *testing.T) {
 	// Mock generator streams action
 	mockGen.streamFunc = func(ctx context.Context, prompt string, params GenerateParams, callback func(string) error) error {
 		callback(`{"action": `)
-		callback(`"heimdall.test.stream_lifecycle", `)
+		callback(`"heimdall_test_stream_lifecycle", `)
 		callback(`"params": {}}`)
 		return nil
 	}

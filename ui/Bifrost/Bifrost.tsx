@@ -1,4 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import './Bifrost.css';
 
 interface Message {
@@ -491,7 +493,15 @@ export const Bifrost: React.FC<BifrostProps> = ({
                 </span>
               </div>
               <div className="bifrost-message-content">
-                {message.content}
+                {(message.role === 'assistant' || message.role === 'heimdall' || message.role === 'system') ? (
+                  <div className="bifrost-markdown">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                      {message.content || ''}
+                    </ReactMarkdown>
+                  </div>
+                ) : (
+                  message.content
+                )}
                 {message.streaming && <span className="bifrost-cursor">▊</span>}
               </div>
             </div>

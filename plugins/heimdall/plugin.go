@@ -1037,70 +1037,70 @@ func (p *WatcherPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 	ctx.Examples = append(ctx.Examples,
 		heimdall.PromptExample{
 			UserSays:   "check the system",
-			ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "get status",
-			ActionJSON: `{"action": "heimdall.watcher.status", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`,
 		},
 		// Database stats queries -> db_stats (node/edge counts, labels, etc.)
 		heimdall.PromptExample{
 			UserSays:   "how many nodes are there",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "how many nodes",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "what is the database status",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "show database info",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "database statistics",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "how many relationships",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "show node labels",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		// K-means clustering and feature flag queries -> db_stats
 		heimdall.PromptExample{
 			UserSays:   "how many k-means clusters",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "show clustering stats",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "how many embeddings",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "what features are enabled",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "show feature flags",
-			ActionJSON: `{"action": "heimdall.watcher.db_stats", "params": {}}`,
+			ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`,
 		},
 		// Generic semantic search examples
 		heimdall.PromptExample{
 			UserSays:   "search for X",
-			ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "X"}}`,
+			ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "X"}}`,
 		},
 		heimdall.PromptExample{
 			UserSays:   "find information about Y",
-			ActionJSON: `{"action": "heimdall.watcher.discover", "params": {"query": "Y"}}`,
+			ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "Y"}}`,
 		},
 	)
 
@@ -1207,7 +1207,7 @@ func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext) string {
 
 	sb.WriteString("=== END KNOWLEDGE ===\n\n")
 	sb.WriteString("Use the above knowledge to help answer the user's question. If you can answer directly, do so. ")
-	sb.WriteString("If more detailed search is needed, use the heimdall.watcher.discover action.\n")
+	sb.WriteString("If more detailed search is needed, use the heimdall_watcher_discover action.\n")
 
 	return sb.String()
 }
@@ -1241,7 +1241,7 @@ func (p *WatcherPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(he
 	// This is async so we don't block the response
 	go func() {
 		// === EXAMPLE: Validation for query actions ===
-		if ctx.Action == "heimdall.watcher.query" {
+		if ctx.Action == "heimdall_watcher_query" {
 			if cypher, ok := ctx.Params["cypher"].(string); ok {
 				// Basic safety check
 				if len(cypher) > 10000 {
@@ -1519,7 +1519,7 @@ func (p *WatcherPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
 			log.Printf("[Watcher] Autonomous action: %d query failures detected, triggering analysis", p.queryFailures)
 
 			// Option 1: Directly invoke an action
-			p.ctx.Heimdall.InvokeActionAsync("heimdall.watcher.status", map[string]interface{}{
+			p.ctx.Heimdall.InvokeActionAsync("heimdall_watcher_status", map[string]interface{}{
 				"trigger":  "autonomous",
 				"reason":   "query_failures",
 				"failures": p.queryFailures,

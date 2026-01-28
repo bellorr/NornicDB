@@ -32,6 +32,16 @@ type Manager struct {
 	lastUsed     time.Time
 }
 
+// heimdallProviderFactories maps provider name to constructor (openai, ollama).
+// Populated by init() in generator_openai.go and generator_ollama.go so scheduler
+// does not reference those packages' constructors directly (avoids linter/IDE undefined errors).
+var heimdallProviderFactories = make(map[string]func(Config) (Generator, error))
+
+// RegisterHeimdallProvider registers a remote provider (openai, ollama). Called from generator_* init().
+func RegisterHeimdallProvider(name string, factory func(Config) (Generator, error)) {
+	heimdallProviderFactories[name] = factory
+}
+
 // NewManager creates an SLM manager using BYOM configuration.
 // Returns nil if SLM feature is disabled.
 //
@@ -53,23 +63,19 @@ func NewManager(cfg Config) (*Manager, error) {
 	var modelPath string
 	var err error
 
-	switch provider {
-	case "openai":
-		generator, err = newOpenAIGenerator(cfg)
+	if provider == "local" || provider == "" {
+		generator, modelPath, err = loadLocalGenerator(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("Heimdall OpenAI provider: %w", err)
+			return nil, err
+		}
+	} else if factory, ok := heimdallProviderFactories[provider]; ok {
+		generator, err = factory(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("Heimdall %s provider: %w", provider, err)
 		}
 		modelPath = generator.ModelPath()
-		fmt.Printf("🛡️ Heimdall using OpenAI: %s\n", modelPath)
-	case "ollama":
-		generator, err = newOllamaGenerator(cfg)
-		if err != nil {
-			return nil, fmt.Errorf("Heimdall Ollama provider: %w", err)
-		}
-		modelPath = generator.ModelPath()
-		fmt.Printf("🛡️ Heimdall using Ollama: %s\n", modelPath)
-	default:
-		// local (or any other value): load GGUF
+		fmt.Printf("🛡️ Heimdall using %s: %s\n", provider, modelPath)
+	} else {
 		generator, modelPath, err = loadLocalGenerator(cfg)
 		if err != nil {
 			return nil, err
@@ -259,6 +265,46 @@ func (m *Manager) GenerateStream(ctx context.Context, prompt string, params Gene
 	}
 
 	return nil
+}
+
+// SupportsTools returns true if the generator supports native tool/function calling
+// (e.g. OpenAI, Ollama). When true, the handler uses GenerateWithTools and an agentic loop.
+func (m *Manager) SupportsTools() bool {
+	m.mu.RLock()
+	gen := m.generator
+	m.mu.RUnlock()
+	if gen == nil {
+		return false
+	}
+	_, ok := gen.(GeneratorWithTools)
+	return ok
+}
+
+// GenerateWithTools runs one round of chat with tools (agentic loop). Only valid when SupportsTools() is true.
+// Returns content and/or toolCalls; caller executes tools and calls again until no toolCalls.
+func (m *Manager) GenerateWithTools(ctx context.Context, messages []ToolRoundMessage, tools []MCPTool, params GenerateParams) (content string, toolCalls []ParsedToolCall, err error) {
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		return "", nil, fmt.Errorf("manager is closed")
+	}
+	gen := m.generator
+	m.mu.RUnlock()
+
+	if gen == nil {
+		return "", nil, fmt.Errorf("no generator loaded")
+	}
+	gwt, ok := gen.(GeneratorWithTools)
+	if !ok {
+		return "", nil, fmt.Errorf("generator does not support tools")
+	}
+
+	m.mu.Lock()
+	m.requestCount++
+	m.lastUsed = time.Now()
+	m.mu.Unlock()
+
+	return gwt.GenerateWithTools(ctx, messages, tools, params)
 }
 
 // Chat handles chat completion requests.

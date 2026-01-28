@@ -2,6 +2,7 @@ package heimdall
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"testing"
 	"time"
@@ -324,7 +325,7 @@ func TestSubsystemManager_RegisterActions(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify actions are registered with full names
-	action, ok := manager.GetAction("heimdall.test_plugin.test_action")
+	action, ok := manager.GetAction("heimdall_test_plugin_test_action")
 	assert.True(t, ok)
 	assert.Equal(t, "A test action", action.Description)
 }
@@ -515,7 +516,7 @@ func TestSubsystemEvent(t *testing.T) {
 
 func TestActionFunc(t *testing.T) {
 	action := ActionFunc{
-		Name:        "heimdall.test.action",
+		Name:        "heimdall_test_action",
 		Description: "Test action",
 		Category:    "testing",
 		Handler: func(ctx ActionContext) (*ActionResult, error) {
@@ -526,7 +527,7 @@ func TestActionFunc(t *testing.T) {
 		},
 	}
 
-	assert.Equal(t, "heimdall.test.action", action.Name)
+	assert.Equal(t, "heimdall_test_action", action.Name)
 	assert.Equal(t, "testing", action.Category)
 
 	// Execute the handler
@@ -641,12 +642,31 @@ func TestListHeimdallActions(t *testing.T) {
 	// Should have actions from the mock plugin
 	found := false
 	for _, name := range actions {
-		if name == "heimdall.test.test_action" {
+		if name == "heimdall_test_test_action" {
 			found = true
 			break
 		}
 	}
-	assert.True(t, found, "Should find heimdall.test.test_action in actions list")
+	assert.True(t, found, "Should find heimdall_test_test_action in actions list")
+}
+
+func TestActionsAsMCPTools(t *testing.T) {
+	globalManager = nil
+	InitBuiltinActions()
+
+	tools := ActionsAsMCPTools()
+	require.NotEmpty(t, tools, "builtin actions should produce MCP tools")
+
+	for _, tool := range tools {
+		assert.NotEmpty(t, tool.Name, "MCP tool must have name")
+		assert.NotEmpty(t, tool.Description, "MCP tool must have description")
+		assert.NotEmpty(t, tool.InputSchema, "MCP tool must have inputSchema (default or set)")
+		// InputSchema should be valid JSON (object with type/properties)
+		var schema map[string]interface{}
+		err := json.Unmarshal(tool.InputSchema, &schema)
+		assert.NoError(t, err, "InputSchema for %s must be valid JSON", tool.Name)
+		assert.Equal(t, "object", schema["type"], "inputSchema type should be object")
+	}
 }
 
 func TestGetHeimdallAction(t *testing.T) {
@@ -663,11 +683,11 @@ func TestGetHeimdallAction(t *testing.T) {
 	plugin := NewMockPlugin("test")
 	_ = manager.RegisterPlugin(plugin, "", true)
 
-	action, ok := GetHeimdallAction("heimdall.test.test_action")
+	action, ok := GetHeimdallAction("heimdall_test_test_action")
 	assert.True(t, ok)
 	assert.Equal(t, "A test action", action.Description)
 
-	_, ok = GetHeimdallAction("heimdall.nonexistent.action")
+	_, ok = GetHeimdallAction("heimdall_nonexistent_action")
 	assert.False(t, ok)
 }
 

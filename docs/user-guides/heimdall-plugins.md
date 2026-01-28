@@ -139,6 +139,27 @@ func (p *MyPlugin) handleAnalyze(ctx heimdall.ActionContext) (*heimdall.ActionRe
 }
 ```
 
+#### MCP tool format
+
+Heimdall actions are aligned with the [Model Context Protocol (MCP)](https://modelcontextprotocol.io) tool format:
+
+- **Name** – Full action name (e.g. `heimdall_watcher_query`)  
+- **Description** – Plain-text description for the model  
+- **InputSchema** – Optional JSON Schema for parameters (same as MCP `inputSchema`)
+
+When you define an action, you can set `InputSchema` so that MCP clients and the assistant know the expected parameters:
+
+```go
+"query": {
+    Description: "Run a read-only Cypher query",
+    Category:    "query",
+    InputSchema: json.RawMessage([]byte(`{"type":"object","properties":{"cypher":{"type":"string","description":"Cypher query"}},"required":["cypher"]}`)),
+    Handler:     p.handleQuery,
+},
+```
+
+Use `heimdall.ActionsAsMCPTools()` to export all registered actions in MCP tool list format (e.g. for merging with NornicDB’s MCP server or external clients). Invocation matches MCP: action name plus `params` (MCP `arguments`).
+
 ### 4. Build and Deploy
 
 ```bash
@@ -1017,11 +1038,11 @@ If you see ordering issues:
 
 | User Says | Maps To |
 |-----------|---------|
-| "check the status" | `heimdall.watcher.status` |
+| "check the status" | `heimdall_watcher_status` |
 | "detect anomalies" | `heimdall.anomaly.detect` |
-| "say hello" | `heimdall.watcher.hello` |
-| "what's the health" | `heimdall.watcher.health` |
-| "show me metrics" | `heimdall.watcher.metrics` |
+| "say hello" | `heimdall_watcher_hello` |
+| "what's the health" | `heimdall_watcher_health` |
+| "show me metrics" | `heimdall_watcher_metrics` |
 
 ---
 

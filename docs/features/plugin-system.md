@@ -70,7 +70,7 @@ Provide SLM-invokable actions for subsystem management:
 
 ```
 User: "check system metrics"
-SLM → Invokes: heimdall.watcher.metrics
+SLM → Invokes: heimdall_watcher_metrics
 Result: CPU 45%, Memory 2.3GB, Queries 1.2K/s
 ```
 
@@ -297,9 +297,9 @@ Provides Neo4j-compatible APOC functions:
 **Location:** `plugins/heimdall/built-plugins/watcher.so`
 
 Provides SLM monitoring and management:
-- System status (`heimdall.watcher.status`)
-- Health checks (`heimdall.watcher.health`)
-- Metrics collection (`heimdall.watcher.metrics`)
+- System status (`heimdall_watcher_status`)
+- Health checks (`heimdall_watcher_health`)
+- Metrics collection (`heimdall_watcher_metrics`)
 - Configuration management
 - Event tracking
 

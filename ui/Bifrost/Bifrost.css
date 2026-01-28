@@ -586,8 +586,118 @@
    SPECIAL EFFECTS
    ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Code blocks in messages */
-.bifrost-message code {
+/* Markdown-rendered content (assistant, heimdall, system) */
+.bifrost-markdown {
+  white-space: normal;
+  word-wrap: break-word;
+}
+
+.bifrost-markdown > *:first-child {
+  margin-top: 0;
+}
+
+.bifrost-markdown > *:last-child {
+  margin-bottom: 0;
+}
+
+.bifrost-markdown p {
+  margin: 0 0 0.75em 0;
+  line-height: 1.65;
+}
+
+.bifrost-markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.bifrost-markdown h1, .bifrost-markdown h2, .bifrost-markdown h3,
+.bifrost-markdown h4, .bifrost-markdown h5, .bifrost-markdown h6 {
+  color: inherit;
+  font-weight: 700;
+  margin: 1em 0 0.5em 0;
+  line-height: 1.3;
+}
+
+.bifrost-markdown h1 { font-size: 1.35em; }
+.bifrost-markdown h2 { font-size: 1.2em; }
+.bifrost-markdown h3 { font-size: 1.1em; }
+.bifrost-markdown h4, .bifrost-markdown h5, .bifrost-markdown h6 { font-size: 1em; }
+
+.bifrost-markdown ul, .bifrost-markdown ol {
+  margin: 0.5em 0 0.75em 0;
+  padding-left: 1.5em;
+}
+
+.bifrost-markdown li {
+  margin: 0.25em 0;
+  line-height: 1.6;
+}
+
+.bifrost-markdown blockquote {
+  margin: 0.75em 0;
+  padding: 0.25em 0 0.25em 12px;
+  border-left: 3px solid var(--valhalla-gold);
+  color: var(--norse-silver);
+  opacity: 0.95;
+}
+
+.bifrost-markdown a {
+  color: var(--frost-ice);
+  text-decoration: none;
+  border-bottom: 1px solid rgba(74, 158, 255, 0.4);
+}
+
+.bifrost-markdown a:hover {
+  color: var(--frost-glacier);
+  border-bottom-color: var(--frost-ice);
+}
+
+.bifrost-markdown strong {
+  font-weight: 700;
+  color: inherit;
+}
+
+.bifrost-markdown em {
+  font-style: italic;
+}
+
+.bifrost-markdown hr {
+  border: none;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--norse-rune),
+    transparent
+  );
+  margin: 1em 0;
+}
+
+.bifrost-markdown table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.75em 0;
+  font-size: 0.92em;
+}
+
+.bifrost-markdown th, .bifrost-markdown td {
+  border: 1px solid var(--norse-rune);
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.bifrost-markdown th {
+  background: rgba(42, 50, 71, 0.5);
+  color: var(--valhalla-gold);
+  font-weight: 600;
+}
+
+.bifrost-markdown td {
+  background: rgba(30, 36, 51, 0.3);
+}
+
+/* Code blocks in messages (inline and block, including inside markdown) */
+.bifrost-message code,
+.bifrost-markdown code {
   background: rgba(42, 50, 71, 0.6);
   border: 1px solid var(--norse-rune);
   border-radius: 4px;
@@ -595,13 +705,21 @@
   font-size: 0.9em;
 }
 
-.bifrost-message pre {
+.bifrost-message pre,
+.bifrost-markdown pre {
   background: var(--norse-stone);
   border: 1px solid var(--norse-rune);
   border-radius: 8px;
   padding: 12px 16px;
   overflow-x: auto;
   margin: 8px 0;
+}
+
+.bifrost-markdown pre code {
+  background: none;
+  border: none;
+  padding: 0;
+  font-size: 0.88em;
 }
 
 /* Action indicators */

@@ -124,6 +124,49 @@ type Generator interface {
 	ModelPath() string
 }
 
+// ParsedToolCall is a single tool invocation from a remote provider (OpenAI/Ollama).
+// Arguments is the JSON string of parameters (e.g. "{\"cypher\": \"MATCH (n) RETURN n\"}").
+// Id is set by the provider (e.g. OpenAI) and must be sent back with the tool result for that call.
+type ParsedToolCall struct {
+	Id        string
+	Name      string
+	Arguments string
+}
+
+// ToolRoundMessage is one message in an agentic conversation (system, user, assistant, or tool result).
+// Used for the tool-calling loop: after executing tools, handler appends assistant message (with
+// ToolCalls) and tool result messages (Role "tool", ToolCallID, Content), then calls again.
+type ToolRoundMessage struct {
+	Role       string           // "system", "user", "assistant", "tool"
+	Content    string           // For tool role: the result content (e.g. JSON or text)
+	ToolCalls  []ParsedToolCall // For assistant: tool invocations from the model
+	ToolCallID string           // For tool role: which call this result is for (OpenAI id)
+}
+
+// MaxAgenticRounds is the maximum number of tool-call rounds in the agentic loop.
+// Prevents runaway when the model keeps requesting tools.
+const MaxAgenticRounds = 10
+
+// AgenticSystemPromptTools is the short system prompt when using native tools (OpenAI/Ollama).
+// The model receives tools via the API; no need to list actions in the prompt.
+const AgenticSystemPromptTools = `You are Heimdall, the AI assistant for NornicDB, a high-performance graph database.
+Use the provided tools to run Cypher queries, get status, discover data, or perform other actions when the user asks.
+After seeing tool results, summarize or explain in a helpful way for the user. For query results (e.g. heimdall_watcher_query), describe what the data looks like—for example show a sample node or row so the user sees the shape of the result. If no tool is needed, answer directly.`
+
+// GeneratorWithTools is implemented by generators that support native tool/function calling.
+// When used, the handler runs an agentic loop: call GenerateWithTools, execute any toolCalls,
+// append assistant + tool result messages, call again until the model returns content only.
+// Used for OpenAI and Ollama; local GGUF uses prompt-based agentic loop (same loop, prompt-based).
+type GeneratorWithTools interface {
+	Generator
+
+	// GenerateWithTools runs one round of chat with tools. messages is the full conversation
+	// so far (system, user, optional assistant+tool_calls, tool results, ...). Returns content
+	// (text reply) and/or toolCalls. Handler executes toolCalls, appends messages, and calls
+	// again until toolCalls is empty (agentic loop).
+	GenerateWithTools(ctx context.Context, messages []ToolRoundMessage, tools []MCPTool, params GenerateParams) (content string, toolCalls []ParsedToolCall, err error)
+}
+
 // ActionOpcode represents bounded actions the SLM can recommend.
 // All SLM outputs map to these predefined actions for safety.
 type ActionOpcode int
@@ -164,9 +207,9 @@ type Config struct {
 
 	ModelsDir   string  `json:"models_dir"`
 	Model       string  `json:"model"`
-	Provider    string  `json:"provider"`    // local, ollama, openai
-	APIURL      string  `json:"api_url"`     // for ollama/openai
-	APIKey      string  `json:"api_key"`     // for openai
+	Provider    string  `json:"provider"`     // local, ollama, openai
+	APIURL      string  `json:"api_url"`      // for ollama/openai
+	APIKey      string  `json:"api_key"`      // for openai
 	ContextSize int     `json:"context_size"` // Context window size (single-shot, max out)
 	BatchSize   int     `json:"batch_size"`   // Batch size (match context for single-shot)
 	MaxTokens   int     `json:"max_tokens"`
@@ -558,8 +601,8 @@ Your role is to help users manage the database by executing actions and running 
 	sb.WriteString(`RESPONSE MODES:
 
 1. ACTION MODE - For database operations, respond with JSON:
-   {"action": "heimdall.watcher.status", "params": {}}
-   {"action": "heimdall.watcher.query", "params": {"cypher": "MATCH (n) RETURN count(n)"}}
+   {"action": "heimdall_watcher_status", "params": {}}
+   {"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN count(n)"}}
 
 2. HELP MODE - For Cypher questions, explain and provide examples:
    - If asked about Cypher syntax, explain clearly with examples
@@ -598,7 +641,7 @@ func (p *PromptContext) buildMinimalPrompt() string {
 	sb.WriteString("You are Heimdall, AI assistant for NornicDB graph database.\n\n")
 	sb.WriteString("ACTIONS:\n")
 	sb.WriteString(p.ActionPrompt)
-	sb.WriteString("\nFor queries: {\"action\": \"heimdall.watcher.query\", \"params\": {\"cypher\": \"...\"}}\n")
+	sb.WriteString("\nFor queries: {\"action\": \"heimdall_watcher_query\", \"params\": {\"cypher\": \"...\"}}\n")
 	sb.WriteString("Respond with JSON only.\n")
 
 	return sb.String()
@@ -728,7 +771,7 @@ type PreExecuteContext struct {
 	// RequestTime when the request started
 	RequestTime time.Time
 
-	// Action is the parsed action name (e.g., "heimdall.watcher.status")
+	// Action is the parsed action name (e.g., "heimdall_watcher_status")
 	Action string
 
 	// Params are the parsed action parameters

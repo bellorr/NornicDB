@@ -93,7 +93,7 @@ For local GGUF instead of OpenAI, use `NORNICDB_HEIMDALL_PROVIDER=local` (or omi
 | `NORNICDB_HEIMDALL_MAX_TOKENS` | `1024` | Max tokens per response |
 | `NORNICDB_HEIMDALL_TEMPERATURE` | `0.1` | Response creativity (0.0-1.0) |
 
-For detailed information about context handling and token budgets, see [Heimdall Context & Tokens](./heimdall-context.md).
+For detailed information about context handling and token budgets, see [Heimdall Context & Tokens](./heimdall-context.md). When using **Ollama or OpenAI**, you can safely increase token budgets (e.g. 32K or 128K context); that guide includes example env values.
 
 ### Provider: local / ollama / openai
 
@@ -161,6 +161,10 @@ NORNICDB_HEIMDALL_ENABLED=true \
 | `/clear` | Clear chat history |
 | `/status` | Show connection status |
 | `/model` | Show current model |
+
+### Actions and MCP (Model Context Protocol)
+
+Heimdall actions follow the same shape as [MCP tools](https://modelcontextprotocol.io): each action has a **name**, **description**, and optional **inputSchema** (JSON Schema for parameters). Invocation uses action name plus **params** (equivalent to MCP `arguments`). Use `heimdall.ActionsAsMCPTools()` to export all registered actions in MCP tool list format for MCP clients or to merge with NornicDB’s MCP server tool list.
 
 ### Natural Language Actions
 
@@ -465,7 +469,7 @@ func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 ┌─────────────────────────────────────────────────────────────────┐
 │  Heimdall SLM                                                   │
 │  └─ Interprets user intent                                      │
-│  └─ Outputs: {"action": "heimdall.watcher.status", "params": {}}│
+│  └─ Outputs: {"action": "heimdall_watcher_status", "params": {}}│
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -477,7 +481,7 @@ func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │  Action Execution                                               │
-│  └─ Registered handler executes (heimdall.watcher.status)       │
+│  └─ Registered handler executes (heimdall_watcher_status)       │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
