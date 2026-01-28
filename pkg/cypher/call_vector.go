@@ -2,7 +2,9 @@ package cypher
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -176,9 +178,19 @@ func (e *StorageExecutor) callDbIndexVectorQueryNodes(ctx context.Context, cyphe
 		return nil, err
 	}
 
+	seenOrphans := make(map[string]bool)
 	for _, hit := range hits {
 		node, err := e.storage.GetNode(storage.NodeID(hit.ID))
 		if err != nil || node == nil {
+			if err != nil && errors.Is(err, storage.ErrNotFound) && e.searchService != nil {
+				if !seenOrphans[hit.ID] {
+					log.Printf("[cypher] orphaned embedding detected, removing from indexes: nodeID=%s", hit.ID)
+					if removeErr := e.searchService.RemoveNode(storage.NodeID(hit.ID)); removeErr != nil {
+						log.Printf("[cypher] failed to remove orphaned embedding for nodeID=%s: %v", hit.ID, removeErr)
+					}
+					seenOrphans[hit.ID] = true
+				}
+			}
 			continue
 		}
 		result.Rows = append(result.Rows, []interface{}{

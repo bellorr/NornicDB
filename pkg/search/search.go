@@ -77,6 +77,7 @@ package search
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -1207,6 +1208,29 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	return nil
 }
 
+// handleOrphanedEmbedding handles the case where a vector/index hit refers to a node
+// that no longer exists in storage (orphaned embedding). If err is storage.ErrNotFound,
+// it logs once per node ID (when seenOrphans is provided), removes all embeddings for
+// that node from indexes via RemoveNode, and returns true so the caller can skip the result.
+// If seenOrphans is non-nil and the node ID was already seen this request, it returns true
+// without logging or removing again. If err is not ErrNotFound, returns false.
+func (s *Service) handleOrphanedEmbedding(ctx context.Context, nodeIDStr string, err error, seenOrphans map[string]bool) bool {
+	if !errors.Is(err, storage.ErrNotFound) {
+		return false
+	}
+	if seenOrphans != nil && seenOrphans[nodeIDStr] {
+		return true // already logged and removed this request
+	}
+	log.Printf("[search] orphaned embedding detected, removing from indexes: nodeID=%s", nodeIDStr)
+	if removeErr := s.RemoveNode(storage.NodeID(nodeIDStr)); removeErr != nil {
+		log.Printf("[search] failed to remove orphaned embedding for nodeID=%s: %v", nodeIDStr, removeErr)
+	}
+	if seenOrphans != nil {
+		seenOrphans[nodeIDStr] = true
+	}
+	return true
+}
+
 // NodeIterator is an interface for streaming node iteration.
 type NodeIterator interface {
 	IterateNodes(fn func(*storage.Node) bool) error
@@ -1373,10 +1397,12 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	// Collapse vector IDs back to unique node IDs.
 	vectorResults = collapseIndexResultsByNodeID(vectorResults)
 
+	seenOrphans := make(map[string]bool)
+
 	// Step 3: Filter by type if specified
 	if len(opts.Types) > 0 {
-		vectorResults = s.filterByType(vectorResults, opts.Types)
-		bm25Results = s.filterByType(bm25Results, opts.Types)
+		vectorResults = s.filterByType(ctx, vectorResults, opts.Types, seenOrphans)
+		bm25Results = s.filterByType(ctx, bm25Results, opts.Types, seenOrphans)
 	}
 
 	// Step 4: Fuse with RRF
@@ -1394,14 +1420,14 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 		message = "RRF (IVF-HNSW vector + BM25)"
 	}
 	if opts.MMREnabled && len(embedding) > 0 {
-		fusedResults = s.applyMMR(fusedResults, embedding, opts.Limit, opts.MMRLambda)
+		fusedResults = s.applyMMR(ctx, fusedResults, embedding, opts.Limit, opts.MMRLambda, seenOrphans)
 		searchMethod += "+mmr"
 		message = fmt.Sprintf("%s + MMR diversification (λ=%.2f)", message, opts.MMRLambda)
 	}
 
 	// Step 6: Cross-encoder reranking (optional Stage 2)
 	if opts.RerankEnabled && crossEncoder != nil && crossEncoder.Config().Enabled {
-		fusedResults = s.applyCrossEncoderRerank(ctx, query, fusedResults, opts)
+		fusedResults = s.applyCrossEncoderRerank(ctx, query, fusedResults, opts, seenOrphans)
 		if searchMethod == "rrf_hybrid" {
 			searchMethod = "rrf_hybrid+rerank"
 			message = "RRF + Cross-Encoder Reranking"
@@ -1412,7 +1438,7 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	}
 
 	// Step 7: Convert to SearchResult and enrich with node data
-	results := s.enrichResults(fusedResults, opts.Limit)
+	results := s.enrichResults(ctx, fusedResults, opts.Limit, seenOrphans)
 
 	return &SearchResponse{
 		Status:          "success",
@@ -1476,9 +1502,10 @@ func (s *Service) VectorSearchCandidates(ctx context.Context, embedding []float3
 
 	candidates = collapseCandidatesByNodeID(candidates)
 
+	seenOrphans := make(map[string]bool)
 	// Apply type filters
 	if len(opts.Types) > 0 {
-		candidates = s.filterCandidatesByType(candidates, opts.Types)
+		candidates = s.filterCandidatesByType(ctx, candidates, opts.Types, seenOrphans)
 	}
 
 	if len(candidates) > opts.Limit && opts.Limit > 0 {
@@ -1911,7 +1938,7 @@ func envDurationSec(key string, fallbackSec int) time.Duration {
 }
 
 // filterCandidatesByType filters candidates by node type/label.
-func (s *Service) filterCandidatesByType(candidates []SearchCandidate, types []string) []SearchCandidate {
+func (s *Service) filterCandidatesByType(ctx context.Context, candidates []SearchCandidate, types []string, seenOrphans map[string]bool) []SearchCandidate {
 	if len(types) == 0 {
 		return candidates
 	}
@@ -1925,7 +1952,10 @@ func (s *Service) filterCandidatesByType(candidates []SearchCandidate, types []s
 	for _, cand := range candidates {
 		node, err := s.engine.GetNode(storage.NodeID(cand.ID))
 		if err != nil {
-			continue // Skip if node not found
+			if s.handleOrphanedEmbedding(ctx, cand.ID, err, seenOrphans) {
+				continue
+			}
+			continue
 		}
 
 		// Check if any label matches
@@ -2104,7 +2134,7 @@ func (s *Service) fuseRRF(vectorResults, bm25Results []indexResult, opts *Search
 // Reference: Carbonell & Goldstein (1998)
 // "The Use of MMR, Diversity-Based Reranking for Reordering Documents
 // and Producing Summaries"
-func (s *Service) applyMMR(results []rrfResult, queryEmbedding []float32, limit int, lambda float64) []rrfResult {
+func (s *Service) applyMMR(ctx context.Context, results []rrfResult, queryEmbedding []float32, limit int, lambda float64, seenOrphans map[string]bool) []rrfResult {
 	if len(results) <= 1 || lambda >= 1.0 {
 		// No diversification needed
 		return results
@@ -2120,7 +2150,14 @@ func (s *Service) applyMMR(results []rrfResult, queryEmbedding []float32, limit 
 	for _, r := range results {
 		// Get embedding from storage
 		node, err := s.engine.GetNode(storage.NodeID(r.ID))
-		if err != nil || node == nil || len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0 {
+		if err != nil {
+			if s.handleOrphanedEmbedding(ctx, r.ID, err, seenOrphans) {
+				continue
+			}
+			candidates = append(candidates, docWithEmbed{result: r, embedding: nil})
+			continue
+		}
+		if node == nil || len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0 {
 			// No embedding - use original score only
 			candidates = append(candidates, docWithEmbed{
 				result:    r,
@@ -2199,7 +2236,7 @@ func (s *Service) applyMMR(results []rrfResult, queryEmbedding []float32, limit 
 //
 // Stage 1 is like using a library catalog to find 100 potentially relevant books.
 // Stage 2 is like reading each book's summary to pick the best 10.
-func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, results []rrfResult, opts *SearchOptions) []rrfResult {
+func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, results []rrfResult, opts *SearchOptions, seenOrphans map[string]bool) []rrfResult {
 	if len(results) == 0 {
 		return results
 	}
@@ -2208,7 +2245,13 @@ func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, res
 	candidates := make([]RerankCandidate, 0, len(results))
 	for _, r := range results {
 		node, err := s.engine.GetNode(storage.NodeID(r.ID))
-		if err != nil || node == nil {
+		if err != nil {
+			if s.handleOrphanedEmbedding(ctx, r.ID, err, seenOrphans) {
+				continue
+			}
+			continue
+		}
+		if node == nil {
 			continue
 		}
 
@@ -2288,25 +2331,24 @@ func (s *Service) CrossEncoderAvailable(ctx context.Context) bool {
 // vectorSearchOnly performs vector-only search.
 func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opts *SearchOptions) (*SearchResponse, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var results []indexResult
-	searchMethod := "vector"
-	message := "Vector similarity search (cosine)"
-	searchStart := time.Now()
-	candidateLimit := vectorOverfetchLimit(opts.Limit)
-
 	pipeline, pipelineErr := s.getOrCreateVectorPipeline()
 	if pipelineErr != nil {
+		s.mu.RUnlock()
 		return nil, pipelineErr
 	}
-	scored, searchErr := pipeline.Search(ctx, embedding, candidateLimit, opts.GetMinSimilarity(0.5))
+	scored, searchErr := pipeline.Search(ctx, embedding, vectorOverfetchLimit(opts.Limit), opts.GetMinSimilarity(0.5))
+	s.mu.RUnlock()
 	if searchErr != nil {
 		return nil, searchErr
 	}
+
+	var results []indexResult
 	for _, r := range scored {
 		results = append(results, indexResult{ID: r.ID, Score: r.Score})
 	}
+	searchMethod := "vector"
+	message := "Vector similarity search (cosine)"
+	searchStart := time.Now()
 
 	switch pipeline.candidateGen.(type) {
 	case *KMeansCandidateGen:
@@ -2326,7 +2368,10 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 		message = "CPU brute-force vector search (exact)"
 	}
 
-	if s.clusterEnabled && s.clusterIndex != nil {
+	s.mu.RLock()
+	clusterEnabled := s.clusterEnabled && s.clusterIndex != nil
+	s.mu.RUnlock()
+	if clusterEnabled {
 		log.Printf("[K-MEANS] 🔍 SEARCH | mode=%s candidates=%d duration=%v",
 			searchMethod, len(results), time.Since(searchStart))
 	}
@@ -2334,11 +2379,12 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 	// Collapse vector IDs back to unique node IDs.
 	results = collapseIndexResultsByNodeID(results)
 
+	seenOrphans := make(map[string]bool)
 	if len(opts.Types) > 0 {
-		results = s.filterByType(results, opts.Types)
+		results = s.filterByType(ctx, results, opts.Types, seenOrphans)
 	}
 
-	searchResults := s.enrichIndexResults(results, opts.Limit)
+	searchResults := s.enrichIndexResults(ctx, results, opts.Limit, seenOrphans)
 
 	return &SearchResponse{
 		Status:          "success",
@@ -2353,15 +2399,15 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 // fullTextSearchOnly performs full-text BM25 search only.
 func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *SearchOptions) (*SearchResponse, error) {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
 	results := s.fulltextIndex.Search(query, opts.Limit*2)
+	s.mu.RUnlock()
 
+	seenOrphans := make(map[string]bool)
 	if len(opts.Types) > 0 {
-		results = s.filterByType(results, opts.Types)
+		results = s.filterByType(ctx, results, opts.Types, seenOrphans)
 	}
 
-	searchResults := s.enrichIndexResults(results, opts.Limit)
+	searchResults := s.enrichIndexResults(ctx, results, opts.Limit, seenOrphans)
 
 	return &SearchResponse{
 		Status:            "success",
@@ -2456,7 +2502,7 @@ func propertyToString(val interface{}) string {
 }
 
 // filterByType filters results to only include specified node types.
-func (s *Service) filterByType(results []indexResult, types []string) []indexResult {
+func (s *Service) filterByType(ctx context.Context, results []indexResult, types []string, seenOrphans map[string]bool) []indexResult {
 	if len(types) == 0 {
 		return results
 	}
@@ -2470,6 +2516,9 @@ func (s *Service) filterByType(results []indexResult, types []string) []indexRes
 	for _, r := range results {
 		node, err := s.engine.GetNode(storage.NodeID(r.ID))
 		if err != nil {
+			if s.handleOrphanedEmbedding(ctx, r.ID, err, seenOrphans) {
+				continue
+			}
 			continue
 		}
 
@@ -2493,7 +2542,7 @@ func (s *Service) filterByType(results []indexResult, types []string) []indexRes
 }
 
 // enrichResults converts RRF results to SearchResult with full node data.
-func (s *Service) enrichResults(rrfResults []rrfResult, limit int) []SearchResult {
+func (s *Service) enrichResults(ctx context.Context, rrfResults []rrfResult, limit int, seenOrphans map[string]bool) []SearchResult {
 	var results []SearchResult
 
 	for i, rrf := range rrfResults {
@@ -2503,6 +2552,9 @@ func (s *Service) enrichResults(rrfResults []rrfResult, limit int) []SearchResul
 
 		node, err := s.engine.GetNode(storage.NodeID(rrf.ID))
 		if err != nil {
+			if s.handleOrphanedEmbedding(ctx, rrf.ID, err, seenOrphans) {
+				continue
+			}
 			continue
 		}
 
@@ -2542,7 +2594,7 @@ func (s *Service) enrichResults(rrfResults []rrfResult, limit int) []SearchResul
 
 // enrichIndexResults converts raw index results to SearchResult.
 // Maps chunk IDs (e.g., "node-id-chunk-0") back to the original node ID.
-func (s *Service) enrichIndexResults(indexResults []indexResult, limit int) []SearchResult {
+func (s *Service) enrichIndexResults(ctx context.Context, indexResults []indexResult, limit int, seenOrphans map[string]bool) []SearchResult {
 	var results []SearchResult
 	seenNodes := make(map[string]bool) // Track nodes we've already added to avoid duplicates
 
@@ -2560,6 +2612,9 @@ func (s *Service) enrichIndexResults(indexResults []indexResult, limit int) []Se
 
 		node, err := s.engine.GetNode(storage.NodeID(nodeIDStr))
 		if err != nil {
+			if s.handleOrphanedEmbedding(ctx, nodeIDStr, err, seenOrphans) {
+				continue
+			}
 			continue
 		}
 

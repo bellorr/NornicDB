@@ -696,6 +696,46 @@ func TestSearchService_RemoveNode(t *testing.T) {
 	}
 }
 
+// TestSearchService_OrphanedEmbedding_DetectedAndRemoved verifies that when a vector
+// index hit refers to a node that no longer exists in storage (orphaned embedding),
+// we log once, remove all embeddings for that node from indexes, and skip the result.
+// A second search then no longer returns that ID (index was cleaned).
+func TestSearchService_OrphanedEmbedding_DetectedAndRemoved(t *testing.T) {
+	baseEngine := newNamespacedEngine(t)
+	engine := storage.NewNamespacedEngine(baseEngine, "test")
+	svc := NewServiceWithDimensions(engine, 4)
+
+	// Create and index a node so it exists in both storage and vector index
+	node := &storage.Node{
+		ID:              "orphan-target",
+		Labels:          []string{"Doc"},
+		Properties:      map[string]any{"name": "Orphan"},
+		ChunkEmbeddings: [][]float32{{1, 0, 0, 0}},
+	}
+	_, err := engine.CreateNode(node)
+	require.NoError(t, err)
+	require.NoError(t, svc.IndexNode(node))
+
+	// Delete from storage only (simulate orphan: index still has embedding, storage does not)
+	require.NoError(t, engine.DeleteNode(node.ID))
+
+	// First search: should detect orphan, log once, remove from index, and not return the missing node
+	opts := DefaultSearchOptions()
+	opts.Limit = 10
+	response, err := svc.Search(context.Background(), "", []float32{1, 0, 0, 0}, opts)
+	require.NoError(t, err)
+	for _, r := range response.Results {
+		assert.NotEqual(t, "orphan-target", r.ID, "orphan should not appear in results")
+	}
+
+	// Second search: orphan was removed from index on first search, so no hit for that ID
+	response2, err := svc.Search(context.Background(), "", []float32{1, 0, 0, 0}, opts)
+	require.NoError(t, err)
+	for _, r := range response2.Results {
+		assert.NotEqual(t, "orphan-target", r.ID, "index should have been cleaned")
+	}
+}
+
 // TestSearchService_RemoveNode_DecrementsEmbeddingCount verifies that removing a node
 // decrements the embedding count in stats. This is critical for ensuring that when nodes
 // are deleted via Cypher, the embedding count is updated correctly without requiring
@@ -1559,12 +1599,12 @@ func TestMMRDiversification(t *testing.T) {
 		queryEmb := []float32{0.9, 0.1, 0.0, 0.0}
 
 		// Without MMR: results should be in original order
-		resultsNoMMR := service.applyMMR(rrfResults, queryEmb, 3, 1.0) // lambda=1.0 = no diversity
+		resultsNoMMR := service.applyMMR(context.Background(), rrfResults, queryEmb, 3, 1.0, nil) // lambda=1.0 = no diversity
 		assert.Len(t, resultsNoMMR, 3, "Should return all results")
 		t.Logf("Without MMR (lambda=1.0): %v", []string{resultsNoMMR[0].ID, resultsNoMMR[1].ID, resultsNoMMR[2].ID})
 
 		// With MMR (lambda=0.3): strong diversity preference
-		resultsWithMMR := service.applyMMR(rrfResults, queryEmb, 3, 0.3) // lambda=0.3 = 70% diversity
+		resultsWithMMR := service.applyMMR(context.Background(), rrfResults, queryEmb, 3, 0.3, nil) // lambda=0.3 = 70% diversity
 		assert.Len(t, resultsWithMMR, 3, "Should return all results")
 		t.Logf("With MMR (lambda=0.3):    %v", []string{resultsWithMMR[0].ID, resultsWithMMR[1].ID, resultsWithMMR[2].ID})
 
@@ -1580,20 +1620,20 @@ func TestMMRDiversification(t *testing.T) {
 		}
 
 		// Lambda=1.0 should return results in original order (pure relevance)
-		results := service.applyMMR(rrfResults, []float32{1, 0, 0, 0}, 3, 1.0)
+		results := service.applyMMR(context.Background(), rrfResults, []float32{1, 0, 0, 0}, 3, 1.0, nil)
 		assert.Equal(t, "doc1", results[0].ID)
 		assert.Equal(t, "doc2", results[1].ID)
 		assert.Equal(t, "doc3", results[2].ID)
 	})
 
 	t.Run("mmr_handles_empty_results", func(t *testing.T) {
-		results := service.applyMMR([]rrfResult{}, []float32{1, 0, 0, 0}, 10, 0.7)
+		results := service.applyMMR(context.Background(), []rrfResult{}, []float32{1, 0, 0, 0}, 10, 0.7, nil)
 		assert.Empty(t, results)
 	})
 
 	t.Run("mmr_handles_single_result", func(t *testing.T) {
 		rrfResults := []rrfResult{{ID: "only", RRFScore: 0.1}}
-		results := service.applyMMR(rrfResults, []float32{1, 0, 0, 0}, 10, 0.7)
+		results := service.applyMMR(context.Background(), rrfResults, []float32{1, 0, 0, 0}, 10, 0.7, nil)
 		assert.Len(t, results, 1)
 		assert.Equal(t, "only", results[0].ID)
 	})
