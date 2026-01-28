@@ -472,9 +472,21 @@ type FeatureFlagsConfig struct {
 	// Environment: NORNICDB_HEIMDALL_ENABLED (default: false)
 	HeimdallEnabled bool
 
-	// Heimdall model name (without .gguf extension)
+	// Heimdall model name (without .gguf extension for local; model name for ollama/openai)
 	// Environment: NORNICDB_HEIMDALL_MODEL (default: qwen2.5-1.5b-instruct-q4_k_m)
 	HeimdallModel string
+
+	// Heimdall provider: "local" (GGUF), "ollama", or "openai"
+	// Environment: NORNICDB_HEIMDALL_PROVIDER (default: local)
+	HeimdallProvider string
+
+	// Heimdall API URL for remote providers (ollama/openai)
+	// Environment: NORNICDB_HEIMDALL_API_URL (e.g. http://localhost:11434 for ollama)
+	HeimdallAPIURL string
+
+	// Heimdall API key for openai (and other authenticated providers)
+	// Environment: NORNICDB_HEIMDALL_API_KEY
+	HeimdallAPIKey string
 
 	// GPU layers for Heimdall SLM (-1=auto, 0=CPU only)
 	// Falls back to CPU if GPU memory insufficient
@@ -581,6 +593,9 @@ type FeatureFlagsConfig struct {
 // Heimdall config getter methods for heimdall.FeatureFlagsSource interface
 func (f *FeatureFlagsConfig) GetHeimdallEnabled() bool          { return f.HeimdallEnabled }
 func (f *FeatureFlagsConfig) GetHeimdallModel() string          { return f.HeimdallModel }
+func (f *FeatureFlagsConfig) GetHeimdallProvider() string       { return f.HeimdallProvider }
+func (f *FeatureFlagsConfig) GetHeimdallAPIURL() string         { return f.HeimdallAPIURL }
+func (f *FeatureFlagsConfig) GetHeimdallAPIKey() string         { return f.HeimdallAPIKey }
 func (f *FeatureFlagsConfig) GetHeimdallGPULayers() int         { return f.HeimdallGPULayers }
 func (f *FeatureFlagsConfig) GetHeimdallContextSize() int       { return f.HeimdallContextSize }
 func (f *FeatureFlagsConfig) GetHeimdallBatchSize() int         { return f.HeimdallBatchSize }
@@ -997,6 +1012,15 @@ func legacyLoadFromEnv() *Config {
 	if v := getEnv("NORNICDB_HEIMDALL_MODEL", ""); v != "" {
 		config.Features.HeimdallModel = v
 	}
+	if v := getEnv("NORNICDB_HEIMDALL_PROVIDER", ""); v != "" {
+		config.Features.HeimdallProvider = v
+	}
+	if v := getEnv("NORNICDB_HEIMDALL_API_URL", ""); v != "" {
+		config.Features.HeimdallAPIURL = v
+	}
+	if v := getEnv("NORNICDB_HEIMDALL_API_KEY", ""); v != "" {
+		config.Features.HeimdallAPIKey = v
+	}
 	if v := os.Getenv("NORNICDB_HEIMDALL_GPU_LAYERS"); v != "" {
 		config.Features.HeimdallGPULayers = getEnvInt("NORNICDB_HEIMDALL_GPU_LAYERS", -1)
 	}
@@ -1235,6 +1259,9 @@ type YAMLConfig struct {
 	Heimdall struct {
 		Enabled          bool    `yaml:"enabled"`
 		Model            string  `yaml:"model"`
+		Provider         string  `yaml:"provider"` // local, ollama, openai
+		APIURL           string  `yaml:"api_url"`  // for ollama/openai
+		APIKey           string  `yaml:"api_key"`  // for openai
 		GPULayers        *int    `yaml:"gpu_layers"`
 		ContextSize      int     `yaml:"context_size"`
 		BatchSize        int     `yaml:"batch_size"`
@@ -1469,6 +1496,9 @@ func LoadDefaults() *Config {
 	config.Features.TopologyABTestPercentage = 50
 	config.Features.HeimdallEnabled = false
 	config.Features.HeimdallModel = "qwen2.5-0.5b-instruct"
+	config.Features.HeimdallProvider = "local"
+	config.Features.HeimdallAPIURL = ""
+	config.Features.HeimdallAPIKey = ""
 	config.Features.HeimdallGPULayers = -1
 	config.Features.HeimdallContextSize = 8192
 	config.Features.HeimdallBatchSize = 2048
@@ -1929,6 +1959,15 @@ func applyEnvVars(config *Config) {
 	if v := getEnv("NORNICDB_HEIMDALL_MODEL", ""); v != "" {
 		config.Features.HeimdallModel = v
 	}
+	if v := getEnv("NORNICDB_HEIMDALL_PROVIDER", ""); v != "" {
+		config.Features.HeimdallProvider = v
+	}
+	if v := getEnv("NORNICDB_HEIMDALL_API_URL", ""); v != "" {
+		config.Features.HeimdallAPIURL = v
+	}
+	if v := getEnv("NORNICDB_HEIMDALL_API_KEY", ""); v != "" {
+		config.Features.HeimdallAPIKey = v
+	}
 	if v := getEnvInt("NORNICDB_HEIMDALL_GPU_LAYERS", 0); v != 0 {
 		config.Features.HeimdallGPULayers = v
 	}
@@ -2331,6 +2370,15 @@ func LoadFromFile(configPath string) (*Config, error) {
 	config.Features.HeimdallEnabled = yamlCfg.Heimdall.Enabled
 	if yamlCfg.Heimdall.Model != "" {
 		config.Features.HeimdallModel = yamlCfg.Heimdall.Model
+	}
+	if yamlCfg.Heimdall.Provider != "" {
+		config.Features.HeimdallProvider = yamlCfg.Heimdall.Provider
+	}
+	if yamlCfg.Heimdall.APIURL != "" {
+		config.Features.HeimdallAPIURL = yamlCfg.Heimdall.APIURL
+	}
+	if yamlCfg.Heimdall.APIKey != "" {
+		config.Features.HeimdallAPIKey = yamlCfg.Heimdall.APIKey
 	}
 	if yamlCfg.Heimdall.GPULayers != nil {
 		config.Features.HeimdallGPULayers = *yamlCfg.Heimdall.GPULayers

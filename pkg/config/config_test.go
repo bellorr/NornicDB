@@ -348,6 +348,30 @@ func TestLoadFromEnv_CustomValues(t *testing.T) {
 	}
 }
 
+// TestLoadFromEnv_HeimdallProvider tests Heimdall provider env vars (openai/ollama/local).
+func TestLoadFromEnv_HeimdallProvider(t *testing.T) {
+	os.Setenv("NORNICDB_HEIMDALL_PROVIDER", "openai")
+	os.Setenv("NORNICDB_HEIMDALL_API_KEY", "sk-test")
+	os.Setenv("NORNICDB_HEIMDALL_API_URL", "https://api.example.com")
+	defer func() {
+		os.Unsetenv("NORNICDB_HEIMDALL_PROVIDER")
+		os.Unsetenv("NORNICDB_HEIMDALL_API_KEY")
+		os.Unsetenv("NORNICDB_HEIMDALL_API_URL")
+	}()
+
+	cfg := LoadFromEnv()
+
+	if cfg.Features.HeimdallProvider != "openai" {
+		t.Errorf("expected HeimdallProvider 'openai', got %q", cfg.Features.HeimdallProvider)
+	}
+	if cfg.Features.HeimdallAPIKey != "sk-test" {
+		t.Errorf("expected HeimdallAPIKey 'sk-test', got %q", cfg.Features.HeimdallAPIKey)
+	}
+	if cfg.Features.HeimdallAPIURL != "https://api.example.com" {
+		t.Errorf("expected HeimdallAPIURL 'https://api.example.com', got %q", cfg.Features.HeimdallAPIURL)
+	}
+}
+
 // TestLoadFromEnv_BoolParsing tests boolean env var parsing.
 func TestLoadFromEnv_BoolParsing(t *testing.T) {
 	tests := []struct {

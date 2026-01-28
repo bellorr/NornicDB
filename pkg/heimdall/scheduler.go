@@ -34,89 +34,46 @@ type Manager struct {
 
 // NewManager creates an SLM manager using BYOM configuration.
 // Returns nil if SLM feature is disabled.
+//
+// Provider selection (matches embeddings: local / ollama / openai):
+//   - openai: Use OpenAI (or compatible) chat API; requires NORNICDB_HEIMDALL_API_KEY.
+//   - ollama: Use Ollama /api/chat; NORNICDB_HEIMDALL_API_URL defaults to http://localhost:11434.
+//   - local or empty: Load GGUF from NORNICDB_MODELS_DIR (BYOM).
 func NewManager(cfg Config) (*Manager, error) {
 	if !cfg.Enabled {
 		return nil, nil // Feature disabled
 	}
 
-	// Get model name (fallback to default if not configured)
-	modelName := cfg.Model
-	if modelName == "" {
-		modelName = "qwen2.5-0.5b-instruct"
-	}
-	// Only add .gguf if not already present
-	modelFile := modelName
-	if !strings.HasSuffix(modelFile, ".gguf") {
-		modelFile = modelFile + ".gguf"
+	provider := strings.ToLower(strings.TrimSpace(cfg.Provider))
+	if provider == "" {
+		provider = "local"
 	}
 
-	// Resolve model path - check where the actual model file exists
-	modelsDir := cfg.ModelsDir
-	if modelsDir == "" {
-		// Check common model locations - look for the actual model file
-		candidates := []string{
-			"/usr/local/var/nornicdb/models", // macOS default (LaunchAgent)
-			"/app/models",                    // Docker container (embedded models)
-			"/data/models",                   // Mounted volume
-			"./models",                       // Local development
-		}
-		for _, dir := range candidates {
-			fullPath := filepath.Join(dir, modelFile)
-			if _, err := os.Stat(fullPath); err == nil {
-				modelsDir = dir
-				fmt.Printf("   Found Heimdall model at: %s\n", fullPath)
-				break
-			}
-		}
-		if modelsDir == "" {
-			modelsDir = "/data/models" // Final fallback for error message
-		}
-	}
+	var generator Generator
+	var modelPath string
+	var err error
 
-	modelPath := filepath.Join(modelsDir, modelFile)
-
-	// Check if model file exists
-	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
-		return nil, fmt.Errorf("Heimdall model not found: %s (expected at %s)\n"+
-			"  → Download a GGUF model and place it in the models directory\n"+
-			"  → Or set NORNICDB_HEIMDALL_MODEL to point to an existing model\n"+
-			"  → Recommended: qwen2.5-0.5b-instruct (Apache 2.0 license)",
-			modelName, modelPath)
-	}
-
-	// Get GPU layers config - defaults to auto (-1), falls back to CPU if needed
-	gpuLayers := cfg.GPULayers
-
-	// Context and batch size - balanced for memory efficiency
-	// Heimdall produces structured JSON (~500-2000 tokens max), so 8K context is ample.
-	// Using 32K would allocate ~2.5GB GPU memory just for KV cache!
-	// Note: Token budgets in types.go allow up to 16K, but actual usage rarely exceeds 4K.
-	contextSize := cfg.ContextSize
-	if contextSize == 0 {
-		contextSize = 8192 // 8K is plenty for structured JSON output
-	}
-	batchSize := cfg.BatchSize
-	if batchSize == 0 {
-		batchSize = 2048 // Match typical prompt size
-	}
-
-	fmt.Printf("🛡️ Loading Heimdall model: %s\n", modelPath)
-	fmt.Printf("   GPU layers: %d (-1 = auto, falls back to CPU if needed)\n", gpuLayers)
-	fmt.Printf("   Context: %d tokens, Batch: %d tokens (single-shot mode)\n", contextSize, batchSize)
-
-	// Load the model - uses CGO implementation if available (via generator_cgo.go init),
-	// otherwise falls back to stub (requires CGO build with localllm tag)
-	generator, err := loadGenerator(modelPath, gpuLayers, contextSize, batchSize)
-	if err != nil {
-		// Try CPU fallback
-		fmt.Printf("⚠️  GPU loading failed, trying CPU fallback: %v\n", err)
-		generator, err = loadGenerator(modelPath, 0, contextSize, batchSize) // 0 = CPU only
+	switch provider {
+	case "openai":
+		generator, err = newOpenAIGenerator(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("failed to load SLM model: %w", err)
+			return nil, fmt.Errorf("Heimdall OpenAI provider: %w", err)
 		}
-		fmt.Printf("✅ SLM model loaded (gpu_layers=0)\n")
-	} else {
-		fmt.Printf("✅ SLM model loaded: %s\n", modelName)
+		modelPath = generator.ModelPath()
+		fmt.Printf("🛡️ Heimdall using OpenAI: %s\n", modelPath)
+	case "ollama":
+		generator, err = newOllamaGenerator(cfg)
+		if err != nil {
+			return nil, fmt.Errorf("Heimdall Ollama provider: %w", err)
+		}
+		modelPath = generator.ModelPath()
+		fmt.Printf("🛡️ Heimdall using Ollama: %s\n", modelPath)
+	default:
+		// local (or any other value): load GGUF
+		generator, modelPath, err = loadLocalGenerator(cfg)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Best-effort GPU status logging (implementation-specific).
@@ -172,6 +129,76 @@ func SetGeneratorLoader(loader GeneratorLoader) GeneratorLoader {
 // loadGenerator creates a generator for the model using the active loader.
 func loadGenerator(modelPath string, gpuLayers, contextSize, batchSize int) (Generator, error) {
 	return generatorLoader(modelPath, gpuLayers, contextSize, batchSize)
+}
+
+// loadLocalGenerator resolves the GGUF model path and loads it via generatorLoader.
+// Used when provider is "local" or empty.
+func loadLocalGenerator(cfg Config) (Generator, string, error) {
+	modelName := cfg.Model
+	if modelName == "" {
+		modelName = "qwen2.5-0.5b-instruct"
+	}
+	modelFile := modelName
+	if !strings.HasSuffix(modelFile, ".gguf") {
+		modelFile = modelFile + ".gguf"
+	}
+
+	modelsDir := cfg.ModelsDir
+	if modelsDir == "" {
+		candidates := []string{
+			"/usr/local/var/nornicdb/models",
+			"/app/models",
+			"/data/models",
+			"./models",
+		}
+		for _, dir := range candidates {
+			fullPath := filepath.Join(dir, modelFile)
+			if _, err := os.Stat(fullPath); err == nil {
+				modelsDir = dir
+				fmt.Printf("   Found Heimdall model at: %s\n", fullPath)
+				break
+			}
+		}
+		if modelsDir == "" {
+			modelsDir = "/data/models"
+		}
+	}
+
+	modelPath := filepath.Join(modelsDir, modelFile)
+	if _, err := os.Stat(modelPath); os.IsNotExist(err) {
+		return nil, "", fmt.Errorf("Heimdall model not found: %s (expected at %s)\n"+
+			"  → Download a GGUF model and place it in the models directory\n"+
+			"  → Or set NORNICDB_HEIMDALL_MODEL to point to an existing model\n"+
+			"  → Or use provider ollama/openai (NORNICDB_HEIMDALL_PROVIDER=ollama or openai)",
+			modelName, modelPath)
+	}
+
+	gpuLayers := cfg.GPULayers
+	contextSize := cfg.ContextSize
+	if contextSize == 0 {
+		contextSize = 8192
+	}
+	batchSize := cfg.BatchSize
+	if batchSize == 0 {
+		batchSize = 2048
+	}
+
+	fmt.Printf("🛡️ Loading Heimdall model: %s\n", modelPath)
+	fmt.Printf("   GPU layers: %d (-1 = auto, falls back to CPU if needed)\n", gpuLayers)
+	fmt.Printf("   Context: %d tokens, Batch: %d tokens (single-shot mode)\n", contextSize, batchSize)
+
+	generator, err := loadGenerator(modelPath, gpuLayers, contextSize, batchSize)
+	if err != nil {
+		fmt.Printf("⚠️  GPU loading failed, trying CPU fallback: %v\n", err)
+		generator, err = loadGenerator(modelPath, 0, contextSize, batchSize)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to load SLM model: %w", err)
+		}
+		fmt.Printf("✅ SLM model loaded (gpu_layers=0)\n")
+	} else {
+		fmt.Printf("✅ SLM model loaded: %s\n", modelName)
+	}
+	return generator, modelPath, nil
 }
 
 // Generate produces a response for the given prompt.

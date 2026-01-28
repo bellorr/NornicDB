@@ -84,6 +84,9 @@ func TestBuildPrompt(t *testing.T) {
 type MockFeatureFlags struct {
 	enabled           bool
 	model             string
+	provider          string
+	apiURL            string
+	apiKey            string
 	gpuLayers         int
 	contextSize       int
 	batchSize         int
@@ -99,6 +102,9 @@ type MockFeatureFlags struct {
 
 func (m *MockFeatureFlags) GetHeimdallEnabled() bool           { return m.enabled }
 func (m *MockFeatureFlags) GetHeimdallModel() string           { return m.model }
+func (m *MockFeatureFlags) GetHeimdallProvider() string        { return m.provider }
+func (m *MockFeatureFlags) GetHeimdallAPIURL() string         { return m.apiURL }
+func (m *MockFeatureFlags) GetHeimdallAPIKey() string         { return m.apiKey }
 func (m *MockFeatureFlags) GetHeimdallGPULayers() int          { return m.gpuLayers }
 func (m *MockFeatureFlags) GetHeimdallContextSize() int        { return m.contextSize }
 func (m *MockFeatureFlags) GetHeimdallBatchSize() int          { return m.batchSize }

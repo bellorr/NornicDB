@@ -164,6 +164,9 @@ type Config struct {
 
 	ModelsDir   string  `json:"models_dir"`
 	Model       string  `json:"model"`
+	Provider    string  `json:"provider"`    // local, ollama, openai
+	APIURL      string  `json:"api_url"`     // for ollama/openai
+	APIKey      string  `json:"api_key"`     // for openai
 	ContextSize int     `json:"context_size"` // Context window size (single-shot, max out)
 	BatchSize   int     `json:"batch_size"`   // Batch size (match context for single-shot)
 	MaxTokens   int     `json:"max_tokens"`
@@ -188,6 +191,9 @@ func DefaultConfig() Config {
 		BifrostEnabled:   false, // Bifrost follows Heimdall state
 		ModelsDir:        "",    // Empty = use NORNICDB_MODELS_DIR env var
 		Model:            "qwen2.5-0.5b-instruct",
+		Provider:         "local",
+		APIURL:           "",
+		APIKey:           "",
 		ContextSize:      8192, // 8K (memory efficient, saves ~2GB GPU RAM vs 32K)
 		BatchSize:        2048, // 2K batch size
 		MaxTokens:        1024, // 1K output (faster)
@@ -207,6 +213,9 @@ func DefaultConfig() Config {
 type FeatureFlagsSource interface {
 	GetHeimdallEnabled() bool
 	GetHeimdallModel() string
+	GetHeimdallProvider() string
+	GetHeimdallAPIURL() string
+	GetHeimdallAPIKey() string
 	GetHeimdallGPULayers() int
 	GetHeimdallContextSize() int
 	GetHeimdallBatchSize() int
@@ -235,6 +244,11 @@ func ConfigFromFeatureFlags(flags FeatureFlagsSource) Config {
 	// Bifrost (the chat interface) requires Heimdall (the SLM) to function
 	cfg.BifrostEnabled = cfg.Enabled
 	cfg.Model = flags.GetHeimdallModel()
+	if p := flags.GetHeimdallProvider(); p != "" {
+		cfg.Provider = p
+	}
+	cfg.APIURL = flags.GetHeimdallAPIURL()
+	cfg.APIKey = flags.GetHeimdallAPIKey()
 	cfg.GPULayers = flags.GetHeimdallGPULayers()
 	cfg.ContextSize = flags.GetHeimdallContextSize()
 	cfg.BatchSize = flags.GetHeimdallBatchSize()

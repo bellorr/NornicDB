@@ -25,7 +25,51 @@ heimdall:
   enabled: true
 ```
 
-**Precedence note:** environment variables override YAML config values. If `heimdall.enabled: false` “does nothing”, check whether `NORNICDB_HEIMDALL_ENABLED` is set in your container/runtime environment.
+**Precedence note:** environment variables override YAML config values. If `heimdall.enabled: false` “does nothing”, check whether `NORNICDB_HEIMDALL_ENABLED` is set in your container/runtime environment. At startup you’ll see `→ Provider: openai|ollama|local` so you can confirm which backend was chosen; ensure env vars are exported in the same shell (or process) before starting.
+
+#### Using Ollama (no GGUF download)
+
+If you run [Ollama](https://ollama.com) locally, point Heimdall at it:
+
+```bash
+export NORNICDB_HEIMDALL_ENABLED=true
+export NORNICDB_HEIMDALL_PROVIDER=ollama
+# Optional: export NORNICDB_HEIMDALL_API_URL=http://localhost:11434
+# Optional: export NORNICDB_HEIMDALL_MODEL=llama3.2
+./nornicdb serve
+```
+
+#### Using OpenAI (or compatible API)
+
+Use OpenAI or an OpenAI-compatible endpoint (e.g. Azure OpenAI, local proxy):
+
+```bash
+export NORNICDB_HEIMDALL_ENABLED=true
+export NORNICDB_HEIMDALL_PROVIDER=openai
+export NORNICDB_HEIMDALL_API_KEY=sk-your-key
+# Optional: export NORNICDB_HEIMDALL_API_URL=https://api.openai.com
+# Optional: export NORNICDB_HEIMDALL_MODEL=gpt-4o-mini
+./nornicdb serve
+```
+
+#### Running via script or make
+
+When you start NornicDB from a script or `make`, the process only sees env vars set in that same invocation. Set **all** Heimdall (and embedding) vars in the same env block so they override any config file:
+
+```bash
+NORNICDB_HEIMDALL_ENABLED=true \
+  NORNICDB_HEIMDALL_PROVIDER=openai \
+  NORNICDB_HEIMDALL_API_KEY=$OPENAI_API_KEY \
+  NORNICDB_HEIMDALL_PLUGINS_DIR=plugins/heimdall/built-plugins \
+  NORNICDB_PLUGINS_DIR=apoc/built-plugins \
+  NORNICDB_MODELS_DIR=models \
+  NORNICDB_EMBEDDING_PROVIDER=local \
+  NORNICDB_EMBEDDING_MODEL=bge-m3 \
+  NORNICDB_EMBEDDING_DIMENSIONS=1024 \
+  ./nornicdb serve
+```
+
+For local GGUF instead of OpenAI, use `NORNICDB_HEIMDALL_PROVIDER=local` (or omit it) and omit `NORNICDB_HEIMDALL_API_KEY`.
 
 ### Access Bifrost Chat
 
@@ -38,15 +82,74 @@ heimdall:
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `NORNICDB_HEIMDALL_ENABLED` | `false` | Enable/disable the AI assistant |
-| `NORNICDB_HEIMDALL_MODEL` | `qwen2.5-0.5b-instruct` | GGUF model to use |
-| `NORNICDB_MODELS_DIR` | `/app/models` | Directory containing GGUF models |
-| `NORNICDB_HEIMDALL_GPU_LAYERS` | `-1` | GPU layers (-1 = auto) |
-| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | `8192` | Context window (tokens) |
-| `NORNICDB_HEIMDALL_BATCH_SIZE` | `2048` | Batch size for prefill |
+| `NORNICDB_HEIMDALL_PROVIDER` | `local` | Backend: `local` (GGUF), `ollama`, or `openai` |
+| `NORNICDB_HEIMDALL_API_URL` | (see below) | API base URL for ollama/openai |
+| `NORNICDB_HEIMDALL_API_KEY` | (empty) | API key for OpenAI (required when provider=openai) |
+| `NORNICDB_HEIMDALL_MODEL` | `qwen2.5-0.5b-instruct` | Model name (GGUF file, Ollama model, or OpenAI model) |
+| `NORNICDB_MODELS_DIR` | `/app/models` | Directory containing GGUF models (local only) |
+| `NORNICDB_HEIMDALL_GPU_LAYERS` | `-1` | GPU layers (-1 = auto, local only) |
+| `NORNICDB_HEIMDALL_CONTEXT_SIZE` | `8192` | Context window (tokens, local only) |
+| `NORNICDB_HEIMDALL_BATCH_SIZE` | `2048` | Batch size for prefill (local only) |
 | `NORNICDB_HEIMDALL_MAX_TOKENS` | `1024` | Max tokens per response |
 | `NORNICDB_HEIMDALL_TEMPERATURE` | `0.1` | Response creativity (0.0-1.0) |
 
 For detailed information about context handling and token budgets, see [Heimdall Context & Tokens](./heimdall-context.md).
+
+### Provider: local / ollama / openai
+
+Heimdall supports the same BYOM/ollama/OpenAI style as the embedding subsystem:
+
+| Provider | Description | API URL default | API key |
+|----------|-------------|-----------------|---------|
+| **local** | Load a GGUF model from `NORNICDB_MODELS_DIR` (BYOM). | N/A | N/A |
+| **ollama** | Use Ollama’s `/api/chat`; no API key. | `http://localhost:11434` | Not used |
+| **openai** | Use OpenAI (or compatible) chat completions API. | `https://api.openai.com` | **Required** |
+
+**Environment variables by provider:**
+
+- **local**: `NORNICDB_HEIMDALL_PROVIDER=local` (or unset), `NORNICDB_HEIMDALL_MODEL`, `NORNICDB_MODELS_DIR`, `NORNICDB_HEIMDALL_GPU_LAYERS`, etc.
+- **ollama**: `NORNICDB_HEIMDALL_PROVIDER=ollama`, optional `NORNICDB_HEIMDALL_API_URL` (default `http://localhost:11434`), optional `NORNICDB_HEIMDALL_MODEL` (e.g. `llama3.2`).
+- **openai**: `NORNICDB_HEIMDALL_PROVIDER=openai`, `NORNICDB_HEIMDALL_API_KEY` (required), optional `NORNICDB_HEIMDALL_API_URL` and `NORNICDB_HEIMDALL_MODEL` (default `gpt-4o-mini`).
+
+**YAML examples:**
+
+```yaml
+# Local GGUF (default)
+heimdall:
+  enabled: true
+  provider: local
+  model: qwen2.5-1.5b-instruct-q4_k_m
+
+# Ollama
+heimdall:
+  enabled: true
+  provider: ollama
+  api_url: "http://localhost:11434"
+  model: llama3.2
+
+# OpenAI (or compatible)
+heimdall:
+  enabled: true
+  provider: openai
+  api_url: "https://api.openai.com"
+  api_key: "sk-..."
+  model: gpt-4o-mini
+```
+NORNICDB_HEIMDALL_PROVIDER=openai \
+NORNICDB_HEIMDALL_API_KEY=$OPENAI_API_KEY \
+NORNICDB_HEIMDALL_MODEL=gpt-4o-mini \
+NORNICDB_HEIMDALL_ENABLED=true \
+   NORNICDB_HEIMDALL_PLUGINS_DIR=plugins/heimdall/built-plugins \
+   NORNICDB_PLUGINS_DIR=apoc/built-plugins \
+   NORNICDB_MODELS_DIR=models \
+   NORNICDB_EMBEDDING_PROVIDER=local \
+   NORNICDB_EMBEDDING_MODEL=bge-m3 \
+   NORNICDB_EMBEDDING_DIMENSIONS=1024 \
+   NORNICDB_DATA_DIR=./data/test \
+   NORNICDB_KMEANS_CLUSTERING_ENABLED=true \
+   NORNICDB_EMBEDDING_PROVIDER=local \
+   ./bin/nornicdb serve --no-auth
+**Streaming:** Bifrost supports streaming responses (SSE). When the client requests `stream: true`, the OpenAI and Ollama providers stream tokens as they are generated; the local (GGUF) provider also supports streaming when built with the appropriate backend.
 
 ## Available Commands
 

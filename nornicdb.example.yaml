@@ -406,11 +406,25 @@ heimdall:
   # Env: NORNICDB_HEIMDALL_ENABLED
   enabled: false
 
-  # Local SLM model file (GGUF format)
+  # Provider: local (GGUF BYOM), ollama, or openai (same style as embeddings)
+  # Env: NORNICDB_HEIMDALL_PROVIDER
+  # provider: local
+
+  # API base URL for ollama or openai (ignored for local)
+  # Env: NORNICDB_HEIMDALL_API_URL
+  # Ollama default: http://localhost:11434
+  # OpenAI default: https://api.openai.com
+  # api_url: ""
+
+  # API key for openai (required when provider=openai)
+  # Env: NORNICDB_HEIMDALL_API_KEY
+  # api_key: ""
+
+  # Model: GGUF filename (local), Ollama model name (ollama), or OpenAI model (openai)
   # Env: NORNICDB_HEIMDALL_MODEL
   model: "qwen2.5-0.5b-instruct.gguf"
 
-  # GPU layers (-1=auto, 0=CPU only, >0=specific layers)
+  # GPU layers (-1=auto, 0=CPU only, >0=specific layers); local provider only
   # Env: NORNICDB_HEIMDALL_GPU_LAYERS
   gpu_layers: -1
 

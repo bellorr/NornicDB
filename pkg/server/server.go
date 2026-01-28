@@ -168,6 +168,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -729,6 +730,12 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		// Configure token budget from environment variables
 		heimdall.SetTokenBudget(featuresConfig)
 		heimdallCfg := heimdall.ConfigFromFeatureFlags(featuresConfig)
+		// Log resolved provider so users can verify env overrides (openai/ollama/local)
+		provider := strings.TrimSpace(strings.ToLower(heimdallCfg.Provider))
+		if provider == "" {
+			provider = "local"
+		}
+		log.Printf("   → Provider: %s (set NORNICDB_HEIMDALL_PROVIDER=openai|ollama|local to override config file)", provider)
 		manager, err := heimdall.NewManager(heimdallCfg)
 		if err != nil {
 			log.Printf("⚠️  Heimdall initialization failed: %v", err)

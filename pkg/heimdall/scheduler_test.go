@@ -2,7 +2,10 @@ package heimdall
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -202,6 +205,7 @@ func TestNewManager_Disabled(t *testing.T) {
 func TestNewManager_ModelNotFound(t *testing.T) {
 	cfg := Config{
 		Enabled:   true,
+		Provider:  "local",
 		ModelsDir: "/nonexistent/path",
 		Model:     "nonexistent-model",
 	}
@@ -211,6 +215,111 @@ func TestNewManager_ModelNotFound(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, manager)
 	assert.Contains(t, err.Error(), "not found")
+}
+
+func TestNewManager_OpenAIProvider(t *testing.T) {
+	// Mock OpenAI-compatible chat completions response
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"content": "hello from openai"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Enabled:  true,
+		Provider: "openai",
+		APIURL:   server.URL,
+		APIKey:   "sk-test",
+		Model:    "gpt-4o-mini",
+	}
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	defer manager.Close()
+
+	ctx := context.Background()
+	result, err := manager.Generate(ctx, "test prompt", DefaultGenerateParams())
+	require.NoError(t, err)
+	assert.Equal(t, "hello from openai", result)
+}
+
+func TestNewManager_OpenAIProvider_UsesGpt4WhenModelIsLocalDefault(t *testing.T) {
+	// When provider=openai but config still has the local default model name,
+	// the OpenAI generator should use gpt-4 instead of sending it to the API.
+	var requestedModel string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		requestedModel = body.Model
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]interface{}{"content": "ok"}},
+			},
+		})
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Enabled:  true,
+		Provider: "openai",
+		APIURL:   server.URL,
+		APIKey:   "sk-test",
+		Model:    "gpt-4o-mini", // config default from local provider
+	}
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	defer manager.Close()
+
+	_, _ = manager.Generate(context.Background(), "test", DefaultGenerateParams())
+	assert.Equal(t, "gpt-4o-mini", requestedModel, "openai provider should override local/GGUF model name with gpt-4o-mini")
+}
+
+func TestNewManager_OllamaProvider(t *testing.T) {
+	// Mock Ollama /api/chat response
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"message": map[string]interface{}{"role": "assistant", "content": "hi from ollama"},
+			"done":    true,
+		})
+	}))
+	defer server.Close()
+
+	cfg := Config{
+		Enabled:  true,
+		Provider: "ollama",
+		APIURL:   server.URL,
+		Model:    "llama3.2",
+	}
+	manager, err := NewManager(cfg)
+	require.NoError(t, err)
+	require.NotNil(t, manager)
+	defer manager.Close()
+
+	ctx := context.Background()
+	result, err := manager.Generate(ctx, "test prompt", DefaultGenerateParams())
+	require.NoError(t, err)
+	assert.Equal(t, "hi from ollama", result)
 }
 
 func TestManager_Generate(t *testing.T) {
