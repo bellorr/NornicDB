@@ -78,7 +78,8 @@ MODELS_DIR := models
 BGE_MODEL := $(MODELS_DIR)/bge-m3.gguf
 QWEN_MODEL := $(MODELS_DIR)/qwen3-0.6b-instruct.gguf
 BGE_URL := https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
-QWEN_URL := https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf
+# Ungated community mirror (single-file Q4_K_M). Official Qwen repo may require auth.
+QWEN_URL := https://huggingface.co/Triangle104/Qwen3-0.6B-Q4_K_M-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf
 
 .PHONY: build-arm64-metal build-arm64-metal-bge build-arm64-metal-bge-heimdall build-arm64-metal-headless
 .PHONY: build-amd64-cuda build-amd64-cuda-bge build-amd64-cuda-bge-heimdall build-amd64-cuda-headless
@@ -866,7 +867,7 @@ plugins: plugin-check plugin-apoc plugin-heimdall-watcher
 	@echo "   NORNICDB_EMBEDDING_DIMENSIONS=1024 \\"
 	@echo "   NORNICDB_DATA_DIR=./data/test \\"
 	@echo "   NORNICDB_KMEANS_CLUSTERING_ENABLED=true \\"
-	@echo "   NORNICDB_EMBEDDING_PROVIDER=local \\"
+	@echo "   NORNICDB_EMBEDDING_ENABLED=true \\"
 	@echo "   ./bin/nornicdb serve --no-auth"
 
 # Plugin source directory

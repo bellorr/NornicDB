@@ -265,20 +265,19 @@ func (h *Handler) handleAutocomplete(w http.ResponseWriter, r *http.Request) {
 				schemaContext.WriteString(fmt.Sprintf("Relationship types (use in patterns like (a)-[:TYPE]->(b)): %s\n", strings.Join(relsToShow, ", ")))
 			}
 
-			prompt := fmt.Sprintf(`Complete this Cypher query. Return ONLY the completed Cypher query, nothing else.
+			prompt := fmt.Sprintf(`Complete this Cypher query. Output ONLY the single completed Cypher line. No explanations, no reasoning, no commentary about the user.
 
 %s
 Rules:
-- Return ONLY the Cypher query, no explanations
-- Properties are accessed as n.propertyName (e.g., n.name, n.age)
-- Relationship types are used in patterns like (a)-[:KNOWS]->(b), NOT as properties
-- If missing LIMIT, add LIMIT 25 at the end
-- Stop immediately after the query
+- Output ONLY the Cypher query line, nothing else
+- No "the user", "they are", "I need to", or any meta-commentary
+- Properties: n.propertyName. Relationships: (a)-[:TYPE]->(b)
+- If missing LIMIT statement at the end, add LIMIT 25 at the end
 
 Current query:
 %s
 
-Complete Cypher query:`,
+Complete Cypher query (one line only):`,
 				schemaContext.String(),
 				req.Query)
 
@@ -288,7 +287,7 @@ Complete Cypher query:`,
 				Temperature: 0.2, // Lower temperature for more focused output
 				TopP:        0.8,
 				TopK:        20,
-				StopTokens:  []string{"IMPORTANT", "Rules:", "Available", "Complete query:", "\n\n\n"}, // Stop on instruction patterns
+				StopTokens:  []string{"The user", "They are", "I need to", "IMPORTANT", "Rules:", "Available", "Complete query:", "\n\n\n"},
 			})
 			if err == nil && slmResult != "" {
 				// Clean up the suggestion - extract only the first valid Cypher query
@@ -340,6 +339,9 @@ Complete Cypher query:`,
 					cleanSuggestion = strings.Join(queryParts, " ")
 					// Remove any remaining instruction text using regex
 					cleanSuggestion = regexp.MustCompile(`(?i)\s+(IMPORTANT|Rules?:|Available|Complete).*$`).ReplaceAllString(cleanSuggestion, "")
+					// Strip trailing model prose (e.g. "The user is a student..." or "They are asking for help...")
+					proseStart := regexp.MustCompile(`(?i)\s+(The user|They are|I need to|I don't know|So they|Probably not|correct syntax|asking for help).*$`)
+					cleanSuggestion = proseStart.ReplaceAllString(cleanSuggestion, "")
 					cleanSuggestion = strings.TrimSpace(cleanSuggestion)
 
 					// Remove any repetition patterns (query repeated multiple times)
@@ -507,7 +509,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
-		TopK:        40,
+		TopK:        20, // Qwen3 0.6B instruct best practice to reduce repetition
 		StopTokens:  []string{"<|im_end|>", "<|endoftext|>", "</s>"},
 	}
 	if params.MaxTokens == 0 {
@@ -549,7 +551,7 @@ type requestLifecycle struct {
 	metrics       MetricsReader
 	StreamWriter  http.ResponseWriter // optional: for streaming notifications during agentic loop
 	StreamFlusher http.Flusher        // optional: flush after each SSE chunk
-	StreamModel   string               // optional: model name for SSE chunk payloads
+	StreamModel   string              // optional: model name for SSE chunk payloads
 }
 
 // sendStreamNotifications writes queued notifications as SSE chunks (used when streaming with tools).
@@ -617,6 +619,8 @@ func defaultExamples() []PromptExample {
 		// === SAMPLING & EXPLORATION ===
 		{UserSays: "show me some nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN n LIMIT 10"}}`},
 		{UserSays: "sample Person nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n:Person) RETURN n LIMIT 5"}}`},
+		{UserSays: "cypher query for nodes with label Animal", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n:Animal) RETURN n"}}`},
+		{UserSays: "nodes with label :Animal", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n:Animal) RETURN n"}}`},
 		{UserSays: "show relationships", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (a)-[r]->(b) RETURN a, type(r), b LIMIT 10"}}`},
 
 		// === SEARCHING ===

@@ -1034,7 +1034,7 @@ func legacyLoadFromEnv() *Config {
 		config.Features.HeimdallMaxTokens = getEnvInt("NORNICDB_HEIMDALL_MAX_TOKENS", 1024)
 	}
 	if v := os.Getenv("NORNICDB_HEIMDALL_TEMPERATURE"); v != "" {
-		config.Features.HeimdallTemperature = float32(getEnvFloat("NORNICDB_HEIMDALL_TEMPERATURE", 0.1))
+		config.Features.HeimdallTemperature = float32(getEnvFloat("NORNICDB_HEIMDALL_TEMPERATURE", 0.5))
 	}
 	// Sub-features default to true when Heimdall is enabled
 	if v := os.Getenv("NORNICDB_HEIMDALL_ANOMALY_DETECTION"); v != "" {
@@ -1503,7 +1503,7 @@ func LoadDefaults() *Config {
 	config.Features.HeimdallContextSize = 8192
 	config.Features.HeimdallBatchSize = 2048
 	config.Features.HeimdallMaxTokens = 1024
-	config.Features.HeimdallTemperature = 0.1
+	config.Features.HeimdallTemperature = 0.5 // Qwen3 0.6B instruct: reduces repetition vs 0.1
 	config.Features.HeimdallAnomalyDetection = false
 	config.Features.HeimdallRuntimeDiagnosis = false
 	config.Features.HeimdallMemoryCuration = false

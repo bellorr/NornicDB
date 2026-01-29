@@ -98,13 +98,14 @@ type GenerateParams struct {
 	StopTokens  []string
 }
 
-// DefaultGenerateParams returns sensible defaults for structured output.
+// DefaultGenerateParams returns sensible defaults for chat (Qwen3-aligned).
+// Qwen3 0.6B instruct best practices: temperature 0.5–0.7, top_p 0.8, top_k 20 to reduce repetition.
 func DefaultGenerateParams() GenerateParams {
 	return GenerateParams{
 		MaxTokens:   512,
-		Temperature: 0.1, // Low for deterministic JSON output
-		TopP:        0.9,
-		TopK:        40,
+		Temperature: 0.5, // Qwen3 chat: higher than 0.1 to avoid repetitive loops
+		TopP:        0.8, // Qwen3 recommendation
+		TopK:        20,  // Qwen3 recommendation for small models
 		StopTokens:  []string{"<|im_end|>", "<|endoftext|>", "</s>"},
 	}
 }
@@ -151,7 +152,10 @@ const MaxAgenticRounds = 10
 // The model receives tools via the API; no need to list actions in the prompt.
 const AgenticSystemPromptTools = `You are Heimdall, the AI assistant for NornicDB, a high-performance graph database.
 Use the provided tools to run Cypher queries, get status, discover data, or perform other actions when the user asks.
-After seeing tool results, summarize or explain in a helpful way for the user. For query results (e.g. heimdall_watcher_query), describe what the data looks like—for example show a sample node or row so the user sees the shape of the result. If no tool is needed, answer directly.`
+
+When the user asks for a Cypher query or "nodes with label X" (e.g. "nodes with label :Animal"), use heimdall_watcher_query with a Cypher like MATCH (n:Label) RETURN n—do not use heimdall_watcher_discover for that. Use heimdall_watcher_discover only for conceptual/semantic search (e.g. "what do we know about X", "find information about topic").
+
+After seeing tool results, summarize once in a helpful way. Do not repeat the same information. For query results (e.g. heimdall_watcher_query), describe what the data looks like—for example show a sample node or row. If no tool is needed, answer directly.`
 
 // GeneratorWithTools is implemented by generators that support native tool/function calling.
 // When used, the handler runs an agentic loop: call GenerateWithTools, execute any toolCalls,
@@ -240,7 +244,7 @@ func DefaultConfig() Config {
 		ContextSize:      8192, // 8K (memory efficient, saves ~2GB GPU RAM vs 32K)
 		BatchSize:        2048, // 2K batch size
 		MaxTokens:        1024, // 1K output (faster)
-		Temperature:      0.1,
+		Temperature:      0.5,
 		GPULayers:        -1, // Auto
 		AnomalyDetection: true,
 		AnomalyInterval:  5 * time.Minute,
@@ -628,8 +632,9 @@ IMPORTANT: Always complete your JSON responses with proper closing braces.
 		}
 	}
 
-	// === FINAL INSTRUCTION ===
+	// === FINAL INSTRUCTION (Qwen3-style: explicit format + anti-repetition) ===
 	sb.WriteString("Respond with JSON action command only. No explanations, no markdown.\n")
+	sb.WriteString("Do not repeat the same line, content, or phrase. End your response after the answer; output once then stop.\n")
 
 	return sb.String()
 }
@@ -642,7 +647,7 @@ func (p *PromptContext) buildMinimalPrompt() string {
 	sb.WriteString("ACTIONS:\n")
 	sb.WriteString(p.ActionPrompt)
 	sb.WriteString("\nFor queries: {\"action\": \"heimdall_watcher_query\", \"params\": {\"cypher\": \"...\"}}\n")
-	sb.WriteString("Respond with JSON only.\n")
+	sb.WriteString("Do not duplicate content in your response; end after one response.\n")
 
 	return sb.String()
 }

@@ -61,6 +61,71 @@ const loadCommandHistory = (): string[] => {
   return [];
 };
 
+type ContentSegment = { type: 'thinking'; text: string } | { type: 'content'; text: string };
+
+function parseContentWithThinking(raw: string): ContentSegment[] {
+  if (!raw) return [];
+  const segments: ContentSegment[] = [];
+  const openTag = '<think>';
+  const closeTag = '</think>';
+  let pos = 0;
+  while (pos < raw.length) {
+    const openIdx = raw.indexOf(openTag, pos);
+    if (openIdx === -1) {
+      const rest = raw.slice(pos).trim();
+      if (rest) segments.push({ type: 'content', text: raw.slice(pos) });
+      break;
+    }
+    const before = raw.slice(pos, openIdx).trim();
+    if (before) segments.push({ type: 'content', text: raw.slice(pos, openIdx) });
+    const contentStart = openIdx + openTag.length;
+    const closeIdx = raw.indexOf(closeTag, contentStart);
+    if (closeIdx === -1) {
+      segments.push({ type: 'thinking', text: raw.slice(contentStart) });
+      break;
+    }
+    segments.push({ type: 'thinking', text: raw.slice(contentStart, closeIdx) });
+    pos = closeIdx + closeTag.length;
+  }
+  return segments;
+}
+
+/** Strip leading think-close tag from content so it doesn't show in the message. */
+function stripLeadingThinkClose(text: string): string {
+  const closeTag = '</think>';
+  const trimmed = text.trimStart();
+  if (trimmed.startsWith(closeTag)) {
+    return trimmed.slice(closeTag.length).trimStart();
+  }
+  return text;
+}
+
+const CollapsibleThinkingBlock: React.FC<{ text: string; streaming?: boolean }> = ({ text, streaming }) => {
+  const [expanded, setExpanded] = useState(false);
+  const preview = text.trim().slice(0, 80);
+  const hasMore = text.trim().length > 80;
+  return (
+    <div className="bifrost-thinking-block">
+      <button
+        type="button"
+        className="bifrost-thinking-toggle"
+        onClick={() => setExpanded(e => !e)}
+        aria-expanded={expanded}
+      >
+        <span className="bifrost-thinking-icon">{expanded ? '▼' : '▶'}</span>
+        <span className="bifrost-thinking-label">Thinking</span>
+        {!expanded && hasMore && <span className="bifrost-thinking-preview"> — {preview}…</span>}
+      </button>
+      {expanded && (
+        <pre className="bifrost-thinking-content">
+          {text.trim()}
+          {streaming && <span className="bifrost-cursor">▊</span>}
+        </pre>
+      )}
+    </div>
+  );
+};
+
 export const Bifrost: React.FC<BifrostProps> = ({ 
   isOpen, 
   onClose,
@@ -494,15 +559,37 @@ export const Bifrost: React.FC<BifrostProps> = ({
               </div>
               <div className="bifrost-message-content">
                 {(message.role === 'assistant' || message.role === 'heimdall' || message.role === 'system') ? (
-                  <div className="bifrost-markdown">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                      {message.content || ''}
-                    </ReactMarkdown>
-                  </div>
+                  (() => {
+                    const segments = parseContentWithThinking(message.content || '');
+                    if (segments.length === 0) {
+                      return message.streaming ? <span className="bifrost-cursor">▊</span> : null;
+                    }
+                    return (
+                      <>
+                        {segments.map((seg, i) =>
+                          seg.type === 'thinking' ? (
+                            <CollapsibleThinkingBlock
+                              key={`${message.id}-thinking-${i}`}
+                              text={seg.text}
+                              streaming={message.streaming && i === segments.length - 1}
+                            />
+                          ) : (
+                            <div key={`${message.id}-content-${i}`} className="bifrost-markdown">
+                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {stripLeadingThinkClose(seg.text)}
+                              </ReactMarkdown>
+                            </div>
+                          )
+                        )}
+                        {message.streaming && (segments.length === 0 || segments[segments.length - 1].type === 'content') && (
+                          <span className="bifrost-cursor">▊</span>
+                        )}
+                      </>
+                    );
+                  })()
                 ) : (
                   message.content
                 )}
-                {message.streaming && <span className="bifrost-cursor">▊</span>}
               </div>
             </div>
           ))}

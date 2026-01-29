@@ -291,7 +291,7 @@ func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 			Handler:     p.actionEvents,
 		},
 		"query": {
-			Description: "Execute a read-only Cypher query (params: cypher, params)",
+			Description: "Execute a read-only Cypher query. Use when the user asks for a Cypher query, nodes with a label (e.g. :Animal), or to run MATCH/RETURN. Params: cypher (required), params (optional).",
 			Category:    "database",
 			Handler:     p.actionQuery,
 		},
@@ -311,7 +311,7 @@ func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 			Handler:     p.actionNotify,
 		},
 		"discover": {
-			Description: "Semantic search in the knowledge graph (params: query, types, limit, depth). Use this to find information by meaning, not exact keywords.",
+			Description: "Semantic search in the knowledge graph (params: query, types, limit, depth). Use only for conceptual search like 'what do we know about X'. Do not use for 'nodes with label X' or explicit Cypher—use heimdall_watcher_query instead.",
 			Category:    "search",
 			Handler:     p.actionDiscover,
 		},

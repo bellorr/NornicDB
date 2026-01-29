@@ -315,7 +315,7 @@ func (m *Manager) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, err
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
 		TopP:        req.TopP,
-		TopK:        40,
+		TopK:        20, // Qwen3 0.6B instruct best practice to reduce repetition
 		StopTokens:  []string{"<|im_end|>", "<|endoftext|>", "</s>"},
 	}
 	if params.MaxTokens == 0 {

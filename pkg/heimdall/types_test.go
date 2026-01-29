@@ -14,7 +14,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Empty(t, cfg.ModelsDir, "ModelsDir empty - reads NORNICDB_MODELS_DIR at runtime")
 	assert.Equal(t, "qwen3-0.6b-instruct", cfg.Model)
 	assert.Equal(t, 1024, cfg.MaxTokens)
-	assert.Equal(t, float32(0.1), cfg.Temperature)
+	assert.Equal(t, float32(0.5), cfg.Temperature)
 	assert.Equal(t, -1, cfg.GPULayers, "Should be auto (-1) by default")
 	assert.True(t, cfg.AnomalyDetection)
 	assert.True(t, cfg.RuntimeDiagnosis)
@@ -25,9 +25,9 @@ func TestDefaultGenerateParams(t *testing.T) {
 	params := DefaultGenerateParams()
 
 	assert.Equal(t, 512, params.MaxTokens)
-	assert.Equal(t, float32(0.1), params.Temperature)
-	assert.Equal(t, float32(0.9), params.TopP)
-	assert.Equal(t, 40, params.TopK)
+	assert.Equal(t, float32(0.5), params.Temperature)
+	assert.Equal(t, float32(0.8), params.TopP)
+	assert.Equal(t, 20, params.TopK)
 	assert.Contains(t, params.StopTokens, "<|im_end|>")
 }
 

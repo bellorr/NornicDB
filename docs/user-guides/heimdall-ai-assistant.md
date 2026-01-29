@@ -91,9 +91,9 @@ For local GGUF instead of OpenAI, use `NORNICDB_HEIMDALL_PROVIDER=local` (or omi
 | `NORNICDB_HEIMDALL_CONTEXT_SIZE` | `8192` | Context window (tokens, local only) |
 | `NORNICDB_HEIMDALL_BATCH_SIZE` | `2048` | Batch size for prefill (local only) |
 | `NORNICDB_HEIMDALL_MAX_TOKENS` | `1024` | Max tokens per response |
-| `NORNICDB_HEIMDALL_TEMPERATURE` | `0.1` | Response creativity (0.0-1.0) |
+| `NORNICDB_HEIMDALL_TEMPERATURE` | `0.5` | Response creativity (0.0-1.0). Default 0.5 aligns with Qwen3 0.6B instruct best practices to reduce repetition; use 0.1 for more deterministic output. |
 
-For detailed information about context handling and token budgets, see [Heimdall Context & Tokens](./heimdall-context.md). When using **Ollama or OpenAI**, you can safely increase token budgets (e.g. 32K or 128K context); that guide includes example env values.
+For detailed information about context handling and token budgets, see [Heimdall Context & Tokens](./heimdall-context.md). For **Qwen3 0.6B instruct**, defaults use temperature 0.5, top_p 0.8, top_k 20 and explicit "do not repeat" instructions in the system prompt to avoid repeated lines. When using **Ollama or OpenAI**, you can safely increase token budgets (e.g. 32K or 128K context); that guide includes example env values.
 
 ### Provider: local / ollama / openai
 
