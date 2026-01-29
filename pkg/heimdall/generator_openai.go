@@ -24,8 +24,8 @@ const openAIChatPath = "/v1/chat/completions"
 const openAIMaxContentPerMessage = 10*1024*1024 - 8*1024 // ~10MB minus 8KB margin
 
 // OpenAI context limits (best practice: stay under total context, reserve space for output).
-const openAIContextLimit  = 128000  // gpt-4o / gpt-4o-mini typical limit
-const openAIOutputReserve = 4096   // reserve for model response
+const openAIContextLimit = 128000 // gpt-4o / gpt-4o-mini typical limit
+const openAIOutputReserve = 4096  // reserve for model response
 const openAIMaxInputTokens = openAIContextLimit - openAIOutputReserve
 const openAIMaxTokensPerToolResult = 16384 // cap each tool result so one round doesn't dominate
 
