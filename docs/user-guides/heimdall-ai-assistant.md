@@ -135,20 +135,32 @@ heimdall:
   api_key: "sk-..."
   model: gpt-4o-mini
 ```
+
+### OpenAI with larger context (defaults + 128K)
+
+The default token budget is 8K total context. For **OpenAI** (and Ollama), inference runs on the provider, so you can use larger context windows (e.g. 128K for GPT-4o-mini) without hitting local GPU limits. Set the token-budget env vars and run with your usual defaults:
+
+```bash
+NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS=131072 \
+NORNICDB_HEIMDALL_MAX_SYSTEM_TOKENS=100000 \
+NORNICDB_HEIMDALL_MAX_USER_TOKENS=30000 \
 NORNICDB_HEIMDALL_PROVIDER=openai \
 NORNICDB_HEIMDALL_API_KEY=$OPENAI_API_KEY \
 NORNICDB_HEIMDALL_MODEL=gpt-4o-mini \
 NORNICDB_HEIMDALL_ENABLED=true \
-   NORNICDB_HEIMDALL_PLUGINS_DIR=plugins/heimdall/built-plugins \
-   NORNICDB_PLUGINS_DIR=apoc/built-plugins \
-   NORNICDB_MODELS_DIR=models \
-   NORNICDB_EMBEDDING_PROVIDER=local \
-   NORNICDB_EMBEDDING_MODEL=bge-m3 \
-   NORNICDB_EMBEDDING_DIMENSIONS=1024 \
-   NORNICDB_DATA_DIR=./data/test \
-   NORNICDB_KMEANS_CLUSTERING_ENABLED=true \
-   NORNICDB_EMBEDDING_PROVIDER=local \
-   ./bin/nornicdb serve --no-auth
+NORNICDB_HEIMDALL_PLUGINS_DIR=plugins/heimdall/built-plugins \
+NORNICDB_PLUGINS_DIR=apoc/built-plugins \
+NORNICDB_MODELS_DIR=models \
+NORNICDB_EMBEDDING_PROVIDER=local \
+NORNICDB_EMBEDDING_MODEL=bge-m3 \
+NORNICDB_EMBEDDING_DIMENSIONS=1024 \
+NORNICDB_DATA_DIR=./data/test \
+NORNICDB_KMEANS_CLUSTERING_ENABLED=true \
+./bin/nornicdb serve --no-auth
+```
+
+Startup logs will show the active budget, e.g. `Token budget: 128K context = 100K system + 30K user`. For 32K context examples, see [Heimdall Context & Tokens](./heimdall-context.md).
+
 **Streaming:** Bifrost supports streaming responses (SSE). When the client requests `stream: true`, the OpenAI and Ollama providers stream tokens as they are generated; the local (GGUF) provider also supports streaming when built with the appropriate backend.
 
 ## Available Commands
