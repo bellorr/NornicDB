@@ -12,11 +12,22 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const defaultOpenAIBaseURL = "https://api.openai.com"
 const defaultOpenAIModel = "gpt-4o-mini"
 const openAIChatPath = "/v1/chat/completions"
+
+// openAIMaxContentPerMessage is OpenAI's per-message content limit (10MB).
+// Truncate tool results and other content to stay under this to avoid 400 string_above_max_length.
+const openAIMaxContentPerMessage = 10*1024*1024 - 8*1024 // ~10MB minus 8KB margin
+
+// OpenAI context limits (best practice: stay under total context, reserve space for output).
+const openAIContextLimit  = 128000  // gpt-4o / gpt-4o-mini typical limit
+const openAIOutputReserve = 4096   // reserve for model response
+const openAIMaxInputTokens = openAIContextLimit - openAIOutputReserve
+const openAIMaxTokensPerToolResult = 16384 // cap each tool result so one round doesn't dominate
 
 // looksLikeLocalModel returns true if the model name is clearly a local/GGUF model
 // (e.g. from config default or YAML) so we do not send it to the OpenAI API.
@@ -179,11 +190,95 @@ func (g *openAIGenerator) Generate(ctx context.Context, prompt string, params Ge
 	return chatResp.Choices[0].Message.Content, nil
 }
 
+// truncateContentToTokenEstimate truncates content so estimated tokens <= maxTokens.
+// Uses EstimateTokens (chars/4); backs up to rune boundary.
+func truncateContentToTokenEstimate(content string, maxTokens int) string {
+	if maxTokens <= 0 {
+		return ""
+	}
+	maxChars := maxTokens * 4 // EstimateTokens uses ~4 chars per token
+	if len(content) <= maxChars {
+		return content
+	}
+	trunc := content[:maxChars]
+	for len(trunc) > 0 && !utf8.RuneStart(trunc[len(trunc)-1]) {
+		trunc = trunc[:len(trunc)-1]
+	}
+	return trunc + "\n\n[Truncated for context limit.]"
+}
+
+// trimMessagesForContext keeps messages within maxInputTokens by capping tool result
+// sizes and, if needed, dropping oldest assistant+tool rounds (always keeps system + user).
+func trimMessagesForContext(messages []ToolRoundMessage, maxInputTokens int) []ToolRoundMessage {
+	if len(messages) <= 2 {
+		return messages
+	}
+	// First pass: cap each tool result to openAIMaxTokensPerToolResult
+	out := make([]ToolRoundMessage, 0, len(messages))
+	for _, m := range messages {
+		msg := m
+		if msg.Role == "tool" && EstimateTokens(msg.Content) > openAIMaxTokensPerToolResult {
+			msg.Content = truncateContentToTokenEstimate(msg.Content, openAIMaxTokensPerToolResult)
+		}
+		out = append(out, msg)
+	}
+	messages = out
+	if EstimateToolRoundMessagesTokens(messages) <= maxInputTokens {
+		return messages
+	}
+	// Second pass: drop oldest assistant+tool round(s); keep [system, user] and recent rounds
+	for len(messages) > 2 && EstimateToolRoundMessagesTokens(messages) > maxInputTokens {
+		// Remove one round: from index 2, remove assistant and all following tool messages until next assistant or end
+		i := 2
+		for i < len(messages) && messages[i].Role != "assistant" {
+			i++
+		}
+		// i is first assistant after system+user, or len(messages)
+		if i >= len(messages) {
+			break
+		}
+		j := i + 1
+		for j < len(messages) && messages[j].Role == "tool" {
+			j++
+		}
+		// Remove messages[i:j]
+		messages = append(messages[:i], messages[j:]...)
+	}
+	return messages
+}
+
+// truncateForOpenAI ensures content is within OpenAI's per-message limit.
+// Truncates at a UTF-8 rune boundary to avoid invalid encoding.
+func truncateForOpenAI(content string) string {
+	if len(content) <= openAIMaxContentPerMessage {
+		return content
+	}
+	max := openAIMaxContentPerMessage
+	if max > len(content) {
+		max = len(content)
+	}
+	// Back up to start of last rune so we don't split UTF-8.
+	for max > 0 && !utf8.RuneStart(content[max-1]) {
+		max--
+	}
+	suffix := fmt.Sprintf("\n\n[Content truncated for API limit; %d chars omitted]", len(content)-max)
+	// Leave room for suffix so total length stays under limit.
+	if max+len(suffix) > openAIMaxContentPerMessage {
+		max = openAIMaxContentPerMessage - len(suffix)
+		for max > 0 && !utf8.RuneStart(content[max-1]) {
+			max--
+		}
+	}
+	return content[:max] + suffix
+}
+
 // GenerateWithTools implements GeneratorWithTools (agentic loop, one round).
+// Trims messages to stay within model context (128K) and returns a friendly error if context is exceeded.
 func (g *openAIGenerator) GenerateWithTools(ctx context.Context, messages []ToolRoundMessage, tools []MCPTool, params GenerateParams) (content string, toolCalls []ParsedToolCall, err error) {
+	messages = trimMessagesForContext(messages, openAIMaxInputTokens)
 	wire := make([]openAIMsgWire, 0, len(messages))
 	for _, m := range messages {
-		msg := openAIMsgWire{Role: m.Role, Content: m.Content, ToolCallID: m.ToolCallID}
+		msg := openAIMsgWire{Role: m.Role, Content: truncateForOpenAI(m.Content), ToolCallID: m.ToolCallID}
 		if len(m.ToolCalls) > 0 {
 			msg.ToolCalls = make([]openAIToolCallWire, len(m.ToolCalls))
 			for i, tc := range m.ToolCalls {
@@ -238,12 +333,16 @@ func (g *openAIGenerator) GenerateWithTools(ctx context.Context, messages []Tool
 		return "", nil, fmt.Errorf("openai request: %w", err)
 	}
 	defer resp.Body.Close()
+	bodyBytes, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		return "", nil, fmt.Errorf("openai returned %d: %s", resp.StatusCode, string(bodyBytes))
+		bodyStr := string(bodyBytes)
+		if resp.StatusCode == http.StatusBadRequest && strings.Contains(bodyStr, "context_length_exceeded") {
+			return "", nil, fmt.Errorf("conversation is too long for the model (context limit exceeded). Please start a new chat or ask a shorter question")
+		}
+		return "", nil, fmt.Errorf("openai returned %d: %s", resp.StatusCode, bodyStr)
 	}
 	var chatResp openAIChatResponse
-	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
+	if err := json.Unmarshal(bodyBytes, &chatResp); err != nil {
 		return "", nil, fmt.Errorf("openai decode: %w", err)
 	}
 	if len(chatResp.Choices) == 0 {

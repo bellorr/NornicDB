@@ -561,6 +561,22 @@ func MaxUserMessageTokens() int {
 	return tokenBudget.MaxUser
 }
 
+// EstimateToolRoundMessagesTokens returns a rough token count for a slice of tool-round messages.
+// Used to stay within model context limits (e.g. OpenAI 128K) before sending.
+func EstimateToolRoundMessagesTokens(messages []ToolRoundMessage) int {
+	var n int
+	for _, m := range messages {
+		n += EstimateTokens(m.Content)
+		if len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				n += EstimateTokens(tc.Id) + EstimateTokens(tc.Name) + EstimateTokens(tc.Arguments)
+			}
+			n += 50 // overhead per assistant message with tool_calls
+		}
+	}
+	return n
+}
+
 // EstimateTokens provides a rough token count estimate for a string.
 // Uses ~4 chars per token which is typical for English text.
 // For exact counts, use the actual tokenizer.
