@@ -64,7 +64,7 @@ const loadCommandHistory = (): string[] => {
 export const Bifrost: React.FC<BifrostProps> = ({ 
   isOpen, 
   onClose,
-  modelName = 'qwen2.5-0.5b-instruct',
+  modelName = 'qwen3-0.6b-instruct',
   apiEndpoint = '/api/bifrost/chat/completions'
 }) => {
   const [messages, setMessages] = useState<Message[]>(loadSessionMessages);

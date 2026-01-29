@@ -132,9 +132,9 @@ RUN --mount=type=bind,source=models,target=/models,ro \
       else \
         echo "ERROR: EMBED_MODEL=true but models/bge-m3.gguf not found" && exit 1; \
       fi && \
-      if [ -f /models/qwen2.5-0.5b-instruct.gguf ]; then \
-        cp /models/qwen2.5-0.5b-instruct.gguf /app/models/ && \
-        echo "✓ Embedded Heimdall model ($(du -h /app/models/qwen2.5-0.5b-instruct.gguf | cut -f1))"; \
+      if [ -f /models/qwen3-0.6b-instruct.gguf ]; then \
+        cp /models/qwen3-0.6b-instruct.gguf /app/models/ && \
+        echo "✓ Embedded Heimdall model ($(du -h /app/models/qwen3-0.6b-instruct.gguf | cut -f1))"; \
       fi; \
     else \
       echo "→ BYOM mode (no embedded model)"; \

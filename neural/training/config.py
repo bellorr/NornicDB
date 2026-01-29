@@ -128,7 +128,7 @@ class ModelPreset:
         License: Apache 2.0 (permissive, commercial use OK)
         """
         return TrainingConfig(
-            base_model="Qwen/Qwen2.5-0.5B-Instruct",
+            base_model="Qwen/qwen3-0.6b-Instruct",
             per_device_train_batch_size=16,
             gradient_accumulation_steps=2,
             lora_r=8,

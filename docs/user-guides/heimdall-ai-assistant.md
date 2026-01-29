@@ -85,7 +85,7 @@ For local GGUF instead of OpenAI, use `NORNICDB_HEIMDALL_PROVIDER=local` (or omi
 | `NORNICDB_HEIMDALL_PROVIDER` | `local` | Backend: `local` (GGUF), `ollama`, or `openai` |
 | `NORNICDB_HEIMDALL_API_URL` | (see below) | API base URL for ollama/openai |
 | `NORNICDB_HEIMDALL_API_KEY` | (empty) | API key for OpenAI (required when provider=openai) |
-| `NORNICDB_HEIMDALL_MODEL` | `qwen2.5-0.5b-instruct` | Model name (GGUF file, Ollama model, or OpenAI model) |
+| `NORNICDB_HEIMDALL_MODEL` | `qwen3-0.6b-instruct` | Model name (GGUF file, Ollama model, or OpenAI model) |
 | `NORNICDB_MODELS_DIR` | `/app/models` | Directory containing GGUF models (local only) |
 | `NORNICDB_HEIMDALL_GPU_LAYERS` | `-1` | GPU layers (-1 = auto, local only) |
 | `NORNICDB_HEIMDALL_CONTEXT_SIZE` | `8192` | Context window (tokens, local only) |
@@ -229,7 +229,7 @@ Heimdall supports any instruction-tuned GGUF model. You can use different models
 
 | Model | Size | Speed | Quality | Use Case |
 |-------|------|-------|---------|----------|
-| `qwen2.5-0.5b-instruct` | 469 MB | Fast | Basic | Quick commands, low memory |
+| `qwen3-0.6b-instruct` | 469 MB | Fast | Basic | Quick commands, low memory |
 | `qwen2.5-1.5b-instruct-q4_k_m` | 1.0 GB | Medium | Good | **Recommended** - balanced |
 | `qwen2.5-3b-instruct-q4_k_m` | 2.0 GB | Slower | Better | Complex queries |
 | `phi-3-mini-4k-instruct` | 2.3 GB | Medium | Good | Alternative option |
@@ -243,8 +243,8 @@ curl -L -o models/qwen2.5-1.5b-instruct-q4_k_m.gguf \
   "https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"
 
 # Smaller model (faster, less capable)
-curl -L -o models/qwen2.5-0.5b-instruct.gguf \
-  "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+curl -L -o models/qwen3-0.6b-instruct.gguf \
+  "https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"
 
 # Larger model (slower, more capable)
 curl -L -o models/qwen2.5-3b-instruct-q4_k_m.gguf \

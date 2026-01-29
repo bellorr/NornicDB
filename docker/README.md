@@ -28,7 +28,7 @@
 
 The Heimdall images (`*-bge-heimdall`) are "batteries included":
 - **BGE-M3** (~400MB) for vector search/embeddings
-- **Qwen2.5-0.5B-Instruct** (~350MB) for Heimdall (cognitive guardian)
+- **qwen3-0.6b-Instruct** (~350MB) for Heimdall (cognitive guardian)
 - **Bifrost** chat interface enabled by default
 
 Heimdall provides:
@@ -50,7 +50,7 @@ Heimdall provides:
 
 **Note:** Models are automatically downloaded during Heimdall builds. You can also pre-download:
 ```bash
-make download-models  # Downloads BGE-M3 + Qwen2.5-0.5B (~750MB total)
+make download-models  # Downloads BGE-M3 + qwen3-0.6b (~750MB total)
 make check-models     # Verify models present
 ```
 
@@ -261,7 +261,7 @@ When building with `--build-arg EMBED_MODEL=true`, the Docker build context expe
 mkdir models -ErrorAction SilentlyContinue
 # Copy your models into ./models, e.g.:
 Copy-Item C:\path\to\bge-m3.gguf models\
-Copy-Item C:\path\to\qwen2.5-0.5b-instruct.gguf models\
+Copy-Item C:\path\to\qwen3-0.6b-instruct.gguf models\
 
 # Then run the build with EMBED_MODEL=true
 docker build -f docker/Dockerfile.amd64-vulkan-heimdall -t nornicdb-amd64-vulkan-bge-heimdall .
@@ -475,7 +475,7 @@ See [APOC Plugin Guide](../docs/features/plugin-system.md) for creating custom p
 | `NORNICDB_GPU_BACKEND` | `-1` (CUDA) / `0` (Metal) | GPU layers for embeddings |
 | `NORNICDB_EMBEDDING_GPU_LAYERS` | `-1` (CUDA) / `0` (Metal) | GPU layers for embeddings |
 | `NORNICDB_HEIMDALL_ENABLED` | `false` | Enable Heimdall AI assistant |
-| `NORNICDB_HEIMDALL_MODEL` | `models/qwen2.5-0.5b-instruct-q4_k_m.gguf` | Heimdall LLM model path |
+| `NORNICDB_HEIMDALL_MODEL` | `models/qwen3-0.6b-instruct-q4_k_m.gguf` | Heimdall LLM model path |
 | `NORNICDB_PLUGINS_DIR` | `/app/plugins` | APOC plugins directory |
 
 **Note:** In CPU-only images, `NORNICDB_EMBEDDING_PROVIDER` defaults to `none` for optimal performance.

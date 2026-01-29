@@ -3,7 +3,7 @@
 #
 # This image includes:
 # - BGE-M3 embedding model for vector search
-# - Qwen2.5-0.5B-Instruct (Q4_K_M) for Heimdall (cognitive database guardian)
+# - qwen3-0.6b-Instruct (Q4_K_M) for Heimdall (cognitive database guardian)
 #
 # Build:
 #   docker build -f docker/Dockerfile.amd64-cuda-heimdall -t timothyswt/nornicdb-amd64-cuda-bge-heimdall .
@@ -103,11 +103,11 @@ RUN --mount=type=bind,source=models,target=/models,ro \
       echo "ERROR: models/bge-m3.gguf not found" && exit 1; \
     fi && \
     echo "Embedding Heimdall SLM model..." && \
-    if [ -f /models/qwen2.5-0.5b-instruct.gguf ]; then \
-      cp /models/qwen2.5-0.5b-instruct.gguf /app/models/ && \
-      echo "✓ Embedded qwen2.5-0.5b-instruct.gguf ($(du -h /app/models/qwen2.5-0.5b-instruct.gguf | cut -f1))"; \
+    if [ -f /models/qwen3-0.6b-instruct.gguf ]; then \
+      cp /models/qwen3-0.6b-instruct.gguf /app/models/ && \
+      echo "✓ Embedded qwen3-0.6b-instruct.gguf ($(du -h /app/models/qwen3-0.6b-instruct.gguf | cut -f1))"; \
     else \
-      echo "ERROR: models/qwen2.5-0.5b-instruct.gguf not found" && exit 1; \
+      echo "ERROR: models/qwen3-0.6b-instruct.gguf not found" && exit 1; \
     fi && \
     echo "✓ Heimdall cognitive features enabled"
 
@@ -128,7 +128,7 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_GPU_ENABLED=true \
     NORNICDB_PLUGINS_DIR=/app/plugins \
     NORNICDB_HEIMDALL_ENABLED=true \
-    NORNICDB_HEIMDALL_MODEL=qwen2.5-0.5b-instruct \
+    NORNICDB_HEIMDALL_MODEL=qwen3-0.6b-instruct \
     NORNICDB_HEIMDALL_PLUGINS_DIR=/app/plugins/heimdall \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \

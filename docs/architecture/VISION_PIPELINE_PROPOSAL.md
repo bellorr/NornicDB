@@ -996,7 +996,7 @@ Running 3 models simultaneously is memory-intensive:
 | Model | VRAM | RAM (CPU) |
 |-------|------|-----------|
 | BGE-M3 (Embedding) | ~1 GB | ~1.5 GB |
-| Qwen2.5-0.5B (Heimdall) | ~1 GB | ~1.5 GB |
+| qwen3-0.6b (Heimdall) | ~1 GB | ~1.5 GB |
 | Qwen2.5-VL-2B (Vision) | ~3 GB | ~4 GB |
 | **Total (all loaded)** | **~5 GB** | **~7 GB** |
 
@@ -1501,7 +1501,7 @@ POST /api/models/load
 ┌─────────────────────────────────────────────────────────────────┐
 │  3. Conditionally Preload Heimdall                              │
 │     └─ If NORNICDB_PRELOAD_HEIMDALL=true                        │
-│     └─ Load Qwen2.5-0.5B                                        │
+│     └─ Load qwen3-0.6b                                        │
 │     └─ Log: "✅ Heimdall AI Assistant ready (512 MB)"           │
 └─────────────────────────────────────────────────────────────────┘
                               │

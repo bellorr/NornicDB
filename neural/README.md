@@ -131,7 +131,7 @@ The training script automatically applies:
 | Model | Size | VRAM (Training) | Best For |
 |-------|------|-----------------|----------|
 | TinyLlama-1.1B | 1.1B params | ~6GB | Quick experiments, small tasks |
-| Qwen2.5-0.5B | 500M params | ~4GB | Ultra-efficient, specific tasks |
+| qwen3-0.6b | 500M params | ~4GB | Ultra-efficient, specific tasks |
 | Qwen2.5-1.5B | 1.5B params | ~8GB | Balanced quality/efficiency |
 | Phi-3-mini | 3.8B params | ~10GB | High quality, fits 2080 Ti |
 
@@ -428,7 +428,7 @@ neural/
 
 1. **Reduce batch size**: `--batch_size 1`
 2. **Increase gradient accumulation**: `--gradient_accumulation 16`
-3. **Use smaller model**: Switch to Qwen2.5-0.5B
+3. **Use smaller model**: Switch to qwen3-0.6b
 4. **Enable QLoRA**: `--use_qlora` (4-bit quantized training)
 
 ### Slow Training

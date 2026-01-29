@@ -12,7 +12,7 @@ func TestDefaultConfig(t *testing.T) {
 
 	assert.False(t, cfg.Enabled, "Should be disabled by default")
 	assert.Empty(t, cfg.ModelsDir, "ModelsDir empty - reads NORNICDB_MODELS_DIR at runtime")
-	assert.Equal(t, "qwen2.5-0.5b-instruct", cfg.Model)
+	assert.Equal(t, "qwen3-0.6b-instruct", cfg.Model)
 	assert.Equal(t, 1024, cfg.MaxTokens)
 	assert.Equal(t, float32(0.1), cfg.Temperature)
 	assert.Equal(t, -1, cfg.GPULayers, "Should be auto (-1) by default")
@@ -82,40 +82,40 @@ func TestBuildPrompt(t *testing.T) {
 
 // MockFeatureFlags implements FeatureFlagsSource for testing
 type MockFeatureFlags struct {
-	enabled           bool
-	model             string
-	provider          string
-	apiURL            string
-	apiKey            string
-	gpuLayers         int
-	contextSize       int
-	batchSize         int
-	maxTokens         int
-	maxContextTokens  int
-	maxSystemTokens   int
-	maxUserTokens     int
-	temperature       float32
-	anomalyDetection  bool
-	runtimeDiagnosis  bool
-	memoryCuration    bool
+	enabled          bool
+	model            string
+	provider         string
+	apiURL           string
+	apiKey           string
+	gpuLayers        int
+	contextSize      int
+	batchSize        int
+	maxTokens        int
+	maxContextTokens int
+	maxSystemTokens  int
+	maxUserTokens    int
+	temperature      float32
+	anomalyDetection bool
+	runtimeDiagnosis bool
+	memoryCuration   bool
 }
 
-func (m *MockFeatureFlags) GetHeimdallEnabled() bool           { return m.enabled }
-func (m *MockFeatureFlags) GetHeimdallModel() string           { return m.model }
-func (m *MockFeatureFlags) GetHeimdallProvider() string        { return m.provider }
+func (m *MockFeatureFlags) GetHeimdallEnabled() bool          { return m.enabled }
+func (m *MockFeatureFlags) GetHeimdallModel() string          { return m.model }
+func (m *MockFeatureFlags) GetHeimdallProvider() string       { return m.provider }
 func (m *MockFeatureFlags) GetHeimdallAPIURL() string         { return m.apiURL }
 func (m *MockFeatureFlags) GetHeimdallAPIKey() string         { return m.apiKey }
-func (m *MockFeatureFlags) GetHeimdallGPULayers() int          { return m.gpuLayers }
-func (m *MockFeatureFlags) GetHeimdallContextSize() int        { return m.contextSize }
-func (m *MockFeatureFlags) GetHeimdallBatchSize() int          { return m.batchSize }
-func (m *MockFeatureFlags) GetHeimdallMaxTokens() int          { return m.maxTokens }
-func (m *MockFeatureFlags) GetHeimdallMaxContextTokens() int   { return m.maxContextTokens }
-func (m *MockFeatureFlags) GetHeimdallMaxSystemTokens() int    { return m.maxSystemTokens }
-func (m *MockFeatureFlags) GetHeimdallMaxUserTokens() int      { return m.maxUserTokens }
-func (m *MockFeatureFlags) GetHeimdallTemperature() float32    { return m.temperature }
-func (m *MockFeatureFlags) GetHeimdallAnomalyDetection() bool  { return m.anomalyDetection }
-func (m *MockFeatureFlags) GetHeimdallRuntimeDiagnosis() bool  { return m.runtimeDiagnosis }
-func (m *MockFeatureFlags) GetHeimdallMemoryCuration() bool    { return m.memoryCuration }
+func (m *MockFeatureFlags) GetHeimdallGPULayers() int         { return m.gpuLayers }
+func (m *MockFeatureFlags) GetHeimdallContextSize() int       { return m.contextSize }
+func (m *MockFeatureFlags) GetHeimdallBatchSize() int         { return m.batchSize }
+func (m *MockFeatureFlags) GetHeimdallMaxTokens() int         { return m.maxTokens }
+func (m *MockFeatureFlags) GetHeimdallMaxContextTokens() int  { return m.maxContextTokens }
+func (m *MockFeatureFlags) GetHeimdallMaxSystemTokens() int   { return m.maxSystemTokens }
+func (m *MockFeatureFlags) GetHeimdallMaxUserTokens() int     { return m.maxUserTokens }
+func (m *MockFeatureFlags) GetHeimdallTemperature() float32   { return m.temperature }
+func (m *MockFeatureFlags) GetHeimdallAnomalyDetection() bool { return m.anomalyDetection }
+func (m *MockFeatureFlags) GetHeimdallRuntimeDiagnosis() bool { return m.runtimeDiagnosis }
+func (m *MockFeatureFlags) GetHeimdallMemoryCuration() bool   { return m.memoryCuration }
 
 func TestConfigFromFeatureFlags(t *testing.T) {
 	flags := &MockFeatureFlags{
@@ -158,7 +158,7 @@ func TestConfigFromFeatureFlagsModelsDir(t *testing.T) {
 
 func TestChatRequest(t *testing.T) {
 	req := ChatRequest{
-		Model: "qwen2.5-0.5b",
+		Model: "qwen3-0.6b",
 		Messages: []ChatMessage{
 			{Role: "user", Content: "Hello"},
 		},
@@ -167,7 +167,7 @@ func TestChatRequest(t *testing.T) {
 		Temperature: 0.5,
 	}
 
-	assert.Equal(t, "qwen2.5-0.5b", req.Model)
+	assert.Equal(t, "qwen3-0.6b", req.Model)
 	assert.Len(t, req.Messages, 1)
 	assert.True(t, req.Stream)
 	assert.Equal(t, 256, req.MaxTokens)
@@ -177,7 +177,7 @@ func TestChatRequest(t *testing.T) {
 func TestChatResponse(t *testing.T) {
 	resp := ChatResponse{
 		ID:      "chat-123",
-		Model:   "qwen2.5-0.5b",
+		Model:   "qwen3-0.6b",
 		Created: 1234567890,
 		Choices: []ChatChoice{
 			{

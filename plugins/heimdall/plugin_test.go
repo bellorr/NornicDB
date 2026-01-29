@@ -152,7 +152,7 @@ func TestWatcherPlugin_StatusAction(t *testing.T) {
 
 	ctx := heimdall.SubsystemContext{
 		Config: heimdall.Config{
-			Model:       "qwen2.5-0.5b",
+			Model:       "qwen3-0.6b",
 			MaxTokens:   512,
 			Temperature: 0.1,
 		},

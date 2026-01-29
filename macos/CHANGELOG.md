@@ -59,7 +59,7 @@
 - Configure server port and host
 - Select AI models from available .gguf files
 - Control auto-start behavior
-- Download default models (BGE-M3, Qwen2.5-0.5B)
+- Download default models (BGE-M3, qwen3-0.6b)
 - Open models folder for manual model management
 
 ### Installation

@@ -43,7 +43,7 @@ make build-localllm-headless
 
 #### Model Downloads (Heimdall only)
 
-Heimdall images require BGE-M3 embedding model (~400MB) and Qwen2.5-0.5B LLM (~350MB):
+Heimdall images require BGE-M3 embedding model (~400MB) and qwen3-0.6b LLM (~350MB):
 
 ```bash
 # Download both models automatically
@@ -51,7 +51,7 @@ make download-models
 
 # Or download individually
 make download-bge    # BGE-M3 embedding model
-make download-qwen   # Qwen2.5-0.5B-Instruct LLM
+make download-qwen   # qwen3-0.6b-Instruct LLM
 
 # Check which models are present
 make check-models
@@ -161,7 +161,7 @@ go test ./pkg/nornicdb/...
 | `NORNICDB_EMBEDDING_PROVIDER` | Embedding provider | `local` |
 | `NORNICDB_EMBEDDING_MODEL` | Model path/name | `models/bge-m3.gguf` |
 | `NORNICDB_HEIMDALL_ENABLED` | Enable Heimdall AI | `false` |
-| `NORNICDB_HEIMDALL_MODEL` | Heimdall LLM model | `models/qwen2.5-0.5b-instruct-q4_k_m.gguf` |
+| `NORNICDB_HEIMDALL_MODEL` | Heimdall LLM model | `models/qwen3-0.6b-instruct-q4_k_m.gguf` |
 | `NORNICDB_PLUGINS_DIR` | APOC plugins directory | `apoc/built-plugins` |
 
 ## IDE Setup
@@ -240,7 +240,7 @@ make download-models
 
 # Run with Heimdall enabled
 NORNICDB_HEIMDALL_ENABLED=true \
-NORNICDB_HEIMDALL_MODEL=models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+NORNICDB_HEIMDALL_MODEL=models/qwen3-0.6b-instruct-q4_k_m.gguf \
 ./bin/nornicdb serve
 ```
 

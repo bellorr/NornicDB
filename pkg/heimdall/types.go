@@ -233,7 +233,7 @@ func DefaultConfig() Config {
 		Enabled:          false, // Heimdall disabled by default (opt-in)
 		BifrostEnabled:   false, // Bifrost follows Heimdall state
 		ModelsDir:        "",    // Empty = use NORNICDB_MODELS_DIR env var
-		Model:            "qwen2.5-0.5b-instruct",
+		Model:            "qwen3-0.6b-instruct",
 		Provider:         "local",
 		APIURL:           "",
 		APIKey:           "",

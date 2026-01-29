@@ -92,7 +92,7 @@ kmeans:
 
 heimdall:
   enabled: true
-  model: qwen2.5-0.5b-instruct.gguf
+  model: qwen3-0.6b-instruct.gguf
 
 auth:
   username: admin
@@ -149,9 +149,9 @@ if let heimdallSection = extractYAMLSection(named: "heimdall", from: testConfig)
     print("  enabled: \(enabled) \(enabled == true ? "✅" : "❌ EXPECTED: true")")
     
     if let model = getYAMLString(key: "model", from: heimdallSection) {
-        print("  model: '\(model)' \(model == "qwen2.5-0.5b-instruct.gguf" ? "✅" : "❌ EXPECTED: qwen2.5-0.5b-instruct.gguf")")
+        print("  model: '\(model)' \(model == "qwen3-0.6b-instruct.gguf" ? "✅" : "❌ EXPECTED: qwen3-0.6b-instruct.gguf")")
     } else {
-        print("  model: nil ❌ EXPECTED: qwen2.5-0.5b-instruct.gguf")
+        print("  model: nil ❌ EXPECTED: qwen3-0.6b-instruct.gguf")
     }
 } else {
     print("  ❌ FAILED: Could not extract heimdall section!")

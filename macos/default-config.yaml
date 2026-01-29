@@ -104,7 +104,7 @@ heimdall:
   enabled: false
   
   # Model for Heimdall (GGUF format) - don't include .gguf extension
-  model: "qwen2.5-0.5b-instruct"
+  model: "qwen3-0.6b-instruct"
   
   # Models directory
   models_dir: "/usr/local/var/nornicdb/models"

@@ -824,7 +824,7 @@ func legacyLoadFromEnv() *Config {
 	// Heimdall - the cognitive guardian feature flags
 	// Opt-in cognitive database features - disabled by default
 	config.Features.HeimdallEnabled = getEnvBool("NORNICDB_HEIMDALL_ENABLED", false)
-	config.Features.HeimdallModel = getEnv("NORNICDB_HEIMDALL_MODEL", "qwen2.5-0.5b-instruct")
+	config.Features.HeimdallModel = getEnv("NORNICDB_HEIMDALL_MODEL", "qwen3-0.6b-instruct")
 	config.Features.HeimdallGPULayers = getEnvInt("NORNICDB_HEIMDALL_GPU_LAYERS", -1)       // -1 = auto
 	config.Features.HeimdallContextSize = getEnvInt("NORNICDB_HEIMDALL_CONTEXT_SIZE", 8192) // 8K (memory efficient)
 	config.Features.HeimdallBatchSize = getEnvInt("NORNICDB_HEIMDALL_BATCH_SIZE", 2048)     // 2K batch size
@@ -1196,7 +1196,7 @@ func LoadDefaults() *Config {
 	config.Features.TopologyABTestEnabled = false
 	config.Features.TopologyABTestPercentage = 50
 	config.Features.HeimdallEnabled = false
-	config.Features.HeimdallModel = "qwen2.5-0.5b-instruct"
+	config.Features.HeimdallModel = "qwen3-0.6b-instruct"
 	config.Features.HeimdallGPULayers = -1
 	config.Features.HeimdallContextSize = 8192
 	config.Features.HeimdallBatchSize = 2048

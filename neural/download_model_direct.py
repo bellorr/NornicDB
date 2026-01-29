@@ -31,7 +31,7 @@ logging.basicConfig(level=logging.INFO)
 
 def download_model():
     """Download Qwen 0.5B Instruct model."""
-    model_id = "Qwen/Qwen2.5-0.5B-Instruct"
+    model_id = "Qwen/qwen3-0.6b-Instruct"
     cache_dir = os.path.expanduser("~/.cache/huggingface/hub")
     
     print(f"Downloading {model_id}...")

@@ -14,7 +14,7 @@ fi
 
 # Set model cache directory
 CACHE_DIR="${HOME}/.cache/huggingface/hub"
-MODEL_NAME="Qwen/Qwen2.5-0.5B-Instruct"
+MODEL_NAME="Qwen/qwen3-0.6b-Instruct"
 
 echo "Model: $MODEL_NAME"
 echo "Cache directory: $CACHE_DIR"

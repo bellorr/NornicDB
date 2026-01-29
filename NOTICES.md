@@ -8,7 +8,7 @@ NornicDB is released under the MIT License. This file contains the notices and l
 
 1. [Bundled AI Models](#bundled-ai-models)
    - [BGE-M3 Embedding Model](#bge-m3-embedding-model)
-   - [Qwen2.5-0.5B-Instruct](#qwen25-05b-instruct)
+   - [qwen3-0.6b-Instruct](#qwen25-05b-instruct)
 2. [Go Dependencies](#go-dependencies)
 3. [C/C++ Libraries](#cc-libraries)
 4. [JavaScript/TypeScript Dependencies](#javascripttypescript-dependencies)
@@ -58,17 +58,17 @@ SOFTWARE.
 
 ---
 
-### Qwen2.5-0.5B-Instruct
+### qwen3-0.6b-Instruct
 
-**Source:** https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct  
-**Quantized Version:** https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF  
+**Source:** https://huggingface.co/Qwen/qwen3-0.6b-Instruct  
+**Quantized Version:** https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF  
 **License:** Apache License 2.0  
 **Copyright:** Alibaba Cloud
 
 **Model Details:**
-- File: `qwen2.5-0.5b-instruct-q4_k_m.gguf`
+- File: `qwen3-0.6b-instruct-q4_k_m.gguf`
 - Purpose: Language model for Heimdall intelligent assistance
-- Downloaded from: https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+- Downloaded from: https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf
 
 **License Text:**
 ```
@@ -361,7 +361,7 @@ The following dependencies are used in the NornicDB UI (Bifrost):
 
 | Component | License | Commercial Use | Modifications | Distribution |
 |-----------|---------|----------------|---------------|--------------|
-| Qwen2.5-0.5B-Instruct | Apache 2.0 | ✅ Yes | ✅ Yes | ✅ Yes |
+| qwen3-0.6b-Instruct | Apache 2.0 | ✅ Yes | ✅ Yes | ✅ Yes |
 | BadgerDB | Apache 2.0 | ✅ Yes | ✅ Yes | ✅ Yes |
 | Cobra CLI | Apache 2.0 | ✅ Yes | ✅ Yes | ✅ Yes |
 | OpenTelemetry | Apache 2.0 | ✅ Yes | ✅ Yes | ✅ Yes |

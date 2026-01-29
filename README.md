@@ -113,7 +113,7 @@ Below are copy-pastable commands and prerequisites to build NornicDB for the sup
 
 Model files:
 - BGE: `models/bge-m3.gguf` (Makefile target `make download-bge` will download it)
-- Qwen: `models/qwen2.5-0.5b-instruct.gguf` (Makefile target `make download-qwen` will download it)
+- Qwen: `models/qwen3-0.6b-instruct.gguf` (Makefile target `make download-qwen` will download it)
 
 ---
 
@@ -473,7 +473,7 @@ make build-localllm
 
 ```bash
 # Download models for Heimdall builds (automatic if missing)
-make download-models        # BGE-M3 + Qwen2.5-0.5B (~750MB)
+make download-models        # BGE-M3 + qwen3-0.6b (~750MB)
 make check-models          # Verify models present
 
 # ARM64 (Apple Silicon)

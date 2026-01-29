@@ -1,6 +1,6 @@
 # Heimdall Context & Token Budget Guide
 
-This guide explains how Heimdall manages context and token allocation with the default qwen2.5-0.5b-instruct model.
+This guide explains how Heimdall manages context and token allocation with the default qwen3-0.6b-instruct model.
 
 ## Overview
 
@@ -171,7 +171,7 @@ Respond with JSON only."
 
 ## Model Specifications
 
-### qwen2.5-0.5b-instruct
+### qwen3-0.6b-instruct
 
 | Spec | Value |
 |------|-------|

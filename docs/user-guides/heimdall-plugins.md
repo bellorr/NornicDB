@@ -38,7 +38,7 @@ Heimdall is the cognitive guardian of NornicDB - a subsystem that enables AI-pow
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│  Heimdall SLM (Qwen2.5-0.5B)                                    │
+│  Heimdall SLM (qwen3-0.6b)                                    │
 │  ├─ Receives system prompt with available actions               │
 │  ├─ Interprets user intent                                      │
 │  └─ Responds: {"action": "heimdall.anomaly.detect", "params": {}}│

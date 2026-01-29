@@ -422,7 +422,7 @@ heimdall:
 
   # Model: GGUF filename (local), Ollama model name (ollama), or OpenAI model (openai)
   # Env: NORNICDB_HEIMDALL_MODEL
-  model: "qwen2.5-0.5b-instruct.gguf"
+  model: "qwen3-0.6b-instruct.gguf"
 
   # GPU layers (-1=auto, 0=CPU only, >0=specific layers); local provider only
   # Env: NORNICDB_HEIMDALL_GPU_LAYERS

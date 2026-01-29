@@ -27,7 +27,7 @@ First-Run Setup Wizard
   - Advanced: All AI features enabled
 • Smart model download integration
 • Green checkmarks for installed models
-• One-click download for missing models (BGE-M3, Qwen2.5-0.5B)
+• One-click download for missing models (BGE-M3, qwen3-0.6b)
 • Direct link to open models folder
 
 Settings Window (4 Tabs)

@@ -142,7 +142,7 @@ func loadGenerator(modelPath string, gpuLayers, contextSize, batchSize int) (Gen
 func loadLocalGenerator(cfg Config) (Generator, string, error) {
 	modelName := cfg.Model
 	if modelName == "" {
-		modelName = "qwen2.5-0.5b-instruct"
+		modelName = "qwen3-0.6b-instruct"
 	}
 	modelFile := modelName
 	if !strings.HasSuffix(modelFile, ".gguf") {

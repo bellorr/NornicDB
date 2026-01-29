@@ -153,7 +153,7 @@ The settings panel has 5 tabs:
 │ Select AI models for different features:                                │
 │                                                                          │
 │  Embedding Model:   bge-m3.gguf                                         │
-│  Heimdall Model:    qwen2.5-0.5b-instruct.gguf                          │
+│  Heimdall Model:    qwen3-0.6b-instruct.gguf                          │
 │                                                                          │
 │  [Refresh List]     Rescan models directory                             │
 │                                                                          │

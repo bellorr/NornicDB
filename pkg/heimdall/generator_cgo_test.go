@@ -193,7 +193,7 @@ func findGGUFInDir(dir string) string {
 
 	// Prefer instruction-tuned models for testing
 	preferred := []string{
-		"qwen2.5-0.5b-instruct.gguf",
+		"qwen3-0.6b-instruct.gguf",
 		"qwen2.5-1.5b-instruct.gguf",
 		"tinyllama-1.1b.gguf",
 	}

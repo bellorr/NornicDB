@@ -227,7 +227,7 @@ manager.RegisterPlugin(myplugin.Plugin, "", true) // built-in = true
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `NORNICDB_HEIMDALL_ENABLED` | `false` | Enable Heimdall subsystem (Bifrost auto-enables with it) |
-| `NORNICDB_HEIMDALL_MODEL` | `qwen2.5-0.5b-instruct` | Model name (without .gguf extension) |
+| `NORNICDB_HEIMDALL_MODEL` | `qwen3-0.6b-instruct` | Model name (without .gguf extension) |
 | `NORNICDB_HEIMDALL_GPU_LAYERS` | `-1` | GPU layer offload (-1=auto, 0=CPU only) |
 | `NORNICDB_HEIMDALL_MAX_TOKENS` | `512` | Maximum tokens for generation |
 | `NORNICDB_HEIMDALL_TEMPERATURE` | `0.1` | Temperature (lower = more deterministic) |

@@ -76,9 +76,9 @@ DOCKER_DIR := docker
 # Model URLs and paths
 MODELS_DIR := models
 BGE_MODEL := $(MODELS_DIR)/bge-m3.gguf
-QWEN_MODEL := $(MODELS_DIR)/qwen2.5-0.5b-instruct.gguf
+QWEN_MODEL := $(MODELS_DIR)/qwen3-0.6b-instruct.gguf
 BGE_URL := https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
-QWEN_URL := https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
+QWEN_URL := https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf
 
 .PHONY: build-arm64-metal build-arm64-metal-bge build-arm64-metal-bge-heimdall build-arm64-metal-headless
 .PHONY: build-amd64-cuda build-amd64-cuda-bge build-amd64-cuda-bge-heimdall build-amd64-cuda-headless
@@ -148,7 +148,7 @@ download-qwen: $(MODELS_DIR)
 ifeq ($(HOST_OS),windows)
 	@if not exist "$(QWEN_MODEL)" ( \
 		echo =============================================================== && \
-		echo  Downloading Qwen2.5-0.5B-Instruct model... && \
+		echo  Downloading qwen3-0.6b-Instruct model... && \
 		echo =============================================================== && \
 		echo Source: $(QWEN_URL) && \
 		echo Target: $(QWEN_MODEL) && \
@@ -161,7 +161,7 @@ ifeq ($(HOST_OS),windows)
 else
 	@if [ ! -f "$(QWEN_MODEL)" ]; then \
 		echo "==============================================================="; \
-		echo " Downloading Qwen2.5-0.5B-Instruct model..."; \
+		echo " Downloading qwen3-0.6b-Instruct model..."; \
 		echo "==============================================================="; \
 		echo "Source: $(QWEN_URL)"; \
 		echo "Target: $(QWEN_MODEL)"; \

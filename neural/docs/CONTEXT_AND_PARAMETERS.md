@@ -307,7 +307,7 @@ from training import TrainingConfig
 
 # Ultra-efficient for embedded systems
 tiny_config = TrainingConfig(
-    base_model="Qwen/Qwen2.5-0.5B",
+    base_model="Qwen/qwen3-0.6b",
     max_seq_length=512,  # Minimal context
     lora_r=8,  # Minimal adaptation
     use_qlora=True,

@@ -747,7 +747,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @objc func downloadModels() {
         let alert = NSAlert()
         alert.messageText = "Download Default Models"
-        alert.informativeText = "This will download:\n• BGE-M3 embedding model (~400MB)\n• Qwen2.5-0.5B-Instruct model (~350MB)\n\nTotal: ~750MB\n\nDownloading from HuggingFace..."
+        alert.informativeText = "This will download:\n• BGE-M3 embedding model (~400MB)\n• qwen3-0.6b-Instruct model (~350MB)\n\nTotal: ~750MB\n\nDownloading from HuggingFace..."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Download")
         alert.addButton(withTitle: "Cancel")
@@ -764,7 +764,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 let task = Process()
                 task.launchPath = "/bin/bash"
-                task.arguments = ["-c", "cd /usr/local/var/nornicdb && curl -L -o models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -L -o models/qwen2.5-0.5b-instruct.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"]
+                task.arguments = ["-c", "cd /usr/local/var/nornicdb && curl -L -o models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -L -o models/qwen3-0.6b-instruct.gguf https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"]
                 
                 // Create models directory first
                 try? FileManager.default.createDirectory(atPath: "/usr/local/var/nornicdb/models", withIntermediateDirectories: true, attributes: nil)
@@ -884,7 +884,7 @@ class ConfigManager: ObservableObject {
     
     @Published var embeddingModel: String = "bge-m3.gguf"
     @Published var embeddingDimensions: Int = 1024  // Read from config, default 1024 for bge-m3
-    @Published var heimdallModel: String = "qwen2.5-0.5b-instruct.gguf"
+    @Published var heimdallModel: String = "qwen3-0.6b-instruct.gguf"
     @Published var availableModels: [String] = []
     
     // Config path matches server's FindConfigFile priority: ~/.nornicdb/config.yaml
@@ -1220,7 +1220,7 @@ class ConfigManager: ObservableObject {
         
         heimdall:
           enabled: false
-          model: qwen2.5-0.5b-instruct.gguf
+          model: qwen3-0.6b-instruct.gguf
         """)
         
         content = ensureSectionExists(in: content, section: "server", defaultContent: """
@@ -1506,7 +1506,7 @@ struct SettingsView: View {
     @State private var originalHttpPortNumber: String = "7474"
     @State private var originalHostAddress: String = "localhost"
     @State private var originalEmbeddingModel: String = "bge-m3.gguf"
-    @State private var originalHeimdallModel: String = "qwen2.5-0.5b-instruct.gguf"
+    @State private var originalHeimdallModel: String = "qwen3-0.6b-instruct.gguf"
     @State private var originalAdminUsername: String = "admin"
     @State private var originalAdminPassword: String = "password"
     @State private var originalJWTSecret: String = ""
@@ -3329,8 +3329,8 @@ struct FirstRunWizard: View {
                             // Heimdall Model (Advanced only)
                             if selectedPreset == .advanced {
                                 ModelDownloadRow(
-                                    modelName: "Qwen2.5-0.5B-Instruct (Heimdall)",
-                                    fileName: "qwen2.5-0.5b-instruct.gguf",
+                                    modelName: "qwen3-0.6b-Instruct (Heimdall)",
+                                    fileName: "qwen3-0.6b-instruct.gguf",
                                     size: "~350MB",
                                     exists: qwenModelExists,
                                     onDownload: { downloadQwenModel() }
@@ -3415,7 +3415,7 @@ struct FirstRunWizard: View {
         let fileManager = FileManager.default
         
         let bgePath = "\(modelsPath)/bge-m3.gguf"
-        let qwenPath = "\(modelsPath)/qwen2.5-0.5b-instruct.gguf"
+        let qwenPath = "\(modelsPath)/qwen3-0.6b-instruct.gguf"
         
         bgeModelExists = fileManager.fileExists(atPath: bgePath)
         qwenModelExists = fileManager.fileExists(atPath: qwenPath)
@@ -3455,12 +3455,12 @@ struct FirstRunWizard: View {
     
     private func downloadQwenModel() {
         isDownloadingModels = true
-        downloadProgress = "Downloading Qwen2.5-0.5B model (~350MB)..."
+        downloadProgress = "Downloading qwen3-0.6b model (~350MB)..."
         
         DispatchQueue.global(qos: .userInitiated).async {
             let task = Process()
             task.launchPath = "/bin/bash"
-            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/qwen2.5-0.5b-instruct.gguf https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"]
+            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/qwen3-0.6b-instruct.gguf https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"]
             
             task.launch()
             task.waitUntilExit()

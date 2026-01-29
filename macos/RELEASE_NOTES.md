@@ -201,7 +201,7 @@ auto_tlp:
 
 heimdall:
   enabled: true
-  model: "qwen2.5-0.5b-instruct"
+  model: "qwen3-0.6b-instruct"
   models_dir: "/usr/local/var/nornicdb/models"
 
 database:
@@ -404,8 +404,8 @@ curl -L "https://huggingface.co/nornicAI/bge-m3-GGUF/resolve/main/bge-m3-Q8_0.gg
   -o /usr/local/var/nornicdb/models/bge-m3.gguf
 
 # Qwen2.5 LLM
-curl -L "https://huggingface.co/nornicAI/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf" \
-  -o /usr/local/var/nornicdb/models/qwen2.5-0.5b-instruct.gguf
+curl -L "https://huggingface.co/nornicAI/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q8_0.gguf" \
+  -o /usr/local/var/nornicdb/models/qwen3-0.6b-instruct.gguf
 ```
 
 ---

@@ -476,7 +476,7 @@ def estimate_memory_usage(config: TrainingConfig) -> Dict[str, float]:
     # Rough model size estimates (in billions of parameters)
     model_sizes = {
         "TinyLlama": 1.1,
-        "Qwen2.5-0.5B": 0.5,
+        "qwen3-0.6b": 0.5,
         "Qwen2.5-1.5B": 1.5,
         "Phi-3": 3.8,
         "Llama-3.2-1B": 1.0,

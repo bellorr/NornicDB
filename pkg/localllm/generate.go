@@ -10,7 +10,7 @@
 //
 // When CGO is enabled, use LoadGenerationModel to load a reasoning model:
 //
-//	opts := localllm.DefaultGenerationOptions("/models/qwen2.5-0.5b.gguf")
+//	opts := localllm.DefaultGenerationOptions("/models/qwen3-0.6b.gguf")
 //	model, err := localllm.LoadGenerationModel(opts)
 //	if err != nil {
 //		log.Fatal(err)

@@ -103,12 +103,12 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from peft import PeftModel
 
 # Load base model
-base_model = "Qwen/Qwen2.5-0.5B-Instruct"
+base_model = "Qwen/qwen3-0.6b-Instruct"
 tokenizer = AutoTokenizer.from_pretrained(base_model)
 model = AutoModelForCausalLM.from_pretrained(base_model)
 
 # Load LoRA adapters
-model = PeftModel.from_pretrained(model, "models/nornicdb-cypher-expert")
+model = PeftModel.from_pretrained(model, "models/qwen3-0.6b")
 
 # Test generation
 prompt = "Generate a Cypher query to find all Person nodes"
@@ -129,10 +129,10 @@ EOF
 mkdir -p ../models
 
 # Copy GGUF file
-cp nornicdb-cypher-expert-q4.gguf ../models/
+cp qwen3-0.6b.gguf ../models/
 
 # Verify
-ls -lh ../models/nornicdb-cypher-expert-q4.gguf
+ls -lh ../models/qwen3-0.6b.gguf
 ```
 
 ### Use in NornicDB Go Code
@@ -149,7 +149,7 @@ import (
 func main() {
     // Load the trained model
     opts := localllm.DefaultGenerationOptions(
-        "../models/nornicdb-cypher-expert-q4.gguf",
+        "../models/qwen3-0.6b.gguf",
     )
     
     model, err := localllm.LoadGenerationModel(opts)
@@ -184,7 +184,7 @@ Test the model with real NornicDB queries:
 
 ```bash
 # Start NornicDB with your model
-./nornicdb --model-path models/nornicdb-cypher-expert-q4.gguf
+./nornicdb --model-path models/qwen3-0.6b.gguf
 
 # Test Cypher generation via API
 curl -X POST http://localhost:7474/db/cypher \
@@ -218,14 +218,14 @@ The export script automatically detects and merges LoRA adapters. If merge fails
 
 1. Check that the base model is accessible:
    ```bash
-   python3 -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('Qwen/Qwen2.5-0.5B-Instruct')"
+   python3 -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('Qwen/qwen3-0.6b-Instruct')"
    ```
 
 2. Manually merge first:
    ```bash
    python export_to_gguf.py \
        --model_dir models/nornicdb-cypher-expert \
-       --base_model Qwen/Qwen2.5-0.5B-Instruct \
+       --base_model Qwen/Qwen3-0.6B-Instruct \
        --merge_only \
        --output models/nornicdb-cypher-expert-merged
    ```

@@ -3,7 +3,7 @@
 #
 # This image includes:
 # - BGE-M3 embedding model for vector search
-# - Qwen2.5-0.5B-Instruct (Q4_K_M) for Heimdall (cognitive database guardian)
+# - qwen3-0.6b-Instruct (Q4_K_M) for Heimdall (cognitive database guardian)
 #
 # Build:
 #   docker build -f docker/Dockerfile.arm64-metal-heimdall -t timothyswt/nornicdb-arm64-metal-bge-heimdall .
@@ -110,7 +110,7 @@ COPY --from=builder /build/plugins/heimdall/built-plugins /app/plugins/heimdall/
 COPY docker/entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
-# Embed BOTH models: BGE-M3 (embeddings) and Qwen2.5-0.5B (Heimdall SLM)
+# Embed BOTH models: BGE-M3 (embeddings) and qwen3-0.6b (Heimdall SLM)
 # Using BuildKit mount to avoid layer bloat during COPY
 RUN --mount=type=bind,source=models,target=/models,ro \
     echo "=== Embedding models for batteries-included deployment ===" && \
@@ -121,12 +121,12 @@ RUN --mount=type=bind,source=models,target=/models,ro \
     else \
       echo "ERROR: models/bge-m3.gguf not found" && exit 1; \
     fi && \
-    # Qwen2.5-0.5B-Instruct for Heimdall (required for this build)
-    if [ -f /models/qwen2.5-0.5b-instruct.gguf ]; then \
-      cp /models/qwen2.5-0.5b-instruct.gguf /app/models/ && \
-      echo "✓ Embedded qwen2.5-0.5b-instruct.gguf ($(du -h /app/models/qwen2.5-0.5b-instruct.gguf | cut -f1))"; \
+    # qwen3-0.6b-Instruct for Heimdall (required for this build)
+    if [ -f /models/qwen3-0.6b-instruct.gguf ]; then \
+      cp /models/qwen3-0.6b-instruct.gguf /app/models/ && \
+      echo "✓ Embedded qwen3-0.6b-instruct.gguf ($(du -h /app/models/qwen3-0.6b-instruct.gguf | cut -f1))"; \
     else \
-      echo "ERROR: models/qwen2.5-0.5b-instruct.gguf not found - required for Heimdall" && exit 1; \
+      echo "ERROR: models/qwen3-0.6b-instruct.gguf not found - required for Heimdall" && exit 1; \
     fi && \
     echo "=== Model embedding complete ===" && \
     ls -lh /app/models/
@@ -148,7 +148,7 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_EMBEDDING_GPU_LAYERS=0 \
     # Heimdall configuration (cognitive guardian)
     NORNICDB_HEIMDALL_ENABLED=true \
-    NORNICDB_HEIMDALL_MODEL=qwen2.5-0.5b-instruct \
+    NORNICDB_HEIMDALL_MODEL=qwen3-0.6b-instruct \
     NORNICDB_HEIMDALL_GPU_LAYERS=-1 \
     NORNICDB_HEIMDALL_MAX_TOKENS=512 \
     NORNICDB_HEIMDALL_TEMPERATURE=0.1 \

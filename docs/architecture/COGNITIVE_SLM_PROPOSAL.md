@@ -106,14 +106,14 @@ type SLMResponse struct {
 
 | Model | Size | License | Strengths | Use Case |
 |-------|------|---------|-----------|----------|
-| **Qwen2.5-0.5B-Instruct** | 0.5B | Apache 2.0 | Excellent structured output, fast | Primary choice |
+| **qwen3-0.6b-Instruct** | 0.5B | Apache 2.0 | Excellent structured output, fast | Primary choice |
 | **Qwen2.5-1.5B-Instruct** | 1.5B | Apache 2.0 | Better reasoning, still fast | If 0.5B insufficient |
 | **Qwen2.5-3B-Instruct** | 3B | Apache 2.0 | Best reasoning | Complex tasks |
 | **SmolLM2-360M-Instruct** | 360M | Apache 2.0 | Ultra-fast, tiny | Simple classification |
 | **Phi-3.5-mini-instruct** | 3.8B | MIT | Strong reasoning | Alternative to Qwen |
 | **TinyLlama-1.1B** | 1.1B | Apache 2.0 | Proven stable | Fallback option |
 
-### 2.2 Why Qwen2.5-0.5B is the Primary Recommendation
+### 2.2 Why qwen3-0.6b is the Primary Recommendation
 
 1. **Structured Output Excellence**: Qwen2.5 family excels at JSON/structured generation
 2. **Size/Performance Balance**: 0.5B runs in ~500MB VRAM quantized (Q4_K_M)
@@ -492,7 +492,7 @@ NORNICDB_HEIMDALL_ENABLED=true
 NORNICDB_MODELS_DIR=/data/models
 
 # Model Selection (without .gguf extension)
-NORNICDB_HEIMDALL_MODEL=qwen2.5-0.5b-instruct
+NORNICDB_HEIMDALL_MODEL=qwen3-0.6b-instruct
 
 # GPU Configuration
 NORNICDB_HEIMDALL_GPU_LAYERS=-1           # -1 = auto (all on GPU, fallback to CPU)
@@ -630,7 +630,7 @@ if err != nil {
 │              GPU Memory Budget (8GB Total)                   │
 ├─────────────────────────────────────────────────────────────┤
 │  BGE-M3 Embedding (Q4_K_M)     │  ~600MB                    │
-│  Qwen2.5-0.5B (Q4_K_M)         │  ~350MB                    │
+│  qwen3-0.6b (Q4_K_M)         │  ~350MB                    │
 │  KV Cache (both models)        │  ~200MB                    │
 │  System Reserve                │  ~512MB                    │
 │  ─────────────────────────────────────────────              │
@@ -645,7 +645,7 @@ if err != nil {
 
 For systems without GPU:
 - BGE-M3: ~10-50ms per embedding (acceptable)
-- Qwen2.5-0.5B: ~100-500ms per generation (acceptable for background tasks)
+- qwen3-0.6b: ~100-500ms per generation (acceptable for background tasks)
 
 Recommendation: Run SLM subsystems on separate thread pool to not block queries.
 
@@ -657,7 +657,7 @@ Recommendation: Run SLM subsystems on separate thread pool to not block queries.
 
 ```bash
 # Primary: HuggingFace (official quantizations)
-https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF
+https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF
 https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF
 
 # Alternative: TheBloke quantizations (community)
@@ -673,13 +673,13 @@ https://huggingface.co/TheBloke/
 MODEL_DIR="${NORNICDB_MODELS_DIR:-/data/models}"
 mkdir -p "$MODEL_DIR"
 
-# Download Qwen2.5-0.5B-Instruct (Q4_K_M)
-wget -O "$MODEL_DIR/qwen2.5-0.5b-instruct.gguf" \
-  "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+# Download qwen3-0.6b-Instruct (Q4_K_M)
+wget -O "$MODEL_DIR/qwen3-0.6b-instruct.gguf" \
+  "https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"
 
 # Verify checksum
 echo "Expected SHA256: <checksum>"
-sha256sum "$MODEL_DIR/qwen2.5-0.5b-instruct.gguf"
+sha256sum "$MODEL_DIR/qwen3-0.6b-instruct.gguf"
 
 echo "✅ SLM model downloaded to $MODEL_DIR"
 ```
@@ -736,12 +736,12 @@ Embedding a reasoning SLM alongside the embedding model transforms NornicDB into
 | Model | Params | VRAM (Q4_K_M) | Tokens/sec (M2) | JSON Accuracy |
 |-------|--------|---------------|-----------------|---------------|
 | SmolLM2-360M | 360M | ~200MB | ~150 | 85% |
-| Qwen2.5-0.5B | 0.5B | ~350MB | ~100 | 94% |
+| qwen3-0.6b | 0.5B | ~350MB | ~100 | 94% |
 | Qwen2.5-1.5B | 1.5B | ~900MB | ~50 | 97% |
 | Qwen2.5-3B | 3B | ~1.8GB | ~25 | 98% |
 | Phi-3.5-mini | 3.8B | ~2.2GB | ~20 | 96% |
 
-**Recommendation**: Start with Qwen2.5-0.5B. Upgrade to 1.5B if JSON accuracy is insufficient.
+**Recommendation**: Start with qwen3-0.6b. Upgrade to 1.5B if JSON accuracy is insufficient.
 
 ---
 
@@ -816,7 +816,7 @@ All models (embedding + reasoning SLM) live in the same directory:
 ```
 ${NORNICDB_MODELS_DIR}/          # Default: /data/models
 ├── bge-m3.gguf                  # Embedding model (existing)
-├── qwen2.5-0.5b-instruct.gguf   # Reasoning SLM (new)
+├── qwen3-0.6b-instruct.gguf   # Reasoning SLM (new)
 ├── qwen2.5-1.5b-instruct.gguf   # Alternative larger SLM
 └── custom-finetuned.gguf        # User's custom model
 ```
@@ -900,7 +900,7 @@ func (r *ModelRegistry) inferModelType(name string) ModelType {
 # Environment Variables
 NORNICDB_MODELS_DIR=/data/models              # Shared models directory
 NORNICDB_EMBEDDING_MODEL=bge-m3               # Embedding model name
-NORNICDB_HEIMDALL_MODEL=qwen2.5-0.5b-instruct      # Reasoning SLM name
+NORNICDB_HEIMDALL_MODEL=qwen3-0.6b-instruct      # Reasoning SLM name
 NORNICDB_HEIMDALL_FALLBACK_MODEL=tinyllama-1.1b    # Fallback if primary OOM
 ```
 
@@ -933,7 +933,7 @@ A translucent terminal-style chat interface for direct SLM interaction:
 │                    NornicDB Admin                               │
 ├─────────────────────────────────────────────────────────────────┤
 │  ┌──────────────────────────────────────────────────────────┐   │
-│  │  🧠 Bifrost                   [qwen2.5-0.5b] ▼  ─ □ x    │   │
+│  │  🧠 Bifrost                   [qwen3-0.6b] ▼  ─ □ x    │   │
 │  ├──────────────────────────────────────────────────────────┤   │
 │  │  #nornicdb-slm                                           │   │
 │  │                                                          │   │
@@ -982,7 +982,7 @@ interface SLMPortalProps {
 export const SLMPortal: React.FC<SLMPortalProps> = ({ 
   isOpen, 
   onClose,
-  modelName = 'qwen2.5-0.5b'
+  modelName = 'qwen3-0.6b'
 }) => {
   const [messages, setMessages] = useState<Message[]>([
     { id: '0', role: 'system', content: '#nornicdb-slm\n\nCognitive Database Assistant Ready', timestamp: new Date() }
@@ -1167,7 +1167,7 @@ export const SLMPortal: React.FC<SLMPortalProps> = ({
               </div>
               <div className="slm-portal-model">
                 <select defaultValue={modelName}>
-                  <option value="qwen2.5-0.5b">qwen2.5-0.5b</option>
+                  <option value="qwen3-0.6b">qwen3-0.6b</option>
                   <option value="qwen2.5-1.5b">qwen2.5-1.5b</option>
                   <option value="phi-3.5-mini">phi-3.5-mini</option>
                 </select>

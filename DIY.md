@@ -24,7 +24,7 @@ This file lists copy-pastable commands (Makefile targets and Docker/run examples
 
 Model files (Makefile helpers):
 - BGE: `models/bge-m3.gguf` — `make download-bge`
-- Qwen: `models/qwen2.5-0.5b-instruct.gguf` — `make download-qwen`
+- Qwen: `models/qwen3-0.6b-instruct.gguf` — `make download-qwen`
 
 ---
 

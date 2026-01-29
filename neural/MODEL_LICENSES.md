@@ -29,7 +29,7 @@ All base models used for fine-tuning with **permissive licenses** that allow com
 
 | Model | Size | Context | License | Use Case |
 |-------|------|---------|---------|----------|
-| [Qwen2.5-0.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct) | 0.5B | 32K | Apache 2.0 | Ultra-efficient, specific tasks |
+| [qwen3-0.6b-Instruct](https://huggingface.co/Qwen/qwen3-0.6b-Instruct) | 0.5B | 32K | Apache 2.0 | Ultra-efficient, specific tasks |
 | [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) | 1.5B | 32K | Apache 2.0 | **Heimdall default**, balanced |
 | [Qwen2.5-3B-Instruct](https://huggingface.co/Qwen/Qwen2.5-3B-Instruct) | 3B | 32K | Apache 2.0 | Better quality, needs QLoRA |
 | [Qwen2.5-7B-Instruct](https://huggingface.co/Qwen/Qwen2.5-7B-Instruct) | 7B | 128K | Apache 2.0 | Best quality, requires >16GB VRAM |

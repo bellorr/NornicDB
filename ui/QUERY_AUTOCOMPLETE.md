@@ -20,7 +20,7 @@ The Query Autocomplete feature uses Bifrost (Heimdall's AI assistant) to provide
 
 ## Features
 
-- ✅ **AI-Powered**: Uses the instruct model (qwen2.5-0.5b-instruct) for intelligent suggestions
+- ✅ **AI-Powered**: Uses the instruct model (qwen3-0.6b-instruct) for intelligent suggestions
 - ✅ **Debounced**: Prevents excessive API calls while typing
 - ✅ **Keyboard Navigation**: Full keyboard support for accessibility
 - ✅ **Toggleable**: Can be enabled/disabled via the lightning bolt icon
@@ -57,7 +57,7 @@ The feature uses the existing Bifrost chat completions endpoint:
 ```typescript
 POST /api/bifrost/chat/completions
 {
-  "model": "qwen2.5-0.5b-instruct",
+  "model": "qwen3-0.6b-instruct",
   "messages": [{
     "role": "user",
     "content": "Complete this Cypher query: ..."
@@ -71,7 +71,7 @@ POST /api/bifrost/chat/completions
 ## Configuration
 
 - **Debounce Delay**: 800ms (configurable in `QueryAutocomplete.tsx`)
-- **Model**: `qwen2.5-0.5b-instruct` (default, can be changed)
+- **Model**: `qwen3-0.6b-instruct` (default, can be changed)
 - **Temperature**: 0.3 (lower for more focused suggestions)
 - **Max Tokens**: 256 (sufficient for query completions)
 
