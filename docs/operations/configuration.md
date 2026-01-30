@@ -199,6 +199,35 @@ Streaming (SSE) is supported for chat completions when the client requests it; t
 
 See [Heimdall AI Assistant](../user-guides/heimdall-ai-assistant.md) for full configuration, provider examples, and YAML.
 
+## Search Rerank (Stage-2 Reranking)
+
+Stage-2 reranking improves vector/hybrid search by re-scoring top candidates with a reranker model. It is **independent of Heimdall** and supports **local** (GGUF, like embeddings) or **external** (ollama/openai/http) providers.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NORNICDB_SEARCH_RERANK_ENABLED` | `false` | Enable Stage-2 reranking for vector/hybrid search |
+| `NORNICDB_SEARCH_RERANK_PROVIDER` | `local` | Backend: `local` (GGUF), `ollama`, `openai`, or `http` |
+| `NORNICDB_SEARCH_RERANK_MODEL` | (see below) | For **local**: GGUF filename (e.g. `bge-reranker-v2-m3-Q4_K_M.gguf`). For **API**: model name (e.g. `rerank-english-v3.0`) |
+| `NORNICDB_SEARCH_RERANK_API_URL` | (see below) | Rerank API URL for non-local (default for `ollama`: `http://localhost:11434/rerank`) |
+| `NORNICDB_SEARCH_RERANK_API_KEY` | (empty) | API key for Cohere, OpenAI, etc. |
+
+Local models live in `NORNICDB_MODELS_DIR` (default `./models`). Download the default reranker with `make download-bge-reranker`.
+
+**Env var invocation:** Use `export NORNICDB_SEARCH_RERANK_ENABLED=true` (and other vars) before running `./nornicdb serve`, or put all vars on one logical line with backslashes—otherwise the shell may run each line as a separate command and only the last line’s vars are passed to the process.
+
+**YAML:**
+
+```yaml
+search_rerank:
+  enabled: true
+  provider: local   # local | ollama | openai | http
+  model: bge-reranker-v2-m3-Q4_K_M.gguf
+  api_url: ""
+  api_key: ""
+```
+
+See [Cross-Encoder Reranking](../features/cross-encoder-reranking.md) for full configuration, local GGUF vs external API, and examples.
+
 ## Memory Decay Configuration
 
 ```yaml

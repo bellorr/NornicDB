@@ -526,6 +526,26 @@ type FeatureFlagsConfig struct {
 	// Environment: NORNICDB_HEIMDALL_MEMORY_CURATION (default: false)
 	HeimdallMemoryCuration bool
 
+	// === Search Rerank (Stage-2 reranking, independent of Heimdall) ===
+	// Reranking can use a local GGUF model (like embeddings) or an external API
+	// (ollama/openai/cohere/HTTP), similar to Heimdall and embeddings.
+
+	// SearchRerankEnabled enables Stage-2 reranking for vector/hybrid search.
+	// Environment: NORNICDB_SEARCH_RERANK_ENABLED (default: false)
+	SearchRerankEnabled bool
+	// SearchRerankProvider: "local" (GGUF), "ollama", "openai", or "http" (Cohere/HuggingFace TEI/custom).
+	// Environment: NORNICDB_SEARCH_RERANK_PROVIDER (default: local)
+	SearchRerankProvider string
+	// SearchRerankModel: for local = GGUF filename (e.g. bge-reranker-v2-m3-Q4_K_M.gguf); for API = model name/id.
+	// Environment: NORNICDB_SEARCH_RERANK_MODEL
+	SearchRerankModel string
+	// SearchRerankAPIURL is the rerank API endpoint for ollama/openai/http (e.g. http://localhost:11434/rerank, https://api.cohere.ai/v1/rerank).
+	// Environment: NORNICDB_SEARCH_RERANK_API_URL
+	SearchRerankAPIURL string
+	// SearchRerankAPIKey for authenticated providers (e.g. OpenAI, Cohere).
+	// Environment: NORNICDB_SEARCH_RERANK_API_KEY
+	SearchRerankAPIKey string
+
 	// === Token Budget Settings for Heimdall Prompt Construction ===
 	// These control how the context window is partitioned between system prompt,
 	// user message, and generation output. Tune these if you see truncation or
@@ -1046,6 +1066,21 @@ func legacyLoadFromEnv() *Config {
 	if v := os.Getenv("NORNICDB_HEIMDALL_MEMORY_CURATION"); v != "" {
 		config.Features.HeimdallMemoryCuration = v == "true" || v == "1"
 	}
+	if v := os.Getenv("NORNICDB_SEARCH_RERANK_ENABLED"); v != "" {
+		config.Features.SearchRerankEnabled = v == "true" || v == "1"
+	}
+	if v := os.Getenv("NORNICDB_SEARCH_RERANK_PROVIDER"); v != "" {
+		config.Features.SearchRerankProvider = strings.TrimSpace(strings.ToLower(v))
+	}
+	if v := os.Getenv("NORNICDB_SEARCH_RERANK_MODEL"); v != "" {
+		config.Features.SearchRerankModel = v
+	}
+	if v := os.Getenv("NORNICDB_SEARCH_RERANK_API_URL"); v != "" {
+		config.Features.SearchRerankAPIURL = v
+	}
+	if v := os.Getenv("NORNICDB_SEARCH_RERANK_API_KEY"); v != "" {
+		config.Features.SearchRerankAPIKey = v
+	}
 
 	// Token budget settings for prompt construction
 	config.Features.HeimdallMaxContextTokens = getEnvInt("NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS", 8192) // Match context size
@@ -1274,6 +1309,15 @@ type YAMLConfig struct {
 		MaxSystemTokens  int     `yaml:"max_system_tokens"`
 		MaxUserTokens    int     `yaml:"max_user_tokens"`
 	} `yaml:"heimdall"`
+
+	// Search rerank (Stage-2 reranking: local GGUF or external API like embeddings/Heimdall).
+	SearchRerank struct {
+		Enabled  bool   `yaml:"enabled"`
+		Provider string `yaml:"provider"` // local, ollama, openai, http
+		Model    string `yaml:"model"`
+		APIURL   string `yaml:"api_url"`
+		APIKey   string `yaml:"api_key"`
+	} `yaml:"search_rerank"`
 
 	// Feature flags (subset supported in YAML).
 	Features struct {
@@ -1507,6 +1551,11 @@ func LoadDefaults() *Config {
 	config.Features.HeimdallAnomalyDetection = false
 	config.Features.HeimdallRuntimeDiagnosis = false
 	config.Features.HeimdallMemoryCuration = false
+	config.Features.SearchRerankEnabled = false
+	config.Features.SearchRerankProvider = "local"
+	config.Features.SearchRerankModel = "bge-reranker-v2-m3"
+	config.Features.SearchRerankAPIURL = ""
+	config.Features.SearchRerankAPIKey = ""
 	config.Features.HeimdallMaxContextTokens = 8192
 	config.Features.HeimdallMaxSystemTokens = 6000
 	config.Features.HeimdallMaxUserTokens = 2000
@@ -1992,6 +2041,21 @@ func applyEnvVars(config *Config) {
 	if getEnv("NORNICDB_HEIMDALL_MEMORY_CURATION", "") == "true" {
 		config.Features.HeimdallMemoryCuration = true
 	}
+	if getEnv("NORNICDB_SEARCH_RERANK_ENABLED", "") == "true" {
+		config.Features.SearchRerankEnabled = true
+	}
+	if v := getEnv("NORNICDB_SEARCH_RERANK_PROVIDER", ""); v != "" {
+		config.Features.SearchRerankProvider = strings.TrimSpace(strings.ToLower(v))
+	}
+	if v := getEnv("NORNICDB_SEARCH_RERANK_MODEL", ""); v != "" {
+		config.Features.SearchRerankModel = v
+	}
+	if v := getEnv("NORNICDB_SEARCH_RERANK_API_URL", ""); v != "" {
+		config.Features.SearchRerankAPIURL = v
+	}
+	if v := getEnv("NORNICDB_SEARCH_RERANK_API_KEY", ""); v != "" {
+		config.Features.SearchRerankAPIKey = v
+	}
 	if v := getEnvInt("NORNICDB_HEIMDALL_MAX_CONTEXT_TOKENS", 0); v > 0 {
 		config.Features.HeimdallMaxContextTokens = v
 	}
@@ -2412,6 +2476,23 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Heimdall.MaxUserTokens > 0 {
 		config.Features.HeimdallMaxUserTokens = yamlCfg.Heimdall.MaxUserTokens
+	}
+
+	// Search rerank settings
+	if yamlCfg.SearchRerank.Enabled {
+		config.Features.SearchRerankEnabled = true
+	}
+	if yamlCfg.SearchRerank.Provider != "" {
+		config.Features.SearchRerankProvider = strings.TrimSpace(strings.ToLower(yamlCfg.SearchRerank.Provider))
+	}
+	if yamlCfg.SearchRerank.Model != "" {
+		config.Features.SearchRerankModel = yamlCfg.SearchRerank.Model
+	}
+	if yamlCfg.SearchRerank.APIURL != "" {
+		config.Features.SearchRerankAPIURL = yamlCfg.SearchRerank.APIURL
+	}
+	if yamlCfg.SearchRerank.APIKey != "" {
+		config.Features.SearchRerankAPIKey = yamlCfg.SearchRerank.APIKey
 	}
 
 	// Qdrant gRPC settings

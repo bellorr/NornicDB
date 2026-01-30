@@ -28,6 +28,7 @@ type Service struct {
 
 	defaultDatabase string
 	maxLimit        int
+	rerankEnabled   bool
 
 	embedQuery EmbedQueryFunc
 	searcher   Searcher
@@ -36,6 +37,8 @@ type Service struct {
 type Config struct {
 	DefaultDatabase string
 	MaxLimit        int
+	// RerankEnabled enables Stage-2 reranking for search when a reranker is configured.
+	RerankEnabled bool
 }
 
 // NewService creates a NornicDB-native search service.
@@ -52,6 +55,7 @@ func NewService(cfg Config, embedQuery EmbedQueryFunc, searcher Searcher) (*Serv
 	return &Service{
 		defaultDatabase: cfg.DefaultDatabase,
 		maxLimit:        cfg.MaxLimit,
+		rerankEnabled:   cfg.RerankEnabled,
 		embedQuery:      embedQuery,
 		searcher:        searcher,
 	}, nil
@@ -77,6 +81,7 @@ func (s *Service) SearchText(ctx context.Context, req *gen.SearchTextRequest) (*
 
 	opts := search.DefaultSearchOptions()
 	opts.Limit = limit
+	opts.RerankEnabled = s.rerankEnabled
 	if len(req.Labels) > 0 {
 		opts.Types = req.Labels
 	}

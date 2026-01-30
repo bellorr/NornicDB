@@ -123,7 +123,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 		}
 		node.ID = actualID
-		e.notifyNodeCreated(string(node.ID))
+		e.notifyNodeMutated(string(node.ID))
 		result.Stats.NodesCreated = 1
 
 		if varName == "" {
@@ -168,6 +168,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			setClause := strings.TrimSpace(cypher[onMatchIdx+13 : setEnd])
 			e.applySetToNode(node, varName, setClause)
 			store.UpdateNode(node)
+			e.notifyNodeMutated(string(node.ID))
 		}
 	} else {
 		// Node doesn't exist - create it
@@ -181,7 +182,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 		}
 		node.ID = actualID
-		e.notifyNodeCreated(string(node.ID))
+		e.notifyNodeMutated(string(node.ID))
 		result.Stats.NodesCreated = 1
 
 		// Apply ON CREATE SET if present
@@ -213,6 +214,7 @@ func (e *StorageExecutor) executeMerge(ctx context.Context, cypher string) (*Exe
 	// Persist updates
 	if existingNode != nil || setIdx > 0 || onCreateIdx > 0 {
 		store.UpdateNode(node)
+		e.notifyNodeMutated(string(node.ID))
 	}
 
 	// Handle RETURN clause
@@ -761,6 +763,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 			setClause := strings.TrimSpace(cypher[onMatchIdx+13 : setEnd])
 			e.applySetToNodeWithContext(node, varName, setClause, nodeContext, relContext)
 		store.UpdateNode(node)
+			e.notifyNodeMutated(string(node.ID))
 		}
 	} else {
 		node = &storage.Node{
@@ -773,7 +776,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 			return nil, fmt.Errorf("failed to create node in MERGE: %w", err)
 		}
 		node.ID = actualID
-		e.notifyNodeCreated(string(node.ID))
+		e.notifyNodeMutated(string(node.ID))
 		result.Stats.NodesCreated = 1
 
 		if onCreateIdx > 0 {
@@ -807,6 +810,7 @@ func (e *StorageExecutor) executeMergeWithContext(ctx context.Context, cypher st
 
 	// Save updates
 	store.UpdateNode(node)
+	e.notifyNodeMutated(string(node.ID))
 
 	// Add this node to context for subsequent MERGEs
 	nodeContext[varName] = node
@@ -1558,6 +1562,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			setClause := strings.TrimSpace(segment[onMatchIdx+12 : setEnd])
 			e.applySetToNode(node, varName, setClause)
 			store.UpdateNode(node)
+			e.notifyNodeMutated(string(node.ID))
 		}
 	} else {
 		// Create new node
@@ -1571,7 +1576,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			return nil, "", fmt.Errorf("failed to create node: %w", err)
 		}
 		node.ID = actualID
-		e.notifyNodeCreated(string(node.ID))
+		e.notifyNodeMutated(string(node.ID))
 
 		// Apply ON CREATE SET if present
 		onCreateIdx := findKeywordIndex(segment, "ON CREATE SET")
@@ -1584,6 +1589,7 @@ func (e *StorageExecutor) executeMergeNodeSegment(ctx context.Context, segment s
 			setClause := strings.TrimSpace(segment[onCreateIdx+13 : setEnd])
 			e.applySetToNode(node, varName, setClause)
 			store.UpdateNode(node)
+			e.notifyNodeMutated(string(node.ID))
 		}
 	}
 

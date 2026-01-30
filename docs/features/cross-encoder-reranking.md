@@ -4,7 +4,7 @@
 
 ## Overview
 
-Cross-encoder reranking is an optional Stage 2 retrieval step that improves search quality by re-scoring candidates with a more accurate (but slower) model.
+Cross-encoder reranking is an optional Stage 2 retrieval step that improves search quality by re-scoring candidates with a more accurate (but slower) model. Reranking is **independent of Heimdall** and can use a **local GGUF model** (like embeddings) or an **external API** (Cohere, HuggingFace TEI, Ollama adapter), similar to how embeddings and Heimdall support multiple providers.
 
 ### How It Works
 
@@ -52,6 +52,99 @@ Imagine finding a book in a library:
 - **Stage 1 (Bi-encoder)**: Using the card catalog to find 100 potentially relevant books. Fast, but might miss nuances.
 - **Stage 2 (Cross-encoder)**: Actually reading each book's summary to pick the best 10. More accurate, but takes longer.
 
+## Server Configuration
+
+When reranking is **enabled**, the server loads the configured reranker at startup (local GGUF asynchronously, external API immediately). Search requests then use Stage-2 reranking when `opts.RerankEnabled` is true (set from config for HTTP and gRPC search).
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NORNICDB_SEARCH_RERANK_ENABLED` | `false` | Enable Stage-2 reranking for vector/hybrid search |
+| `NORNICDB_SEARCH_RERANK_PROVIDER` | `local` | Backend: `local` (GGUF), `ollama`, `openai`, or `http` |
+| `NORNICDB_SEARCH_RERANK_MODEL` | (see below) | For **local**: GGUF filename (e.g. `bge-reranker-v2-m3-Q4_K_M.gguf`). For **API**: model name/id (e.g. `rerank-english-v3.0`) |
+| `NORNICDB_SEARCH_RERANK_API_URL` | (see below) | Rerank API endpoint for non-local providers (required when provider ≠ local; default for `ollama`: `http://localhost:11434/rerank`) |
+| `NORNICDB_SEARCH_RERANK_API_KEY` | (empty) | API key for authenticated providers (e.g. Cohere, OpenAI) |
+
+Models directory for **local** provider: `NORNICDB_MODELS_DIR` (default `./models`). Download the default reranker with:
+
+```bash
+make download-bge-reranker
+```
+
+### YAML Configuration
+
+```yaml
+search_rerank:
+  enabled: true
+  provider: local   # local | ollama | openai | http
+  model: bge-reranker-v2-m3-Q4_K_M.gguf   # GGUF filename (local) or API model name
+  api_url: ""       # For ollama/openai/http (e.g. https://api.cohere.ai/v1/rerank)
+  api_key: ""       # For Cohere, OpenAI, etc.
+```
+
+### Local GGUF (BGE-Reranker-v2-m3)
+
+With `provider: local`, NornicDB loads a BGE-style reranker GGUF from the models directory (same pattern as the embedding model). Default model: `bge-reranker-v2-m3-Q4_K_M.gguf`.
+
+```bash
+# Download the default reranker model
+make download-bge-reranker
+
+# Enable and run (uses ./models by default)
+export NORNICDB_SEARCH_RERANK_ENABLED=true
+export NORNICDB_SEARCH_RERANK_PROVIDER=local
+# Optional: NORNICDB_SEARCH_RERANK_MODEL=bge-reranker-v2-m3-Q4_K_M.gguf
+# Optional: NORNICDB_MODELS_DIR=./models
+./nornicdb serve
+```
+
+**Tip:** If you set env vars on the same line as the command (without `export`), every variable must be on one logical line using backslashes. Otherwise the shell runs each line as a separate command and only the last line’s vars are passed to `nornicdb`:
+
+```bash
+# ✅ Correct: all vars passed to nornicdb
+NORNICDB_SEARCH_RERANK_ENABLED=true \
+NORNICDB_SEARCH_RERANK_PROVIDER=local \
+./bin/nornicdb serve
+
+# ❌ Wrong: NORNICDB_SEARCH_RERANK_* are not passed (they run as separate commands)
+NORNICDB_SEARCH_RERANK_ENABLED=true
+NORNICDB_SEARCH_RERANK_PROVIDER=local
+NORNICDB_HEIMDALL_ENABLED=true \
+./bin/nornicdb serve
+```
+
+### External Providers (ollama / openai / http)
+
+Use an HTTP rerank API (Cohere, HuggingFace TEI, or a custom/Ollama adapter). Set provider and API URL; for authenticated APIs, set the API key.
+
+**Cohere:**
+
+```bash
+export NORNICDB_SEARCH_RERANK_ENABLED=true
+export NORNICDB_SEARCH_RERANK_PROVIDER=http
+export NORNICDB_SEARCH_RERANK_API_URL=https://api.cohere.ai/v1/rerank
+export NORNICDB_SEARCH_RERANK_API_KEY=your_cohere_key
+export NORNICDB_SEARCH_RERANK_MODEL=rerank-english-v3.0
+```
+
+**HuggingFace TEI (e.g. local container):**
+
+```bash
+export NORNICDB_SEARCH_RERANK_ENABLED=true
+export NORNICDB_SEARCH_RERANK_PROVIDER=http
+export NORNICDB_SEARCH_RERANK_API_URL=http://localhost:8080/rerank
+export NORNICDB_SEARCH_RERANK_MODEL=cross-encoder/ms-marco-MiniLM-L-6-v2
+```
+
+**Ollama (if you run a rerank adapter on the Ollama port):**
+
+```bash
+export NORNICDB_SEARCH_RERANK_ENABLED=true
+export NORNICDB_SEARCH_RERANK_PROVIDER=ollama
+# NORNICDB_SEARCH_RERANK_API_URL defaults to http://localhost:11434/rerank
+```
+
 ## Quick Start
 
 ### Enable via Search Options
@@ -65,11 +158,13 @@ opts.RerankMinScore = 0.3 // Filter low-confidence results
 results, err := svc.Search(ctx, query, embedding, opts)
 ```
 
-### Configure the Cross-Encoder
+### Configure the Reranker Programmatically
+
+When you build the server yourself (e.g. tests or custom binary), you can set the reranker via `db.SetSearchReranker(...)`. For **HTTP/API** rerankers use `CrossEncoder`:
 
 ```go
-// Configure cross-encoder service
-svc.SetCrossEncoder(search.NewCrossEncoder(&search.CrossEncoderConfig{
+// Configure cross-encoder (HTTP API) service
+svc.SetReranker(search.NewCrossEncoder(&search.CrossEncoderConfig{
     Enabled:  true,
     APIURL:   "http://localhost:8081/rerank",
     Model:    "cross-encoder/ms-marco-MiniLM-L-6-v2",
@@ -79,7 +174,9 @@ svc.SetCrossEncoder(search.NewCrossEncoder(&search.CrossEncoderConfig{
 }))
 ```
 
-## Configuration Options
+For **local GGUF**, use `search.NewLocalReranker(localllm.RerankerModel, config)`; the standard server does this automatically when `NORNICDB_SEARCH_RERANK_ENABLED=true` and `NORNICDB_SEARCH_RERANK_PROVIDER=local`.
+
+## CrossEncoderConfig Options (HTTP/API)
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -92,6 +189,10 @@ svc.SetCrossEncoder(search.NewCrossEncoder(&search.CrossEncoderConfig{
 | `MinScore` | `0.0` | Minimum score threshold |
 
 ## Supported Reranking Services
+
+### Local GGUF (BGE-Reranker-v2-m3)
+
+Configure via **server config** (env or YAML). No code required: set `NORNICDB_SEARCH_RERANK_ENABLED=true`, `NORNICDB_SEARCH_RERANK_PROVIDER=local`, and ensure the model is in `NORNICDB_MODELS_DIR` (e.g. `make download-bge-reranker`). See [Server Configuration](#server-configuration) above.
 
 ### Cohere Rerank API
 
@@ -120,15 +221,9 @@ ce := search.NewCrossEncoder(&search.CrossEncoderConfig{
 })
 ```
 
-### Local Models (llama.cpp with reranking)
+### Local GGUF (in-process)
 
-```go
-ce := search.NewCrossEncoder(&search.CrossEncoderConfig{
-    Enabled: true,
-    APIURL:  "http://localhost:8081/rerank",
-    Model:   "bge-reranker-base",
-})
-```
+Use **server config** with `provider: local` and a GGUF path (e.g. BGE-Reranker-v2-m3). The server loads the model into memory like the embedding model. For an **external** HTTP service that runs a reranker (e.g. HuggingFace TEI or a custom adapter), use `provider: http` and set `api_url` to the rerank endpoint.
 
 ## Response Format
 
@@ -224,11 +319,11 @@ The search method will show: `rrf_hybrid+mmr+rerank`
 
 ## Monitoring
 
-Check if cross-encoder is available:
+Check if any Stage-2 reranker is available (local GGUF or cross-encoder):
 
 ```go
-if svc.CrossEncoderAvailable(ctx) {
-    log.Println("Cross-encoder ready")
+if svc.RerankerAvailable(ctx) {
+    log.Println("Reranker ready")
 }
 ```
 
@@ -251,15 +346,15 @@ The cross-encoder gracefully falls back to original rankings on errors:
 
 No error is returned to the caller - the search continues with best-effort results.
 
-## Popular Cross-Encoder Models
+## Popular Reranker Models
 
-| Model | Size | Quality | Speed |
-|-------|------|---------|-------|
-| `cross-encoder/ms-marco-MiniLM-L-6-v2` | 22M | Good | Fast |
-| `cross-encoder/ms-marco-TinyBERT-L-6` | 14M | Good | Fastest |
-| `BAAI/bge-reranker-base` | 278M | Better | Medium |
-| `BAAI/bge-reranker-large` | 560M | Best | Slow |
-| `Cohere rerank-english-v3.0` | - | Best | API |
+| Model | Provider | Quality | Speed |
+|-------|----------|---------|-------|
+| `bge-reranker-v2-m3-Q4_K_M.gguf` | Local (default) | Excellent | Medium |
+| `cross-encoder/ms-marco-MiniLM-L-6-v2` | HuggingFace TEI | Good | Fast |
+| `cross-encoder/ms-marco-TinyBERT-L-6` | HuggingFace TEI | Good | Fastest |
+| `BAAI/bge-reranker-base` | TEI / HTTP | Better | Medium |
+| `Cohere rerank-english-v3.0` | Cohere API | Best | API |
 
 ## Related Documentation
 
@@ -270,4 +365,4 @@ No error is returned to the caller - the search continues with best-effort resul
 
 ---
 
-_Cross-Encoder Reranking v1.0 - December 2025_
+_Cross-Encoder Reranking v1.1 - January 2026 (local GGUF + external providers)_

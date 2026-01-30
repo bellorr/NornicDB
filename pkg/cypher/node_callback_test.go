@@ -10,8 +10,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestNodeCreatedCallbackOnCreate verifies the callback is invoked when nodes are created via CREATE
-func TestNodeCreatedCallbackOnCreate(t *testing.T) {
+// TestNodeMutatedCallbackOnCreate verifies the callback is invoked when nodes are created via CREATE
+func TestNodeMutatedCallbackOnCreate(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -22,7 +22,7 @@ func TestNodeCreatedCallbackOnCreate(t *testing.T) {
 	createdNodeIDs := []string{}
 
 	// Set up callback to track created nodes
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		createdNodeIDs = append(createdNodeIDs, nodeID)
@@ -37,8 +37,8 @@ func TestNodeCreatedCallbackOnCreate(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestNodeCreatedCallbackOnCreateMultiple verifies callback is invoked for each node in multi-node CREATE
-func TestNodeCreatedCallbackOnCreateMultiple(t *testing.T) {
+// TestNodeMutatedCallbackOnCreateMultiple verifies callback is invoked for each node in multi-node CREATE
+func TestNodeMutatedCallbackOnCreateMultiple(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -48,7 +48,7 @@ func TestNodeCreatedCallbackOnCreateMultiple(t *testing.T) {
 	var mu sync.Mutex
 	createdNodeIDs := []string{}
 
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		createdNodeIDs = append(createdNodeIDs, nodeID)
@@ -63,8 +63,8 @@ func TestNodeCreatedCallbackOnCreateMultiple(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestNodeCreatedCallbackOnCreateWithRelationship verifies callback for nodes created with relationships
-func TestNodeCreatedCallbackOnCreateWithRelationship(t *testing.T) {
+// TestNodeMutatedCallbackOnCreateWithRelationship verifies callback for nodes created with relationships
+func TestNodeMutatedCallbackOnCreateWithRelationship(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -74,7 +74,7 @@ func TestNodeCreatedCallbackOnCreateWithRelationship(t *testing.T) {
 	var mu sync.Mutex
 	createdNodeIDs := []string{}
 
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		createdNodeIDs = append(createdNodeIDs, nodeID)
@@ -89,8 +89,8 @@ func TestNodeCreatedCallbackOnCreateWithRelationship(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestNodeCreatedCallbackOnMergeCreate verifies callback is invoked when MERGE creates a new node
-func TestNodeCreatedCallbackOnMergeCreate(t *testing.T) {
+// TestNodeMutatedCallbackOnMergeCreate verifies callback is invoked when MERGE creates a new node
+func TestNodeMutatedCallbackOnMergeCreate(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -100,7 +100,7 @@ func TestNodeCreatedCallbackOnMergeCreate(t *testing.T) {
 	var mu sync.Mutex
 	createdNodeIDs := []string{}
 
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		createdNodeIDs = append(createdNodeIDs, nodeID)
@@ -115,8 +115,8 @@ func TestNodeCreatedCallbackOnMergeCreate(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestNodeCreatedCallbackOnMergeMatch verifies callback is NOT invoked when MERGE matches existing node
-func TestNodeCreatedCallbackOnMergeMatch(t *testing.T) {
+// TestNodeMutatedCallbackOnMergeMatch verifies callback is invoked when MERGE matches and persists (so embed queue can re-process on any mutation).
+func TestNodeMutatedCallbackOnMergeMatch(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -126,31 +126,32 @@ func TestNodeCreatedCallbackOnMergeMatch(t *testing.T) {
 	var mu sync.Mutex
 	createdNodeIDs := []string{}
 
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		createdNodeIDs = append(createdNodeIDs, nodeID)
 	})
 
-	// First MERGE creates the node
+	// First MERGE creates the node (1 callback)
 	_, err := exec.Execute(ctx, `MERGE (n:Person {name: 'Alice'})`, nil)
 	require.NoError(t, err)
 
 	mu.Lock()
 	initialCount := len(createdNodeIDs)
 	mu.Unlock()
+	require.Equal(t, 1, initialCount, "first MERGE create should trigger callback once")
 
-	// Second MERGE should match existing - no new callback
+	// Second MERGE matches existing; we still notify so embed queue can re-process on any mutation (2 callbacks total).
 	_, err = exec.Execute(ctx, `MERGE (n:Person {name: 'Alice'})`, nil)
 	require.NoError(t, err)
 
 	mu.Lock()
-	assert.Equal(t, initialCount, len(createdNodeIDs), "MERGE matching existing node should not trigger callback")
+	assert.Equal(t, 2, len(createdNodeIDs), "MERGE match triggers callback so embeddings can be regenerated on any mutation")
 	mu.Unlock()
 }
 
-// TestNodeCreatedCallbackNotSet verifies no panic when callback is nil
-func TestNodeCreatedCallbackNotSet(t *testing.T) {
+// TestNodeMutatedCallbackNotSet verifies no panic when callback is nil
+func TestNodeMutatedCallbackNotSet(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -165,8 +166,8 @@ func TestNodeCreatedCallbackNotSet(t *testing.T) {
 	require.NoError(t, err, "MERGE should succeed even without callback set")
 }
 
-// TestNodeCreatedCallbackNodeIDsAreValid verifies the callback receives valid node IDs
-func TestNodeCreatedCallbackNodeIDsAreValid(t *testing.T) {
+// TestNodeMutatedCallbackNodeIDsAreValid verifies the callback receives valid node IDs
+func TestNodeMutatedCallbackNodeIDsAreValid(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -176,7 +177,7 @@ func TestNodeCreatedCallbackNodeIDsAreValid(t *testing.T) {
 	var mu sync.Mutex
 	createdNodeIDs := []string{}
 
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		createdNodeIDs = append(createdNodeIDs, nodeID)
@@ -197,8 +198,8 @@ func TestNodeCreatedCallbackNodeIDsAreValid(t *testing.T) {
 	}
 }
 
-// TestNodeCreatedCallbackConcurrentCreates verifies callback is thread-safe
-func TestNodeCreatedCallbackConcurrentCreates(t *testing.T) {
+// TestNodeMutatedCallbackConcurrentCreates verifies callback is thread-safe
+func TestNodeMutatedCallbackConcurrentCreates(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -208,7 +209,7 @@ func TestNodeCreatedCallbackConcurrentCreates(t *testing.T) {
 	var mu sync.Mutex
 	callbackCount := 0
 
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		callbackCount++
@@ -233,8 +234,8 @@ func TestNodeCreatedCallbackConcurrentCreates(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestNodeCreatedCallbackOnMatchCreate verifies callback for MATCH...CREATE pattern
-func TestNodeCreatedCallbackOnMatchCreate(t *testing.T) {
+// TestNodeMutatedCallbackOnMatchCreate verifies callback for MATCH...CREATE pattern
+func TestNodeMutatedCallbackOnMatchCreate(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -249,7 +250,7 @@ func TestNodeCreatedCallbackOnMatchCreate(t *testing.T) {
 	createdNodeIDs := []string{}
 
 	// Set callback after creating initial node
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		mu.Lock()
 		defer mu.Unlock()
 		createdNodeIDs = append(createdNodeIDs, nodeID)
@@ -268,8 +269,8 @@ func TestNodeCreatedCallbackOnMatchCreate(t *testing.T) {
 	mu.Unlock()
 }
 
-// TestSetNodeCreatedCallbackReplacesExisting verifies callback can be replaced
-func TestSetNodeCreatedCallbackReplacesExisting(t *testing.T) {
+// TestSetNodeMutatedCallbackReplacesExisting verifies callback can be replaced
+func TestSetNodeMutatedCallbackReplacesExisting(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -280,7 +281,7 @@ func TestSetNodeCreatedCallbackReplacesExisting(t *testing.T) {
 	callback2Count := 0
 
 	// Set first callback
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		callback1Count++
 	})
 
@@ -289,7 +290,7 @@ func TestSetNodeCreatedCallbackReplacesExisting(t *testing.T) {
 	assert.Equal(t, 0, callback2Count)
 
 	// Replace with second callback
-	exec.SetNodeCreatedCallback(func(nodeID string) {
+	exec.SetNodeMutatedCallback(func(nodeID string) {
 		callback2Count++
 	})
 

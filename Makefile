@@ -77,9 +77,11 @@ DOCKER_DIR := docker
 MODELS_DIR := models
 BGE_MODEL := $(MODELS_DIR)/bge-m3.gguf
 QWEN_MODEL := $(MODELS_DIR)/qwen3-0.6b-instruct.gguf
+BGE_RERANKER_MODEL := $(MODELS_DIR)/bge-reranker-v2-m3-Q4_K_M.gguf
 BGE_URL := https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
 # Ungated community mirror (single-file Q4_K_M). Official Qwen repo may require auth.
 QWEN_URL := https://huggingface.co/Triangle104/Qwen3-0.6B-Q4_K_M-GGUF/resolve/main/qwen3-0.6b-q4_k_m.gguf
+BGE_RERANKER_URL := https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf
 
 .PHONY: build-arm64-metal build-arm64-metal-bge build-arm64-metal-bge-heimdall build-arm64-metal-headless
 .PHONY: build-amd64-cuda build-amd64-cuda-bge build-amd64-cuda-bge-heimdall build-amd64-cuda-headless
@@ -99,7 +101,7 @@ QWEN_URL := https://huggingface.co/Triangle104/Qwen3-0.6B-Q4_K_M-GGUF/resolve/ma
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
 .PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
 .PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
-.PHONY: download-models download-bge download-qwen check-models
+.PHONY: download-models download-bge download-qwen download-bge-reranker check-models
 .PHONY: antlr-generate antlr-clean antlr-test antlr-test-full test-parsers
 
 # ==============================================================================
@@ -171,6 +173,34 @@ else
 		echo "Downloaded $(QWEN_MODEL)"; \
 	else \
 		echo "Qwen model already exists: $(QWEN_MODEL)"; \
+	fi
+endif
+
+# Download BGE-Reranker-v2-m3 for Stage-2 search reranking (NORNICDB_SEARCH_RERANK_ENABLED)
+download-bge-reranker: $(MODELS_DIR)
+ifeq ($(HOST_OS),windows)
+	@if not exist "$(BGE_RERANKER_MODEL)" ( \
+		echo =============================================================== && \
+		echo  Downloading BGE-Reranker-v2-m3 model... && \
+		echo =============================================================== && \
+		echo Source: $(BGE_RERANKER_URL) && \
+		echo Target: $(BGE_RERANKER_MODEL) && \
+		powershell -Command "Invoke-WebRequest -Uri '$(BGE_RERANKER_URL)' -OutFile '$(BGE_RERANKER_MODEL)'" && \
+		echo Downloaded $(BGE_RERANKER_MODEL) \
+	) else ( \
+		echo BGE-Reranker model already exists: $(BGE_RERANKER_MODEL) \
+	)
+else
+	@if [ ! -f "$(BGE_RERANKER_MODEL)" ]; then \
+		echo "==============================================================="; \
+		echo " Downloading BGE-Reranker-v2-m3 model..."; \
+		echo "==============================================================="; \
+		echo "Source: $(BGE_RERANKER_URL)"; \
+		echo "Target: $(BGE_RERANKER_MODEL)"; \
+		curl -L --progress-bar "$(BGE_RERANKER_URL)" -o "$(BGE_RERANKER_MODEL)"; \
+		echo "Downloaded $(BGE_RERANKER_MODEL)"; \
+	else \
+		echo "BGE-Reranker model already exists: $(BGE_RERANKER_MODEL)"; \
 	fi
 endif
 

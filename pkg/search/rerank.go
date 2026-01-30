@@ -53,6 +53,27 @@ import (
 	"time"
 )
 
+// Reranker is a Stage-2 reranking component.
+//
+// Implementations MUST be fail-open: if reranking cannot be performed (service
+// unavailable, parse error, timeout), they should return a pass-through ranking
+// rather than failing the overall search request.
+type Reranker interface {
+	// Name identifies the reranker implementation for observability.
+	// Examples: "cross_encoder", "heimdall_llm".
+	Name() string
+
+	// Enabled indicates whether reranking is configured/enabled.
+	Enabled() bool
+
+	// IsAvailable is an optional health check. Implementations should keep this
+	// cheap; Search() should not call it on the hot path.
+	IsAvailable(ctx context.Context) bool
+
+	// Rerank reorders candidates for a query.
+	Rerank(ctx context.Context, query string, candidates []RerankCandidate) ([]RerankResult, error)
+}
+
 // CrossEncoderConfig configures the cross-encoder reranker.
 type CrossEncoderConfig struct {
 	// Enabled turns on cross-encoder reranking
@@ -96,6 +117,12 @@ type CrossEncoder struct {
 	client *http.Client
 }
 
+func (ce *CrossEncoder) Name() string { return "cross_encoder" }
+
+func (ce *CrossEncoder) Enabled() bool {
+	return ce != nil && ce.config != nil && ce.config.Enabled
+}
+
 // NewCrossEncoder creates a new cross-encoder reranker.
 func NewCrossEncoder(config *CrossEncoderConfig) *CrossEncoder {
 	if config == nil {
@@ -130,9 +157,21 @@ type RerankResult struct {
 
 // Rerank takes a query and candidates, returns reranked results.
 func (ce *CrossEncoder) Rerank(ctx context.Context, query string, candidates []RerankCandidate) ([]RerankResult, error) {
-	if !ce.config.Enabled {
+	if ce == nil || ce.config == nil || !ce.config.Enabled {
 		// Pass through without reranking
-		return ce.passThrough(candidates), nil
+		results := make([]RerankResult, len(candidates))
+		for i, c := range candidates {
+			results[i] = RerankResult{
+				ID:           c.ID,
+				Content:      c.Content,
+				OriginalRank: i + 1,
+				NewRank:      i + 1,
+				BiScore:      c.Score,
+				CrossScore:   c.Score,
+				FinalScore:   c.Score,
+			}
+		}
+		return results, nil
 	}
 
 	if len(candidates) == 0 {

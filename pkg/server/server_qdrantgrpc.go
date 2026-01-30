@@ -88,10 +88,15 @@ func (s *Server) startQdrantGRPC() error {
 		return fmt.Errorf("qdrant grpc: failed to initialize server: %w", err)
 	}
 
+	rerankEnabled := false
+	if s.config != nil && s.config.Features != nil {
+		rerankEnabled = s.config.Features.SearchRerankEnabled
+	}
 	nornicSearchSvc, err := nornicgrpc.NewService(
 		nornicgrpc.Config{
 			DefaultDatabase: dbName,
 			MaxLimit:        cfg.MaxTopK,
+			RerankEnabled:   rerankEnabled,
 		},
 		func(ctx context.Context, query string) ([]float32, error) {
 			return s.db.EmbedQuery(ctx, query)

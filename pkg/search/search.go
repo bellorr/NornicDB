@@ -238,7 +238,7 @@ type Service struct {
 	engine        storage.Engine
 	vectorIndex   *VectorIndex
 	fulltextIndex *FulltextIndex
-	crossEncoder  *CrossEncoder
+	reranker      Reranker
 	mu            sync.RWMutex
 
 	// cypherMetadata is a small, in-memory view of node embedding availability and labels.
@@ -1366,7 +1366,7 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	// otherwise we can deadlock with writers that lock pipelineMu and then need s.mu.
 	// See: maybeAutoSetVectorDimensions(), ClearVectorIndex(), SetGPUManager().
 	s.mu.RLock()
-	crossEncoder := s.crossEncoder
+	reranker := s.reranker
 	fulltextIndex := s.fulltextIndex
 	s.mu.RUnlock()
 
@@ -1425,15 +1425,15 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 		message = fmt.Sprintf("%s + MMR diversification (λ=%.2f)", message, opts.MMRLambda)
 	}
 
-	// Step 6: Cross-encoder reranking (optional Stage 2)
-	if opts.RerankEnabled && crossEncoder != nil && crossEncoder.Config().Enabled {
-		fusedResults = s.applyCrossEncoderRerank(ctx, query, fusedResults, opts, seenOrphans)
+	// Step 6: Stage-2 reranking (optional)
+	if opts.RerankEnabled && reranker != nil && reranker.Enabled() {
+		fusedResults = s.applyStage2Rerank(ctx, query, fusedResults, opts, seenOrphans, reranker)
 		if searchMethod == "rrf_hybrid" {
 			searchMethod = "rrf_hybrid+rerank"
-			message = "RRF + Cross-Encoder Reranking"
+			message = fmt.Sprintf("RRF + Reranking (%s)", reranker.Name())
 		} else {
 			searchMethod += "+rerank"
-			message += " + Cross-Encoder Reranking"
+			message += fmt.Sprintf(" + Reranking (%s)", reranker.Name())
 		}
 	}
 
@@ -2222,26 +2222,31 @@ func (s *Service) applyMMR(ctx context.Context, results []rrfResult, queryEmbedd
 	return selected
 }
 
-// applyCrossEncoderRerank applies cross-encoder reranking to RRF results.
+// applyStage2Rerank applies Stage-2 reranking to RRF results.
 //
 // This is Stage 2 of a two-stage retrieval system:
 //   - Stage 1 (fast): Bi-encoder retrieval (vector + BM25 with RRF)
-//   - Stage 2 (accurate): Cross-encoder reranking of top-K candidates
+//   - Stage 2 (accurate): Optional reranking of top candidates (LLM or cross-encoder)
 //
-// Cross-encoders see query and document together, capturing fine-grained
-// semantic relationships that bi-encoders miss. However, they're slower
-// since they can't be pre-computed.
-//
-// ELI12:
-//
-// Stage 1 is like using a library catalog to find 100 potentially relevant books.
-// Stage 2 is like reading each book's summary to pick the best 10.
-func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, results []rrfResult, opts *SearchOptions, seenOrphans map[string]bool) []rrfResult {
+// Reranking is slower than Stage 1, so it should be used on a bounded TopK.
+func (s *Service) applyStage2Rerank(ctx context.Context, query string, results []rrfResult, opts *SearchOptions, seenOrphans map[string]bool, reranker Reranker) []rrfResult {
 	if len(results) == 0 {
 		return results
 	}
+	if reranker == nil || !reranker.Enabled() {
+		return results
+	}
 
-	// Build candidates with content from storage
+	// Limit to top-K (optional; keeps prompt/service bounded).
+	topK := opts.RerankTopK
+	if topK <= 0 {
+		topK = 100
+	}
+	if len(results) > topK {
+		results = results[:topK]
+	}
+
+	// Build candidates with content from storage.
 	candidates := make([]RerankCandidate, 0, len(results))
 	for _, r := range results {
 		node, err := s.engine.GetNode(storage.NodeID(r.ID))
@@ -2272,10 +2277,45 @@ func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, res
 		return results
 	}
 
-	// Apply cross-encoder reranking
-	reranked, err := s.crossEncoder.Rerank(ctx, query, candidates)
+	// Log before reranking
+	queryPreview := query
+	if len(queryPreview) > 60 {
+		queryPreview = queryPreview[:57] + "..."
+	}
+	log.Printf("🔄 Reranking %d candidates for query %q (%s)...", len(candidates), queryPreview, reranker.Name())
+	start := time.Now()
+
+	// Apply Stage-2 reranking.
+	reranked, err := reranker.Rerank(ctx, query, candidates)
 	if err != nil {
 		// Fallback to original results on error
+		log.Printf("⚠️ Reranking failed (%s): %v; using original order", reranker.Name(), err)
+		return results
+	}
+
+	// Log after reranking
+	log.Printf("✅ Reranking complete: %d results in %v (%s)", len(reranked), time.Since(start), reranker.Name())
+
+	// If reranker produced nearly identical scores (e.g. model not discriminating),
+	// keep original RRF order and scores so the user gets the better ranking.
+	// This avoids replacing discriminative RRF (0.03, 0.02, ...) with flat 0.49 for all.
+	const minScoreRange = 0.05
+	var scoreMin, scoreMax float64
+	for i, r := range reranked {
+		s := r.FinalScore
+		if i == 0 {
+			scoreMin, scoreMax = s, s
+		} else {
+			if s < scoreMin {
+				scoreMin = s
+			}
+			if s > scoreMax {
+				scoreMax = s
+			}
+		}
+	}
+	if scoreMax-scoreMin < minScoreRange {
+		log.Printf("ℹ️ Reranking produced nearly identical scores (range=%.4f); using RRF order and scores", scoreMax-scoreMin)
 		return results
 	}
 
@@ -2292,6 +2332,11 @@ func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, res
 		}
 
 		if original != nil {
+			// Apply per-request MinScore filter if configured. Note that individual rerankers
+			// may also apply their own MinScore internally.
+			if opts.RerankMinScore > 0 && r.FinalScore < opts.RerankMinScore {
+				continue
+			}
 			rerankedResults = append(rerankedResults, rrfResult{
 				ID:            r.ID,
 				RRFScore:      r.FinalScore, // Use cross-encoder score
@@ -2305,7 +2350,7 @@ func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, res
 	return rerankedResults
 }
 
-// SetCrossEncoder configures the cross-encoder reranker.
+// SetCrossEncoder configures the Stage-2 reranker to use the cross-encoder implementation.
 //
 // Example:
 //
@@ -2318,14 +2363,35 @@ func (s *Service) applyCrossEncoderRerank(ctx context.Context, query string, res
 func (s *Service) SetCrossEncoder(ce *CrossEncoder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.crossEncoder = ce
+	s.reranker = ce
 }
 
-// CrossEncoderAvailable returns true if cross-encoder reranking is configured and available.
+// SetReranker configures the Stage-2 reranker.
+func (s *Service) SetReranker(r Reranker) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.reranker = r
+}
+
+// CrossEncoderAvailable returns true if a cross-encoder reranker is configured and available.
 func (s *Service) CrossEncoderAvailable(ctx context.Context) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.crossEncoder != nil && s.crossEncoder.IsAvailable(ctx)
+	if s.reranker == nil {
+		return false
+	}
+	_, ok := s.reranker.(*CrossEncoder)
+	if !ok {
+		return false
+	}
+	return s.reranker.IsAvailable(ctx)
+}
+
+// RerankerAvailable returns true if Stage-2 reranking is configured and available.
+func (s *Service) RerankerAvailable(ctx context.Context) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.reranker != nil && s.reranker.IsAvailable(ctx)
 }
 
 // vectorSearchOnly performs vector-only search.

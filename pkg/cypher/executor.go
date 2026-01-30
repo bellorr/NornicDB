@@ -181,9 +181,9 @@ func hasSubqueryPattern(query string, pattern *regexp.Regexp) bool {
 //
 //	The executor is thread-safe and can handle concurrent queries.
 //
-// NodeCreatedCallback is called when a node is created or updated via Cypher.
-// This allows external systems (like the embed queue) to be notified of new content.
-type NodeCreatedCallback func(nodeID string)
+// NodeMutatedCallback is called when a node is created or mutated via Cypher (CREATE, MERGE, SET, REMOVE, or procedures that update nodes).
+// This allows external systems (like the embed queue) to be notified so embeddings can be (re)generated.
+type NodeMutatedCallback func(nodeID string)
 
 type StorageExecutor struct {
 	parser    *Parser
@@ -210,9 +210,9 @@ type StorageExecutor struct {
 	// When set, db.index.vector.queryNodes delegates to search.Service.
 	searchService *search.Service
 
-	// onNodeCreated is called when a node is created or updated via CREATE/MERGE
-	// This allows the embed queue to be notified of new content requiring embeddings
-	onNodeCreated NodeCreatedCallback
+	// onNodeMutated is called when a node is created or mutated (CREATE, MERGE, SET, REMOVE).
+	// This allows the embed queue to be notified so embeddings are (re)generated.
+	onNodeMutated NodeMutatedCallback
 
 	// defaultEmbeddingDimensions is the configured embedding dimensions for vector indexes
 	// Used as default when CREATE VECTOR INDEX doesn't specify dimensions
@@ -354,18 +354,18 @@ func (e *StorageExecutor) GetEmbedder() QueryEmbedder {
 	return e.embedder
 }
 
-// SetNodeCreatedCallback sets a callback that is invoked when nodes are created
-// or updated via CREATE/MERGE statements. This allows the embed queue to be
-// notified of new content that needs embedding generation.
+// SetNodeMutatedCallback sets a callback that is invoked when nodes are created
+// or mutated (CREATE, MERGE, SET, REMOVE, or procedures that update nodes).
+// This allows the embed queue to be notified so embeddings can be (re)generated.
 //
 // Example:
 //
 //	executor := cypher.NewStorageExecutor(storage)
-//	executor.SetNodeCreatedCallback(func(nodeID string) {
+//	executor.SetNodeMutatedCallback(func(nodeID string) {
 //	    embedQueue.Enqueue(nodeID)
 //	})
-func (e *StorageExecutor) SetNodeCreatedCallback(cb NodeCreatedCallback) {
-	e.onNodeCreated = cb
+func (e *StorageExecutor) SetNodeMutatedCallback(cb NodeMutatedCallback) {
+	e.onNodeMutated = cb
 }
 
 // SetDefaultEmbeddingDimensions sets the default dimensions for vector indexes.
@@ -380,12 +380,26 @@ func (e *StorageExecutor) GetDefaultEmbeddingDimensions() int {
 	return e.defaultEmbeddingDimensions
 }
 
-// notifyNodeCreated calls the onNodeCreated callback if set.
-// This is called internally after node creation/update operations.
-func (e *StorageExecutor) notifyNodeCreated(nodeID string) {
-	if e.onNodeCreated != nil {
-		e.onNodeCreated(nodeID)
+// notifyNodeMutated calls the onNodeMutated callback if set.
+// Call after any node creation or mutation (CREATE, MERGE, SET, REMOVE) so the embed queue can re-process.
+func (e *StorageExecutor) notifyNodeMutated(nodeID string) {
+	if e.onNodeMutated != nil {
+		e.onNodeMutated(nodeID)
 	}
+}
+
+// removeNodeFromSearch removes a node from the search service (vector/fulltext indexes).
+// Call after successfully deleting a node via Cypher so embeddings are not left orphaned.
+// nodeID may be prefixed (e.g. "nornic:xyz") or local ("xyz"); the search service expects local ID.
+func (e *StorageExecutor) removeNodeFromSearch(nodeID string) {
+	if e.searchService == nil || nodeID == "" {
+		return
+	}
+	localID := nodeID
+	if _, unprefixed, ok := storage.ParseDatabasePrefix(nodeID); ok {
+		localID = unprefixed
+	}
+	_ = e.searchService.RemoveNode(storage.NodeID(localID))
 }
 
 // Flush persists all pending writes to storage.
@@ -864,7 +878,7 @@ func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher st
 	}
 
 	for _, node := range nodes {
-		e.notifyNodeCreated(string(node.ID))
+		e.notifyNodeMutated(string(node.ID))
 	}
 	result.Stats.NodesCreated += len(nodes)
 

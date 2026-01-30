@@ -347,7 +347,7 @@ Scenario 2: Vector & BM25 Disagree
 
 ### What It Does
 
-**Re-scores and re-ranks** top-K candidates from RRF using a more expensive but accurate cross-encoder model.
+**Re-scores and re-ranks** top-K candidates from RRF using a more expensive but accurate cross-encoder model. Reranking can use a **local GGUF** (e.g. BGE-Reranker-v2-m3, loaded like the embedding model) or an **external API** (Cohere, HuggingFace TEI, Ollama adapter). Configure via `NORNICDB_SEARCH_RERANK_ENABLED`, `NORNICDB_SEARCH_RERANK_PROVIDER`, and related env vars or YAML; see [Cross-Encoder Reranking](../features/cross-encoder-reranking.md) and [Configuration](../operations/configuration.md#search-rerank-stage-2-reranking).
 
 ### Bi-Encoder vs Cross-Encoder
 

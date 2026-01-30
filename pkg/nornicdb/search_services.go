@@ -62,6 +62,7 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	db.searchServicesMu.RLock()
 	if entry, ok := db.searchServices[dbName]; ok {
 		svc := entry.svc
+		reranker := db.searchReranker
 		db.searchServicesMu.RUnlock()
 
 		// If clustering is enabled globally, ensure cached services have clustering enabled too.
@@ -73,6 +74,12 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 				mgr = gpuMgr
 			}
 			svc.EnableClustering(mgr, 100)
+		}
+		// If a Stage-2 reranker is configured (e.g. Heimdall LLM), ensure it is applied.
+		// This keeps behavior consistent even if the reranker is configured after the
+		// service was created (e.g. Heimdall initializes later in server startup).
+		if svc != nil {
+			svc.SetReranker(reranker)
 		}
 		return svc, nil
 	}
@@ -106,6 +113,12 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 		svc.EnableClustering(mgr, 100)
 	}
 
+	// Apply configured Stage-2 reranker (if any).
+	db.searchServicesMu.RLock()
+	reranker := db.searchReranker
+	db.searchServicesMu.RUnlock()
+	svc.SetReranker(reranker)
+
 	entry := &dbSearchService{
 		dbName: dbName,
 		engine: storageEngine,
@@ -122,6 +135,27 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	db.searchServicesMu.Unlock()
 
 	return svc, nil
+}
+
+// SetSearchReranker configures the Stage-2 reranker for all per-database search services.
+//
+// This is typically set by the server when Heimdall is enabled and the
+// vector rerank feature flag is turned on.
+func (db *DB) SetSearchReranker(r search.Reranker) {
+	db.searchServicesMu.Lock()
+	db.searchReranker = r
+	entries := make([]*dbSearchService, 0, len(db.searchServices))
+	for _, entry := range db.searchServices {
+		entries = append(entries, entry)
+	}
+	db.searchServicesMu.Unlock()
+
+	for _, entry := range entries {
+		if entry == nil || entry.svc == nil {
+			continue
+		}
+		entry.svc.SetReranker(r)
+	}
 }
 
 // GetOrCreateSearchService returns the per-database search service for dbName.
@@ -213,7 +247,10 @@ func (db *DB) indexNodeFromEvent(node *storage.Node) {
 func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
 	dbName, local, ok := splitQualifiedID(string(nodeID))
 	if !ok {
-		return
+		// Unprefixed ID (e.g. single-db or callback from engine that doesn't prefix).
+		// Use default database and the ID as-is so embeddings are still removed.
+		dbName = db.defaultDatabaseName()
+		local = string(nodeID)
 	}
 
 	db.searchServicesMu.RLock()

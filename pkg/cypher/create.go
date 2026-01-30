@@ -110,7 +110,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 			return nil, fmt.Errorf("failed to create node: %w", err)
 		}
 		node.ID = actualID
-		e.notifyNodeCreated(string(node.ID))
+		e.notifyNodeMutated(string(node.ID))
 
 		result.Stats.NodesCreated++
 
@@ -160,7 +160,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 					return nil, fmt.Errorf("failed to create source node: %w", err)
 				}
 				sourceNode.ID = actualID
-				e.notifyNodeCreated(string(sourceNode.ID))
+				e.notifyNodeMutated(string(sourceNode.ID))
 				result.Stats.NodesCreated++
 				if sourcePattern.variable != "" {
 					createdNodes[sourcePattern.variable] = sourceNode
@@ -186,7 +186,7 @@ func (e *StorageExecutor) executeCreate(ctx context.Context, cypher string) (*Ex
 					return nil, fmt.Errorf("failed to create target node: %w", err)
 				}
 				targetNode.ID = actualID
-				e.notifyNodeCreated(string(targetNode.ID))
+				e.notifyNodeMutated(string(targetNode.ID))
 				result.Stats.NodesCreated++
 				if targetPattern.variable != "" {
 					createdNodes[targetPattern.variable] = targetNode
@@ -425,7 +425,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 			return nil, nil, nil, fmt.Errorf("failed to create node: %w", err)
 		}
 		node.ID = actualID
-		e.notifyNodeCreated(string(node.ID))
+		e.notifyNodeMutated(string(node.ID))
 
 		result.Stats.NodesCreated++
 
@@ -472,7 +472,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 					return nil, nil, nil, fmt.Errorf("failed to create source node: %w", err)
 				}
 				sourceNode.ID = actualID
-				e.notifyNodeCreated(string(sourceNode.ID))
+				e.notifyNodeMutated(string(sourceNode.ID))
 				result.Stats.NodesCreated++
 				if sourcePattern.variable != "" {
 					createdNodes[sourcePattern.variable] = sourceNode
@@ -497,7 +497,7 @@ func (e *StorageExecutor) executeCreateWithRefs(ctx context.Context, cypher stri
 					return nil, nil, nil, fmt.Errorf("failed to create target node: %w", err)
 				}
 				targetNode.ID = actualID
-				e.notifyNodeCreated(string(targetNode.ID))
+				e.notifyNodeMutated(string(targetNode.ID))
 				result.Stats.NodesCreated++
 				if targetPattern.variable != "" {
 					createdNodes[targetPattern.variable] = targetNode
@@ -1517,6 +1517,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			}
 			if err := store.DeleteNode(node.ID); err == nil {
 				result.Stats.NodesDeleted++
+				e.removeNodeFromSearch(string(node.ID))
 			}
 		}
 	}
@@ -1600,7 +1601,7 @@ func (e *StorageExecutor) processCreateNode(pattern string, nodeVars map[string]
 		return fmt.Errorf("failed to create node: %w", err)
 	}
 	node.ID = actualID
-	e.notifyNodeCreated(string(node.ID))
+	e.notifyNodeMutated(string(node.ID))
 
 	result.Stats.NodesCreated++
 
@@ -1730,7 +1731,7 @@ func (e *StorageExecutor) resolveOrCreateNode(content string, nodeVars map[strin
 		return nil, fmt.Errorf("failed to create node: %w", err)
 	}
 	node.ID = actualID
-	e.notifyNodeCreated(string(node.ID))
+	e.notifyNodeMutated(string(node.ID))
 
 	result.Stats.NodesCreated++
 
@@ -1836,6 +1837,7 @@ func (e *StorageExecutor) executeCompoundCreateWithDelete(ctx context.Context, c
 			return nil, fmt.Errorf("DELETE failed: %w", err)
 		}
 		result.Stats.NodesDeleted++
+		e.removeNodeFromSearch(string(node.ID))
 	} else if edge, exists := createdEdges[deleteTarget]; exists {
 		if err := store.DeleteEdge(edge.ID); err != nil {
 			return nil, fmt.Errorf("DELETE failed: %w", err)
@@ -1952,6 +1954,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 								return nil, fmt.Errorf("failed to add label: %w", err)
 							}
 							result.Stats.LabelsAdded++
+							e.notifyNodeMutated(string(node.ID))
 						}
 					}
 				}
@@ -1983,6 +1986,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 					return nil, fmt.Errorf("failed to update node property: %w", err)
 				}
 				result.Stats.PropertiesSet++
+				e.notifyNodeMutated(string(node.ID))
 			} else if edge, exists := createdEdges[varName]; exists {
 				edge.Properties[propName] = value
 				if err := store.UpdateEdge(edge); err != nil {
@@ -2075,6 +2079,7 @@ func (e *StorageExecutor) applySetMergeToCreated(setPart string, createdNodes ma
 		if err := store.UpdateNode(node); err != nil {
 			return fmt.Errorf("failed to update node: %w", err)
 		}
+		e.notifyNodeMutated(string(node.ID))
 	} else if edge, exists := createdEdges[varName]; exists {
 		for k, v := range props {
 			edge.Properties[k] = v
@@ -2320,7 +2325,7 @@ func (e *StorageExecutor) executeCreateNodeSegment(ctx context.Context, createSt
 	// This ensures node IDs are consistent when used in subsequent operations (edge creation, etc.)
 	node.ID = actualID
 
-	e.notifyNodeCreated(string(node.ID))
+	e.notifyNodeMutated(string(node.ID))
 
 	return node, nodePattern.variable, nil
 }

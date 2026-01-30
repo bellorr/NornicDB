@@ -7,7 +7,7 @@
 ### Search & Discovery
 - **[Vector Search](../user-guides/vector-search.md)** - Semantic search with embeddings
 - **[Hybrid Search](../user-guides/hybrid-search.md)** - RRF fusion of vector + BM25
-- **[Cross-Encoder Reranking](cross-encoder-reranking.md)** - Two-stage retrieval
+- **[Cross-Encoder Reranking](cross-encoder-reranking.md)** - Two-stage retrieval (local GGUF or external API)
 - **[Link Prediction](link-prediction.md)** - ML-based relationship prediction
 
 ### AI & Machine Learning
@@ -98,7 +98,7 @@ ORDER BY n.decayScore DESC
 - **[Feature Flags](feature-flags.md)** - Runtime configuration
 - **[Link Prediction](link-prediction.md)** - Predict missing relationships
 - **[MCP Integration](mcp-integration.md)** - AI agent tools
-- **[Cross-Encoder Reranking](cross-encoder-reranking.md)** - Improve search accuracy
+- **[Cross-Encoder Reranking](cross-encoder-reranking.md)** - Improve search accuracy (local BGE-reranker or Cohere/TEI)
 
 ## ⏭️ Next Steps
 

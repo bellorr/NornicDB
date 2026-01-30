@@ -295,7 +295,7 @@ Features NornicDB has that Neo4j doesn't:
 - Slow query logging (configurable threshold)
 - MMR diversification for search results
 - Eval harness for search quality validation
-- Cross-encoder reranking for Stage 2 retrieval
+- Cross-encoder reranking for Stage 2 retrieval (local GGUF or external API: Cohere, TEI, Ollama)
 
 ### 🎯 Next Priority
 

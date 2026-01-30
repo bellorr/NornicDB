@@ -179,7 +179,7 @@ func (r *Resolver) getCypherExecutor(ctx context.Context, database string) (*cyp
 		// This ensures nodes created via GraphQL get automatically queued for embedding
 		embedQueue := r.DB.GetEmbedQueue()
 		if embedQueue != nil {
-			executor.SetNodeCreatedCallback(func(nodeID string) {
+			executor.SetNodeMutatedCallback(func(nodeID string) {
 				embedQueue.Enqueue(nodeID)
 			})
 		}

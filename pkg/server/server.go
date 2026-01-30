@@ -168,6 +168,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -183,6 +184,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/graphql"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
+	"github.com/orneryd/nornicdb/pkg/localllm"
 	"github.com/orneryd/nornicdb/pkg/mcp"
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
@@ -791,25 +793,6 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			// Register built-in actions (core system actions)
 			heimdall.InitBuiltinActions()
 
-			// Optional: Heimdall-backed Stage-2 reranking for vector/hybrid search.
-			// This is gated by a dedicated feature flag so it remains opt-in.
-			if featuresConfig.HeimdallVectorRerankEnabled {
-				llm := func(ctx context.Context, prompt string) (string, error) {
-					// Conservative params optimized for short JSON outputs.
-					return manager.Generate(ctx, prompt, heimdall.GenerateParams{
-						MaxTokens:   512,
-						Temperature: 0.1,
-						TopP:        0.9,
-						TopK:        20,
-						StopTokens:  []string{"<|im_end|>", "<|endoftext|>", "</s>"},
-					})
-				}
-				cfg := search.DefaultLLMRerankerConfig()
-				cfg.Enabled = true
-				db.SetSearchReranker(search.NewLLMReranker(cfg, llm))
-				log.Printf("🧠 Heimdall vector rerank enabled (Stage-2 reranking)")
-			}
-
 			// Load plugins from configured directories
 			// Auto-detects plugin types: function plugins (APOC) and Heimdall plugins
 			// APOC plugins provide Cypher functions, Heimdall plugins provide AI actions
@@ -846,6 +829,90 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		}
 	} else {
 		log.Println("ℹ️  Heimdall AI Assistant disabled (set NORNICDB_HEIMDALL_ENABLED=true to enable)")
+	}
+
+	// Independent search rerank (Stage-2 reranking, not tied to Heimdall).
+	// Supports local (GGUF, like embeddings) or external provider (ollama/openai/http),
+	// similar to Heimdall and embeddings.
+	if featuresConfig.SearchRerankEnabled {
+		provider := strings.TrimSpace(strings.ToLower(featuresConfig.SearchRerankProvider))
+		if provider == "" {
+			provider = "local"
+		}
+
+		if provider == "local" {
+			// Load GGUF into memory (same pattern as embedding model).
+			modelsDir := config.ModelsDir
+			if modelsDir == "" {
+				modelsDir = "./models"
+			}
+			modelName := featuresConfig.SearchRerankModel
+			if modelName == "" {
+				modelName = "bge-reranker-v2-m3-Q4_K_M.gguf"
+			}
+			if !strings.HasSuffix(modelName, ".gguf") {
+				modelName = modelName + ".gguf"
+			}
+			modelPath := filepath.Join(modelsDir, modelName)
+
+			log.Printf("🔄 Loading search reranker model: %s (provider=local)...", modelPath)
+			log.Println("   → Server will start immediately, reranking available after model loads")
+
+			go func() {
+				opts := localllm.DefaultOptions(modelPath)
+				opts.GPULayers = -1
+				rerankerModel, err := localllm.LoadRerankerModel(opts)
+				if err != nil {
+					log.Printf("⚠️  Search reranker model unavailable: %v", err)
+					log.Println("   → Stage-2 reranking disabled; search will use RRF order only")
+					return
+				}
+
+				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				_, healthErr := rerankerModel.Score(ctx, "health", "check")
+				cancel()
+				if healthErr != nil {
+					rerankerModel.Close()
+					log.Printf("⚠️  Search reranker failed health check: %v", healthErr)
+					return
+				}
+
+				cfg := search.DefaultLocalRerankerConfig()
+				cfg.Enabled = true
+				r := search.NewLocalReranker(rerankerModel, cfg)
+				db.SetSearchReranker(r)
+				log.Printf("✅ Search reranker ready: %s (Stage-2 reranking enabled)", modelName)
+			}()
+		} else {
+			// External provider: use HTTP rerank API (Cohere, HuggingFace TEI, Ollama adapter, etc.).
+			apiURL := strings.TrimSpace(featuresConfig.SearchRerankAPIURL)
+			if apiURL == "" {
+				if provider == "ollama" {
+					apiURL = "http://localhost:11434/rerank"
+				}
+			}
+			if apiURL == "" {
+				log.Printf("⚠️  Search rerank enabled with provider=%q but NORNICDB_SEARCH_RERANK_API_URL is not set; Stage-2 reranking disabled", provider)
+			} else {
+				ceConfig := &search.CrossEncoderConfig{
+					Enabled:  true,
+					APIURL:   apiURL,
+					APIKey:   featuresConfig.SearchRerankAPIKey,
+					Model:    featuresConfig.SearchRerankModel,
+					TopK:     100,
+					Timeout:  30 * time.Second,
+					MinScore: 0.0,
+				}
+				if ceConfig.Model == "" && provider == "ollama" {
+					ceConfig.Model = "reranker"
+				}
+				ce := search.NewCrossEncoder(ceConfig)
+				db.SetSearchReranker(ce)
+				log.Printf("✅ Search reranker ready: provider=%s, url=%s (Stage-2 reranking enabled)", provider, apiURL)
+			}
+		}
+	} else {
+		log.Println("ℹ️  Search rerank disabled (set NORNICDB_SEARCH_RERANK_ENABLED=true to enable Stage-2 reranking)")
 	}
 
 	// Configure embeddings if enabled

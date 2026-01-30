@@ -71,7 +71,7 @@ Welcome to **NornicDB** - A high-performance graph database with GPU acceleratio
 - Vector similarity search with cosine similarity
 - Full-text search with BM25 scoring
 - Hybrid search (RRF) combining both methods
-- Cross-encoder reranking (Stage 2 retrieval)
+- Cross-encoder reranking (Stage 2 retrieval; local GGUF or external API)
 - MMR diversification for result variety
 - HNSW indexing for O(log N) performance
 - Eval harness for search quality validation

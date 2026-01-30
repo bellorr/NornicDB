@@ -143,6 +143,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/inference"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/replication"
+	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
 )
@@ -482,6 +483,7 @@ type DB struct {
 	searchMinSimilarity float64 // Default MinSimilarity threshold for search
 	searchServicesMu    sync.RWMutex
 	searchServices      map[string]*dbSearchService
+	searchReranker      search.Reranker // Optional Stage-2 reranker for hybrid search
 
 	// Per-database inference engines (topology, Kalman, etc.).
 	inferenceServicesMu sync.RWMutex
@@ -1317,10 +1319,10 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 		}
 	}
 
-	// Wire up Cypher executor to trigger embedding queue when nodes are created/updated
-	// This ensures nodes created via Cypher queries get embeddings generated
+	// Wire up Cypher executor to trigger embedding queue when nodes are created or mutated
+	// This ensures nodes created or updated via Cypher get embeddings (re)generated
 	if db.cypherExecutor != nil {
-		db.cypherExecutor.SetNodeCreatedCallback(func(nodeID string) {
+		db.cypherExecutor.SetNodeMutatedCallback(func(nodeID string) {
 			db.embedQueue.Enqueue(nodeID)
 		})
 	}

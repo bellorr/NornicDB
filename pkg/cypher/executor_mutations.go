@@ -208,11 +208,13 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
 					result.Stats.RelationshipsDeleted += edgesCount
+					e.removeNodeFromSearch(nodeID)
 				}
 			} else {
 				// Non-detach delete - just delete the node (will fail if edges exist)
 				if err := store.DeleteNode(storage.NodeID(nodeID)); err == nil {
 					result.Stats.NodesDeleted++
+					e.removeNodeFromSearch(nodeID)
 				}
 			}
 		}
@@ -376,6 +378,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 								invalidateManagedEmbeddings(node)
 								if err := store.UpdateNode(node); err == nil {
 									result.Stats.LabelsAdded++
+									e.notifyNodeMutated(string(node.ID))
 								}
 							}
 						}
@@ -410,6 +413,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 				setNodeProperty(node, propName, propValue)
 				if err := store.UpdateNode(node); err == nil {
 					result.Stats.PropertiesSet++
+					e.notifyNodeMutated(string(node.ID))
 				}
 			}
 		}
@@ -566,6 +570,7 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 					result.Stats.PropertiesSet++
 				}
 				_ = store.UpdateNode(node)
+				e.notifyNodeMutated(string(node.ID))
 				updatedNodes = append(updatedNodes, node)
 				continue
 			}
@@ -583,6 +588,7 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 				result.Stats.PropertiesSet++
 			}
 			_ = store.UpdateNode(node)
+			e.notifyNodeMutated(string(node.ID))
 			updatedNodes = append(updatedNodes, node)
 		}
 	}
@@ -704,6 +710,7 @@ func (e *StorageExecutor) executeRemove(ctx context.Context, cypher string) (*Ex
 				invalidateManagedEmbeddings(node)
 			}
 			_ = store.UpdateNode(node)
+			e.notifyNodeMutated(string(node.ID))
 		}
 	}
 

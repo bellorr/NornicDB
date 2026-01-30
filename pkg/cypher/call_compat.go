@@ -720,6 +720,7 @@ func (e *StorageExecutor) callDbCreateSetNodeVectorProperty(ctx context.Context,
 	if err != nil {
 		return nil, fmt.Errorf("failed to update node: %w", err)
 	}
+	e.notifyNodeMutated(string(node.ID))
 
 	return &ExecuteResult{
 		Columns: []string{"node"},

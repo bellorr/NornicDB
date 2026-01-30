@@ -122,6 +122,15 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 		executor.SetSearchService(searchSvc)
 	}
 
+	// Wire embed queue so nodes mutated via this executor get embeddings (re)generated.
+	// The default-database executor is wired in db.SetEmbedder; per-database executors
+	// (used by /db/{dbName}/tx/commit) must be wired here or new nodes would never be enqueued.
+	if q := s.db.GetEmbedQueue(); q != nil {
+		executor.SetNodeMutatedCallback(func(nodeID string) {
+			q.Enqueue(nodeID)
+		})
+	}
+
 	// Cache the executor (write lock for cache update)
 	s.executorsMu.Lock()
 	// Double-check in case another goroutine created it while we were waiting

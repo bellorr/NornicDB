@@ -56,6 +56,11 @@ func (m *Model) Embed(ctx context.Context, text string) ([]float32, error) {
 	return nil, errNotSupported
 }
 
+// EmbedRaw returns an error on unsupported platforms.
+func (m *Model) EmbedRaw(ctx context.Context, text string) ([]float32, error) {
+	return nil, errNotSupported
+}
+
 // EmbedBatch returns an error on unsupported platforms.
 func (m *Model) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
 	return nil, errNotSupported
@@ -66,3 +71,19 @@ func (m *Model) Dimensions() int { return 0 }
 
 // Close is a no-op on unsupported platforms.
 func (m *Model) Close() error { return nil }
+
+// RerankerModel wraps a GGUF model for reranking; stub returns errors.
+type RerankerModel struct{}
+
+// LoadRerankerModel returns an error on unsupported platforms.
+func LoadRerankerModel(opts Options) (*RerankerModel, error) {
+	return nil, errNotSupported
+}
+
+// Score returns an error on unsupported platforms.
+func (r *RerankerModel) Score(ctx context.Context, query, document string) (float32, error) {
+	return 0, errNotSupported
+}
+
+// Close is a no-op on unsupported platforms.
+func (r *RerankerModel) Close() error { return nil }

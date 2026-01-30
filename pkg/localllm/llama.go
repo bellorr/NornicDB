@@ -516,6 +516,9 @@ import "C"
 import (
 	"context"
 	"fmt"
+	"log"
+	"math"
+	"os"
 	"runtime"
 	"sync"
 	"unsafe"
@@ -707,6 +710,42 @@ func (m *Model) Embed(ctx context.Context, text string) ([]float32, error) {
 	return emb, nil
 }
 
+// EmbedRaw returns the pooled output from the model without normalizing.
+// Used by RerankerModel: when the GGUF outputs a single relevance logit (n_embd=1),
+// emb[0] is the logit to pass through sigmoid. When n_embd>1 (e.g. 1024), the GGUF
+// may be an embedding-style export without a classification head; emb[0] is then
+// the first component of the [CLS] vector, which is not the true relevance score
+// and can cluster around ~0.5 after sigmoid. Prefer a reranker GGUF that outputs
+// 1 dimension (relevance logit).
+func (m *Model) EmbedRaw(ctx context.Context, text string) ([]float32, error) {
+	if text == "" {
+		return nil, nil
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	cText := C.CString(text)
+	defer C.free(unsafe.Pointer(cText))
+	tokens := make([]C.int, 512)
+	n := C.tokenize(m.model, cText, C.int(len(text)), &tokens[0], 512)
+	if n < 0 {
+		return nil, fmt.Errorf("tokenization failed for text of length %d", len(text))
+	}
+	if n == 0 {
+		return nil, fmt.Errorf("text produced no tokens")
+	}
+	emb := make([]float32, m.dims)
+	result := C.embed(m.ctx, (*C.int)(&tokens[0]), n, (*C.float)(&emb[0]), C.int(m.dims))
+	if result != 0 {
+		return nil, fmt.Errorf("embedding generation failed (code: %d)", result)
+	}
+	return emb, nil
+}
+
 // EmbedBatch generates normalized embeddings for multiple texts.
 //
 // Each text is processed sequentially through the GPU. For maximum throughput
@@ -771,6 +810,78 @@ func (m *Model) Close() error {
 		m.model = nil
 	}
 	return nil
+}
+
+// ============================================================================
+// RERANKER (BGE-style: query + document → single relevance score)
+// ============================================================================
+//
+// RerankerModel uses the same BERT-style encoder as embedding models but is
+// configured for classification/reranking: input "query \n\n document" is
+// encoded and the model output (single dimension or first logit) is interpreted
+// as a relevance score. Used for Stage-2 search reranking.
+
+// RerankerModel wraps a GGUF model for reranking (query, document) pairs.
+// It uses the embedding path: encode "query \n\n document" and treat the
+// output as a relevance score (1-dim or first element with sigmoid).
+type RerankerModel struct {
+	model *Model
+}
+
+// LoadRerankerModel loads a GGUF reranker model (e.g. BGE-Reranker-v2-m3).
+// Uses the same loader as embedding models; the model file must be a
+// reranker/classification GGUF that outputs a single score per (query, doc) pair.
+func LoadRerankerModel(opts Options) (*RerankerModel, error) {
+	model, err := LoadModel(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &RerankerModel{model: model}, nil
+}
+
+// Score returns a relevance score in [0, 1] for the (query, document) pair.
+// Input format is "query \n\n document" (BGE-style). We use EmbedRaw (no
+// normalization) so that when the GGUF outputs a single relevance logit (dims=1),
+// we get the true logit; normalizing would turn it into ±1 and distort scores.
+// Thread-safe: serialized via the underlying Model mutex.
+func (r *RerankerModel) Score(ctx context.Context, query, document string) (float32, error) {
+	if r == nil || r.model == nil {
+		return 0, fmt.Errorf("reranker model not loaded")
+	}
+	combined := query + "\n\n" + document
+	emb, err := r.model.EmbedRaw(ctx, combined)
+	if err != nil {
+		return 0, err
+	}
+	if len(emb) == 0 {
+		return 0, fmt.Errorf("reranker returned empty embedding")
+	}
+	// Reranker GGUF should output 1 dim (relevance logit). If dims>1 we're using
+	// the embedding-style pooled [CLS] and first component is not the true logit.
+	logit := emb[0]
+	score := sigmoid32(logit)
+	if os.Getenv("NORNICDB_RERANK_DEBUG") == "1" {
+		log.Printf("[rerank] dims=%d raw_logit=%.4f score=%.4f", len(emb), logit, score)
+	}
+	return score, nil
+}
+
+// sigmoid32 maps a logit to (0, 1) in a numerically stable way.
+func sigmoid32(x float32) float32 {
+	xf := float64(x)
+	if xf >= 0 {
+		return float32(1 / (1 + math.Exp(-xf)))
+	}
+	e := math.Exp(xf)
+	return float32(e / (1 + e))
+}
+
+// Close releases the underlying model.
+func (r *RerankerModel) Close() error {
+	if r == nil || r.model == nil {
+		return nil
+	}
+	return r.model.Close()
 }
 
 // ============================================================================
