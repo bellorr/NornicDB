@@ -263,7 +263,7 @@ Actions are organized by category for the SLM to understand:
 
 ## Security Considerations
 
-1. **Read-only database access**: Plugins receive `DatabaseReader` which only allows read queries
+1. **Multi-database routing**: Plugins receive `DatabaseRouter` and should route each operation to the correct logical database (`""` = default database)
 2. **No arbitrary code execution**: Actions are predefined and registered
 3. **Configuration validation**: `ConfigSchema()` defines valid config
 4. **Event logging**: All actions logged via `RecentEvents()`

@@ -23,14 +23,14 @@ type Handler struct {
 	manager  *Manager
 	bifrost  *Bifrost
 	config   Config
-	database DatabaseReader
+	database DatabaseRouter
 	metrics  MetricsReader
 }
 
 // NewHandler creates a Bifrost HTTP handler.
 // Returns nil if Heimdall is disabled (manager is nil).
 // Automatically creates Bifrost bridge when Heimdall is enabled.
-func NewHandler(manager *Manager, cfg Config, db DatabaseReader, metrics MetricsReader) *Handler {
+func NewHandler(manager *Manager, cfg Config, db DatabaseRouter, metrics MetricsReader) *Handler {
 	if manager == nil {
 		return nil
 	}
@@ -547,7 +547,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 type requestLifecycle struct {
 	promptCtx     *PromptContext
 	requestID     string
-	database      DatabaseReader
+	database      DatabaseRouter
 	metrics       MetricsReader
 	StreamWriter  http.ResponseWriter // optional: for streaming notifications during agentic loop
 	StreamFlusher http.Flusher        // optional: flush after each SSE chunk

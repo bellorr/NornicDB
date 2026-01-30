@@ -14,18 +14,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// mockDBReader is a mock implementation of DatabaseReader for testing
-type mockDBReader struct{}
+// mockDBRouter is a mock implementation of DatabaseRouter for testing.
+type mockDBRouter struct{}
 
-func (m *mockDBReader) Query(ctx context.Context, cypher string, params map[string]interface{}) ([]map[string]interface{}, error) {
+func (m *mockDBRouter) DefaultDatabaseName() string { return "nornic" }
+func (m *mockDBRouter) ResolveDatabase(nameOrAlias string) (string, error) {
+	if nameOrAlias == "" {
+		return "nornic", nil
+	}
+	return nameOrAlias, nil
+}
+func (m *mockDBRouter) ListDatabases() []string { return []string{"nornic"} }
+
+func (m *mockDBRouter) Query(ctx context.Context, database string, cypher string, params map[string]interface{}) ([]map[string]interface{}, error) {
 	return []map[string]interface{}{{"count": int64(42)}}, nil
 }
 
-func (m *mockDBReader) Stats() DatabaseStats {
-	return DatabaseStats{NodeCount: 100, RelationshipCount: 50}
+func (m *mockDBRouter) Stats(database string) (DatabaseStats, error) {
+	return DatabaseStats{NodeCount: 100, RelationshipCount: 50}, nil
 }
 
-func (m *mockDBReader) Discover(ctx context.Context, query string, nodeTypes []string, limit int, depth int) (*DiscoverResult, error) {
+func (m *mockDBRouter) Discover(ctx context.Context, database string, query string, nodeTypes []string, limit int, depth int) (*DiscoverResult, error) {
 	return &DiscoverResult{
 		Results: []SearchResult{
 			{
@@ -49,7 +58,7 @@ func (m *mockMetricsReader) Runtime() RuntimeMetrics {
 
 // testHandler creates a handler with mock db and metrics for testing
 func testHandler(manager *Manager, cfg Config) *Handler {
-	return NewHandler(manager, cfg, &mockDBReader{}, &mockMetricsReader{})
+	return NewHandler(manager, cfg, &mockDBRouter{}, &mockMetricsReader{})
 }
 
 func TestNewHandler_Disabled(t *testing.T) {
@@ -1065,7 +1074,7 @@ func TestRequestLifecycle_Structure(t *testing.T) {
 			PluginData:   map[string]interface{}{"key": "value"},
 		},
 		requestID: "test-123",
-		database:  &mockDBReader{},
+		database:  &mockDBRouter{},
 		metrics:   &mockMetricsReader{},
 	}
 
@@ -1082,7 +1091,7 @@ func TestPreExecuteContext_Fields(t *testing.T) {
 		Params:      map[string]interface{}{"param1": "value1"},
 		RawResponse: `{"action": "heimdall_watcher_status"}`,
 		PluginData:  map[string]interface{}{"from_preprompt": true},
-		Database:    &mockDBReader{},
+		Database:    &mockDBRouter{},
 		Metrics:     &mockMetricsReader{},
 	}
 

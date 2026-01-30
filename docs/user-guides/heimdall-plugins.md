@@ -151,7 +151,7 @@ When you define an action, you can set `InputSchema` so that MCP clients and the
 
 ```go
 "query": {
-    Description: "Run a read-only Cypher query",
+    Description: "Run a Cypher query (prefer read-only for user-triggered actions)",
     Category:    "query",
     InputSchema: json.RawMessage([]byte(`{"type":"object","properties":{"cypher":{"type":"string","description":"Cypher query"}},"required":["cypher"]}`)),
     Handler:     p.handleQuery,
@@ -218,10 +218,11 @@ Provided during initialization:
 ```go
 type SubsystemContext struct {
     Config   Config          // Heimdall configuration
-    Database DatabaseReader  // Read-only database access
+    Database DatabaseRouter  // Multi-database graph access ("" = default database)
     Metrics  MetricsReader   // Runtime metrics
     Logger   SubsystemLogger // Logging interface
     Bifrost  BifrostBridge   // Communication to UI clients
+    Heimdall HeimdallInvoker // Optional: invoke the SLM from plugins
 }
 ```
 
@@ -267,7 +268,7 @@ type ActionContext struct {
     UserMessage string                     // Original user request
     Params      map[string]interface{}     // Extracted parameters
 
-    Database    DatabaseReader             // Query the graph
+    Database    DatabaseRouter             // Query/search by database ("" = default database)
     Metrics     MetricsReader              // Get runtime metrics
     Bifrost     BifrostBridge              // Communicate with UI
 }
@@ -296,7 +297,7 @@ func (p *MyPlugin) handleDetect(ctx heimdall.ActionContext) (*heimdall.ActionRes
     }
 
     // 2. Query the database
-    results, err := ctx.Database.Query(ctx, `
+    results, err := ctx.Database.Query(ctx, "", `
         MATCH (n)
         WHERE n.score > $threshold
         RETURN n.id, n.score
@@ -552,7 +553,7 @@ func (p *AnomalyPlugin) actionDetect(ctx heimdall.ActionContext) (*heimdall.Acti
     p.mu.Unlock()
 
     // Example: Find nodes with unusually high edge counts
-    results, err := ctx.Database.Query(ctx, `
+    results, err := ctx.Database.Query(ctx, "", `
         MATCH (n)
         WITH n, size((n)--()) as edgeCount
         WHERE edgeCount > 100
@@ -998,9 +999,10 @@ Write clear descriptions - they're shown to both the SLM and users:
 
 ### Database Access Fails
 
-1. Ensure your Cypher is read-only (SELECT only)
-2. Check context isn't cancelled
-3. Verify database connection in Health()
+1. Verify the target database exists (or pass `""` to use the default database)
+2. If your action is intended to be read-only, validate and reject write clauses (CREATE/MERGE/DELETE/SET, etc.)
+3. Check context isn't cancelled
+4. Verify database routing in `Health()`
 
 ### Bifrost Communication Fails
 

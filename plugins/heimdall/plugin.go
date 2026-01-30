@@ -370,11 +370,20 @@ func (p *WatcherPlugin) actionStatus(ctx heimdall.ActionContext) (*heimdall.Acti
 
 	// Add database stats if available
 	if ctx.Database != nil {
-		dbStats := ctx.Database.Stats()
-		status["database"] = map[string]interface{}{
-			"nodes":         dbStats.NodeCount,
-			"relationships": dbStats.RelationshipCount,
-			"labels":        dbStats.LabelCounts,
+		dbName := getDatabaseParam(ctx.Params)
+		dbStats, err := ctx.Database.Stats(dbName)
+		if err == nil {
+			status["database"] = map[string]interface{}{
+				"database":      coalesceString(dbName, ctx.Database.DefaultDatabaseName()),
+				"nodes":         dbStats.NodeCount,
+				"relationships": dbStats.RelationshipCount,
+				"labels":        dbStats.LabelCounts,
+			}
+		} else {
+			status["database"] = map[string]interface{}{
+				"database": coalesceString(dbName, ctx.Database.DefaultDatabaseName()),
+				"error":    err.Error(),
+			}
 		}
 	}
 
@@ -486,11 +495,20 @@ func (p *WatcherPlugin) actionMetrics(ctx heimdall.ActionContext) (*heimdall.Act
 
 	// Add database stats if available
 	if ctx.Database != nil {
-		dbStats := ctx.Database.Stats()
-		metrics["database"] = map[string]interface{}{
-			"nodes":         dbStats.NodeCount,
-			"relationships": dbStats.RelationshipCount,
-			"labels":        dbStats.LabelCounts,
+		dbName := getDatabaseParam(ctx.Params)
+		dbStats, err := ctx.Database.Stats(dbName)
+		if err == nil {
+			metrics["database"] = map[string]interface{}{
+				"database":      coalesceString(dbName, ctx.Database.DefaultDatabaseName()),
+				"nodes":         dbStats.NodeCount,
+				"relationships": dbStats.RelationshipCount,
+				"labels":        dbStats.LabelCounts,
+			}
+		} else {
+			metrics["database"] = map[string]interface{}{
+				"database": coalesceString(dbName, ctx.Database.DefaultDatabaseName()),
+				"error":    err.Error(),
+			}
 		}
 	}
 
@@ -646,7 +664,8 @@ func (p *WatcherPlugin) actionQuery(ctx heimdall.ActionContext) (*heimdall.Actio
 	}
 
 	// Execute query
-	results, err := ctx.Database.Query(ctx.Context, cypher, queryParams)
+	dbName := getDatabaseParam(ctx.Params)
+	results, err := ctx.Database.Query(ctx.Context, dbName, cypher, queryParams)
 	if err != nil {
 		p.mu.Lock()
 		p.errors++
@@ -724,7 +743,8 @@ func (p *WatcherPlugin) actionDiscover(ctx heimdall.ActionContext) (*heimdall.Ac
 	}
 
 	// Call Discover
-	result, err := ctx.Database.Discover(ctx.Context, query, nodeTypes, limit, depth)
+	dbName := getDatabaseParam(ctx.Params)
+	result, err := ctx.Database.Discover(ctx.Context, dbName, query, nodeTypes, limit, depth)
 	if err != nil {
 		p.mu.Lock()
 		p.errors++
@@ -859,61 +879,73 @@ func (p *WatcherPlugin) actionDBStats(ctx heimdall.ActionContext) (*heimdall.Act
 
 	// Get database stats if available
 	if ctx.Database != nil {
-		dbStats := ctx.Database.Stats()
-		stats["database"] = map[string]interface{}{
-			"nodes":         dbStats.NodeCount,
-			"relationships": dbStats.RelationshipCount,
-			"labels":        dbStats.LabelCounts,
-		}
-
-		msgBuilder.WriteString(fmt.Sprintf("DATABASE: %d nodes, %d relationships\n\n",
-			dbStats.NodeCount, dbStats.RelationshipCount))
-
-		// Add cluster/search stats if available
-		if dbStats.ClusterStats != nil {
-			stats["clustering"] = map[string]interface{}{
-				"embedding_count":    dbStats.ClusterStats.EmbeddingCount,
-				"num_clusters":       dbStats.ClusterStats.NumClusters,
-				"is_clustered":       dbStats.ClusterStats.IsClustered,
-				"avg_cluster_size":   dbStats.ClusterStats.AvgClusterSize,
-				"cluster_iterations": dbStats.ClusterStats.Iterations,
+		dbName := getDatabaseParam(ctx.Params)
+		dbStats, err := ctx.Database.Stats(dbName)
+		if err != nil {
+			stats["database"] = map[string]interface{}{
+				"database": coalesceString(dbName, ctx.Database.DefaultDatabaseName()),
+				"error":    err.Error(),
+			}
+			msgBuilder.WriteString(fmt.Sprintf("DATABASE: error reading stats for %s: %v\n\n",
+				coalesceString(dbName, ctx.Database.DefaultDatabaseName()), err))
+		} else {
+			stats["database"] = map[string]interface{}{
+				"database":      coalesceString(dbName, ctx.Database.DefaultDatabaseName()),
+				"nodes":         dbStats.NodeCount,
+				"relationships": dbStats.RelationshipCount,
+				"labels":        dbStats.LabelCounts,
 			}
 
-			msgBuilder.WriteString("CLUSTERING:\n")
-			msgBuilder.WriteString(fmt.Sprintf("  • Embeddings: %d\n", dbStats.ClusterStats.EmbeddingCount))
-			msgBuilder.WriteString(fmt.Sprintf("  • K-Means Clusters: %d\n", dbStats.ClusterStats.NumClusters))
-			if dbStats.ClusterStats.IsClustered {
-				msgBuilder.WriteString(fmt.Sprintf("  • Clustered: Yes (avg size: %.1f, iterations: %d)\n",
-					dbStats.ClusterStats.AvgClusterSize, dbStats.ClusterStats.Iterations))
-			} else {
-				msgBuilder.WriteString("  • Clustered: No\n")
-			}
-			msgBuilder.WriteString("\n")
-		}
+			msgBuilder.WriteString(fmt.Sprintf("DATABASE (%s): %d nodes, %d relationships\n\n",
+				coalesceString(dbName, ctx.Database.DefaultDatabaseName()),
+				dbStats.NodeCount, dbStats.RelationshipCount))
 
-		// Add feature flags if available
-		if dbStats.FeatureFlags != nil {
-			stats["feature_flags"] = map[string]interface{}{
-				"heimdall_enabled":           dbStats.FeatureFlags.HeimdallEnabled,
-				"heimdall_anomaly_detection": dbStats.FeatureFlags.HeimdallAnomalyDetection,
-				"heimdall_runtime_diagnosis": dbStats.FeatureFlags.HeimdallRuntimeDiagnosis,
-				"heimdall_memory_curation":   dbStats.FeatureFlags.HeimdallMemoryCuration,
-				"clustering_enabled":         dbStats.FeatureFlags.ClusteringEnabled,
-				"topology_enabled":           dbStats.FeatureFlags.TopologyEnabled,
-				"kalman_enabled":             dbStats.FeatureFlags.KalmanEnabled,
-				"async_writes_enabled":       dbStats.FeatureFlags.AsyncWritesEnabled,
+			// Add cluster/search stats if available
+			if dbStats.ClusterStats != nil {
+				stats["clustering"] = map[string]interface{}{
+					"embedding_count":    dbStats.ClusterStats.EmbeddingCount,
+					"num_clusters":       dbStats.ClusterStats.NumClusters,
+					"is_clustered":       dbStats.ClusterStats.IsClustered,
+					"avg_cluster_size":   dbStats.ClusterStats.AvgClusterSize,
+					"cluster_iterations": dbStats.ClusterStats.Iterations,
+				}
+
+				msgBuilder.WriteString("CLUSTERING:\n")
+				msgBuilder.WriteString(fmt.Sprintf("  • Embeddings: %d\n", dbStats.ClusterStats.EmbeddingCount))
+				msgBuilder.WriteString(fmt.Sprintf("  • K-Means Clusters: %d\n", dbStats.ClusterStats.NumClusters))
+				if dbStats.ClusterStats.IsClustered {
+					msgBuilder.WriteString(fmt.Sprintf("  • Clustered: Yes (avg size: %.1f, iterations: %d)\n",
+						dbStats.ClusterStats.AvgClusterSize, dbStats.ClusterStats.Iterations))
+				} else {
+					msgBuilder.WriteString("  • Clustered: No\n")
+				}
+				msgBuilder.WriteString("\n")
 			}
 
-			msgBuilder.WriteString("FEATURE FLAGS:\n")
-			msgBuilder.WriteString(fmt.Sprintf("  • Heimdall AI: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallEnabled)))
-			msgBuilder.WriteString(fmt.Sprintf("  • Anomaly Detection: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallAnomalyDetection)))
-			msgBuilder.WriteString(fmt.Sprintf("  • Runtime Diagnosis: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallRuntimeDiagnosis)))
-			msgBuilder.WriteString(fmt.Sprintf("  • Memory Curation: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallMemoryCuration)))
-			msgBuilder.WriteString(fmt.Sprintf("  • K-Means Clustering: %s\n", boolToStatus(dbStats.FeatureFlags.ClusteringEnabled)))
-			msgBuilder.WriteString(fmt.Sprintf("  • Topology Prediction: %s\n", boolToStatus(dbStats.FeatureFlags.TopologyEnabled)))
-			msgBuilder.WriteString(fmt.Sprintf("  • Kalman Filtering: %s\n", boolToStatus(dbStats.FeatureFlags.KalmanEnabled)))
-			msgBuilder.WriteString(fmt.Sprintf("  • Async Writes: %s\n", boolToStatus(dbStats.FeatureFlags.AsyncWritesEnabled)))
-			msgBuilder.WriteString("\n")
+			// Add feature flags if available
+			if dbStats.FeatureFlags != nil {
+				stats["feature_flags"] = map[string]interface{}{
+					"heimdall_enabled":           dbStats.FeatureFlags.HeimdallEnabled,
+					"heimdall_anomaly_detection": dbStats.FeatureFlags.HeimdallAnomalyDetection,
+					"heimdall_runtime_diagnosis": dbStats.FeatureFlags.HeimdallRuntimeDiagnosis,
+					"heimdall_memory_curation":   dbStats.FeatureFlags.HeimdallMemoryCuration,
+					"clustering_enabled":         dbStats.FeatureFlags.ClusteringEnabled,
+					"topology_enabled":           dbStats.FeatureFlags.TopologyEnabled,
+					"kalman_enabled":             dbStats.FeatureFlags.KalmanEnabled,
+					"async_writes_enabled":       dbStats.FeatureFlags.AsyncWritesEnabled,
+				}
+
+				msgBuilder.WriteString("FEATURE FLAGS:\n")
+				msgBuilder.WriteString(fmt.Sprintf("  • Heimdall AI: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallEnabled)))
+				msgBuilder.WriteString(fmt.Sprintf("  • Anomaly Detection: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallAnomalyDetection)))
+				msgBuilder.WriteString(fmt.Sprintf("  • Runtime Diagnosis: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallRuntimeDiagnosis)))
+				msgBuilder.WriteString(fmt.Sprintf("  • Memory Curation: %s\n", boolToStatus(dbStats.FeatureFlags.HeimdallMemoryCuration)))
+				msgBuilder.WriteString(fmt.Sprintf("  • K-Means Clustering: %s\n", boolToStatus(dbStats.FeatureFlags.ClusteringEnabled)))
+				msgBuilder.WriteString(fmt.Sprintf("  • Topology Prediction: %s\n", boolToStatus(dbStats.FeatureFlags.TopologyEnabled)))
+				msgBuilder.WriteString(fmt.Sprintf("  • Kalman Filtering: %s\n", boolToStatus(dbStats.FeatureFlags.KalmanEnabled)))
+				msgBuilder.WriteString(fmt.Sprintf("  • Async Writes: %s\n", boolToStatus(dbStats.FeatureFlags.AsyncWritesEnabled)))
+				msgBuilder.WriteString("\n")
+			}
 		}
 	}
 
@@ -951,6 +983,28 @@ func boolToStatus(b bool) string {
 		return "✅ Enabled"
 	}
 	return "❌ Disabled"
+}
+
+func getDatabaseParam(params map[string]interface{}) string {
+	if params == nil {
+		return ""
+	}
+	if v, ok := params["database"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	if v, ok := params["db"].(string); ok {
+		return strings.TrimSpace(v)
+	}
+	return ""
+}
+
+func coalesceString(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // === Data Access Methods ===
@@ -1134,6 +1188,7 @@ func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext) string {
 	// Perform semantic search with depth=2 for neighbor context
 	result, err := p.ctx.Database.Discover(
 		context.Background(),
+		"", // default database
 		ctx.UserMessage,
 		nil, // all node types
 		5,   // limit to top 5 results
@@ -1341,7 +1396,7 @@ func (p *WatcherPlugin) Synthesize(ctx *heimdall.SynthesisContext, done func(res
 	}
 
 	// If there's no structured data, just return the message
-	if ctx.Result.Data == nil || len(ctx.Result.Data) == 0 {
+	if len(ctx.Result.Data) == 0 {
 		done(ctx.Result.Message)
 		return
 	}

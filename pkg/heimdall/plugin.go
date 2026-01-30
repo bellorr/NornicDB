@@ -184,8 +184,10 @@ type SubsystemContext struct {
 	// Config is the Heimdall configuration
 	Config Config
 
-	// Database provides read-only database access
-	Database DatabaseReader
+	// Database routes Cypher/search operations across logical databases.
+	// This is multi-database aware (Neo4j 4.x style) and should be used instead of
+	// relying on a single default database.
+	Database DatabaseRouter
 
 	// Metrics provides runtime metrics
 	Metrics MetricsReader
@@ -268,12 +270,12 @@ type LiveHeimdallInvoker struct {
 	manager   *SubsystemManager
 	generator Generator
 	bifrost   BifrostBridge
-	database  DatabaseReader
+	database  DatabaseRouter
 	metrics   MetricsReader
 }
 
 // NewLiveHeimdallInvoker creates a new invoker with the required dependencies.
-func NewLiveHeimdallInvoker(manager *SubsystemManager, generator Generator, bifrost BifrostBridge, database DatabaseReader, metrics MetricsReader) *LiveHeimdallInvoker {
+func NewLiveHeimdallInvoker(manager *SubsystemManager, generator Generator, bifrost BifrostBridge, database DatabaseRouter, metrics MetricsReader) *LiveHeimdallInvoker {
 	return &LiveHeimdallInvoker{
 		manager:   manager,
 		generator: generator,
@@ -519,8 +521,8 @@ type ActionContext struct {
 	// Params extracted from user message by SLM
 	Params map[string]interface{}
 
-	// Database provides read-only graph access
-	Database DatabaseReader
+	// Database routes Cypher/search operations across logical databases.
+	Database DatabaseRouter
 
 	// Metrics provides runtime metrics
 	Metrics MetricsReader
@@ -556,15 +558,38 @@ type MCPTool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
-// DatabaseReader provides read-only database access for actions.
-type DatabaseReader interface {
-	// Query executes a read-only Cypher query
-	Query(ctx context.Context, cypher string, params map[string]interface{}) ([]map[string]interface{}, error)
-	// Stats returns database statistics
-	Stats() DatabaseStats
-	// Discover performs semantic search with graph traversal.
+// DatabaseRouter provides multi-database access for Heimdall actions and plugins.
+//
+// IMPORTANT:
+//   - The `database` parameter is a logical database name (or alias) as used by the
+//     Neo4j-compatible multi-database layer.
+//   - If `database` is empty, implementations must route to the configured default database.
+//
+// This interface is intentionally database-name aware so plugins can maintain strict
+// tenant isolation by routing each operation to the correct logical database.
+type DatabaseRouter interface {
+	// DefaultDatabaseName returns the configured default database name.
+	DefaultDatabaseName() string
+
+	// ResolveDatabase resolves a database alias or name to the underlying database name.
+	ResolveDatabase(nameOrAlias string) (string, error)
+
+	// ListDatabases returns the known logical database names.
+	ListDatabases() []string
+
+	// Query executes a Cypher query against the specified logical database.
+	//
+	// NOTE: Despite the historical "read-only" naming, this method may execute write
+	// queries depending on the underlying Cypher engine. Treat it as a general Cypher
+	// execution entrypoint unless your implementation enforces read-only semantics.
+	Query(ctx context.Context, database string, cypher string, params map[string]interface{}) ([]map[string]interface{}, error)
+
+	// Stats returns database statistics for the specified logical database.
+	Stats(database string) (DatabaseStats, error)
+
+	// Discover performs semantic search with graph traversal in the specified database.
 	// Returns search results with related nodes up to the specified depth.
-	Discover(ctx context.Context, query string, nodeTypes []string, limit int, depth int) (*DiscoverResult, error)
+	Discover(ctx context.Context, database string, query string, nodeTypes []string, limit int, depth int) (*DiscoverResult, error)
 }
 
 // DiscoverResult contains semantic search results with related nodes.
@@ -1380,7 +1405,12 @@ func BuiltinActions() []ActionFunc {
 
 				// Get all labels
 				if ctx.Database != nil {
-					labelResults, err := ctx.Database.Query(ctx, "CALL db.labels() YIELD label RETURN label", nil)
+					dbName, _ := ctx.Params["database"].(string)
+					if dbName == "" {
+						dbName, _ = ctx.Params["db"].(string)
+					}
+
+					labelResults, err := ctx.Database.Query(ctx, dbName, "CALL db.labels() YIELD label RETURN label", nil)
 					if err == nil {
 						for _, row := range labelResults {
 							if label, ok := row["label"].(string); ok {
@@ -1390,7 +1420,7 @@ func BuiltinActions() []ActionFunc {
 					}
 
 					// Get all relationship types
-					relResults, err := ctx.Database.Query(ctx, "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType", nil)
+					relResults, err := ctx.Database.Query(ctx, dbName, "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType", nil)
 					if err == nil {
 						for _, row := range relResults {
 							if relType, ok := row["relationshipType"].(string); ok {
@@ -1400,7 +1430,7 @@ func BuiltinActions() []ActionFunc {
 					}
 
 					// Get sample properties from nodes (limit to avoid performance issues)
-					propResults, err := ctx.Database.Query(ctx, `
+					propResults, err := ctx.Database.Query(ctx, dbName, `
 						MATCH (n)
 						WITH n, keys(n) as props
 						UNWIND props as prop
@@ -1476,12 +1506,12 @@ type ParsedAction struct {
 
 // ActionInvoker handles action invocation from SLM responses.
 type ActionInvoker struct {
-	db      DatabaseReader
+	db      DatabaseRouter
 	metrics MetricsReader
 }
 
 // NewActionInvoker creates an action invoker with database/metrics access.
-func NewActionInvoker(db DatabaseReader, metrics MetricsReader) *ActionInvoker {
+func NewActionInvoker(db DatabaseRouter, metrics MetricsReader) *ActionInvoker {
 	return &ActionInvoker{db: db, metrics: metrics}
 }
 

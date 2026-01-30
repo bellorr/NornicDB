@@ -712,6 +712,26 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		log.Println("ℹ️  MCP server disabled via configuration")
 	}
 
+	// Load environment-backed global config once (used for multi-db + feature defaults).
+	globalConfig := nornicConfig.LoadFromEnv()
+
+	// Initialize DatabaseManager for multi-database support.
+	// IMPORTANT: This must happen before Heimdall/GraphQL so they can route per database.
+	//
+	// Get the base storage engine from the DB (unwraps the namespaced storage).
+	// DatabaseManager will create NamespacedEngines for each logical database.
+	storageEngine := db.GetBaseStorageForManager()
+	multiDBConfig := &multidb.Config{
+		DefaultDatabase:  globalConfig.Database.DefaultDatabase,
+		SystemDatabase:   "system",
+		MaxDatabases:     0, // Unlimited
+		AllowDropDefault: false,
+	}
+	dbManager, err := multidb.NewDatabaseManager(storageEngine, multiDBConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize database manager: %w", err)
+	}
+
 	// ==========================================================================
 	// Heimdall - AI Assistant for Database Management
 	// ==========================================================================
@@ -722,7 +742,6 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 	if config.Features != nil {
 		featuresConfig = config.Features
 	} else {
-		globalConfig := nornicConfig.LoadFromEnv()
 		featuresConfig = &globalConfig.Features
 	}
 	if featuresConfig.HeimdallEnabled {
@@ -742,10 +761,10 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			log.Println("   → AI Assistant will not be available")
 			log.Println("   → Check NORNICDB_HEIMDALL_MODEL and NORNICDB_MODELS_DIR")
 		} else {
-			// Create database reader wrapper for Heimdall
-			dbReader := &heimdallDBReader{db: db, features: featuresConfig}
+			// Create database router wrapper for Heimdall (multi-db aware)
+			dbRouter := newHeimdallDBRouter(db, dbManager, featuresConfig)
 			metricsReader := &heimdallMetricsReader{}
-			heimdallHandler = heimdall.NewHandler(manager, heimdallCfg, dbReader, metricsReader)
+			heimdallHandler = heimdall.NewHandler(manager, heimdallCfg, dbRouter, metricsReader)
 
 			// Initialize Heimdall plugin subsystem
 			subsystemMgr := heimdall.GetSubsystemManager()
@@ -756,14 +775,14 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 				subsystemMgr,
 				manager, // Manager implements Generator interface
 				heimdallHandler.Bifrost(),
-				dbReader,
+				dbRouter,
 				metricsReader,
 			)
 
 			subsystemCtx := heimdall.SubsystemContext{
 				Config:   heimdallCfg,
 				Bifrost:  heimdallHandler.Bifrost(),
-				Database: dbReader,
+				Database: dbRouter,
 				Metrics:  metricsReader,
 				Heimdall: heimdallInvoker, // Now plugins can call p.ctx.Heimdall.SendPrompt()
 			}
@@ -771,6 +790,25 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 
 			// Register built-in actions (core system actions)
 			heimdall.InitBuiltinActions()
+
+			// Optional: Heimdall-backed Stage-2 reranking for vector/hybrid search.
+			// This is gated by a dedicated feature flag so it remains opt-in.
+			if featuresConfig.HeimdallVectorRerankEnabled {
+				llm := func(ctx context.Context, prompt string) (string, error) {
+					// Conservative params optimized for short JSON outputs.
+					return manager.Generate(ctx, prompt, heimdall.GenerateParams{
+						MaxTokens:   512,
+						Temperature: 0.1,
+						TopP:        0.9,
+						TopK:        20,
+						StopTokens:  []string{"<|im_end|>", "<|endoftext|>", "</s>"},
+					})
+				}
+				cfg := search.DefaultLLMRerankerConfig()
+				cfg.Enabled = true
+				db.SetSearchReranker(search.NewLLMReranker(cfg, llm))
+				log.Printf("🧠 Heimdall vector rerank enabled (Stage-2 reranking)")
+			}
 
 			// Load plugins from configured directories
 			// Auto-detects plugin types: function plugins (APOC) and Heimdall plugins
@@ -905,32 +943,6 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 	if config.RateLimitEnabled {
 		rateLimiter = NewIPRateLimiter(config.RateLimitPerMinute, config.RateLimitPerHour, config.RateLimitBurst)
 		log.Printf("✓ Rate limiting enabled: %d/min, %d/hour per IP", config.RateLimitPerMinute, config.RateLimitPerHour)
-	}
-
-	// Initialize DatabaseManager for multi-database support
-	// Get the base storage engine from the DB (unwraps the namespaced storage)
-	// DatabaseManager will create NamespacedEngines for each database
-	storageEngine := db.GetBaseStorageForManager()
-
-	// Get multi-database config from global config
-	globalConfig := nornicConfig.LoadFromEnv()
-	multiDBConfig := &multidb.Config{
-		DefaultDatabase:  globalConfig.Database.DefaultDatabase,
-		SystemDatabase:   "system",
-		MaxDatabases:     0, // Unlimited
-		AllowDropDefault: false,
-	}
-
-	dbManager, err := multidb.NewDatabaseManager(storageEngine, multiDBConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to initialize database manager: %w", err)
-	}
-
-	// If authenticator is provided but doesn't have storage, initialize it with system database storage
-	// This handles the case where authenticator was created before dbManager
-	if authenticator != nil {
-		// Authenticator should already have storage from main.go initialization
-		// This is just a check to ensure system database is available
 	}
 
 	s := &Server{

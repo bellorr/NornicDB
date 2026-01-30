@@ -804,8 +804,8 @@ type PreExecuteContext struct {
 	// PluginData from the PrePrompt phase
 	PluginData map[string]interface{}
 
-	// Database provides read-only graph access for async fetches
-	Database DatabaseReader
+	// Database routes Cypher/search operations across logical databases.
+	Database DatabaseRouter
 
 	// Metrics provides runtime metrics
 	Metrics MetricsReader
@@ -1208,8 +1208,8 @@ type SynthesisContext struct {
 	// PluginData from earlier phases
 	PluginData map[string]interface{}
 
-	// Database provides read-only graph access if additional data is needed
-	Database DatabaseReader
+	// Database routes Cypher/search operations across logical databases.
+	Database DatabaseRouter
 }
 
 // DatabaseEventHook is an optional interface for plugins that want to react to database events.
