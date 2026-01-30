@@ -114,6 +114,18 @@ NORNICDB_HEIMDALL_ENABLED=true \
 ./bin/nornicdb serve
 ```
 
+#### GGUF output dimension and quantization
+
+- **Output dimension:** NornicDB expects the reranker GGUF to output a **single relevance logit** (1 dimension). The code uses that value with sigmoid to get a score in [0,1]. Some GGUF conversions export the reranker as a 1024-dim pooled embedding (same as BGE-M3); in that case the first component is *not* the true relevance score and all results can cluster around ~0.5. Prefer a GGUF that was built for **reranking** (classification head → 1-dim logit), e.g. from [gpustack/bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) or similar.
+- **Quantization:** Reranker GGUFs are commonly quantized (Q4_K_M, Q8_0, F16). Q4_K_M is typical for CPU/small GPU; Q8_0 or F16 for higher accuracy. The default `make download-bge-reranker` target uses a Q4_K_M variant.
+
+#### Debugging flat or poor rerank scores
+
+If every result has the same score (e.g. 0.49) or ordering is worse than with reranking off:
+
+1. **Check model output dimension:** Set `NORNICDB_RERANK_DEBUG=1` and run a search. Logs will show `dims=...`, `raw_logit=...`, and `score=...` per candidate. If `dims=1024`, the GGUF is an embedding-style export (pooled [CLS]) and the "score" is just the first component of that vector, not the true relevance logit; try a reranker GGUF that outputs 1 dimension.
+2. **Fallback:** When the reranker produces nearly identical scores (range &lt; 0.05), NornicDB automatically falls back to RRF order and scores so search quality matches "reranking off" until you fix the model or config.
+
 ### External Providers (ollama / openai / http)
 
 Use an HTTP rerank API (Cohere, HuggingFace TEI, or a custom/Ollama adapter). Set provider and API URL; for authenticated APIs, set the API key.
