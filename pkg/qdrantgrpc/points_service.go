@@ -24,15 +24,24 @@ type PointsService struct {
 	collections    CollectionStore
 	searchProvider SearchServiceProvider
 	vecIndex       *vectorIndexCache
+	checker        DatabaseAccessChecker // optional; when set, enforces per-database (per-collection) RBAC
 }
 
-func NewPointsService(config *Config, collections CollectionStore, searchProvider SearchServiceProvider, vecIndex *vectorIndexCache) *PointsService {
+func NewPointsService(config *Config, collections CollectionStore, searchProvider SearchServiceProvider, vecIndex *vectorIndexCache, checker DatabaseAccessChecker) *PointsService {
 	return &PointsService{
 		config:         config,
 		collections:    collections,
 		searchProvider: searchProvider,
 		vecIndex:       vecIndex,
+		checker:        checker,
 	}
+}
+
+func (s *PointsService) allowAccess(ctx context.Context, collectionName string, write bool) error {
+	if s.checker == nil {
+		return nil
+	}
+	return s.checker.AllowDatabaseAccess(ctx, collectionName, write)
 }
 
 func (s *PointsService) openCollection(ctx context.Context, name string) (storage.Engine, *CollectionMeta, error) {
@@ -63,6 +72,9 @@ func (s *PointsService) Upsert(ctx context.Context, req *qpb.UpsertPoints) (*qpb
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
 	}
 	if !s.config.AllowVectorMutations {
 		return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
@@ -211,6 +223,9 @@ func (s *PointsService) Get(ctx context.Context, req *qpb.GetPoints) (*qpb.GetRe
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
+	}
 	if len(req.GetIds()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "ids are required")
 	}
@@ -255,6 +270,9 @@ func (s *PointsService) Delete(ctx context.Context, req *qpb.DeletePoints) (*qpb
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
+	}
 	if req.Points == nil {
 		return nil, status.Error(codes.InvalidArgument, "points selector is required")
 	}
@@ -297,6 +315,9 @@ func (s *PointsService) Count(ctx context.Context, req *qpb.CountPoints) (*qpb.C
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
+	}
 
 	store, _, err := s.openCollection(ctx, req.CollectionName)
 	if err != nil {
@@ -330,6 +351,9 @@ func (s *PointsService) Search(ctx context.Context, req *qpb.SearchPoints) (*qpb
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
 	}
 	if len(req.GetVector()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "vector is required")
@@ -439,6 +463,9 @@ func (s *PointsService) Scroll(ctx context.Context, req *qpb.ScrollPoints) (*qpb
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
+	}
 
 	limit := 10
 	if req.Limit != nil && *req.Limit > 0 {
@@ -524,6 +551,9 @@ func (s *PointsService) updatePayload(ctx context.Context, req *qpb.SetPayloadPo
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
+	}
 	if req.Payload == nil {
 		return nil, status.Error(codes.InvalidArgument, "payload is required")
 	}
@@ -570,6 +600,9 @@ func (s *PointsService) DeletePayload(ctx context.Context, req *qpb.DeletePayloa
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
+	}
 	if len(req.GetKeys()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "keys are required")
 	}
@@ -608,6 +641,9 @@ func (s *PointsService) ClearPayload(ctx context.Context, req *qpb.ClearPayloadP
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
+	}
 	if req.Points == nil {
 		return nil, status.Error(codes.InvalidArgument, "points selector is required")
 	}
@@ -643,6 +679,9 @@ func (s *PointsService) UpdateVectors(ctx context.Context, req *qpb.UpdatePointV
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
 	}
 	if !s.config.AllowVectorMutations {
 		return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
@@ -713,6 +752,9 @@ func (s *PointsService) DeleteVectors(ctx context.Context, req *qpb.DeletePointV
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
+	}
 	if !s.config.AllowVectorMutations {
 		return nil, status.Error(codes.FailedPrecondition, "vector mutations are disabled because NornicDB-managed embeddings are enabled; set NORNICDB_EMBEDDING_ENABLED=false to allow managing vectors via Qdrant gRPC")
 	}
@@ -774,6 +816,9 @@ func (s *PointsService) SearchBatch(ctx context.Context, req *qpb.SearchBatchPoi
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
+	}
 	if len(req.GetSearchPoints()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "search_points are required")
 	}
@@ -804,6 +849,9 @@ func (s *PointsService) Recommend(ctx context.Context, req *qpb.RecommendPoints)
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
 	}
 
 	limit := uint64(10)
@@ -851,6 +899,9 @@ func (s *PointsService) RecommendBatch(ctx context.Context, req *qpb.RecommendBa
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
+	}
 	if len(req.GetRecommendPoints()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "recommend_points are required")
 	}
@@ -880,6 +931,9 @@ func (s *PointsService) SearchGroups(ctx context.Context, req *qpb.SearchPointGr
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
 	}
 	if len(req.GetVector()) == 0 {
 		return nil, status.Error(codes.InvalidArgument, "vector is required")
@@ -963,6 +1017,9 @@ func (s *PointsService) CreateFieldIndex(ctx context.Context, req *qpb.CreateFie
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
+	}
 	if req.FieldName == "" {
 		return nil, status.Error(codes.InvalidArgument, "field_name is required")
 	}
@@ -983,6 +1040,9 @@ func (s *PointsService) DeleteFieldIndex(ctx context.Context, req *qpb.DeleteFie
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
 	}
 	if req.FieldName == "" {
 		return nil, status.Error(codes.InvalidArgument, "field_name is required")
@@ -1009,6 +1069,9 @@ func (s *PointsService) Query(ctx context.Context, req *qpb.QueryPoints) (*qpb.Q
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
 	}
 
 	limit := uint64(10)

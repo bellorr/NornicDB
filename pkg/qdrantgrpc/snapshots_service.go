@@ -25,11 +25,12 @@ type SnapshotsService struct {
 	collections CollectionStore
 	baseStorage storage.Engine
 	snapshotDir string
+	checker     DatabaseAccessChecker // optional; when set, enforces per-database (per-collection) RBAC
 }
 
 // NewSnapshotsService creates a new Snapshots service.
 // snapshotDir is the directory where snapshots will be stored.
-func NewSnapshotsService(config *Config, collections CollectionStore, baseStorage storage.Engine, snapshotDir string) *SnapshotsService {
+func NewSnapshotsService(config *Config, collections CollectionStore, baseStorage storage.Engine, snapshotDir string, checker DatabaseAccessChecker) *SnapshotsService {
 	if snapshotDir == "" {
 		snapshotDir = "./data/qdrant-snapshots"
 	}
@@ -41,7 +42,15 @@ func NewSnapshotsService(config *Config, collections CollectionStore, baseStorag
 		collections: collections,
 		baseStorage: baseStorage,
 		snapshotDir: snapshotDir,
+		checker:     checker,
 	}
+}
+
+func (s *SnapshotsService) allowAccess(ctx context.Context, collectionName string, write bool) error {
+	if s.checker == nil {
+		return nil
+	}
+	return s.checker.AllowDatabaseAccess(ctx, collectionName, write)
 }
 
 // Create creates a new snapshot of a collection.
@@ -51,6 +60,9 @@ func (s *SnapshotsService) Create(ctx context.Context, req *qpb.CreateSnapshotRe
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
 	}
 
 	// Verify collection exists
@@ -124,6 +136,9 @@ func (s *SnapshotsService) List(ctx context.Context, req *qpb.ListSnapshotsReque
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
+	}
 
 	// Verify collection exists
 	if s.collections == nil || !s.collections.Exists(req.CollectionName) {
@@ -186,6 +201,9 @@ func (s *SnapshotsService) Delete(ctx context.Context, req *qpb.DeleteSnapshotRe
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
 	}
 
 	if req.GetSnapshotName() == "" {

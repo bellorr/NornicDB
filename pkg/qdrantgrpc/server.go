@@ -152,6 +152,14 @@ type Config struct {
 	// If a request's method is not found in either this map or the built-in
 	// defaults, the request is denied (default-deny).
 	MethodPermissions map[string]auth.Permission
+
+	// DatabaseAccessModeResolver, when set, enables per-database (per-collection) RBAC.
+	// Collection name = database name. Called with the principal's roles from context;
+	// CanAccessDatabase(collectionName) is checked before opening the collection.
+	DatabaseAccessModeResolver func(roles []string) auth.DatabaseAccessMode
+	// ResolvedAccessResolver, when set, is used for write RPCs: ResolvedAccess.Write
+	// for (roles, collectionName) must be true or the request is denied.
+	ResolvedAccessResolver func(roles []string, dbName string) auth.ResolvedAccess
 }
 
 // SearchServiceProvider returns a search service configured for the provided database namespace.
@@ -177,6 +185,15 @@ func DefaultConfig() *Config {
 	}
 }
 
+// DatabaseAccessChecker is used by Points, Collections, and Snapshots services to enforce
+// per-database (per-collection) RBAC. Collection name = database name.
+type DatabaseAccessChecker interface {
+	// AllowDatabaseAccess returns nil if the principal in ctx may access the database (read-only if write is false, write if write is true).
+	AllowDatabaseAccess(ctx context.Context, database string, write bool) error
+	// VisibleDatabases returns the subset of candidates that the principal may see (e.g. for List filtering).
+	VisibleDatabases(ctx context.Context, candidates []string) ([]string, error)
+}
+
 // Server is the Qdrant-compatible gRPC server.
 type Server struct {
 	config         *Config
@@ -187,12 +204,62 @@ type Server struct {
 	authenticator  *auth.Authenticator // Authentication for gRPC requests
 	basicAuthCache *auth.BasicAuthCache
 
+	// Per-database RBAC (optional). When set, collection = database and access is checked before each RPC.
+	databaseAccessModeResolver func(roles []string) auth.DatabaseAccessMode
+	resolvedAccessResolver     func(roles []string, dbName string) auth.ResolvedAccess
+
 	grpcServer *grpc.Server
 	listener   net.Listener
 	register   []func(*grpc.Server)
 
 	mu      sync.RWMutex
 	started bool
+}
+
+// AllowDatabaseAccess implements DatabaseAccessChecker. Returns PermissionDenied if the principal may not access the database.
+func (s *Server) AllowDatabaseAccess(ctx context.Context, database string, write bool) error {
+	if s.databaseAccessModeResolver == nil {
+		return nil
+	}
+	claims, _ := ctx.Value(contextKeyClaims{}).(*auth.JWTClaims)
+	var roles []string
+	if claims != nil {
+		roles = claims.Roles
+	}
+	mode := s.databaseAccessModeResolver(roles)
+	if mode == nil || !mode.CanAccessDatabase(database) {
+		return status.Errorf(codes.PermissionDenied, "access to database %q is not allowed", database)
+	}
+	if write && s.resolvedAccessResolver != nil {
+		ra := s.resolvedAccessResolver(roles, database)
+		if !ra.Write {
+			return status.Errorf(codes.PermissionDenied, "write on database %q is not allowed", database)
+		}
+	}
+	return nil
+}
+
+// VisibleDatabases implements DatabaseAccessChecker. Returns the subset of candidates the principal may see.
+func (s *Server) VisibleDatabases(ctx context.Context, candidates []string) ([]string, error) {
+	if s.databaseAccessModeResolver == nil {
+		return candidates, nil
+	}
+	claims, _ := ctx.Value(contextKeyClaims{}).(*auth.JWTClaims)
+	var roles []string
+	if claims != nil {
+		roles = claims.Roles
+	}
+	mode := s.databaseAccessModeResolver(roles)
+	if mode == nil {
+		return candidates, nil
+	}
+	out := make([]string, 0, len(candidates))
+	for _, name := range candidates {
+		if mode.CanSeeDatabase(name) {
+			out = append(out, name)
+		}
+	}
+	return out, nil
 }
 
 type contextKeyClaims struct{}
@@ -215,7 +282,7 @@ func NewServer(config *Config, collections CollectionStore, baseStorage storage.
 		return nil, fmt.Errorf("collection store required")
 	}
 
-	return &Server{
+	srv := &Server{
 		config:         config,
 		collections:    collections,
 		baseStorage:    baseStorage,
@@ -224,7 +291,12 @@ func NewServer(config *Config, collections CollectionStore, baseStorage storage.
 		authenticator:  authenticator,
 		basicAuthCache: auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
 		register:       nil,
-	}, nil
+	}
+	if config != nil {
+		srv.databaseAccessModeResolver = config.DatabaseAccessModeResolver
+		srv.resolvedAccessResolver = config.ResolvedAccessResolver
+	}
+	return srv, nil
 }
 
 // CollectionStore returns the configured collection store.
@@ -294,13 +366,17 @@ func (s *Server) Start() error {
 
 	s.grpcServer = grpc.NewServer(opts...)
 
-	collectionsService := NewCollectionsService(s.collections, s.vecIndex)
+	var checker DatabaseAccessChecker = s
+	if s.databaseAccessModeResolver == nil {
+		checker = nil // no per-DB RBAC when resolvers not set
+	}
+	collectionsService := NewCollectionsService(s.collections, s.vecIndex, checker)
 	qpb.RegisterCollectionsServer(s.grpcServer, collectionsService)
 
-	pointsService := NewPointsService(s.config, s.collections, s.searchService, s.vecIndex)
+	pointsService := NewPointsService(s.config, s.collections, s.searchService, s.vecIndex, checker)
 	qpb.RegisterPointsServer(s.grpcServer, pointsService)
 
-	snapshotsService := NewSnapshotsService(s.config, s.collections, s.baseStorage, s.config.SnapshotDir)
+	snapshotsService := NewSnapshotsService(s.config, s.collections, s.baseStorage, s.config.SnapshotDir, checker)
 	qpb.RegisterSnapshotsServer(s.grpcServer, snapshotsService)
 
 	for _, fn := range s.register {

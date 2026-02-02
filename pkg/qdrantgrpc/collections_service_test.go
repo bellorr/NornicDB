@@ -25,7 +25,7 @@ func newTestCollectionStore(t *testing.T) (CollectionStore, *vectorIndexCache) {
 func TestCollectionsService_Create(t *testing.T) {
 	ctx := context.Background()
 	collections, vec := newTestCollectionStore(t)
-	service := NewCollectionsService(collections, vec)
+	service := NewCollectionsService(collections, vec, nil)
 
 	t.Run("create collection successfully", func(t *testing.T) {
 		req := &qpb.CreateCollection{
@@ -111,7 +111,7 @@ func TestCollectionsService_Create(t *testing.T) {
 func TestCollectionsService_Get(t *testing.T) {
 	ctx := context.Background()
 	collections, vec := newTestCollectionStore(t)
-	service := NewCollectionsService(collections, vec)
+	service := NewCollectionsService(collections, vec, nil)
 
 	// Create a test collection first
 	require.NoError(t, collections.Create(ctx, "my_collection", 512, qpb.Distance_Dot))
@@ -160,7 +160,7 @@ func TestCollectionsService_Get(t *testing.T) {
 func TestCollectionsService_List(t *testing.T) {
 	ctx := context.Background()
 	collections, vec := newTestCollectionStore(t)
-	service := NewCollectionsService(collections, vec)
+	service := NewCollectionsService(collections, vec, nil)
 
 	t.Run("list empty collections", func(t *testing.T) {
 		req := &qpb.ListCollectionsRequest{}
@@ -196,7 +196,7 @@ func TestCollectionsService_List(t *testing.T) {
 func TestCollectionsService_Delete(t *testing.T) {
 	ctx := context.Background()
 	collections, vec := newTestCollectionStore(t)
-	service := NewCollectionsService(collections, vec)
+	service := NewCollectionsService(collections, vec, nil)
 
 	// Create a collection first
 	require.NoError(t, collections.Create(ctx, "to_delete", 128, qpb.Distance_Cosine))

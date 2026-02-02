@@ -198,6 +198,20 @@ func (s *Server) handleSearchRebuild(w http.ResponseWriter, r *http.Request) {
 		dbName = s.dbManager.DefaultDatabaseName()
 	}
 
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	claims := getClaims(r)
+	if !s.getDatabaseAccessMode(claims).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
+	// Rebuild is a write to the database; require ResolvedAccess.Write for this DB.
+	if !s.getResolvedAccess(claims, dbName).Write {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Write on database '%s' is not allowed.", dbName))
+		return
+	}
+
 	// Get namespaced storage for the specified database
 	storageEngine, err := s.dbManager.GetStorage(dbName)
 	if err != nil {
@@ -260,6 +274,13 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	dbName := req.Database
 	if dbName == "" {
 		dbName = s.dbManager.DefaultDatabaseName()
+	}
+
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
 	}
 
 	// Get namespaced storage for the specified database
@@ -470,6 +491,13 @@ func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {
 	dbName := req.Database
 	if dbName == "" {
 		dbName = s.dbManager.DefaultDatabaseName()
+	}
+
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
 	}
 
 	// Get namespaced storage for the specified database

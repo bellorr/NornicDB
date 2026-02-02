@@ -407,6 +407,13 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 		return
 	}
 
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
+
 	// Get storage for this database to get stats
 	// This returns a NamespacedEngine that provides isolated access
 	storage, err := s.dbManager.GetStorage(dbName)
@@ -445,6 +452,12 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 
 // handleClusterStatus returns cluster status (standalone mode)
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request, dbName string) {
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
 	response := map[string]interface{}{
 		"mode":     "standalone",
 		"database": dbName,
@@ -1266,6 +1279,15 @@ func (s *Server) generateBookmark() string {
 //   - Long-running transaction support
 
 func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, dbName string) {
+	claims := getClaims(r)
+
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	if !s.getDatabaseAccessMode(claims).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
+
 	// Generate transaction ID
 	txID := fmt.Sprintf("%d", time.Now().UnixNano())
 
@@ -1297,9 +1319,25 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	// Execute any provided statements
+	// Execute any provided statements (with per-DB write check for mutations)
 	if len(req.Statements) > 0 {
 		for _, stmt := range req.Statements {
+			if isMutationQuery(stmt.Statement) {
+				if claims == nil {
+					response.Errors = append(response.Errors, QueryError{
+						Code:    "Neo.ClientError.Security.Forbidden",
+						Message: "Write permission required",
+					})
+					continue
+				}
+				if !s.getResolvedAccess(claims, dbName).Write {
+					response.Errors = append(response.Errors, QueryError{
+						Code:    "Neo.ClientError.Security.Forbidden",
+						Message: fmt.Sprintf("Write on database '%s' is not allowed.", dbName),
+					})
+					continue
+				}
+			}
 			result, err := executor.Execute(r.Context(), stmt.Statement, stmt.Parameters)
 			if err != nil {
 				response.Errors = append(response.Errors, QueryError{
@@ -1342,6 +1380,15 @@ func (s *Server) handleExecuteInTransaction(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request, dbName, txID string) {
+	claims := getClaims(r)
+
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	if !s.getDatabaseAccessMode(claims).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
+
 	var req TransactionRequest
 	_ = s.readJSON(r, &req) // Optional final statements
 
@@ -1362,8 +1409,24 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	// Execute any final statements
+	// Execute any final statements (with per-DB write check for mutations)
 	for _, stmt := range req.Statements {
+		if isMutationQuery(stmt.Statement) {
+			if claims == nil {
+				response.Errors = append(response.Errors, QueryError{
+					Code:    "Neo.ClientError.Security.Forbidden",
+					Message: "Write permission required",
+				})
+				continue
+			}
+			if !s.getResolvedAccess(claims, dbName).Write {
+				response.Errors = append(response.Errors, QueryError{
+					Code:    "Neo.ClientError.Security.Forbidden",
+					Message: fmt.Sprintf("Write on database '%s' is not allowed.", dbName),
+				})
+				continue
+			}
+		}
 		result, err := executor.Execute(r.Context(), stmt.Statement, stmt.Parameters)
 		if err != nil {
 			response.Errors = append(response.Errors, QueryError{
@@ -1407,6 +1470,12 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 }
 
 func (s *Server) handleRollbackTransaction(w http.ResponseWriter, r *http.Request, dbName, txID string) {
+	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
+	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
 	// Rollback transaction (for simplified implementation, just acknowledge)
 	response := TransactionResponse{
 		Results: make([]QueryResult, 0),

@@ -34,7 +34,7 @@ func setupPointsService(t *testing.T) (*PointsService, CollectionStore, storage.
 	err = collections.Create(ctx, "test_vectors", 4, qpb.Distance_Cosine)
 	require.NoError(t, err)
 
-	return NewPointsService(cfg, collections, nil, vecIndex), collections, base
+	return NewPointsService(cfg, collections, nil, vecIndex, nil), collections, base
 }
 
 func TestPointsService_UpsertGetDeleteCountSearch(t *testing.T) {

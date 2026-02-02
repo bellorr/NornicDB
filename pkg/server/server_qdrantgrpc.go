@@ -78,6 +78,11 @@ func (s *Server) startQdrantGRPC() error {
 		}
 		cfg.MethodPermissions = overrides
 	}
+	// Per-database RBAC: when auth is enabled, gRPC enforces same allowlist + privileges as HTTP/Bolt.
+	if s.auth != nil && s.auth.IsSecurityEnabled() {
+		cfg.DatabaseAccessModeResolver = s.GetDatabaseAccessModeForRoles
+		cfg.ResolvedAccessResolver = s.GetResolvedAccessForRoles
+	}
 
 	searchProvider := func(database string, store storage.Engine) (*search.Service, error) {
 		return s.db.GetOrCreateSearchService(database, store)

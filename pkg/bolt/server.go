@@ -1371,6 +1371,10 @@ func (s *Session) handleRun(data []byte) error {
 	} else if s.server != nil && s.server.databaseAccessMode != nil {
 		mode = s.server.databaseAccessMode
 	}
+	// When auth is required but no resolver/mode was set (e.g. standalone Bolt), deny all DB access (secure default).
+	if mode == nil && s.server != nil && s.server.config.RequireAuth {
+		mode = auth.DenyAllDatabaseAccessMode
+	}
 	if mode != nil && !mode.CanAccessDatabase(dbName) {
 		return s.sendFailure("Neo.ClientError.Security.Forbidden",
 			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))

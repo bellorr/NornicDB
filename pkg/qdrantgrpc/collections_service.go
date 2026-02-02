@@ -14,14 +14,23 @@ type CollectionsService struct {
 	qpb.UnimplementedCollectionsServer
 	collections CollectionStore
 	vecIndex    *vectorIndexCache
+	checker     DatabaseAccessChecker // optional; when set, enforces per-database (per-collection) RBAC
 }
 
 // NewCollectionsService creates a new Collections service.
-func NewCollectionsService(collections CollectionStore, vecIndex *vectorIndexCache) *CollectionsService {
+func NewCollectionsService(collections CollectionStore, vecIndex *vectorIndexCache, checker DatabaseAccessChecker) *CollectionsService {
 	return &CollectionsService{
 		collections: collections,
 		vecIndex:    vecIndex,
+		checker:     checker,
 	}
+}
+
+func (s *CollectionsService) allowAccess(ctx context.Context, collectionName string, write bool) error {
+	if s.checker == nil {
+		return nil
+	}
+	return s.checker.AllowDatabaseAccess(ctx, collectionName, write)
 }
 
 func (s *CollectionsService) Create(ctx context.Context, req *qpb.CreateCollection) (*qpb.CollectionOperationResponse, error) {
@@ -29,6 +38,9 @@ func (s *CollectionsService) Create(ctx context.Context, req *qpb.CreateCollecti
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
 	}
 
 	// Extract vector config
@@ -74,6 +86,9 @@ func (s *CollectionsService) Get(ctx context.Context, req *qpb.GetCollectionInfo
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
 	}
 
 	meta, err := s.collections.GetMeta(ctx, req.CollectionName)
@@ -145,6 +160,12 @@ func (s *CollectionsService) List(ctx context.Context, req *qpb.ListCollectionsR
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "failed to list collections: %v", err)
 	}
+	if s.checker != nil {
+		names, err = s.checker.VisibleDatabases(ctx, names)
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	collections := make([]*qpb.CollectionDescription, len(names))
 	for i, name := range names {
@@ -162,6 +183,9 @@ func (s *CollectionsService) Delete(ctx context.Context, req *qpb.DeleteCollecti
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
 	}
 
 	if err := s.collections.Drop(ctx, req.CollectionName); err != nil {
@@ -188,6 +212,9 @@ func (s *CollectionsService) Update(ctx context.Context, req *qpb.UpdateCollecti
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
 	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), true); err != nil {
+		return nil, err
+	}
 
 	// Verify collection exists
 	if !s.collections.Exists(req.CollectionName) {
@@ -208,6 +235,9 @@ func (s *CollectionsService) CollectionExists(ctx context.Context, req *qpb.Coll
 
 	if req.GetCollectionName() == "" {
 		return nil, status.Error(codes.InvalidArgument, "collection_name is required")
+	}
+	if err := s.allowAccess(ctx, req.GetCollectionName(), false); err != nil {
+		return nil, err
 	}
 
 	exists := s.collections.Exists(req.CollectionName)
