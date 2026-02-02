@@ -68,7 +68,7 @@ func createNodeViaCypher(t *testing.T, resolver *Resolver, labels []string, prop
 	propsStr += "}"
 
 	query := fmt.Sprintf("CREATE (n%s %s) RETURN n", labelsStr, propsStr)
-	result, err := resolver.executeCypher(ctx, query, params, "")
+	result, err := resolver.executeCypher(ctx, query, params, "", false)
 	require.NoError(t, err)
 	require.Len(t, result.Rows, 1)
 

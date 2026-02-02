@@ -9,6 +9,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/auth"
 )
 
 // Handler provides HTTP endpoints for Bifrost chat.
@@ -199,11 +201,14 @@ func (h *Handler) handleAutocomplete(w http.ResponseWriter, r *http.Request) {
 
 	// Invoke the autocomplete action
 	ctx := ActionContext{
-		Context:  r.Context(),
-		Params:   map[string]interface{}{"query": req.Query, "cursor_position": req.CursorPosition},
-		Database: h.database,
-		Metrics:  h.metrics,
-		Bifrost:  h.bifrost,
+		Context:            r.Context(),
+		Params:             map[string]interface{}{"query": req.Query, "cursor_position": req.CursorPosition},
+		Database:           h.database,
+		Metrics:            h.metrics,
+		Bifrost:            h.bifrost,
+		PrincipalRoles:     PrincipalRolesFromContext(r.Context()),
+		DatabaseAccessMode: DatabaseAccessModeFromContext(r.Context()),
+		ResolvedAccess:     ResolvedAccessResolverFromContext(r.Context()),
 	}
 
 	result, err := ExecuteAction("heimdall_autocomplete_suggest", ctx)
@@ -522,12 +527,15 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 
-	// Store PromptContext in request context for later phases
+	// Store PromptContext in request context for later phases; attach RBAC from request context
 	lifecycleCtx := &requestLifecycle{
-		promptCtx: promptCtx,
-		requestID: requestID,
-		database:  h.database,
-		metrics:   h.metrics,
+		promptCtx:              promptCtx,
+		requestID:              requestID,
+		database:               h.database,
+		metrics:                h.metrics,
+		principalRoles:         PrincipalRolesFromContext(r.Context()),
+		databaseAccessMode:     DatabaseAccessModeFromContext(r.Context()),
+		resolvedAccessResolver: ResolvedAccessResolverFromContext(r.Context()),
 	}
 
 	if req.Stream {
@@ -552,6 +560,10 @@ type requestLifecycle struct {
 	StreamWriter  http.ResponseWriter // optional: for streaming notifications during agentic loop
 	StreamFlusher http.Flusher        // optional: flush after each SSE chunk
 	StreamModel   string              // optional: model name for SSE chunk payloads
+	// RBAC: from request context (set by server when Bifrost is behind auth)
+	principalRoles         []string
+	databaseAccessMode     auth.DatabaseAccessMode
+	resolvedAccessResolver func(string) auth.ResolvedAccess
 }
 
 // sendStreamNotifications writes queued notifications as SSE chunks (used when streaming with tools).
@@ -694,6 +706,9 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 				RequestID: lifecycle.requestID, RequestTime: lifecycle.promptCtx.RequestTime,
 				Action: tc.Name, Params: paramsMap, PluginData: lifecycle.promptCtx.PluginData,
 				Database: lifecycle.database, Metrics: lifecycle.metrics,
+				PrincipalRoles:     lifecycle.principalRoles,
+				DatabaseAccessMode: lifecycle.databaseAccessMode,
+				ResolvedAccess:     lifecycle.resolvedAccessResolver,
 			}
 			preExecCtx.SetBifrost(h.bifrost)
 			preExecResult := CallPreExecuteHooks(preExecCtx)
@@ -709,7 +724,13 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 			if preExecResult.ModifiedParams != nil {
 				paramsMap = preExecResult.ModifiedParams
 			}
-			actCtx := ActionContext{Context: ctx, UserMessage: userMessage, Params: paramsMap, Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics}
+			actCtx := ActionContext{
+				Context: ctx, UserMessage: userMessage, Params: paramsMap,
+				Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics,
+				PrincipalRoles:     lifecycle.principalRoles,
+				DatabaseAccessMode: lifecycle.databaseAccessMode,
+				ResolvedAccess:     lifecycle.resolvedAccessResolver,
+			}
 			startTime := time.Now()
 			result, execErr := ExecuteAction(tc.Name, actCtx)
 			execDuration := time.Since(startTime)
@@ -751,6 +772,9 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 			RequestID: lifecycle.requestID, RequestTime: lifecycle.promptCtx.RequestTime,
 			Action: parsedAction.Action, Params: parsedAction.Params, RawResponse: response, PluginData: lifecycle.promptCtx.PluginData,
 			Database: lifecycle.database, Metrics: lifecycle.metrics,
+			PrincipalRoles:     lifecycle.principalRoles,
+			DatabaseAccessMode: lifecycle.databaseAccessMode,
+			ResolvedAccess:     lifecycle.resolvedAccessResolver,
 		}
 		preExecCtx.SetBifrost(h.bifrost)
 		preExecResult := CallPreExecuteHooks(preExecCtx)
@@ -767,7 +791,13 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 		if preExecResult.ModifiedParams != nil {
 			paramsToUse = preExecResult.ModifiedParams
 		}
-		actCtx := ActionContext{Context: ctx, UserMessage: userMessage, Params: paramsToUse, Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics}
+		actCtx := ActionContext{
+			Context: ctx, UserMessage: userMessage, Params: paramsToUse,
+			Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics,
+			PrincipalRoles:     lifecycle.principalRoles,
+			DatabaseAccessMode: lifecycle.databaseAccessMode,
+			ResolvedAccess:     lifecycle.resolvedAccessResolver,
+		}
 		startTime := time.Now()
 		result, execErr := ExecuteAction(parsedAction.Action, actCtx)
 		execDuration := time.Since(startTime)
@@ -1043,14 +1073,17 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 
 		// === Phase 4: PreExecute hooks ===
 		preExecCtx := &PreExecuteContext{
-			RequestID:   lifecycle.requestID,
-			RequestTime: lifecycle.promptCtx.RequestTime,
-			Action:      parsedAction.Action,
-			Params:      parsedAction.Params,
-			RawResponse: response,
-			PluginData:  lifecycle.promptCtx.PluginData,
-			Database:    lifecycle.database,
-			Metrics:     lifecycle.metrics,
+			RequestID:          lifecycle.requestID,
+			RequestTime:        lifecycle.promptCtx.RequestTime,
+			Action:             parsedAction.Action,
+			Params:             parsedAction.Params,
+			RawResponse:        response,
+			PluginData:         lifecycle.promptCtx.PluginData,
+			Database:           lifecycle.database,
+			Metrics:            lifecycle.metrics,
+			PrincipalRoles:     lifecycle.principalRoles,
+			DatabaseAccessMode: lifecycle.databaseAccessMode,
+			ResolvedAccess:     lifecycle.resolvedAccessResolver,
 		}
 		// Set Bifrost for notifications (fire-and-forget SSE messages)
 		preExecCtx.SetBifrost(h.bifrost)
@@ -1130,12 +1163,15 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 				// === Phase 5: Execute action ===
 				startTime := time.Now()
 				actCtx := ActionContext{
-					Context:     ctx,
-					UserMessage: prompt,
-					Params:      parsedAction.Params,
-					Bifrost:     h.bifrost,
-					Database:    h.database,
-					Metrics:     h.metrics,
+					Context:            ctx,
+					UserMessage:        prompt,
+					Params:             parsedAction.Params,
+					Bifrost:            h.bifrost,
+					Database:           h.database,
+					Metrics:            h.metrics,
+					PrincipalRoles:     lifecycle.principalRoles,
+					DatabaseAccessMode: lifecycle.databaseAccessMode,
+					ResolvedAccess:     lifecycle.resolvedAccessResolver,
 				}
 
 				var err error

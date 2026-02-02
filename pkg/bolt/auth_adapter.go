@@ -53,9 +53,10 @@ import (
 //
 //	boltServer := bolt.New(boltConfig, executor)
 type AuthenticatorAdapter struct {
-	auth           *auth.Authenticator
-	allowAnonymous bool
-	basicAuthCache *auth.BasicAuthCache
+	auth                    *auth.Authenticator
+	allowAnonymous          bool
+	basicAuthCache          *auth.BasicAuthCache
+	getEffectivePermissions func(roles []string) []string // optional; when set, BoltAuthResult.Permissions is filled
 }
 
 // NewAuthenticatorAdapter creates a new BoltAuthenticator that wraps auth.Authenticator.
@@ -93,6 +94,12 @@ func NewAuthenticatorAdapterWithAnonymous(authenticator *auth.Authenticator) *Au
 	}
 }
 
+// SetGetEffectivePermissions sets the callback used to resolve roles to effective permission IDs.
+// When set, BoltAuthResult.Permissions is filled so HasPermission uses stored role entitlements.
+func (a *AuthenticatorAdapter) SetGetEffectivePermissions(fn func(roles []string) []string) {
+	a.getEffectivePermissions = fn
+}
+
 // Authenticate validates credentials from the Bolt HELLO message.
 // This method implements the BoltAuthenticator interface.
 //
@@ -123,16 +130,17 @@ func NewAuthenticatorAdapterWithAnonymous(authenticator *auth.Authenticator) *Au
 //	driver = GraphDatabase.driver("bolt://node:7687",
 //		basic_auth("", token))  # Empty username = bearer auth
 func (a *AuthenticatorAdapter) Authenticate(scheme, principal, credentials string) (*BoltAuthResult, error) {
-	// Handle anonymous authentication
+	// Handle anonymous authentication (canonical role from auth)
 	if scheme == "none" || scheme == "" {
 		if !a.allowAnonymous {
 			return nil, fmt.Errorf("anonymous authentication not allowed")
 		}
-		return &BoltAuthResult{
-			Authenticated: true,
-			Username:      "anonymous",
-			Roles:         []string{"viewer"},
-		}, nil
+		roles := []string{string(auth.RoleViewer)}
+		result := &BoltAuthResult{Authenticated: true, Username: "anonymous", Roles: roles}
+		if a.getEffectivePermissions != nil {
+			result.Permissions = a.getEffectivePermissions(roles)
+		}
+		return result, nil
 	}
 
 	// Handle bearer token authentication (JWT)
@@ -149,11 +157,11 @@ func (a *AuthenticatorAdapter) Authenticate(scheme, principal, credentials strin
 			return nil, fmt.Errorf("invalid bearer token: %w", err)
 		}
 
-		return &BoltAuthResult{
-			Authenticated: true,
-			Username:      claims.Username,
-			Roles:         claims.Roles,
-		}, nil
+		result := &BoltAuthResult{Authenticated: true, Username: claims.Username, Roles: claims.Roles}
+		if a.getEffectivePermissions != nil {
+			result.Permissions = a.getEffectivePermissions(claims.Roles)
+		}
+		return result, nil
 	}
 
 	// Handle basic auth - check if it's actually a bearer token in disguise
@@ -165,11 +173,11 @@ func (a *AuthenticatorAdapter) Authenticate(scheme, principal, credentials strin
 			return nil, fmt.Errorf("invalid bearer token: %w", err)
 		}
 
-		return &BoltAuthResult{
-			Authenticated: true,
-			Username:      claims.Username,
-			Roles:         claims.Roles,
-		}, nil
+		result := &BoltAuthResult{Authenticated: true, Username: claims.Username, Roles: claims.Roles}
+		if a.getEffectivePermissions != nil {
+			result.Permissions = a.getEffectivePermissions(claims.Roles)
+		}
+		return result, nil
 	}
 
 	// Only "basic" scheme supported for username/password authentication
@@ -179,11 +187,11 @@ func (a *AuthenticatorAdapter) Authenticate(scheme, principal, credentials strin
 
 	if a.basicAuthCache != nil {
 		if cached, ok := a.basicAuthCache.Get(principal, credentials); ok {
-			return &BoltAuthResult{
-				Authenticated: true,
-				Username:      cached.Username,
-				Roles:         cached.Roles,
-			}, nil
+			result := &BoltAuthResult{Authenticated: true, Username: cached.Username, Roles: cached.Roles}
+			if a.getEffectivePermissions != nil {
+				result.Permissions = a.getEffectivePermissions(cached.Roles)
+			}
+			return result, nil
 		}
 	}
 
@@ -213,11 +221,11 @@ func (a *AuthenticatorAdapter) Authenticate(scheme, principal, credentials strin
 		})
 	}
 
-	return &BoltAuthResult{
-		Authenticated: true,
-		Username:      user.Username,
-		Roles:         roles,
-	}, nil
+	result := &BoltAuthResult{Authenticated: true, Username: user.Username, Roles: roles}
+	if a.getEffectivePermissions != nil {
+		result.Permissions = a.getEffectivePermissions(roles)
+	}
+	return result, nil
 }
 
 // SetAllowAnonymous enables or disables anonymous authentication.

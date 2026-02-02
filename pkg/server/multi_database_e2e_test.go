@@ -1409,6 +1409,7 @@ RETURN count(n) as test_db_nodes`},
 	}, "Bearer "+token)
 	require.Equal(t, http.StatusOK, resp.Code)
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Len(t, result.Results, 1, "expected one result set for test_db_a")
 	if len(result.Results[0].Data) > 0 {
 		count := result.Results[0].Data[0].Row[0]
 		if countVal, ok := count.(float64); ok {
@@ -1425,6 +1426,7 @@ RETURN count(n) as test_db_nodes`},
 	}, "Bearer "+token)
 	require.Equal(t, http.StatusOK, resp.Code)
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
+	require.Len(t, result.Results, 1, "expected one result set for test_db_b")
 	if len(result.Results[0].Data) > 0 {
 		count := result.Results[0].Data[0].Row[0]
 		if countVal, ok := count.(float64); ok {

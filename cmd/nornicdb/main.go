@@ -593,10 +593,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("creating authenticator: %w", authErr)
 		}
 
-		// Create admin user with configured username
+		// Create admin user with configured username (fallback from auth default)
 		adminUsername := authConfig.DefaultAdminUsername
 		if adminUsername == "" {
-			adminUsername = "admin" // Fallback to default
+			adminUsername = auth.DefaultAuthConfig().DefaultAdminUsername
 		}
 		_, err := authenticator.CreateUser(adminUsername, adminPassword, []auth.Role{auth.RoleAdmin})
 		if err != nil {
@@ -655,10 +655,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 	boltConfig := bolt.DefaultConfig()
 	boltConfig.Port = boltPort
 	boltConfig.LogQueries = logQueries
+	if !noAuth && authenticator != nil {
+		boltAuth := bolt.NewAuthenticatorAdapter(authenticator)
+		boltAuth.SetGetEffectivePermissions(httpServer.GetEffectivePermissions)
+		boltConfig.Authenticator = boltAuth
+		boltConfig.RequireAuth = true
+	}
 
 	// Create query executor adapter
 	queryExecutor := &DBQueryExecutor{db: db}
 	boltServer := bolt.New(boltConfig, queryExecutor)
+	// Wire per-database access from HTTP server so Bolt enforces same policy (allowlist + principal roles)
+	boltServer.SetDatabaseAccessModeResolver(httpServer.GetDatabaseAccessModeForRoles)
+	// Wire per-DB read/write for mutation checks (Phase 4)
+	boltServer.SetResolvedAccessResolver(httpServer.GetResolvedAccessForRoles)
 
 	// Start Bolt server in goroutine
 	go func() {

@@ -17,6 +17,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/auth"
 )
 
 // ModelType categorizes models by their purpose.
@@ -809,6 +811,15 @@ type PreExecuteContext struct {
 
 	// Metrics provides runtime metrics
 	Metrics MetricsReader
+
+	// PrincipalRoles are the authenticated principal's role names (from request context).
+	PrincipalRoles []string
+
+	// DatabaseAccessMode is the principal's per-database see/access mode (from request context).
+	DatabaseAccessMode auth.DatabaseAccessMode
+
+	// ResolvedAccess returns per-database read/write for the principal (from request context).
+	ResolvedAccess func(dbName string) auth.ResolvedAccess
 
 	// === INTERNAL (set by handler, used by methods) ===
 	bifrost BifrostBridge // For sending notifications

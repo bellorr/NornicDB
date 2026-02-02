@@ -113,7 +113,7 @@ func (s *Server) withAuth(handler http.HandlerFunc, requiredPerm auth.Permission
 		}
 
 		// Check permission
-		if !hasPermission(claims.Roles, requiredPerm) {
+		if !hasPermission(s, claims.Roles, requiredPerm) {
 			s.logAudit(r, claims.Sub, "access_denied", false,
 				fmt.Sprintf("required permission: %s", requiredPerm))
 			s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden", "insufficient permissions")

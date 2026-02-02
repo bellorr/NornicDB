@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"reflect"
@@ -726,18 +727,6 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			break
 		}
 
-		// Check write permission for mutations
-		if isMutationQuery(stmt.Statement) {
-			if claims != nil && !hasPermission(claims.Roles, auth.PermWrite) {
-				response.Errors = append(response.Errors, QueryError{
-					Code:    "Neo.ClientError.Security.Forbidden",
-					Message: "Write permission required",
-				})
-				hasError = true
-				continue
-			}
-		}
-
 		// Extract :USE command from this statement if present
 		// Each statement can have its own :USE command to switch databases
 		effectiveDbName := defaultDbName
@@ -788,6 +777,36 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			if foundUse {
 				queryStatement = strings.Join(remainingLines, "\n")
 				queryStatement = strings.TrimSpace(queryStatement)
+			}
+		}
+
+		// Per-database access: deny if principal may not access this database (Neo4j-aligned).
+		if !s.getDatabaseAccessMode(claims).CanAccessDatabase(effectiveDbName) {
+			response.Errors = append(response.Errors, QueryError{
+				Code:    "Neo.ClientError.Security.Forbidden",
+				Message: fmt.Sprintf("Access to database '%s' is not allowed.", effectiveDbName),
+			})
+			hasError = true
+			continue
+		}
+
+		// Per-database write: for mutations, require ResolvedAccess.Write for this (principal, db).
+		if isMutationQuery(stmt.Statement) {
+			if claims == nil {
+				response.Errors = append(response.Errors, QueryError{
+					Code:    "Neo.ClientError.Security.Forbidden",
+					Message: "Write permission required",
+				})
+				hasError = true
+				continue
+			}
+			if !s.getResolvedAccess(claims, effectiveDbName).Write {
+				response.Errors = append(response.Errors, QueryError{
+					Code:    "Neo.ClientError.Security.Forbidden",
+					Message: fmt.Sprintf("Write on database '%s' is not allowed.", effectiveDbName),
+				})
+				hasError = true
+				continue
 			}
 		}
 
@@ -842,6 +861,27 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 			})
 			hasError = true
 			continue
+		}
+
+		// Auto-grant access when a new database is created: admins and the creating principal get full access.
+		if isCreateDatabaseStatement(queryStatement) {
+			if createdName, ok := parseCreatedDatabaseName(queryStatement); ok && createdName != "" {
+				s.grantAccessToNewDatabase(r.Context(), createdName, claims)
+			}
+		}
+
+		// Per-database RBAC: filter SHOW DATABASES results by CanSeeDatabase so principals only see DBs they may access
+		if isShowDatabasesQuery(queryStatement) && result.Rows != nil {
+			mode := s.getDatabaseAccessMode(claims)
+			filtered := make([][]interface{}, 0, len(result.Rows))
+			for _, row := range result.Rows {
+				if len(row) > 0 {
+					if name, ok := row[0].(string); ok && mode.CanSeeDatabase(name) {
+						filtered = append(filtered, row)
+					}
+				}
+			}
+			result.Rows = filtered
 		}
 
 		// Extract receipt from result metadata if present (for mutations)
@@ -905,6 +945,67 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 	}
 
 	s.writeJSON(w, status, response)
+}
+
+// grantAccessToNewDatabase grants the admin role and the creating principal's roles full access
+// (see, access, read, write) to a newly created database. Called after successful CREATE DATABASE
+// or CREATE COMPOSITE DATABASE. No-op when RBAC stores are not loaded.
+func (s *Server) grantAccessToNewDatabase(ctx context.Context, dbName string, claims *auth.JWTClaims) {
+	if s.allowlistStore == nil || s.privilegesStore == nil {
+		return
+	}
+	allowlist := s.allowlistStore.Allowlist()
+	normalizeRole := func(r string) string {
+		r = strings.TrimSpace(r)
+		r = strings.ToLower(r)
+		r = strings.TrimPrefix(r, "role_")
+		return r
+	}
+
+	// Ensure admin role has full access to the new database.
+	adminRole := string(auth.RoleAdmin)
+	if dbs, ok := allowlist[adminRole]; ok && len(dbs) > 0 {
+		// Explicit allowlist: add new DB if not present.
+		seen := false
+		for _, d := range dbs {
+			if d == dbName {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			_ = s.allowlistStore.SaveRoleDatabases(ctx, adminRole, append(append([]string(nil), dbs...), dbName))
+		}
+	}
+	_ = s.privilegesStore.SavePrivilege(ctx, adminRole, dbName, true, true)
+
+	// Grant the creating principal's roles full access.
+	if claims != nil && len(claims.Roles) > 0 {
+		seenRoles := map[string]struct{}{adminRole: {}}
+		for _, r := range claims.Roles {
+			role := normalizeRole(r)
+			if role == "" {
+				continue
+			}
+			if _, done := seenRoles[role]; done {
+				continue
+			}
+			seenRoles[role] = struct{}{}
+			if dbs, ok := allowlist[role]; ok && len(dbs) > 0 {
+				seen := false
+				for _, d := range dbs {
+					if d == dbName {
+						seen = true
+						break
+					}
+				}
+				if !seen {
+					_ = s.allowlistStore.SaveRoleDatabases(ctx, role, append(append([]string(nil), dbs...), dbName))
+				}
+			}
+			_ = s.privilegesStore.SavePrivilege(ctx, role, dbName, true, true)
+		}
+	}
 }
 
 // convertRowToNeo4jFormat converts each value in a row to Neo4j-compatible format.

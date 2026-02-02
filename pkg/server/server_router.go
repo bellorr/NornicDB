@@ -132,6 +132,19 @@ func (s *Server) registerAuthRoutes(mux *http.ServeMux) {
 	// User management (admin only)
 	mux.HandleFunc("/auth/users", s.withAuth(s.handleUsers, auth.PermUserManage))
 	mux.HandleFunc("/auth/users/", s.withAuth(s.handleUserByID, auth.PermUserManage))
+
+	// User-defined roles (admin only)
+	mux.HandleFunc("/auth/roles", s.withAuth(s.handleRoles, auth.PermAdmin))
+	mux.HandleFunc("/auth/roles/", s.withAuth(s.handleRoleByID, auth.PermAdmin))
+
+	// Per-database access allowlist (admin only, Phase 3 RBAC)
+	mux.HandleFunc("/auth/access/databases", s.withAuth(s.handleAccessDatabases, auth.PermAdmin))
+	// Per-database read/write privileges (admin only, Phase 4 RBAC)
+	mux.HandleFunc("/auth/access/privileges", s.withAuth(s.handleAccessPrivileges, auth.PermAdmin))
+	// Canonical list of entitlements (for UI and docs); read access sufficient
+	mux.HandleFunc("/auth/entitlements", s.withAuth(s.handleEntitlements, auth.PermRead))
+	// Per-role global entitlements (admin only); GET returns role→entitlements, PUT sets one role's entitlements
+	mux.HandleFunc("/auth/role-entitlements", s.withAuth(s.handleRoleEntitlements, auth.PermAdmin))
 }
 
 func (s *Server) registerNornicDBRoutes(mux *http.ServeMux) {
@@ -215,18 +228,22 @@ func (s *Server) registerHeimdallRoutes(mux *http.ServeMux) {
 
 	// Status endpoint - read access required
 	mux.HandleFunc("/api/bifrost/status", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		r = s.withBifrostRBAC(r)
 		s.heimdallHandler.ServeHTTP(w, r)
 	}, auth.PermRead))
 	// Chat completions - write access required (modifies state/generates content)
 	mux.HandleFunc("/api/bifrost/chat/completions", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		r = s.withBifrostRBAC(r)
 		s.heimdallHandler.ServeHTTP(w, r)
 	}, auth.PermWrite))
 	// Autocomplete - read access required (queries schema, generates suggestions)
 	mux.HandleFunc("/api/bifrost/autocomplete", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		r = s.withBifrostRBAC(r)
 		s.heimdallHandler.ServeHTTP(w, r)
 	}, auth.PermRead))
 	// SSE events - read access required
 	mux.HandleFunc("/api/bifrost/events", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		r = s.withBifrostRBAC(r)
 		s.heimdallHandler.ServeHTTP(w, r)
 	}, auth.PermRead))
 }
@@ -241,8 +258,9 @@ func (s *Server) registerGraphQLRoutes(mux *http.ServeMux) {
 		return
 	}
 
-	// GraphQL endpoint - read access required for queries
+	// GraphQL endpoint - read access required; enrich request with RBAC for per-DB enforcement
 	mux.HandleFunc("/graphql", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		r = s.withBifrostRBAC(r)
 		if os.Getenv("NORNICDB_TRACE_GRAPHQL") != "" {
 			start := time.Now()
 			s.graphqlHandler.ServeHTTP(w, r)
@@ -254,6 +272,7 @@ func (s *Server) registerGraphQLRoutes(mux *http.ServeMux) {
 
 	// GraphQL Playground - interactive IDE (read access required)
 	mux.HandleFunc("/graphql/playground", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
+		r = s.withBifrostRBAC(r)
 		s.graphqlHandler.Playground().ServeHTTP(w, r)
 	}, auth.PermRead))
 	log.Println("📊 GraphQL API enabled at /graphql")

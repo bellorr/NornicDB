@@ -78,6 +78,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/auth"
 )
 
 // DefaultActionInputSchema is the MCP-compatible JSON Schema when an action
@@ -530,6 +532,18 @@ type ActionContext struct {
 	// Bifrost provides communication bridge to the user
 	// Use this to send progress updates, request confirmation, etc.
 	Bifrost BifrostBridge
+
+	// PrincipalRoles are the authenticated principal's role names (from request context).
+	// Plugins can use this with DatabaseAccessMode and ResolvedAccess to enforce per-DB access.
+	PrincipalRoles []string
+
+	// DatabaseAccessMode is the principal's per-database see/access mode (from request context).
+	// Use CanAccessDatabase(dbName) before running Cypher against a database.
+	DatabaseAccessMode auth.DatabaseAccessMode
+
+	// ResolvedAccess returns per-database read/write for the principal (from request context).
+	// Use for mutation checks: ResolvedAccess(dbName).Write before CREATE/DELETE/SET/etc.
+	ResolvedAccess func(dbName string) auth.ResolvedAccess
 }
 
 // ActionResult is the outcome of action execution.

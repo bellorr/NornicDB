@@ -399,7 +399,7 @@ type ComplianceConfig struct {
 	RetentionEnabled     bool
 	RetentionPolicyDays  int      // Default retention period (0 = indefinite)
 	RetentionAutoDelete  bool     // Auto-delete vs archive after retention
-	RetentionExemptRoles []string // Roles exempt from retention (e.g., "admin")
+	RetentionExemptRoles []string // Roles exempt from retention (default "admin" matches auth.RoleAdmin; config cannot import auth due to cycle)
 
 	// Access Control - Required by: GDPR Art.32, HIPAA §164.312(a), FISMA
 	AccessControlEnabled bool

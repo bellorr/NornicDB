@@ -138,12 +138,20 @@ export function Security() {
         backTo="/"
         actions={
           isAdmin && (
-            <Button
-              variant="secondary"
-              onClick={() => navigate('/security/admin')}
-            >
-              👥 Admin Panel
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                onClick={() => navigate('/security/database-access')}
+              >
+                Database Access
+              </Button>
+              <Button
+                variant="secondary"
+                onClick={() => navigate('/security/admin')}
+              >
+                👥 Admin Panel
+              </Button>
+            </div>
           )
         }
       />

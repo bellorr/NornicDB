@@ -19,6 +19,8 @@ NORNICDB_ENV=development
 - **[HTTP Security Implementation](http-security.md)** - Complete implementation details
 - **[Query Cache Security](query-cache-security.md)** - Query analysis and caching security model
 - **[LLM & AST Security](llm-ast-security.md)** - Safe patterns for LLM integration and plugin security
+- **[Per-Database RBAC & Lockout Recovery](per-database-rbac.md)** - Per-DB access control and how to recover from admin lockout
+- **[RBAC Entitlements Reference](entitlements.md)** - Canonical list of entitlements (global + per-database) and what they gate
 - **[Cluster Security](../operations/cluster-security.md)** - Multi-node authentication
 - **[Compliance Guide](../compliance/)** - GDPR, HIPAA, SOC2
 

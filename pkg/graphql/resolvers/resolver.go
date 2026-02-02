@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
@@ -142,19 +143,25 @@ func NewResolver(db *nornicdb.DB, dbManager *multidb.DatabaseManager) *Resolver 
 
 // getCypherExecutor returns the Cypher executor using the specified database's namespaced storage.
 // If database is empty, uses the configured default database (typically "nornic").
+// Enforces per-database RBAC: if request context has DatabaseAccessMode, checks CanAccessDatabase(effectiveDb).
 func (r *Resolver) getCypherExecutor(ctx context.Context, database string) (*cypher.StorageExecutor, error) {
+	effectiveDb := database
+	if effectiveDb == "" {
+		effectiveDb = r.dbManager.DefaultDatabaseName()
+	}
+	mode := auth.RequestDatabaseAccessModeFromContext(ctx)
+	if mode != nil && !mode.CanAccessDatabase(effectiveDb) {
+		return nil, fmt.Errorf("access to database '%s' is not allowed", effectiveDb)
+	}
+
 	var storage storage.Engine
 	var err error
-
 	if database != "" {
-		// Use specified database
 		storage, err = r.dbManager.GetStorage(database)
 		if err != nil {
 			return nil, fmt.Errorf("database '%s' not found: %w", database, err)
 		}
 	} else {
-		// Use the configured default database (typically "nornic")
-		// This ensures queries without a database parameter only see nodes from the default database
 		defaultDBName := r.dbManager.DefaultDatabaseName()
 		storage, err = r.dbManager.GetStorage(defaultDBName)
 		if err != nil {
@@ -189,7 +196,21 @@ func (r *Resolver) getCypherExecutor(ctx context.Context, database string) (*cyp
 
 // executeCypher executes a Cypher query using the specified database's namespaced storage.
 // If database is empty, uses the default database.
-func (r *Resolver) executeCypher(ctx context.Context, query string, params map[string]interface{}, database string) (*nornicdb.CypherResult, error) {
+// When isMutation is true, enforces per-database write permission via ResolvedAccess(database).Write.
+func (r *Resolver) executeCypher(ctx context.Context, query string, params map[string]interface{}, database string, isMutation bool) (*nornicdb.CypherResult, error) {
+	effectiveDb := database
+	if effectiveDb == "" {
+		effectiveDb = r.dbManager.DefaultDatabaseName()
+	}
+	if isMutation {
+		resolver := auth.RequestResolvedAccessResolverFromContext(ctx)
+		if resolver != nil {
+			ra := resolver(effectiveDb)
+			if !ra.Write {
+				return nil, fmt.Errorf("write on database '%s' is not allowed", effectiveDb)
+			}
+		}
+	}
 	executor, err := r.getCypherExecutor(ctx, database)
 	if err != nil {
 		return nil, err

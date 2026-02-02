@@ -3,6 +3,7 @@ import { Login } from './pages/Login';
 import { Browser } from './pages/Browser';
 import { Security } from './pages/Security';
 import { AdminUsers } from './pages/AdminUsers';
+import { DatabaseAccess } from './pages/DatabaseAccess';
 import { Databases } from './pages/Databases';
 import { ProtectedRoute } from './components/ProtectedRoute';
 
@@ -28,6 +29,11 @@ function App() {
         <Route path="/security/admin" element={
           <ProtectedRoute>
             <AdminUsers />
+          </ProtectedRoute>
+        } />
+        <Route path="/security/database-access" element={
+          <ProtectedRoute>
+            <DatabaseAccess />
           </ProtectedRoute>
         } />
         <Route path="/databases" element={

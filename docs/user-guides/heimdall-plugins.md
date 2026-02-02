@@ -271,7 +271,61 @@ type ActionContext struct {
     Database    DatabaseRouter             // Query/search by database ("" = default database)
     Metrics     MetricsReader              // Get runtime metrics
     Bifrost     BifrostBridge              // Communicate with UI
+
+    // Per-database RBAC (set when Bifrost is behind auth)
+    PrincipalRoles     []string             // Authenticated principal's role names
+    DatabaseAccessMode auth.DatabaseAccessMode  // CanAccessDatabase(dbName) before running Cypher
+    ResolvedAccess     func(dbName string) auth.ResolvedAccess  // Per-DB read/write for mutations
 }
+```
+
+When the server mounts Bifrost behind authentication, it attaches **PrincipalRoles**, **DatabaseAccessMode**, and **ResolvedAccess** to the request context; these are then available on `ActionContext` (and `PreExecuteContext`). Plugins that run Cypher or mutations against a specific database should enforce per-database access: call `ctx.DatabaseAccessMode.CanAccessDatabase(dbName)` before querying that database, and for mutations use `ctx.ResolvedAccess(dbName).Write`. See [Per-Database RBAC & Lockout Recovery](../security/per-database-rbac.md).
+
+#### Example: Validating per-database RBAC for a chat completion
+
+The following is a **commented-out example** of a PreExecute hook that validates the caller’s per-database access before an action runs (e.g. before the SLM’s chosen action is executed in a chat completion). If the principal cannot access the target database or cannot write when the action is a mutation, the hook cancels execution and returns a clear message.
+
+```go
+// PreExecute validates per-database RBAC before the action runs (chat completion flow).
+// func (p *MyPlugin) PreExecute(ctx *heimdall.PreExecuteContext, done func(heimdall.PreExecuteResult)) {
+//     // 1. Determine target database from action params (e.g. "database" or "db" key)
+//     dbName := ""
+//     if d, ok := ctx.Params["database"].(string); ok && d != "" {
+//         dbName = d
+//     }
+//     if dbName == "" {
+//         dbName = ctx.Database.DefaultDatabaseName()
+//     }
+//
+//     // 2. Enforce database access: principal must be allowed to access this DB
+//     if ctx.DatabaseAccessMode != nil && !ctx.DatabaseAccessMode.CanAccessDatabase(dbName) {
+//         ctx.Cancel("Access to database '"+dbName+"' is not allowed for your role.", "plugin:rbac")
+//         done(heimdall.PreExecuteResult{Continue: false, AbortMessage: "Permission denied: you cannot access database '" + dbName + "'."})
+//         return
+//     }
+//
+//     // 3. If this action performs mutations, require write permission for that DB
+//     if isMutationAction(ctx.Action) && ctx.ResolvedAccess != nil {
+//         ra := ctx.ResolvedAccess(dbName)
+//         if !ra.Write {
+//             ctx.Cancel("Write on database '"+dbName+"' is not allowed for your role.", "plugin:rbac")
+//             done(heimdall.PreExecuteResult{Continue: false, AbortMessage: "Permission denied: write on database '" + dbName + "' is not allowed."})
+//             return
+//         }
+//     }
+//
+//     done(heimdall.PreExecuteResult{Continue: true})
+// }
+//
+// func isMutationAction(action string) bool {
+//     // Example: list of action names that perform CREATE/DELETE/SET/MERGE, etc.
+//     switch action {
+//     case "heimdall_myplugin_create", "heimdall_myplugin_delete":
+//         return true
+//     default:
+//         return false
+//     }
+// }
 ```
 
 ### ActionResult

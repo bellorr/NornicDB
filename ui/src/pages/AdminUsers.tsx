@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useId } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { PageLayout } from '../components/common/PageLayout';
 import { PageHeader } from '../components/common/PageHeader';
@@ -27,7 +27,13 @@ export function AdminUsers() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
-  
+  const [availableRoles, setAvailableRoles] = useState<string[]>(['admin', 'editor', 'viewer']);
+  const createUsernameId = useId();
+  const createPasswordId = useId();
+  const createEmailId = useId();
+  const createRolesId = useId();
+  const editRolesId = useId();
+
   // Create user state
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newUsername, setNewUsername] = useState('');
@@ -44,27 +50,7 @@ export function AdminUsers() {
   const [updating, setUpdating] = useState(false);
   const [updateError, setUpdateError] = useState('');
 
-  useEffect(() => {
-    // Check if user is admin
-    fetch(`${BASE_PATH}/auth/me`, {
-      credentials: 'include'
-    })
-      .then(res => res.json())
-      .then(data => {
-        const roles = data.roles || [];
-        if (!roles.includes('admin')) {
-          navigate('/security');
-          return;
-        }
-        setIsAdmin(true);
-        loadUsers();
-      })
-      .catch(() => {
-        navigate('/security');
-      });
-  }, [navigate]);
-
-  const loadUsers = async () => {
+  const loadUsers = useCallback(async () => {
     try {
       const response = await fetch(`${BASE_PATH}/auth/users`, {
         credentials: 'include'
@@ -81,7 +67,42 @@ export function AdminUsers() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  const loadRoles = useCallback(async () => {
+    try {
+      const response = await fetch(`${BASE_PATH}/auth/roles`, { credentials: 'include' });
+      if (response.ok) {
+        const names = await response.json();
+        if (Array.isArray(names) && names.length > 0) {
+          setAvailableRoles(names);
+        }
+      }
+    } catch {
+      // Keep default ['admin', 'editor', 'viewer'] if API unavailable
+    }
+  }, []);
+
+  useEffect(() => {
+    // Check if user is admin
+    fetch(`${BASE_PATH}/auth/me`, {
+      credentials: 'include'
+    })
+      .then(res => res.json())
+      .then(data => {
+        const roles = data.roles || [];
+        if (!roles.includes('admin')) {
+          navigate('/security');
+          return;
+        }
+        setIsAdmin(true);
+        loadUsers();
+        loadRoles();
+      })
+      .catch(() => {
+        navigate('/security');
+      });
+  }, [navigate, loadUsers, loadRoles]);
 
   const handleCreateUser = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -234,7 +255,7 @@ export function AdminUsers() {
             <h2 className="text-lg font-semibold text-white mb-4">Create New User</h2>
             <form onSubmit={handleCreateUser} className="space-y-4">
               <FormInput
-                id="username"
+                id={createUsernameId}
                 label="Username"
                 value={newUsername}
                 onChange={setNewUsername}
@@ -242,7 +263,7 @@ export function AdminUsers() {
               />
 
               <FormInput
-                id="password"
+                id={createPasswordId}
                 type="password"
                 label="Password"
                 value={newPassword}
@@ -252,29 +273,30 @@ export function AdminUsers() {
               <p className="text-xs text-norse-fog -mt-2">Minimum 8 characters</p>
 
               <FormInput
-                id="email"
+                id={createEmailId}
                 type="email"
                 label="Email (optional)"
                 value={newEmail}
                 onChange={setNewEmail}
               />
 
-              <div>
-                <label className="block text-sm text-norse-silver mb-2">Roles *</label>
-                <div className="flex gap-4">
-                  {['admin', 'editor', 'viewer'].map(role => (
+              <fieldset>
+                <legend id={createRolesId} className="text-sm text-norse-silver mb-2">Roles *</legend>
+                <div className="flex gap-4 flex-wrap">
+                  {availableRoles.map(role => (
                     <label key={role} className="flex items-center gap-2 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={newRoles.includes(role)}
                         onChange={() => toggleRole(role, newRoles, setNewRoles)}
                         className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary focus:ring-nornic-primary"
+                        aria-describedby={createRolesId}
                       />
                       <span className="text-sm capitalize text-norse-silver">{role}</span>
                     </label>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
               {createError && <Alert type="error" message={createError} />}
 
@@ -390,22 +412,23 @@ export function AdminUsers() {
             title={`Edit User: ${editingUser.username}`}
           >
             <div className="space-y-4">
-              <div>
-                <label className="block text-sm text-norse-silver mb-2">Roles</label>
-                <div className="flex gap-4">
-                  {['admin', 'editor', 'viewer'].map(role => (
+              <fieldset>
+                <legend id={editRolesId} className="text-sm text-norse-silver mb-2">Roles</legend>
+                <div className="flex gap-4 flex-wrap">
+                  {availableRoles.map(role => (
                     <label key={role} className="flex items-center gap-2 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={editRoles.includes(role)}
                         onChange={() => toggleRole(role, editRoles, setEditRoles)}
                         className="w-4 h-4 rounded border-norse-rune bg-norse-stone text-nornic-primary focus:ring-nornic-primary"
+                        aria-describedby={editRolesId}
                       />
                       <span className="text-sm capitalize text-norse-silver">{role}</span>
                     </label>
                   ))}
                 </div>
-              </div>
+              </fieldset>
 
               <div>
                 <label className="flex items-center gap-2 cursor-pointer">

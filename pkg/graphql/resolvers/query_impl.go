@@ -258,7 +258,7 @@ func (r *queryResolver) querySearchByProperty(ctx context.Context, key string, v
 	result, err := r.executeCypher(ctx, cypher, map[string]interface{}{
 		"value": value,
 		"limit": lim,
-	}, "")
+	}, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -291,7 +291,7 @@ func (r *queryResolver) queryCypher(ctx context.Context, input models.CypherInpu
 		database = *input.Database
 	}
 
-	result, err := r.executeCypher(ctx, input.Statement, params, database)
+	result, err := r.executeCypher(ctx, input.Statement, params, database, false)
 	if err != nil {
 		return nil, err
 	}
@@ -311,7 +311,7 @@ func (r *queryResolver) queryStats(ctx context.Context) (*models.DatabaseStats, 
 	labelStats := make([]*models.LabelStats, 0, len(labels))
 	for _, label := range labels {
 		// Use Cypher COUNT for accurate label counts
-		result, err := r.executeCypher(ctx, fmt.Sprintf("MATCH (n:%s) RETURN count(n) as cnt", label), nil, "")
+		result, err := r.executeCypher(ctx, fmt.Sprintf("MATCH (n:%s) RETURN count(n) as cnt", label), nil, "", false)
 		count := 0
 		if err == nil && len(result.Rows) > 0 && len(result.Rows[0]) > 0 {
 			if cnt, ok := result.Rows[0][0].(int64); ok {
@@ -327,7 +327,7 @@ func (r *queryResolver) queryStats(ctx context.Context) (*models.DatabaseStats, 
 	typeStats := make([]*models.RelationshipTypeStats, 0, len(relTypes))
 	for _, typ := range relTypes {
 		// Use Cypher COUNT for accurate relationship counts
-		result, err := r.executeCypher(ctx, fmt.Sprintf("MATCH ()-[r:%s]->() RETURN count(r) as cnt", typ), nil, "")
+		result, err := r.executeCypher(ctx, fmt.Sprintf("MATCH ()-[r:%s]->() RETURN count(r) as cnt", typ), nil, "", false)
 		count := 0
 		if err == nil && len(result.Rows) > 0 && len(result.Rows[0]) > 0 {
 			if cnt, ok := result.Rows[0][0].(int64); ok {

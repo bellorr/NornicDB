@@ -131,6 +131,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/storage"
 )
@@ -201,6 +202,13 @@ type Server struct {
 	// Database manager for multi-database support (optional)
 	// If set, queries are routed to the correct database based on HELLO message
 	dbManager DatabaseManagerInterface
+
+	// Per-database access control (optional). When set, CanAccessDatabase is checked before running queries.
+	databaseAccessMode auth.DatabaseAccessMode
+	// Resolver for per-principal mode (Phase 3). When set, used with session roles instead of databaseAccessMode.
+	databaseAccessModeResolver func(roles []string) auth.DatabaseAccessMode
+	// Resolver for per-DB read/write (Phase 4). When set, used for mutation write check.
+	resolvedAccessResolver func(roles []string, dbName string) auth.ResolvedAccess
 
 	// Transaction sequence tracking for causal consistency
 	// Tracks the highest committed transaction sequence number across all sessions
@@ -373,6 +381,7 @@ type BoltAuthResult struct {
 	Authenticated bool     // Whether authentication succeeded
 	Username      string   // Authenticated username
 	Roles         []string // User roles (admin, editor, viewer, etc.)
+	Permissions   []string // Effective entitlement IDs (when set, used by HasPermission; else fallback to rolePerms)
 }
 
 // HasRole checks if the auth result has a specific role.
@@ -385,19 +394,23 @@ func (r *BoltAuthResult) HasRole(role string) bool {
 	return false
 }
 
-// HasPermission checks if the auth result has a specific permission based on roles.
-// Maps to standard RBAC permissions:
-//   - admin: read, write, create, delete, admin, schema, user_manage
-//   - editor: read, write, create, delete
-//   - viewer: read
+// boltRolePermsFallback is the default role→permission IDs when Permissions is not set (from auth.RolePermissions).
+var boltRolePermsFallback = auth.RolePermissionsAsStrings()
+
+// HasPermission checks if the auth result has a specific permission.
+// When Permissions is set (from role entitlements store), uses that list; else falls back to auth.RolePermissions.
 func (r *BoltAuthResult) HasPermission(perm string) bool {
-	rolePerms := map[string][]string{
-		"admin":  {"read", "write", "create", "delete", "admin", "schema", "user_manage"},
-		"editor": {"read", "write", "create", "delete"},
-		"viewer": {"read"},
+	perm = strings.ToLower(strings.TrimSpace(perm))
+	if len(r.Permissions) > 0 {
+		for _, p := range r.Permissions {
+			if p == perm || p == string(auth.PermAdmin) {
+				return true
+			}
+		}
+		return false
 	}
 	for _, role := range r.Roles {
-		if perms, ok := rolePerms[role]; ok {
+		if perms, ok := boltRolePermsFallback[role]; ok {
 			for _, p := range perms {
 				if p == perm {
 					return true
@@ -675,6 +688,29 @@ func NewWithDatabaseManager(config *Config, executor QueryExecutor, dbManager Da
 		executor:  executor,
 		dbManager: dbManager,
 	}
+}
+
+// SetDatabaseAccessMode sets the per-database access mode (e.g. from HTTP server).
+// When set, CanAccessDatabase(dbName) is checked before running each query.
+func (s *Server) SetDatabaseAccessMode(mode auth.DatabaseAccessMode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.databaseAccessMode = mode
+}
+
+// SetDatabaseAccessModeResolver sets a per-principal resolver (e.g. from HTTP server for Phase 3 allowlist).
+// When set, the resolver is called with the session's roles to get the mode for each query.
+func (s *Server) SetDatabaseAccessModeResolver(resolver func(roles []string) auth.DatabaseAccessMode) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.databaseAccessModeResolver = resolver
+}
+
+// SetResolvedAccessResolver sets a per-(principal, db) resolver for Phase 4 write checks.
+func (s *Server) SetResolvedAccessResolver(resolver func(roles []string, dbName string) auth.ResolvedAccess) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.resolvedAccessResolver = resolver
 }
 
 // ListenAndServe starts the Bolt server and begins accepting connections.
@@ -1093,12 +1129,12 @@ func (s *Session) handleHello(data []byte) error {
 			if !s.server.config.AllowAnonymous {
 				return s.sendFailure("Neo.ClientError.Security.Unauthorized", "Authentication required")
 			}
-			// Anonymous user gets viewer role
+			// Anonymous user gets viewer role (canonical from auth)
 			s.authenticated = true
 			s.authResult = &BoltAuthResult{
 				Authenticated: true,
 				Username:      "anonymous",
-				Roles:         []string{"viewer"},
+				Roles:         []string{string(auth.RoleViewer)},
 			}
 		} else if scheme == "basic" {
 			// Authenticate with provided credentials
@@ -1133,12 +1169,12 @@ func (s *Session) handleHello(data []byte) error {
 		// Auth required but no authenticator configured - reject all
 		return s.sendFailure("Neo.ClientError.Security.Unauthorized", "Authentication required but not configured")
 	} else {
-		// No auth configured - allow all (development mode)
+		// No auth configured - allow all (development mode, canonical role from auth)
 		s.authenticated = true
 		s.authResult = &BoltAuthResult{
 			Authenticated: true,
 			Username:      "anonymous",
-			Roles:         []string{"admin"}, // Full access in dev mode
+			Roles:         []string{string(auth.RoleAdmin)},
 		}
 	}
 
@@ -1285,15 +1321,15 @@ func (s *Session) handleRun(data []byte) error {
 	isSchema := strings.Contains(upperQuery, "INDEX") ||
 		strings.Contains(upperQuery, "CONSTRAINT")
 
-	// Check permissions based on query type
+	// Check permissions based on query type (use canonical entitlement IDs from auth)
 	if s.authResult != nil {
-		if isSchema && !s.authResult.HasPermission("schema") {
+		if isSchema && !s.authResult.HasPermission(string(auth.PermSchema)) {
 			return s.sendFailure("Neo.ClientError.Security.Forbidden", "Schema operations require schema permission")
 		}
-		if isWrite && !s.authResult.HasPermission("write") {
+		if isWrite && !s.authResult.HasPermission(string(auth.PermWrite)) {
 			return s.sendFailure("Neo.ClientError.Security.Forbidden", "Write operations require write permission")
 		}
-		if !s.authResult.HasPermission("read") {
+		if !s.authResult.HasPermission(string(auth.PermRead)) {
 			return s.sendFailure("Neo.ClientError.Security.Forbidden", "Read operations require read permission")
 		}
 	}
@@ -1315,14 +1351,47 @@ func (s *Session) handleRun(data []byte) error {
 		}
 	}
 
+	// Resolve effective database name (for multi-database or for per-DB access check).
+	dbName := s.database
+	if dbName == "" {
+		if s.server != nil && s.server.dbManager != nil {
+			dbName = s.server.dbManager.DefaultDatabaseName()
+		} else {
+			dbName = "nornic" // single-DB mode default
+		}
+	}
+	// Per-database access: deny if principal may not access this database (Neo4j-aligned).
+	var mode auth.DatabaseAccessMode
+	if s.server != nil && s.server.databaseAccessModeResolver != nil {
+		var roles []string
+		if s.authResult != nil {
+			roles = s.authResult.Roles
+		}
+		mode = s.server.databaseAccessModeResolver(roles)
+	} else if s.server != nil && s.server.databaseAccessMode != nil {
+		mode = s.server.databaseAccessMode
+	}
+	if mode != nil && !mode.CanAccessDatabase(dbName) {
+		return s.sendFailure("Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+	}
+
+	// Per-DB write: for mutations, require ResolvedAccess.Write for this (principal, db).
+	if isWrite && s.server != nil && s.server.resolvedAccessResolver != nil {
+		var roles []string
+		if s.authResult != nil {
+			roles = s.authResult.Roles
+		}
+		ra := s.server.resolvedAccessResolver(roles, dbName)
+		if !ra.Write {
+			return s.sendFailure("Neo.ClientError.Security.Forbidden",
+				fmt.Sprintf("Write on database '%s' is not allowed.", dbName))
+		}
+	}
+
 	// Get executor for the database (if multi-database is enabled)
 	executor := s.executor
 	if s.server != nil && s.server.dbManager != nil {
-		// Get database-specific executor
-		dbName := s.database
-		if dbName == "" {
-			dbName = s.server.dbManager.DefaultDatabaseName()
-		}
 		dbExecutor, err := s.getExecutorForDatabase(dbName)
 		if err != nil {
 			return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
@@ -1338,6 +1407,19 @@ func (s *Session) handleRun(data []byte) error {
 			fmt.Printf("[BOLT] ERROR: %v\n", err)
 		}
 		return s.sendFailure("Neo.ClientError.Statement.SyntaxError", err.Error())
+	}
+
+	// Per-database RBAC: filter SHOW DATABASES results by CanSeeDatabase so principals only see DBs they may access
+	if isShowDatabasesQuery(query) && result.Rows != nil && mode != nil {
+		filtered := make([][]interface{}, 0, len(result.Rows))
+		for _, row := range result.Rows {
+			if len(row) > 0 {
+				if name, ok := row[0].(string); ok && mode.CanSeeDatabase(name) {
+					filtered = append(filtered, row)
+				}
+			}
+		}
+		result.Rows = filtered
 	}
 
 	// Track write operation for deferred flush
@@ -1379,6 +1461,14 @@ func truncateQuery(q string, maxLen int) string {
 		return q
 	}
 	return q[:maxLen] + "..."
+}
+
+// isShowDatabasesQuery returns true if the normalized statement is SHOW DATABASES (flexible whitespace).
+// Used to filter SHOW DATABASES results by CanSeeDatabase when per-database RBAC is enabled.
+func isShowDatabasesQuery(query string) bool {
+	norm := strings.TrimSpace(query)
+	norm = strings.Join(strings.Fields(norm), " ")
+	return strings.EqualFold(norm, "SHOW DATABASES")
 }
 
 // parseRunMessage parses a RUN message to extract query, parameters, and metadata.

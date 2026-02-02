@@ -124,21 +124,22 @@ func (s *Server) startQdrantGRPC() error {
 	return nil
 }
 
+// parsePermissionString maps string IDs to auth.Permission (canonical entitlement IDs from auth/entitlements.go).
 func parsePermissionString(v string) (auth.Permission, bool) {
 	switch strings.ToLower(strings.TrimSpace(v)) {
-	case "read":
+	case string(auth.PermRead):
 		return auth.PermRead, true
-	case "write":
+	case string(auth.PermWrite):
 		return auth.PermWrite, true
-	case "create":
+	case string(auth.PermCreate):
 		return auth.PermCreate, true
-	case "delete":
+	case string(auth.PermDelete):
 		return auth.PermDelete, true
-	case "admin":
+	case string(auth.PermAdmin):
 		return auth.PermAdmin, true
-	case "schema":
+	case string(auth.PermSchema):
 		return auth.PermSchema, true
-	case "user_manage":
+	case string(auth.PermUserManage):
 		return auth.PermUserManage, true
 	default:
 		return "", false

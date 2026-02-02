@@ -53,7 +53,181 @@ func getClientIP(r *http.Request) string {
 	return host
 }
 
-func hasPermission(roles []string, required auth.Permission) bool {
+// getDatabaseAccessMode returns the per-database access mode for the given principal (claims).
+// When auth is disabled returns Full; when unauthenticated returns DenyAll;
+// when allowlist is loaded returns allowlist-based mode for claims.Roles.
+func (s *Server) getDatabaseAccessMode(claims *auth.JWTClaims) auth.DatabaseAccessMode {
+	if s.auth == nil || !s.auth.IsSecurityEnabled() {
+		return auth.FullDatabaseAccessMode
+	}
+	if claims == nil {
+		return auth.DenyAllDatabaseAccessMode
+	}
+	if s.allowlistStore != nil {
+		return auth.NewAllowlistDatabaseAccessMode(s.allowlistStore.Allowlist(), claims.Roles)
+	}
+	return auth.DenyAllDatabaseAccessMode
+}
+
+// GetDatabaseAccessModeForRoles returns the per-database access mode for the given principal roles.
+// Used by Bolt when the principal is known (e.g. from HELLO auth). When auth disabled, Bolt should use Full.
+func (s *Server) GetDatabaseAccessModeForRoles(roles []string) auth.DatabaseAccessMode {
+	if s.auth == nil || !s.auth.IsSecurityEnabled() {
+		return auth.FullDatabaseAccessMode
+	}
+	if roles == nil {
+		return auth.DenyAllDatabaseAccessMode
+	}
+	if s.allowlistStore != nil {
+		return auth.NewAllowlistDatabaseAccessMode(s.allowlistStore.Allowlist(), roles)
+	}
+	return auth.DenyAllDatabaseAccessMode
+}
+
+// GetDatabaseAccessMode returns the server's per-database access mode for a request with no principal (e.g. unauthenticated).
+// Prefer getDatabaseAccessMode(claims) or GetDatabaseAccessModeForRoles(roles) when principal is known.
+func (s *Server) GetDatabaseAccessMode() auth.DatabaseAccessMode {
+	return s.getDatabaseAccessMode(nil)
+}
+
+// getResolvedAccess returns per-DB read/write for (claims, dbName). When privilegesStore is set, uses it; else falls back to global PermRead/PermWrite.
+func (s *Server) getResolvedAccess(claims *auth.JWTClaims, dbName string) auth.ResolvedAccess {
+	if claims == nil {
+		return auth.ResolvedAccess{}
+	}
+	return s.GetResolvedAccessForRoles(claims.Roles, dbName)
+}
+
+// withBifrostRBAC enriches the request context with RBAC (principal roles, DatabaseAccessMode, ResolvedAccess)
+// so that Bifrost, GraphQL, and plugins can enforce per-database access. Call before passing r to heimdallHandler or graphqlHandler.
+func (s *Server) withBifrostRBAC(r *http.Request) *http.Request {
+	claims := getClaims(r)
+	if claims == nil {
+		return r
+	}
+	ctx := r.Context()
+	ctx = auth.WithRequestPrincipalRoles(ctx, claims.Roles)
+	ctx = auth.WithRequestDatabaseAccessMode(ctx, s.getDatabaseAccessMode(claims))
+	ctx = auth.WithRequestResolvedAccessResolver(ctx, func(dbName string) auth.ResolvedAccess {
+		return s.getResolvedAccess(claims, dbName)
+	})
+	return r.WithContext(ctx)
+}
+
+// GetEffectivePermissions returns the union of global entitlement IDs for the given roles.
+// Used by Bolt auth adapter so BoltAuthResult.HasPermission uses stored role entitlements.
+func (s *Server) GetEffectivePermissions(roles []string) []string {
+	if len(roles) == 0 {
+		return nil
+	}
+	if s.roleEntitlementsStore != nil {
+		return auth.PermissionsForRoles(roles, s.roleEntitlementsStore)
+	}
+	// Fallback: static RolePermissions
+	var out []string
+	seen := make(map[string]struct{})
+	for _, role := range roles {
+		role = strings.ToLower(strings.TrimSpace(role))
+		role = strings.TrimPrefix(role, "role_")
+		perms, ok := auth.RolePermissions[auth.Role(role)]
+		if !ok {
+			continue
+		}
+		for _, p := range perms {
+			id := string(p)
+			if _, ok := seen[id]; !ok {
+				seen[id] = struct{}{}
+				out = append(out, id)
+			}
+		}
+	}
+	return out
+}
+
+// GetResolvedAccessForRoles returns per-DB read/write for (roles, dbName). Used by Bolt for mutation checks.
+func (s *Server) GetResolvedAccessForRoles(roles []string, dbName string) auth.ResolvedAccess {
+	if len(roles) == 0 {
+		return auth.ResolvedAccess{}
+	}
+	if s.privilegesStore != nil {
+		return s.privilegesStore.Resolve(roles, dbName)
+	}
+	return auth.ResolvedAccess{
+		Read:  hasPermission(s, roles, auth.PermRead),
+		Write: hasPermission(s, roles, auth.PermWrite),
+	}
+}
+
+// isCreateDatabaseStatement returns true if the statement is CREATE DATABASE or CREATE COMPOSITE DATABASE.
+// Used to trigger auto-grant of access when a new database is created.
+func isCreateDatabaseStatement(statement string) bool {
+	t := strings.TrimSpace(statement)
+	u := strings.ToUpper(t)
+	return strings.HasPrefix(u, "CREATE COMPOSITE DATABASE") || strings.HasPrefix(u, "CREATE DATABASE")
+}
+
+// parseCreatedDatabaseName extracts the database name from a CREATE DATABASE or CREATE COMPOSITE DATABASE statement.
+// Returns (name, true) when the statement matches and name is non-empty; otherwise ("", false).
+// Handles "CREATE DATABASE name [IF NOT EXISTS]" and "CREATE COMPOSITE DATABASE name ...".
+func parseCreatedDatabaseName(statement string) (dbName string, ok bool) {
+	t := strings.TrimSpace(statement)
+	if t == "" {
+		return "", false
+	}
+	u := strings.ToUpper(t)
+	if strings.HasPrefix(u, "CREATE COMPOSITE DATABASE") {
+		// Skip "CREATE COMPOSITE DATABASE" (case-insensitive, flexible whitespace)
+		rest := t[len("CREATE COMPOSITE DATABASE"):]
+		rest = strings.TrimLeft(rest, " \t\n\r")
+		if rest == "" {
+			return "", false
+		}
+		// Name is first token (until whitespace or newline)
+		end := 0
+		for end < len(rest) && rest[end] != ' ' && rest[end] != '\t' && rest[end] != '\n' && rest[end] != '\r' {
+			end++
+		}
+		name := strings.TrimSpace(rest[:end])
+		return name, name != ""
+	}
+	if strings.HasPrefix(u, "CREATE DATABASE") {
+		// Skip "CREATE DATABASE" (case-insensitive, flexible whitespace)
+		rest := t[len("CREATE DATABASE"):]
+		rest = strings.TrimLeft(rest, " \t\n\r")
+		if rest == "" {
+			return "", false
+		}
+		// Name runs until "IF NOT EXISTS" or end; may be backtick-quoted
+		restUpper := strings.ToUpper(rest)
+		ifIdx := strings.Index(restUpper, "IF NOT EXISTS")
+		if ifIdx > 0 {
+			rest = strings.TrimSpace(rest[:ifIdx])
+		}
+		rest = strings.TrimSpace(rest)
+		if rest == "" {
+			return "", false
+		}
+		// Unquote backticks if present
+		if len(rest) >= 2 && rest[0] == '`' && rest[len(rest)-1] == '`' {
+			rest = rest[1 : len(rest)-1]
+		}
+		return rest, rest != ""
+	}
+	return "", false
+}
+
+func hasPermission(s *Server, roles []string, required auth.Permission) bool {
+	// When role entitlements store is set, use it (includes built-in defaults and stored overrides).
+	if s != nil && s.roleEntitlementsStore != nil {
+		effective := auth.PermissionsForRoles(roles, s.roleEntitlementsStore)
+		for _, p := range effective {
+			if p == string(required) || p == string(auth.PermAdmin) {
+				return true
+			}
+		}
+		return false
+	}
+	// Fallback: static RolePermissions (no store)
 	for _, roleOrPerm := range roles {
 		roleOrPerm = strings.ToLower(strings.TrimSpace(roleOrPerm))
 		roleOrPerm = strings.TrimPrefix(roleOrPerm, "role_")
@@ -88,6 +262,15 @@ func isMutationQuery(query string) bool {
 		strings.HasPrefix(upper, "SET") ||
 		strings.HasPrefix(upper, "REMOVE") ||
 		strings.HasPrefix(upper, "DROP")
+}
+
+// isShowDatabasesQuery returns true if the normalized statement is SHOW DATABASES (flexible whitespace).
+// Used to filter SHOW DATABASES results by CanSeeDatabase when per-database RBAC is enabled.
+func isShowDatabasesQuery(query string) bool {
+	// Normalize: collapse whitespace, trim, uppercase (match cypher executor behavior)
+	norm := strings.TrimSpace(query)
+	norm = strings.Join(strings.Fields(norm), " ")
+	return strings.EqualFold(norm, "SHOW DATABASES")
 }
 
 func parseIntQuery(r *http.Request, key string, defaultVal int) int {

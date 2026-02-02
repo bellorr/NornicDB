@@ -29,7 +29,7 @@ func (s *Server) handleGDPRExport(w http.ResponseWriter, r *http.Request) {
 
 	// User can only export own data unless admin
 	claims := getClaims(r)
-	if claims != nil && claims.Sub != req.UserID && !hasPermission(claims.Roles, auth.PermAdmin) {
+	if claims != nil && claims.Sub != req.UserID && !hasPermission(s, claims.Roles, auth.PermAdmin) {
 		s.writeError(w, http.StatusForbidden, "can only export own data", ErrForbidden)
 		return
 	}
@@ -77,7 +77,7 @@ func (s *Server) handleGDPRDelete(w http.ResponseWriter, r *http.Request) {
 
 	// User can only delete own data unless admin
 	claims := getClaims(r)
-	if claims != nil && claims.Sub != req.UserID && !hasPermission(claims.Roles, auth.PermAdmin) {
+	if claims != nil && claims.Sub != req.UserID && !hasPermission(s, claims.Roles, auth.PermAdmin) {
 		s.writeError(w, http.StatusForbidden, "can only delete own data", ErrForbidden)
 		return
 	}

@@ -116,10 +116,10 @@ func (s *Server) handleGenerateAPIToken(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Check if user has admin role
+	// Check if user has admin role (use canonical role name from auth)
 	isAdmin := false
 	for _, role := range claims.Roles {
-		if role == "admin" {
+		if strings.ToLower(strings.TrimSpace(role)) == string(auth.RoleAdmin) {
 			isAdmin = true
 			break
 		}
@@ -371,12 +371,12 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// If auth is disabled, return anonymous admin user
+	// If auth is disabled, return anonymous admin user (canonical role from auth)
 	if s.auth == nil || !s.auth.IsSecurityEnabled() {
 		s.writeJSON(w, http.StatusOK, map[string]interface{}{
 			"id":       "anonymous",
 			"username": "anonymous",
-			"roles":    []string{"admin"},
+			"roles":    []string{string(auth.RoleAdmin)},
 			"enabled":  true,
 		})
 		return
@@ -642,5 +642,338 @@ func (s *Server) handleUserByID(w http.ResponseWriter, r *http.Request) {
 
 	default:
 		s.writeError(w, http.StatusMethodNotAllowed, "GET, PUT, or DELETE required", ErrMethodNotAllowed)
+	}
+}
+
+// handleEntitlements serves GET /auth/entitlements. Returns the canonical list of entitlements (global + per-database) for UI and docs.
+func (s *Server) handleEntitlements(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, http.StatusMethodNotAllowed, "GET required", ErrMethodNotAllowed)
+		return
+	}
+	s.writeJSON(w, http.StatusOK, auth.AllEntitlements())
+}
+
+// handleRoleEntitlements serves GET/PUT /auth/role-entitlements (per-role global entitlements, admin only).
+// GET returns { role: string, entitlements: string[] }[] (all roles with effective entitlements).
+// PUT accepts { role: string, entitlements: string[] } and sets that role's entitlements.
+func (s *Server) handleRoleEntitlements(w http.ResponseWriter, r *http.Request) {
+	if s.roleEntitlementsStore == nil {
+		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "Role entitlements are not configured (auth disabled or system DB unavailable).")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		var roles []string
+		if s.roleStore != nil {
+			roles = s.roleStore.AllRoles()
+		}
+		out := make([]struct {
+			Role         string   `json:"role"`
+			Entitlements []string `json:"entitlements"`
+		}, 0, len(roles))
+		for _, role := range roles {
+			ent := auth.PermissionsForRole(role, s.roleEntitlementsStore)
+			out = append(out, struct {
+				Role         string   `json:"role"`
+				Entitlements []string `json:"entitlements"`
+			}{Role: role, Entitlements: ent})
+		}
+		s.writeJSON(w, http.StatusOK, out)
+	case http.MethodPut:
+		var body struct {
+			Role         string   `json:"role"`
+			Entitlements []string `json:"entitlements"`
+			Mappings     []struct {
+				Role         string   `json:"role"`
+				Entitlements []string `json:"entitlements"`
+			} `json:"mappings"`
+		}
+		if err := s.readJSON(r, &body); err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "invalid request body")
+			return
+		}
+		validEntitlementIDs := make(map[string]struct{})
+		for _, id := range auth.GlobalEntitlementIDs() {
+			validEntitlementIDs[id] = struct{}{}
+		}
+		normalize := func(ids []string) ([]string, error) {
+			out := make([]string, 0, len(ids))
+			seen := make(map[string]struct{})
+			for _, id := range ids {
+				id = strings.ToLower(strings.TrimSpace(id))
+				if id == "" {
+					continue
+				}
+				if _, valid := validEntitlementIDs[id]; !valid {
+					return nil, fmt.Errorf("invalid entitlement id %q; valid: %s", id, strings.Join(auth.GlobalEntitlementIDs(), ", "))
+				}
+				if _, ok := seen[id]; !ok {
+					seen[id] = struct{}{}
+					out = append(out, id)
+				}
+			}
+			return out, nil
+		}
+		if len(body.Mappings) > 0 {
+			for _, m := range body.Mappings {
+				role := strings.ToLower(strings.TrimSpace(m.Role))
+				if role == "" {
+					continue
+				}
+				norm, err := normalize(m.Entitlements)
+				if err != nil {
+					s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", err.Error())
+					return
+				}
+				if err := s.roleEntitlementsStore.Set(r.Context(), role, norm); err != nil {
+					log.Printf("role entitlements Set %q: %v", role, err)
+					s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+					return
+				}
+			}
+		} else if body.Role != "" {
+			role := strings.ToLower(strings.TrimSpace(body.Role))
+			norm, err := normalize(body.Entitlements)
+			if err != nil {
+				s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", err.Error())
+				return
+			}
+			if err := s.roleEntitlementsStore.Set(r.Context(), role, norm); err != nil {
+				s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+				return
+			}
+		} else {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "body must contain role and entitlements or mappings array")
+			return
+		}
+		s.writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "GET or PUT required", ErrMethodNotAllowed)
+	}
+}
+
+// handleRoles serves GET/POST /auth/roles (user-defined roles, admin only).
+// GET returns list of role names (built-in + user-defined). POST creates a user-defined role; body { "name": string }.
+func (s *Server) handleRoles(w http.ResponseWriter, r *http.Request) {
+	if s.roleStore == nil {
+		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "Roles are not configured (auth disabled or system DB unavailable).")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.writeJSON(w, http.StatusOK, s.roleStore.AllRoles())
+	case http.MethodPost:
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := s.readJSON(r, &req); err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "invalid request body")
+			return
+		}
+		if strings.TrimSpace(req.Name) == "" {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "name is required")
+			return
+		}
+		if err := s.roleStore.CreateRole(r.Context(), req.Name); err != nil {
+			if err == auth.ErrRoleExists {
+				s.writeNeo4jError(w, http.StatusConflict, "Neo.ClientError.General.SchemaViolation", "role already exists")
+				return
+			}
+			if err == auth.ErrInvalidRoleName {
+				s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", err.Error())
+				return
+			}
+			s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusCreated, map[string]string{"name": strings.ToLower(strings.TrimSpace(req.Name))})
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "GET or POST required", ErrMethodNotAllowed)
+	}
+}
+
+// handleRoleByID serves PATCH/DELETE /auth/roles/:name (rename or delete user-defined role, admin only).
+func (s *Server) handleRoleByID(w http.ResponseWriter, r *http.Request) {
+	roleName := strings.TrimPrefix(r.URL.Path, "/auth/roles/")
+	roleName = strings.TrimSpace(roleName)
+	if roleName == "" {
+		s.handleRoles(w, r)
+		return
+	}
+	if s.roleStore == nil {
+		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "Roles are not configured.")
+		return
+	}
+	switch r.Method {
+	case http.MethodPatch:
+		var req struct {
+			Name string `json:"name"`
+		}
+		if err := s.readJSON(r, &req); err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "invalid request body")
+			return
+		}
+		newName := strings.TrimSpace(req.Name)
+		if newName == "" {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "name is required")
+			return
+		}
+		if err := s.roleStore.RenameRole(r.Context(), roleName, newName); err != nil {
+			if err == auth.ErrCannotDeleteBuiltinRole || err == auth.ErrRoleNotFound {
+				s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.General.SchemaViolation", err.Error())
+				return
+			}
+			if err == auth.ErrRoleExists {
+				s.writeNeo4jError(w, http.StatusConflict, "Neo.ClientError.General.SchemaViolation", "new role name already exists")
+				return
+			}
+			s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+			return
+		}
+		if s.allowlistStore != nil {
+			_ = s.allowlistStore.RenameRoleInAllowlist(r.Context(), roleName, newName)
+		}
+		if s.auth != nil {
+			for _, u := range s.auth.ListUsers() {
+				var hasOld bool
+				for _, ur := range u.Roles {
+					if strings.EqualFold(string(ur), roleName) {
+						hasOld = true
+						break
+					}
+				}
+				if hasOld {
+					newRoles := make([]auth.Role, 0, len(u.Roles))
+					for _, ur := range u.Roles {
+						if strings.EqualFold(string(ur), roleName) {
+							newRoles = append(newRoles, auth.Role(newName))
+						} else {
+							newRoles = append(newRoles, ur)
+						}
+					}
+					_ = s.auth.UpdateRoles(u.Username, newRoles)
+				}
+			}
+		}
+		s.writeJSON(w, http.StatusOK, map[string]string{"name": newName})
+	case http.MethodDelete:
+		// Reject if any user has this role
+		if s.auth != nil {
+			for _, u := range s.auth.ListUsers() {
+				for _, ur := range u.Roles {
+					if strings.EqualFold(string(ur), roleName) {
+						s.writeNeo4jError(w, http.StatusConflict, "Neo.ClientError.General.SchemaViolation", "cannot delete role: at least one user has this role")
+						return
+					}
+				}
+			}
+		}
+		if err := s.roleStore.DeleteRole(r.Context(), roleName); err != nil {
+			if err == auth.ErrCannotDeleteBuiltinRole || err == auth.ErrRoleNotFound {
+				s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.General.SchemaViolation", err.Error())
+				return
+			}
+			s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "PATCH or DELETE required", ErrMethodNotAllowed)
+	}
+}
+
+// handleAccessDatabases serves GET/PUT /auth/access/databases (per-database allowlist, admin only).
+// GET returns { role: string, databases: string[] }[].
+// PUT accepts { role: string, databases: string[] } or { mappings: [{ role, databases }] } and persists to system DB.
+func (s *Server) handleAccessDatabases(w http.ResponseWriter, r *http.Request) {
+	if s.allowlistStore == nil {
+		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "Database access allowlist is not configured (auth disabled or system DB unavailable).")
+		return
+	}
+
+	switch r.Method {
+	case http.MethodGet:
+		allowlist := s.allowlistStore.Allowlist()
+		out := make([]struct {
+			Role      string   `json:"role"`
+			Databases []string `json:"databases"`
+		}, 0, len(allowlist))
+		for role, dbs := range allowlist {
+			out = append(out, struct {
+				Role      string   `json:"role"`
+				Databases []string `json:"databases"`
+			}{Role: role, Databases: dbs})
+		}
+		s.writeJSON(w, http.StatusOK, out)
+
+	case http.MethodPut:
+		var req struct {
+			Role      string   `json:"role"`
+			Databases []string `json:"databases"`
+			Mappings  *[]struct {
+				Role      string   `json:"role"`
+				Databases []string `json:"databases"`
+			} `json:"mappings"`
+		}
+		if err := s.readJSON(r, &req); err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "invalid request body")
+			return
+		}
+		if req.Mappings != nil {
+			for _, m := range *req.Mappings {
+				if err := s.allowlistStore.SaveRoleDatabases(r.Context(), m.Role, m.Databases); err != nil {
+					log.Printf("allowlist SaveRoleDatabases %q: %v", m.Role, err)
+					s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+					return
+				}
+			}
+		} else {
+			if req.Role == "" {
+				s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "role is required")
+				return
+			}
+			if err := s.allowlistStore.SaveRoleDatabases(r.Context(), req.Role, req.Databases); err != nil {
+				log.Printf("allowlist SaveRoleDatabases %q: %v", req.Role, err)
+				s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+				return
+			}
+		}
+		s.writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "GET or PUT required", ErrMethodNotAllowed)
+	}
+}
+
+// handleAccessPrivileges serves GET/PUT /auth/access/privileges (per-DB read/write, admin only, Phase 4).
+// GET returns [{ role, database, read, write }, ...]. PUT accepts the same array and replaces the matrix.
+func (s *Server) handleAccessPrivileges(w http.ResponseWriter, r *http.Request) {
+	if s.privilegesStore == nil {
+		s.writeNeo4jError(w, http.StatusServiceUnavailable, "Neo.ClientError.General.Unavailable", "Database access privileges are not configured (auth disabled or system DB unavailable).")
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		s.writeJSON(w, http.StatusOK, s.privilegesStore.Matrix())
+	case http.MethodPut:
+		var entries []struct {
+			Role     string `json:"role"`
+			Database string `json:"database"`
+			Read     bool   `json:"read"`
+			Write    bool   `json:"write"`
+		}
+		if err := s.readJSON(r, &entries); err != nil {
+			s.writeNeo4jError(w, http.StatusBadRequest, "Neo.ClientError.Request.InvalidFormat", "invalid request body")
+			return
+		}
+		if err := s.privilegesStore.PutMatrix(r.Context(), entries); err != nil {
+			log.Printf("privileges PutMatrix: %v", err)
+			s.writeNeo4jError(w, http.StatusInternalServerError, "Neo.ClientError.General.UnknownError", err.Error())
+			return
+		}
+		s.writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "GET or PUT required", ErrMethodNotAllowed)
 	}
 }

@@ -1490,6 +1490,55 @@ func TestIsMutationQuery(t *testing.T) {
 	}
 }
 
+func TestIsCreateDatabaseStatement(t *testing.T) {
+	tests := []struct {
+		stmt     string
+		expected bool
+	}{
+		{"CREATE DATABASE foo", true},
+		{"CREATE DATABASE foo IF NOT EXISTS", true},
+		{"create database bar", true},
+		{"CREATE COMPOSITE DATABASE comp ALIAS a FOR DATABASE db1", true},
+		{"CREATE (n:Node)", false},
+		{"MATCH (n) RETURN n", false},
+		{"SHOW DATABASES", false},
+		{"  CREATE DATABASE x  ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.stmt, func(t *testing.T) {
+			got := isCreateDatabaseStatement(tt.stmt)
+			if got != tt.expected {
+				t.Errorf("isCreateDatabaseStatement(%q) = %v, want %v", tt.stmt, got, tt.expected)
+			}
+		})
+	}
+}
+
+func TestParseCreatedDatabaseName(t *testing.T) {
+	tests := []struct {
+		stmt     string
+		wantName string
+		wantOk   bool
+	}{
+		{"CREATE DATABASE foo", "foo", true},
+		{"CREATE DATABASE foo IF NOT EXISTS", "foo", true},
+		{"create database bar", "bar", true},
+		{"CREATE DATABASE `backtick-db`", "backtick-db", true},
+		{"CREATE COMPOSITE DATABASE comp ALIAS a FOR DATABASE db1", "comp", true},
+		{"CREATE COMPOSITE DATABASE my_comp", "my_comp", true},
+		{"CREATE (n:Node)", "", false},
+		{"CREATE DATABASE ", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.stmt, func(t *testing.T) {
+			gotName, gotOk := parseCreatedDatabaseName(tt.stmt)
+			if gotOk != tt.wantOk || gotName != tt.wantName {
+				t.Errorf("parseCreatedDatabaseName(%q) = (%q, %v), want (%q, %v)", tt.stmt, gotName, gotOk, tt.wantName, tt.wantOk)
+			}
+		})
+	}
+}
+
 func TestParseIntQuery(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1539,7 +1588,7 @@ func TestHasPermission(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := hasPermission(tt.roles, tt.perm)
+			result := hasPermission(nil, tt.roles, tt.perm)
 			if result != tt.expected {
 				t.Errorf("hasPermission() = %v, want %v", result, tt.expected)
 			}

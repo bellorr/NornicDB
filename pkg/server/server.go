@@ -546,6 +546,14 @@ type Server struct {
 	// Cached Cypher executors per database (thread-safe, reusable)
 	executorsMu sync.RWMutex
 	executors   map[string]*cypher.StorageExecutor
+
+	// Per-database access control (Neo4j-aligned). When auth disabled, Full is used.
+	// When auth enabled, allowlistStore (if set) provides allowlist-based mode per principal.
+	databaseAccessMode    auth.DatabaseAccessMode
+	allowlistStore        *auth.AllowlistStore        // loaded from system DB when auth enabled
+	roleStore             *auth.RoleStore             // user-defined roles when auth enabled
+	privilegesStore       *auth.PrivilegesStore       // per-DB read/write (Phase 4) when auth enabled
+	roleEntitlementsStore *auth.RoleEntitlementsStore // per-role global entitlements when auth enabled
 }
 
 // IPRateLimiter provides IP-based rate limiting to prevent DoS attacks.
@@ -1029,6 +1037,50 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 	// Initialize OAuth manager if authenticator is available
 	if authenticator != nil {
 		s.oauthManager = auth.NewOAuthManager(authenticator)
+	}
+
+	// Per-database access: Full when auth disabled; when auth enabled, DenyAll until allowlist resolves.
+	if authenticator == nil || !authenticator.IsSecurityEnabled() {
+		s.databaseAccessMode = auth.FullDatabaseAccessMode
+	} else {
+		s.databaseAccessMode = auth.DenyAllDatabaseAccessMode
+	}
+
+	// Load RBAC stores from system DB when available so roles/allowlist/privileges/entitlements APIs
+	// work even with --no-auth (e.g. fetch roles, configure RBAC before enabling auth).
+	if systemStorage, err := dbManager.GetStorage("system"); err == nil {
+		ctx := context.Background()
+		roleStore := auth.NewRoleStore(systemStorage)
+		if loadErr := roleStore.Load(ctx); loadErr != nil {
+			log.Printf("⚠️  Failed to load RBAC roles: %v", loadErr)
+		} else {
+			s.roleStore = roleStore
+		}
+		allowlistStore := auth.NewAllowlistStore(systemStorage)
+		if loadErr := allowlistStore.Load(ctx); loadErr != nil {
+			log.Printf("⚠️  Failed to load RBAC allowlist: %v", loadErr)
+		} else {
+			dbList := make([]string, 0, len(dbManager.ListDatabases()))
+			for _, info := range dbManager.ListDatabases() {
+				dbList = append(dbList, info.Name)
+			}
+			if seedErr := allowlistStore.SeedIfEmpty(ctx, dbList); seedErr != nil {
+				log.Printf("⚠️  Failed to seed RBAC allowlist: %v", seedErr)
+			}
+			s.allowlistStore = allowlistStore
+		}
+		privilegesStore := auth.NewPrivilegesStore(systemStorage)
+		if loadErr := privilegesStore.Load(ctx); loadErr != nil {
+			log.Printf("⚠️  Failed to load RBAC privileges: %v", loadErr)
+		} else {
+			s.privilegesStore = privilegesStore
+		}
+		roleEntitlementsStore := auth.NewRoleEntitlementsStore(systemStorage)
+		if loadErr := roleEntitlementsStore.Load(ctx); loadErr != nil {
+			log.Printf("⚠️  Failed to load RBAC role entitlements: %v", loadErr)
+		} else {
+			s.roleEntitlementsStore = roleEntitlementsStore
+		}
 	}
 
 	// Initialize slow query logger if file specified
