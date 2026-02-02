@@ -2,10 +2,13 @@
 """
 Seed NornicDB with 10+ nodes (paragraph content each), wait for embeddings, then run search.
 Usage: python scripts/seed_and_search.py [--base http://localhost:7474] [--db nornic] [--wait 8]
+        [--user admin] [--password password]
 No auth required when server is run with --no-auth.
 """
 import argparse
+import base64
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -71,16 +74,27 @@ def cypher_escape(s: str) -> str:
     return s.replace("\\", "\\\\").replace("'", "''")
 
 
-def request(base_url: str, path: str, body: dict, method: str = "POST") -> dict:
+def request(
+    base_url: str,
+    path: str,
+    body: dict,
+    method: str = "POST",
+    user: str | None = None,
+    password: str | None = None,
+) -> dict:
     url = f"{base_url.rstrip('/')}{path}"
     data = json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
+    if user is not None and password is not None:
+        creds = base64.b64encode(f"{user}:{password}".encode()).decode("ascii")
+        req.add_header("Authorization", f"Basic {creds}")
     try:
         with urllib.request.urlopen(req, timeout=60) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8")
+        body_bytes = e.read()
+        body = body_bytes.decode("utf-8")
         try:
             err = json.loads(body)
         except Exception:
@@ -88,7 +102,9 @@ def request(base_url: str, path: str, body: dict, method: str = "POST") -> dict:
         raise SystemExit(f"HTTP {e.code} {path}: {err}")
 
 
-def seed(base_url: str, db: str) -> None:
+def seed(
+    base_url: str, db: str, user: str | None = None, password: str | None = None
+) -> None:
     print(f"Seeding database '{db}' with {len(NODES)} nodes...")
     statements = []
     for i, node in enumerate(NODES):
@@ -102,7 +118,7 @@ def seed(base_url: str, db: str) -> None:
         }
         statements.append(stmt)
     body = {"statements": statements}
-    out = request(base_url, f"/db/{db}/tx/commit", body)
+    out = request(base_url, f"/db/{db}/tx/commit", body, user=user, password=password)
     errors = out.get("errors") or []
     if errors:
         print("Cypher errors:", json.dumps(errors, indent=2))
@@ -111,11 +127,18 @@ def seed(base_url: str, db: str) -> None:
     print(f"  Created {len(results)} nodes.")
 
 
-def search(base_url: str, query: str, limit: int = 10, database: str | None = None) -> None:
+def search(
+    base_url: str,
+    query: str,
+    limit: int = 10,
+    database: str | None = None,
+    user: str | None = None,
+    password: str | None = None,
+) -> None:
     body = {"query": query, "limit": limit}
     if database:
         body["database"] = database
-    out = request(base_url, "/nornicdb/search", body)
+    out = request(base_url, "/nornicdb/search", body, user=user, password=password)
     if isinstance(out, list):
         results = out
     else:
@@ -142,13 +165,33 @@ def main() -> None:
     p.add_argument("--no-seed", action="store_true", help="Skip seeding, only run search")
     p.add_argument("--query", default="vector embeddings and semantic search", help="Search query")
     p.add_argument("--limit", type=int, default=10, help="Search result limit")
+    p.add_argument(
+        "--user",
+        default=os.environ.get("API_USER", "admin"),
+        help="HTTP Basic Auth user (default: API_USER env or 'admin')",
+    )
+    p.add_argument(
+        "--password",
+        default=os.environ.get("API_PASSWORD", "password"),
+        help="HTTP Basic Auth password (default: API_PASSWORD env or 'password')",
+    )
     args = p.parse_args()
 
+    user = args.user or None
+    password = args.password or None
+
     if not args.no_seed:
-        seed(args.base, args.db)
+        seed(args.base, args.db, user=user, password=password)
         print(f"Waiting {args.wait}s for embeddings to generate...")
         time.sleep(args.wait)
-    search(args.base, args.query, limit=args.limit, database=args.db)
+    search(
+        args.base,
+        args.query,
+        limit=args.limit,
+        database=args.db,
+        user=user,
+        password=password,
+    )
     print("\nDone.")
 
 

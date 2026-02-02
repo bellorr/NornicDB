@@ -124,10 +124,11 @@ type SearchResult struct {
 	Score      float64 `json:"score"`
 	Similarity float64 `json:"similarity,omitempty"`
 
-	// RRF metadata
+	// RRF metadata (vector_rank/bm25_rank are always emitted so clients see original
+	// ranks even when Stage-2 reranking is applied; 0 means not in that result set)
 	RRFScore   float64 `json:"rrf_score,omitempty"`
-	VectorRank int     `json:"vector_rank,omitempty"`
-	BM25Rank   int     `json:"bm25_rank,omitempty"`
+	VectorRank int     `json:"vector_rank"`
+	BM25Rank   int     `json:"bm25_rank"`
 }
 
 // SearchResponse is the response from a search operation.
@@ -1391,8 +1392,11 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 		vectorResults = append(vectorResults, indexResult{ID: r.ID, Score: r.Score})
 	}
 
-	// Step 2: BM25 full-text search
-	bm25Results := fulltextIndex.Search(query, bm25CandidateLimit)
+	// Step 2: BM25 full-text search (skip if no full-text index; ranks will have vector only)
+	var bm25Results []indexResult
+	if fulltextIndex != nil {
+		bm25Results = fulltextIndex.Search(query, bm25CandidateLimit)
+	}
 
 	// Collapse vector IDs back to unique node IDs.
 	vectorResults = collapseIndexResultsByNodeID(vectorResults)
@@ -2319,32 +2323,37 @@ func (s *Service) applyStage2Rerank(ctx context.Context, query string, results [
 		return results
 	}
 
+	// Build map by ID so we can reliably preserve VectorRank/BM25Rank when converting
+	// reranker output back to rrfResult. Without this, original ranks can be lost when
+	// reranking reorders or filters results.
+	resultsByID := make(map[string]*rrfResult, len(results))
+	for i := range results {
+		resultsByID[results[i].ID] = &results[i]
+	}
+
 	// Convert back to rrfResult format
 	rerankedResults := make([]rrfResult, 0, len(reranked))
 	for _, r := range reranked {
-		// Find original result to preserve VectorRank/BM25Rank
-		var original *rrfResult
-		for i := range results {
-			if results[i].ID == r.ID {
-				original = &results[i]
-				break
-			}
+		original := resultsByID[r.ID]
+		if original == nil {
+			log.Printf("⚠️ Reranker returned ID %q not in pre-rerank results; preserving result with zero ranks", r.ID)
 		}
-
+		// Apply per-request MinScore filter if configured. Note that individual rerankers
+		// may also apply their own MinScore internally.
+		if opts.RerankMinScore > 0 && r.FinalScore < opts.RerankMinScore {
+			continue
+		}
+		var vectorRank, bm25Rank int
 		if original != nil {
-			// Apply per-request MinScore filter if configured. Note that individual rerankers
-			// may also apply their own MinScore internally.
-			if opts.RerankMinScore > 0 && r.FinalScore < opts.RerankMinScore {
-				continue
-			}
-			rerankedResults = append(rerankedResults, rrfResult{
-				ID:            r.ID,
-				RRFScore:      r.FinalScore, // Use cross-encoder score
-				VectorRank:    original.VectorRank,
-				BM25Rank:      original.BM25Rank,
-				OriginalScore: r.BiScore,
-			})
+			vectorRank, bm25Rank = original.VectorRank, original.BM25Rank
 		}
+		rerankedResults = append(rerankedResults, rrfResult{
+			ID:            r.ID,
+			RRFScore:      r.FinalScore, // Use cross-encoder score
+			VectorRank:    vectorRank,
+			BM25Rank:      bm25Rank,
+			OriginalScore: r.BiScore,
+		})
 	}
 
 	return rerankedResults
@@ -2451,6 +2460,11 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 	}
 
 	searchResults := s.enrichIndexResults(ctx, results, opts.Limit, seenOrphans)
+	// Vector-only: set vector_rank from position (1-based), bm25_rank = 0
+	for i := range searchResults {
+		searchResults[i].VectorRank = i + 1
+		searchResults[i].BM25Rank = 0
+	}
 
 	return &SearchResponse{
 		Status:          "success",
@@ -2465,8 +2479,21 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 // fullTextSearchOnly performs full-text BM25 search only.
 func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *SearchOptions) (*SearchResponse, error) {
 	s.mu.RLock()
-	results := s.fulltextIndex.Search(query, opts.Limit*2)
+	ft := s.fulltextIndex
 	s.mu.RUnlock()
+	if ft == nil {
+		return &SearchResponse{
+			Status:            "success",
+			Query:             query,
+			Results:           nil,
+			TotalCandidates:   0,
+			Returned:          0,
+			SearchMethod:      "fulltext",
+			FallbackTriggered: true,
+			Message:           "Full-text index not available",
+		}, nil
+	}
+	results := ft.Search(query, opts.Limit*2)
 
 	seenOrphans := make(map[string]bool)
 	if len(opts.Types) > 0 {
@@ -2474,6 +2501,11 @@ func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *Se
 	}
 
 	searchResults := s.enrichIndexResults(ctx, results, opts.Limit, seenOrphans)
+	// Full-text only: set bm25_rank from position (1-based), vector_rank = 0
+	for i := range searchResults {
+		searchResults[i].VectorRank = 0
+		searchResults[i].BM25Rank = i + 1
+	}
 
 	return &SearchResponse{
 		Status:            "success",

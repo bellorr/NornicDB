@@ -1,7 +1,12 @@
 #!/bin/bash
 # Test semantic search performance with and without K-means clustering
+#
+# Usage: ./scripts/test_search_performance.sh
+#   Optional env: API_URL, API_USER, API_PASSWORD (default: http://localhost:7474, admin, password)
 
-API_URL="http://localhost:7474"
+API_URL="${API_URL:-http://localhost:7474}"
+API_USER="${API_USER:-admin}"
+API_PASSWORD="${API_PASSWORD:-password}"
 NUM_QUERIES=20
 QUERY_SAMPLES=(
     "genetically enhanced human in an underground bunker discovers an alien civilization"
@@ -19,6 +24,7 @@ QUERY_SAMPLES=(
 echo "🔍 Testing Semantic Search Performance"
 echo "======================================"
 echo "Server: $API_URL"
+echo "User:   $API_USER"
 echo "Number of queries: $NUM_QUERIES"
 echo ""
 
@@ -37,7 +43,7 @@ run_search_test() {
         
         # Measure time (macOS compatible - use perl for milliseconds)
         start=$(perl -MTime::HiRes=time -e 'printf "%.0f\n", time * 1000')
-        response=$(curl -s -X POST "$API_URL/nornicdb/search" \
+        response=$(curl -s -u "$API_USER:$API_PASSWORD" -X POST "$API_URL/nornicdb/search" \
             -H "Content-Type: application/json" \
             -d "{\"query\": \"$query\", \"limit\": 10}" \
             --max-time 30)
@@ -87,7 +93,7 @@ run_search_test() {
 
 # Get current server status
 echo "Checking server status..."
-status=$(curl -s "$API_URL/status")
+status=$(curl -s -u "$API_USER:$API_PASSWORD" "$API_URL/status")
 if echo "$status" | grep -q "running"; then
     nodes=$(echo "$status" | jq -r '.database.nodes // 0')
     echo "✓ Server is running with $nodes nodes"
@@ -119,7 +125,7 @@ read -r
 # Wait for server to be ready
 echo "Waiting for server to be ready..."
 for i in {1..30}; do
-    if curl -s "$API_URL/health" > /dev/null 2>&1; then
+    if curl -s -u "$API_USER:$API_PASSWORD" "$API_URL/health" > /dev/null 2>&1; then
         echo "✓ Server is ready"
         sleep 2
         break

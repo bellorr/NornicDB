@@ -130,11 +130,11 @@ export function NodeDetailsPanel({
         )}
 
         {/* Scores */}
-        {(selectedNode.rrf_score ||
-          selectedNode.vector_rank ||
-          selectedNode.bm25_rank) && (
+        {(selectedNode.rrf_score != null ||
+          (selectedNode.vector_rank != null && selectedNode.vector_rank > 0) ||
+          (selectedNode.bm25_rank != null && selectedNode.bm25_rank > 0)) && (
           <div className="mb-4 flex gap-4">
-            {selectedNode.rrf_score && (
+            {selectedNode.rrf_score != null && (
               <div>
                 <h3 className="text-xs font-medium text-norse-silver mb-1">
                   RRF Score
@@ -144,7 +144,7 @@ export function NodeDetailsPanel({
                 </span>
               </div>
             )}
-            {selectedNode.vector_rank && (
+            {selectedNode.vector_rank != null && selectedNode.vector_rank > 0 && (
               <div>
                 <h3 className="text-xs font-medium text-norse-silver mb-1">
                   Vector Rank
@@ -152,7 +152,7 @@ export function NodeDetailsPanel({
                 <span className="text-frost-ice">#{selectedNode.vector_rank}</span>
               </div>
             )}
-            {selectedNode.bm25_rank && (
+            {selectedNode.bm25_rank != null && selectedNode.bm25_rank > 0 && (
               <div>
                 <h3 className="text-xs font-medium text-norse-silver mb-1">
                   BM25 Rank

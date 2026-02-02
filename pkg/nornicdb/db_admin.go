@@ -899,10 +899,11 @@ type SearchResult struct {
 	Node  *Node   `json:"node"`
 	Score float64 `json:"score"`
 
-	// RRF metadata
+	// RRF metadata (vector_rank/bm25_rank always emitted so clients see original
+	// ranks even when Stage-2 reranking is applied; 0 = not in that result set)
 	RRFScore   float64 `json:"rrf_score,omitempty"`
-	VectorRank int     `json:"vector_rank,omitempty"`
-	BM25Rank   int     `json:"bm25_rank,omitempty"`
+	VectorRank int     `json:"vector_rank"`
+	BM25Rank   int     `json:"bm25_rank"`
 }
 
 // Search performs full-text BM25 search.

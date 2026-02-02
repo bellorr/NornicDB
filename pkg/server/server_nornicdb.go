@@ -335,8 +335,10 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 
 		type fused struct {
-			node     *nornicdb.Node
-			scoreRRF float64
+			node       *nornicdb.Node
+			scoreRRF   float64
+			vectorRank int
+			bm25Rank   int
 		}
 		fusedByID := make(map[string]*fused)
 
@@ -368,7 +370,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 							Labels:     r.Labels,
 							Properties: r.Properties,
 						},
-						scoreRRF: 0,
+						scoreRRF:   0,
+						vectorRank: r.VectorRank,
+						bm25Rank:   r.BM25Rank,
 					}
 					fusedByID[id] = f
 				}
@@ -401,7 +405,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				Results:           make([]search.SearchResult, 0, len(fusedList)),
 			}
 			for _, f := range fusedList {
-				// Note: we use the fused RRF score as the primary score; inner ranks are not meaningful after fusion.
+				// Preserve vector_rank and bm25_rank from the first chunk where the node appeared.
 				searchResponse.Results = append(searchResponse.Results, search.SearchResult{
 					ID:         f.node.ID,
 					NodeID:     storage.NodeID(f.node.ID),
@@ -409,6 +413,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 					Properties: f.node.Properties,
 					Score:      f.scoreRRF,
 					RRFScore:   f.scoreRRF,
+					VectorRank: f.vectorRank,
+					BM25Rank:   f.bm25Rank,
 				})
 			}
 		}
