@@ -742,6 +742,11 @@ func (e *StorageExecutor) executeMatchWithClause(ctx context.Context, cypher str
 // executeMatchWithOptionalMatch handles MATCH ... WITH ... WHERE ... OPTIONAL MATCH ... RETURN queries
 // This is a Neo4j compatibility feature that processes WITH clause filtering before OPTIONAL MATCH
 func (e *StorageExecutor) executeMatchWithOptionalMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	// Substitute parameters AFTER routing to avoid keyword detection issues
+	if params := getParamsFromContext(ctx); params != nil {
+		cypher = e.substituteParams(cypher, params)
+	}
+
 	// Find clause boundaries
 	withIdx := findKeywordIndex(cypher, "WITH")
 	optMatchIdx := findKeywordIndex(cypher, "OPTIONAL MATCH")

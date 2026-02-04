@@ -222,19 +222,24 @@ func (e *StorageExecutor) evaluateStringOp(node *storage.Node, variable, whereCl
 	left := strings.TrimSpace(whereClause[:opIdx])
 	right := strings.TrimSpace(whereClause[opIdx+len(op)+2:])
 
-	// Extract property
-	if !strings.HasPrefix(left, variable+".") {
+	// If the left side doesn't reference this variable, it's not our concern in this
+	// single-node evaluation context. Treat it as a pass-through.
+	if !containsIdentifierToken(left, variable) {
 		return true
 	}
-	propName := left[len(variable)+1:]
 
-	actualVal, exists := node.Properties[propName]
-	if !exists {
+	// Evaluate left/right expressions to support functions like toLower()/toUpper()
+	actualVal := e.evaluateExpression(left, variable, node)
+	if actualVal == nil {
 		return false
+	}
+	expectedVal := e.evaluateExpression(right, variable, node)
+	if expectedVal == nil {
+		expectedVal = e.parseValue(right)
 	}
 
 	actualStr := fmt.Sprintf("%v", actualVal)
-	expectedStr := fmt.Sprintf("%v", e.parseValue(right))
+	expectedStr := fmt.Sprintf("%v", expectedVal)
 
 	switch op {
 	case "CONTAINS":

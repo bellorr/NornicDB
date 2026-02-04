@@ -979,6 +979,7 @@ type optionalRelPattern struct {
 	relVar      string
 	targetVar   string
 	targetLabel string
+	targetProps map[string]interface{}
 	direction   string // "out", "in", "both"
 }
 
@@ -991,6 +992,11 @@ type optionalRelResult struct {
 // executeCompoundMatchOptionalMatch handles MATCH ... OPTIONAL MATCH ... WITH ... RETURN queries
 // This implements left outer join semantics for relationship traversals with aggregation support
 func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	// Substitute parameters AFTER routing to avoid keyword detection issues
+	if params := getParamsFromContext(ctx); params != nil {
+		cypher = e.substituteParams(cypher, params)
+	}
+
 	// Find OPTIONAL MATCH position
 	optMatchIdx := findKeywordIndex(cypher, "OPTIONAL MATCH")
 	if optMatchIdx == -1 {
@@ -1141,7 +1147,10 @@ func (e *StorageExecutor) executeCompoundMatchOptionalMatch(ctx context.Context,
 
 // parseOptionalRelPattern parses patterns like (a)-[r:TYPE]->(b:Label)
 func (e *StorageExecutor) parseOptionalRelPattern(pattern string) optionalRelPattern {
-	result := optionalRelPattern{direction: "out"}
+	result := optionalRelPattern{
+		direction:   "out",
+		targetProps: make(map[string]interface{}),
+	}
 	pattern = strings.TrimSpace(pattern)
 
 	// Check direction
@@ -1188,11 +1197,15 @@ func (e *StorageExecutor) parseOptionalRelPattern(pattern string) optionalRelPat
 			endIdx := strings.Index(remaining[idx:], ")")
 			if endIdx > 0 {
 				targetStr := remaining[idx+1 : idx+endIdx]
-				if colonIdx := strings.Index(targetStr, ":"); colonIdx >= 0 {
-					result.targetVar = strings.TrimSpace(targetStr[:colonIdx])
-					result.targetLabel = strings.TrimSpace(targetStr[colonIdx+1:])
-				} else {
-					result.targetVar = strings.TrimSpace(targetStr)
+				targetInfo := e.parseNodePattern("(" + targetStr + ")")
+				if targetInfo.variable != "" {
+					result.targetVar = targetInfo.variable
+				}
+				if len(targetInfo.labels) > 0 {
+					result.targetLabel = targetInfo.labels[0]
+				}
+				if len(targetInfo.properties) > 0 {
+					result.targetProps = targetInfo.properties
 				}
 			}
 		}
@@ -1256,6 +1269,21 @@ func (e *StorageExecutor) findRelatedNodes(sourceNode *storage.Node, pattern opt
 				}
 			}
 			if !hasLabel {
+				continue
+			}
+		}
+
+		// Check target properties if specified
+		if len(pattern.targetProps) > 0 {
+			match := true
+			for k, expected := range pattern.targetProps {
+				actual, ok := targetNode.Properties[k]
+				if !ok || !e.compareEqual(actual, expected) {
+					match = false
+					break
+				}
+			}
+			if !match {
 				continue
 			}
 		}

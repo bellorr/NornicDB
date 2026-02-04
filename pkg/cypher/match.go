@@ -303,6 +303,20 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 			return nil, err
 		}
 
+		// Apply DISTINCT for relationship pattern results (consistent with MATCH)
+		if distinct {
+			seen := make(map[string]bool)
+			filtered := make([][]interface{}, 0, len(result.Rows))
+			for _, row := range result.Rows {
+				key := fmt.Sprintf("%v", row)
+				if !seen[key] {
+					seen[key] = true
+					filtered = append(filtered, row)
+				}
+			}
+			result.Rows = filtered
+		}
+
 		// Apply ORDER BY (whitespace-tolerant) - ORDER BY is NOT handled inside executeMatchWithRelationships
 		orderByIdx := findKeywordIndex(cypher, "ORDER")
 		if orderByIdx > 0 {
