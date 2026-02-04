@@ -3,7 +3,25 @@ package mcp
 
 import (
 	"encoding/json"
+	"strings"
 )
+
+// databaseParamSchema returns the optional "database" argument schema shared by all MCP tools.
+// Callers can override to target a different database at call time; when omitted, the server
+// routes to the configured default database.
+//
+// Note: JSON Schema "default" is advisory for LLMs/tooling; the server still applies defaults
+// at execution time so behavior is consistent across clients.
+func databaseParamSchema(defaultDatabase string) map[string]interface{} {
+	schema := map[string]interface{}{
+		"type":        "string",
+		"description": "Database name to use. If omitted, uses the server's configured default database.",
+	}
+	if strings.TrimSpace(defaultDatabase) != "" {
+		schema["default"] = strings.TrimSpace(defaultDatabase)
+	}
+	return schema
+}
 
 // GetToolDefinitions returns all 6 MCP tool definitions with JSON schemas.
 // These tools are designed for LLM-native usage with:
@@ -15,18 +33,24 @@ import (
 // Note: File indexing (index/unindex) is handled by Mimir (the intelligence layer).
 // NornicDB is the storage/embedding layer - it receives already-processed content.
 func GetToolDefinitions() []Tool {
+	return GetToolDefinitionsWithDefaultDatabase("")
+}
+
+// GetToolDefinitionsWithDefaultDatabase returns all MCP tool definitions using the provided
+// default database name in the shared `database` parameter schema.
+func GetToolDefinitionsWithDefaultDatabase(defaultDatabase string) []Tool {
 	return []Tool{
-		getStoreTool(),
-		getRecallTool(),
-		getDiscoverTool(),
-		getLinkTool(),
-		getTaskTool(),
-		getTasksTool(),
+		getStoreTool(defaultDatabase),
+		getRecallTool(defaultDatabase),
+		getDiscoverTool(defaultDatabase),
+		getLinkTool(defaultDatabase),
+		getTaskTool(defaultDatabase),
+		getTasksTool(defaultDatabase),
 	}
 }
 
 // getStoreTool returns the store tool definition
-func getStoreTool() Tool {
+func getStoreTool(defaultDatabase string) Tool {
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -36,8 +60,7 @@ func getStoreTool() Tool {
 			},
 			"type": map[string]interface{}{
 				"type":        "string",
-				"description": "Node type for categorization.",
-				"enum":        []string{"memory", "decision", "concept", "task", "note", "file", "code", "conversation", "project", "person"},
+				"description": "Node label/type: any valid identifier for categorization (e.g. memory, concept, task). Used as graph label.",
 				"default":     "memory",
 			},
 			"title": map[string]interface{}{
@@ -54,6 +77,7 @@ func getStoreTool() Tool {
 				"description":          "Additional key-value metadata.",
 				"additionalProperties": true,
 			},
+			"database": databaseParamSchema(defaultDatabase),
 		},
 		"required": []string{"content"},
 	}
@@ -67,13 +91,13 @@ Use this whenever you want to remember something.
 
 Examples:
 - store(content="PostgreSQL is our primary database", type="decision")
-- store(content="User prefers dark mode", type="memory", tags=["preferences"])`,
+- store(content="Optional title or summary", type="concept", tags=["tag1"])`,
 		InputSchema: schemaJSON,
 	}
 }
 
 // getRecallTool returns the recall tool definition
-func getRecallTool() Tool {
+func getRecallTool(defaultDatabase string) Tool {
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -103,6 +127,7 @@ func getRecallTool() Tool {
 				"minimum":     1,
 				"maximum":     100,
 			},
+			"database": databaseParamSchema(defaultDatabase),
 		},
 		"required": []string{},
 	}
@@ -122,7 +147,7 @@ Examples:
 }
 
 // getDiscoverTool returns the discover tool definition
-func getDiscoverTool() Tool {
+func getDiscoverTool(defaultDatabase string) Tool {
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -144,8 +169,8 @@ func getDiscoverTool() Tool {
 			},
 			"min_similarity": map[string]interface{}{
 				"type":        "number",
-				"description": "Minimum cosine similarity threshold (0.0-1.0). Lower = more results.",
-				"default":     0.70,
+				"description": "Minimum score threshold for results. For hybrid/vector search this is a fused rank score (often ~0.01-0.05). Set to 0 to return all.",
+				"default":     0.0,
 				"minimum":     0.0,
 				"maximum":     1.0,
 			},
@@ -156,6 +181,7 @@ func getDiscoverTool() Tool {
 				"minimum":     1,
 				"maximum":     3,
 			},
+			"database": databaseParamSchema(defaultDatabase),
 		},
 		"required": []string{"query"},
 	}
@@ -170,13 +196,13 @@ Use when you're asking "what do we know about X?" or "find similar to Y".
 Examples:
 - discover(query="database connection pooling")
 - discover(query="authentication bugs", type=["code", "decision"], depth=2)
-- discover(query="user preferences", min_similarity=0.65)`,
+- discover(query="user preferences", min_similarity=0.01)`,
 		InputSchema: schemaJSON,
 	}
 }
 
 // getLinkTool returns the link tool definition
-func getLinkTool() Tool {
+func getLinkTool(defaultDatabase string) Tool {
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -190,8 +216,7 @@ func getLinkTool() Tool {
 			},
 			"relation": map[string]interface{}{
 				"type":        "string",
-				"description": "Relationship type.",
-				"enum":        []string{"depends_on", "relates_to", "implements", "caused_by", "blocks", "contains", "references", "uses", "evolved_from", "contradicts"},
+				"description": "Relationship type: any valid identifier (e.g. relates_to, depends_on, contains). Used as graph relationship type.",
 			},
 			"strength": map[string]interface{}{
 				"type":        "number",
@@ -205,6 +230,7 @@ func getLinkTool() Tool {
 				"description":          "Additional edge properties.",
 				"additionalProperties": true,
 			},
+			"database": databaseParamSchema(defaultDatabase),
 		},
 		"required": []string{"from", "to", "relation"},
 	}
@@ -216,15 +242,14 @@ func getLinkTool() Tool {
 show dependencies, or build knowledge graphs. Relationships have types and properties.
 
 Examples:
-- link(from="task-123", to="task-456", relation="depends_on")
-- link(from="decision-a", to="decision-b", relation="contradicts", strength=0.8)
-- link(from="file-1", to="module-2", relation="contains")`,
+- link(from="<node-id-1>", to="<node-id-2>", relation="relates_to")
+- link(from="<id-a>", to="<id-b>", relation="depends_on", strength=0.8)`,
 		InputSchema: schemaJSON,
 	}
 }
 
 // getTaskTool returns the task tool definition
-func getTaskTool() Tool {
+func getTaskTool(defaultDatabase string) Tool {
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
@@ -242,8 +267,8 @@ func getTaskTool() Tool {
 			},
 			"status": map[string]interface{}{
 				"type":        "string",
-				"description": "Task status. Omit for auto-toggle (pending→active→done).",
-				"enum":        []string{"pending", "active", "done", "blocked"},
+				"description": "Task status. Omit for auto-toggle (pending→active→completed).",
+				"enum":        []string{"pending", "active", "completed", "blocked"},
 			},
 			"priority": map[string]interface{}{
 				"type":        "string",
@@ -262,12 +287,13 @@ func getTaskTool() Tool {
 			},
 			"complete": map[string]interface{}{
 				"type":        "boolean",
-				"description": "Set to true to mark task as done. Shorthand for status='done'.",
+				"description": "Set to true to mark task as completed. Shorthand for status='completed'.",
 			},
 			"delete": map[string]interface{}{
 				"type":        "boolean",
 				"description": "Set to true to delete the task.",
 			},
+			"database": databaseParamSchema(defaultDatabase),
 		},
 		"required": []string{},
 	}
@@ -275,12 +301,12 @@ func getTaskTool() Tool {
 	schemaJSON, _ := json.Marshal(schema)
 	return Tool{
 		Name: "task",
-		Description: `Create or manage a task. Tasks are special nodes with status tracking (pending/active/done).
+		Description: `Create or manage a task. Tasks are special nodes with status tracking (pending/active/completed).
 Automatically embedded for semantic search. Returns task with context for next steps.
 
 Status auto-toggle: If you provide an ID without status, it advances the status:
 - pending → active
-- active → done
+- active → completed
 
 Examples:
 - task(title="Implement auth", priority="high")
@@ -293,13 +319,13 @@ Examples:
 }
 
 // getTasksTool returns the tasks tool definition
-func getTasksTool() Tool {
+func getTasksTool(defaultDatabase string) Tool {
 	schema := map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
 			"status": map[string]interface{}{
 				"type":        "array",
-				"items":       map[string]interface{}{"type": "string", "enum": []string{"pending", "active", "done", "blocked"}},
+				"items":       map[string]interface{}{"type": "string", "enum": []string{"pending", "active", "completed", "blocked"}},
 				"description": "Filter by status.",
 			},
 			"priority": map[string]interface{}{
@@ -323,6 +349,7 @@ func getTasksTool() Tool {
 				"minimum":     1,
 				"maximum":     100,
 			},
+			"database": databaseParamSchema(defaultDatabase),
 		},
 		"required": []string{},
 	}

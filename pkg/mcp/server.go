@@ -54,7 +54,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
+	"github.com/orneryd/nornicdb/pkg/search"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/pkg/util"
 )
 
@@ -104,6 +107,17 @@ type ServerConfig struct {
 	EmbeddingDimensions int `yaml:"embedding_dimensions"`
 	// Embedder is the embedding service (set externally if needed)
 	Embedder Embedder `yaml:"-"`
+
+	// DatabaseScopedExecutor returns an executor and node getter for the given database name.
+	// When set, MCP tool calls that include a database in context (e.g. from the agentic loop)
+	// use this to run store/recall/link/task against the request's database instead of the default.
+	// If nil or the context has no database, the server uses its single db.
+	DatabaseScopedExecutor func(dbName string) (exec *cypher.StorageExecutor, getNode func(context.Context, string) (*nornicdb.Node, error), err error)
+
+	// DatabaseScopedStorage returns a storage engine scoped to dbName.
+	// When set, tools that need direct storage access (e.g. discover/search) can operate
+	// on the request's database without relying on a single default DB instance.
+	DatabaseScopedStorage func(dbName string) (storage.Engine, error)
 }
 
 // DefaultServerConfig returns sensible defaults for the MCP server.
@@ -145,6 +159,18 @@ func NewServer(db *nornicdb.DB, config *ServerConfig) *Server {
 func (s *Server) SetEmbedder(e Embedder) {
 	s.embed = e
 	s.config.EmbeddingEnabled = e != nil
+}
+
+// SetDatabaseScopedExecutor sets the optional per-database executor and node getter.
+// Call this after the server is created when multi-database support is available (e.g. from the HTTP server).
+func (s *Server) SetDatabaseScopedExecutor(fn func(dbName string) (exec *cypher.StorageExecutor, getNode func(context.Context, string) (*nornicdb.Node, error), err error)) {
+	s.config.DatabaseScopedExecutor = fn
+}
+
+// SetDatabaseScopedStorage sets the optional per-database storage resolver.
+// Call this after the server is created when multi-database support is available (e.g. from the HTTP server).
+func (s *Server) SetDatabaseScopedStorage(fn func(dbName string) (storage.Engine, error)) {
+	s.config.DatabaseScopedStorage = fn
 }
 
 // registerHandlers registers all MCP tool handlers.
@@ -448,13 +474,25 @@ func (s *Server) doInitialize(params map[string]interface{}) (interface{}, error
 
 func (s *Server) doListTools() ListToolsResponse {
 	return ListToolsResponse{
-		Tools: GetToolDefinitions(),
+		Tools: s.ToolDefinitions(),
 	}
 }
 
 func (s *Server) doCallTool(ctx context.Context, params map[string]interface{}) (interface{}, error) {
 	name, _ := params["name"].(string)
 	args, _ := params["arguments"].(map[string]interface{})
+	if args == nil {
+		args = make(map[string]interface{})
+	}
+
+	// Allow callers to target a specific database at call time.
+	// Precedence:
+	// 1) arguments.database / arguments.db
+	// 2) database already present in ctx (e.g. agentic loop default)
+	// 3) otherwise route to the server's configured default database
+	if dbArg := extractDatabaseArg(args); dbArg != "" {
+		ctx = ContextWithDatabase(ctx, dbArg)
+	}
 
 	handler, ok := s.handlers[name]
 	if !ok {
@@ -462,6 +500,83 @@ func (s *Server) doCallTool(ctx context.Context, params map[string]interface{}) 
 	}
 
 	return handler(ctx, args)
+}
+
+// CallTool runs an MCP tool by name with the given arguments in memory.
+// Use this to execute MCP tools (store, recall, discover, link, task, tasks) without HTTP.
+// If ctx contains a database name (ContextWithDatabase), tools run against that database when
+// DatabaseScopedExecutor is configured.
+func (s *Server) CallTool(ctx context.Context, name string, arguments map[string]interface{}) (interface{}, error) {
+	return s.doCallTool(ctx, map[string]interface{}{"name": name, "arguments": arguments})
+}
+
+// DefaultDatabaseName returns the configured default database name for this server.
+// This is derived from the DB's namespaced storage (which is configured during DB open).
+func (s *Server) DefaultDatabaseName() string {
+	if s == nil || s.db == nil {
+		return ""
+	}
+	if ns, ok := s.db.GetStorage().(*storage.NamespacedEngine); ok && ns != nil {
+		return ns.Namespace()
+	}
+	return ""
+}
+
+// ToolDefinitions returns the MCP tool definitions for this server instance.
+// The `database` parameter schema will reflect the configured default database name.
+func (s *Server) ToolDefinitions() []Tool {
+	return GetToolDefinitionsWithDefaultDatabase(s.DefaultDatabaseName())
+}
+
+// getExecutorAndGetNode returns the Cypher executor and node getter for this request.
+// If context has a database name and DatabaseScopedExecutor is set, uses that database; else uses s.db.
+func (s *Server) getExecutorAndGetNode(ctx context.Context) (exec *cypher.StorageExecutor, getNode func(context.Context, string) (*nornicdb.Node, error), err error) {
+	dbName := DatabaseFromContext(ctx)
+	if dbName != "" && s.config.DatabaseScopedExecutor != nil {
+		e, gn, resolveErr := s.config.DatabaseScopedExecutor(dbName)
+		if resolveErr != nil {
+			return nil, nil, resolveErr
+		}
+		if e == nil || gn == nil {
+			return nil, nil, fmt.Errorf("database scoped executor unavailable for %q", dbName)
+		}
+		return e, func(ctx context.Context, id string) (*nornicdb.Node, error) {
+			return gn(ctx, normalizeNodeElementID(id))
+		}, nil
+	}
+	if s.db != nil {
+		exec := s.db.GetCypherExecutor()
+		if exec == nil {
+			return nil, nil, fmt.Errorf("cypher executor unavailable")
+		}
+		return exec, func(ctx context.Context, id string) (*nornicdb.Node, error) {
+			return s.db.GetNode(ctx, localNodeIDFromAny(id))
+		}, nil
+	}
+	return nil, nil, nil
+}
+
+func (s *Server) storageForContext(ctx context.Context) (storage.Engine, error) {
+	dbName := DatabaseFromContext(ctx)
+	if dbName != "" && s.config.DatabaseScopedStorage != nil {
+		return s.config.DatabaseScopedStorage(dbName)
+	}
+	if s.db == nil {
+		return nil, nil
+	}
+	store := s.db.GetStorage()
+	if dbName == "" {
+		return store, nil
+	}
+	// If the DB's storage is namespaced, reuse its inner engine for other databases.
+	if ns, ok := store.(*storage.NamespacedEngine); ok {
+		if ns.Namespace() == dbName {
+			return store, nil
+		}
+		return storage.NewNamespacedEngine(ns.GetInnerEngine(), dbName), nil
+	}
+	// Best-effort: fall back to whatever storage we have (single-db mode).
+	return store, nil
 }
 
 // =============================================================================
@@ -511,11 +626,11 @@ func (s *Server) handleStore(ctx context.Context, args map[string]interface{}) (
 	var nodeID string
 	var embedded bool
 	var receipt interface{}
-	if s.db != nil {
-		exec := s.db.GetCypherExecutor()
-		if exec == nil {
-			return nil, fmt.Errorf("cypher executor unavailable")
-		}
+	exec, _, execErr := s.getExecutorAndGetNode(ctx)
+	if execErr != nil {
+		return nil, execErr
+	}
+	if exec != nil {
 		safeLabel := strings.ReplaceAll(nodeType, "`", "")
 		if strings.TrimSpace(safeLabel) == "" {
 			return nil, fmt.Errorf("invalid node type")
@@ -565,18 +680,24 @@ func (s *Server) handleRecall(ctx context.Context, args map[string]interface{}) 
 	id := getString(args, "id")
 	nodeTypes := getStringSlice(args, "type")
 	tags := getStringSlice(args, "tags")
+	since := getString(args, "since")
 	limit := getInt(args, "limit", 10)
+
+	exec, getNode, execErr := s.getExecutorAndGetNode(ctx)
+	if execErr != nil {
+		return nil, execErr
+	}
 
 	// If ID provided, fetch specific node
 	if id != "" {
-		if s.db != nil {
-			node, err := s.db.GetNode(ctx, id)
+		if getNode != nil {
+			node, err := getNode(ctx, id)
 			if err != nil {
 				return nil, fmt.Errorf("node not found: %s", id)
 			}
 			return RecallResult{
 				Nodes: []Node{{
-					ID:         node.ID,
+					ID:         normalizeNodeElementID(node.ID),
 					Type:       getLabelType(node.Labels),
 					Title:      getStringProp(node.Properties, "title"),
 					Content:    getStringProp(node.Properties, "content"),
@@ -593,46 +714,67 @@ func (s *Server) handleRecall(ctx context.Context, args map[string]interface{}) 
 	}
 
 	// Query by filters
-	if s.db != nil {
+	if exec != nil {
 		// Use label filter if provided
 		label := ""
 		if len(nodeTypes) > 0 {
-			label = nodeTypes[0]
+			label = strings.ReplaceAll(nodeTypes[0], "`", "")
 		}
 
-		dbNodes, err := s.db.ListNodes(ctx, label, limit, 0)
+		var b strings.Builder
+		if label != "" {
+			b.WriteString("MATCH (n:`")
+			b.WriteString(label)
+			b.WriteString("`)")
+		} else {
+			b.WriteString("MATCH (n)")
+		}
+
+		conds := make([]string, 0, 2)
+		params := map[string]interface{}{"limit": limit}
+		if len(tags) > 0 {
+			conds = append(conds, "ALL(tag IN $tags WHERE tag IN coalesce(n.tags, []))")
+			params["tags"] = tags
+		}
+		if since != "" {
+			// created_at is stored as RFC3339 string by store; lexical compare works for RFC3339 timestamps.
+			conds = append(conds, "coalesce(n.created_at, '') >= $since")
+			params["since"] = since
+		}
+		if len(conds) > 0 {
+			b.WriteString(" WHERE ")
+			b.WriteString(strings.Join(conds, " AND "))
+		}
+		b.WriteString(" RETURN n LIMIT $limit")
+
+		result, err := exec.Execute(ctx, b.String(), params)
 		if err != nil {
-			return nil, fmt.Errorf("failed to list nodes: %w", err)
+			return nil, fmt.Errorf("failed to recall nodes: %w", err)
 		}
 
-		// Filter by tags if provided
-		var nodes []Node
-		for _, n := range dbNodes {
-			// Filter by tags if specified
-			if len(tags) > 0 {
-				nodeTags := getStringSliceProp(n.Properties, "tags")
-				if !hasAnyTag(nodeTags, tags) {
-					continue
-				}
+		nodes := make([]Node, 0, len(result.Rows))
+		for _, row := range result.Rows {
+			if len(row) == 0 {
+				continue
 			}
-
+			snode, ok := row[0].(*storage.Node)
+			if !ok || snode == nil {
+				continue
+			}
+			props := toInterfaceMap(snode.Properties)
 			nodes = append(nodes, Node{
-				ID:         n.ID,
-				Type:       getLabelType(n.Labels),
-				Title:      getStringProp(n.Properties, "title"),
-				Content:    getStringProp(n.Properties, "content"),
-				Properties: sanitizePropertiesForLLM(n.Properties),
+				ID:         normalizeNodeElementID(string(snode.ID)),
+				Type:       getLabelType(snode.Labels),
+				Title:      getStringProp(props, "title"),
+				Content:    getStringProp(props, "content"),
+				Properties: sanitizePropertiesForLLM(props),
 			})
-
 			if len(nodes) >= limit {
 				break
 			}
 		}
 
-		return RecallResult{
-			Nodes: nodes,
-			Count: len(nodes),
-		}, nil
+		return RecallResult{Nodes: nodes, Count: len(nodes)}, nil
 	}
 
 	return RecallResult{
@@ -650,8 +792,6 @@ func (s *Server) handleDiscover(ctx context.Context, args map[string]interface{}
 
 	nodeTypes := getStringSlice(args, "type")
 	limit := getInt(args, "limit", 10)
-	// Note: RRF hybrid search scores are typically 0.01-0.05 range (not 0-1 cosine similarity)
-	// Use a low default threshold to include results, or set to 0 to return all
 	minScore := getFloat64(args, "min_similarity", 0.0)
 	// Depth for graph traversal (1-3, default 1 = no related nodes)
 	depth := getInt(args, "depth", 1)
@@ -665,155 +805,163 @@ func (s *Server) handleDiscover(ctx context.Context, args map[string]interface{}
 	method := "keyword"
 
 	if s.db != nil {
-		// Try vector search if embeddings enabled
-		if s.embed != nil && s.config.EmbeddingEnabled {
-			// IMPORTANT: don't rely on embedding failures to detect "too long" queries.
-			// Instead, proactively chunk the query into embedding-safe segments.
-			const (
-				queryChunkSize    = 512
-				queryChunkOverlap = 50
-				maxQueryChunks    = 32 // safety cap to prevent pathological requests
-				outerRRFK         = 60 // RRF constant (matches search default)
-			)
+		dbName := DatabaseFromContext(ctx) // empty = default database
+		engine, err := s.storageForContext(ctx)
+		if err != nil {
+			return nil, err
+		}
+		svc, err := s.db.GetOrCreateSearchService(dbName, engine)
+		if err == nil && svc != nil {
+			// Try vector/hybrid search if embeddings enabled
+			if s.embed != nil && s.config.EmbeddingEnabled {
+				// IMPORTANT: don't rely on embedding failures to detect "too long" queries.
+				// Instead, proactively chunk the query into embedding-safe segments.
+				const (
+					queryChunkSize    = 512
+					queryChunkOverlap = 50
+					maxQueryChunks    = 32 // safety cap to prevent pathological requests
+					outerRRFK         = 60 // RRF constant for cross-chunk fusion
+				)
 
-			queryChunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
-			if len(queryChunks) > maxQueryChunks {
-				queryChunks = queryChunks[:maxQueryChunks]
+				queryChunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
+				if len(queryChunks) > maxQueryChunks {
+					queryChunks = queryChunks[:maxQueryChunks]
+				}
+
+				// Embed each chunk and search; then fuse results across chunks using RRF (rank-based).
+				queryEmbeddings, err := s.embed.EmbedBatch(ctx, queryChunks)
+				if err == nil && len(queryEmbeddings) == len(queryChunks) && len(queryEmbeddings) > 0 {
+					method = "vector"
+
+					// Pull more candidates per chunk, then cut down after fusion.
+					perChunkLimit := limit
+					if perChunkLimit < 10 {
+						perChunkLimit = 10
+					}
+					if len(queryChunks) > 1 && perChunkLimit < limit*3 {
+						perChunkLimit = limit * 3
+					}
+					if perChunkLimit > 100 {
+						perChunkLimit = 100
+					}
+
+					type fused struct {
+						idLocal  string
+						labels   []string
+						title    string
+						preview  string
+						props    map[string]any
+						scoreRRF float64
+					}
+					fusedByID := make(map[string]*fused)
+
+					for i, emb := range queryEmbeddings {
+						if len(emb) == 0 {
+							continue
+						}
+						chunkQuery := queryChunks[i]
+
+						opts := search.GetAdaptiveRRFConfig(chunkQuery)
+						opts.Limit = perChunkLimit
+						if len(nodeTypes) > 0 {
+							opts.Types = nodeTypes
+						}
+
+						resp, err := svc.Search(ctx, chunkQuery, emb, opts)
+						if err != nil || resp == nil {
+							continue
+						}
+						for rank, r := range resp.Results {
+							id := r.ID
+							f := fusedByID[id]
+							if f == nil {
+								f = &fused{
+									idLocal:  id,
+									labels:   r.Labels,
+									title:    r.Title,
+									preview:  r.ContentPreview,
+									props:    r.Properties,
+									scoreRRF: 0,
+								}
+								fusedByID[id] = f
+							}
+							// Outer RRF: 1/(k + rank), rank is 1-based.
+							f.scoreRRF += 1.0 / (outerRRFK + float64(rank+1))
+						}
+					}
+
+					// Build and sort fused list.
+					fusedList := make([]*fused, 0, len(fusedByID))
+					for _, f := range fusedByID {
+						// Apply threshold to fused score.
+						if minScore > 0 && f.scoreRRF < minScore {
+							continue
+						}
+						fusedList = append(fusedList, f)
+					}
+
+					sort.Slice(fusedList, func(i, j int) bool {
+						return fusedList[i].scoreRRF > fusedList[j].scoreRRF
+					})
+
+					if limit <= 0 {
+						limit = 10
+					}
+					if len(fusedList) > limit {
+						fusedList = fusedList[:limit]
+					}
+
+					results := make([]SearchResult, 0, len(fusedList))
+					for _, f := range fusedList {
+						props := toInterfaceMap(f.props)
+						res := SearchResult{
+							ID:             normalizeNodeElementID(f.idLocal),
+							Type:           getLabelType(f.labels),
+							Title:          f.title,
+							ContentPreview: f.preview,
+							Similarity:     f.scoreRRF,
+							Properties:     sanitizePropertiesForLLM(props),
+						}
+						if depth > 1 {
+							res.Related = s.getRelatedNodes(ctx, res.ID, depth)
+						}
+						results = append(results, res)
+					}
+
+					return DiscoverResult{
+						Results: results,
+						Method:  method,
+						Total:   len(results),
+					}, nil
+				}
 			}
 
-			// Embed each chunk and search; then fuse results across chunks using RRF (rank-based),
-			// which is robust even when per-chunk scores are not directly comparable.
-			queryEmbeddings, err := s.embed.EmbedBatch(ctx, queryChunks)
-			if err == nil && len(queryEmbeddings) == len(queryChunks) && len(queryEmbeddings) > 0 {
-				method = "vector"
-
-				// Pull more candidates per chunk, then cut down after fusion.
-				perChunkLimit := limit
-				if perChunkLimit < 10 {
-					perChunkLimit = 10
-				}
-				if len(queryChunks) > 1 && perChunkLimit < limit*3 {
-					perChunkLimit = limit * 3
-				}
-				if perChunkLimit > 100 {
-					perChunkLimit = 100
-				}
-
-				type fused struct {
-					node      *nornicdb.Node
-					title     string
-					nodeType  string
-					scoreRRF  float64
-					bestScore float64
-				}
-				fusedByID := make(map[string]*fused)
-
-				for i, emb := range queryEmbeddings {
-					if len(emb) == 0 {
-						continue
-					}
-					chunkQuery := queryChunks[i]
-
-					dbResults, err := s.db.HybridSearch(ctx, chunkQuery, emb, nodeTypes, perChunkLimit)
-					if err != nil {
-						continue
-					}
-
-					for rank, r := range dbResults {
-						id := r.Node.ID
-						f := fusedByID[id]
-						if f == nil {
-							f = &fused{
-								node:      r.Node,
-								title:     getStringProp(r.Node.Properties, "title"),
-								nodeType:  getLabelType(r.Node.Labels),
-								scoreRRF:  0,
-								bestScore: r.Score,
-							}
-							fusedByID[id] = f
-						}
-
-						// Outer RRF: 1/(k + rank), rank is 1-based.
-						f.scoreRRF += 1.0 / (outerRRFK + float64(rank+1))
-						if r.Score > f.bestScore {
-							f.bestScore = r.Score
-						}
-					}
-				}
-
-				// Build and sort fused list.
-				fusedList := make([]*fused, 0, len(fusedByID))
-				for _, f := range fusedByID {
-					// Apply threshold to fused score.
-					if minScore > 0 && f.scoreRRF < minScore {
-						continue
-					}
-					fusedList = append(fusedList, f)
-				}
-
-				sort.Slice(fusedList, func(i, j int) bool {
-					return fusedList[i].scoreRRF > fusedList[j].scoreRRF
-				})
-
-				if limit <= 0 {
-					limit = 10
-				}
-				if len(fusedList) > limit {
-					fusedList = fusedList[:limit]
-				}
-
-				results := make([]SearchResult, 0, len(fusedList))
-				for _, f := range fusedList {
-					content := getStringProp(f.node.Properties, "content")
-					preview := truncateString(content, 200)
-					result := SearchResult{
-						ID:             f.node.ID,
-						Type:           f.nodeType,
-						Title:          f.title,
-						ContentPreview: preview,
-						Similarity:     f.scoreRRF,
-						Properties:     sanitizePropertiesForLLM(f.node.Properties),
+			// Keyword search (BM25-only)
+			opts := search.GetAdaptiveRRFConfig(query)
+			opts.Limit = limit
+			if len(nodeTypes) > 0 {
+				opts.Types = nodeTypes
+			}
+			resp, err := svc.Search(ctx, query, nil, opts)
+			if err == nil && resp != nil {
+				results := make([]SearchResult, 0, len(resp.Results))
+				for _, r := range resp.Results {
+					props := toInterfaceMap(r.Properties)
+					res := SearchResult{
+						ID:             normalizeNodeElementID(r.ID),
+						Type:           getLabelType(r.Labels),
+						Title:          r.Title,
+						ContentPreview: r.ContentPreview,
+						Similarity:     r.Score,
+						Properties:     sanitizePropertiesForLLM(props),
 					}
 					if depth > 1 {
-						result.Related = s.getRelatedNodes(ctx, f.node.ID, depth)
+						res.Related = s.getRelatedNodes(ctx, res.ID, depth)
 					}
-					results = append(results, result)
+					results = append(results, res)
 				}
-
-				return DiscoverResult{
-					Results: results,
-					Method:  method,
-					Total:   len(results),
-				}, nil
+				return DiscoverResult{Results: results, Method: method, Total: len(results)}, nil
 			}
-		}
-
-		// Fall back to text search
-		dbResults, err := s.db.Search(ctx, query, nodeTypes, limit)
-		if err == nil {
-			var results []SearchResult
-			for _, r := range dbResults {
-				content := getStringProp(r.Node.Properties, "content")
-				preview := truncateString(content, 200)
-				result := SearchResult{
-					ID:             r.Node.ID,
-					Type:           getLabelType(r.Node.Labels),
-					Title:          getStringProp(r.Node.Properties, "title"),
-					ContentPreview: preview,
-					Similarity:     r.Score,
-					Properties:     sanitizePropertiesForLLM(r.Node.Properties),
-				}
-				// Add related nodes if depth > 1
-				if depth > 1 {
-					result.Related = s.getRelatedNodes(ctx, r.Node.ID, depth)
-				}
-				results = append(results, result)
-			}
-			return DiscoverResult{
-				Results: results,
-				Method:  method,
-				Total:   len(results),
-			}, nil
 		}
 	}
 
@@ -841,7 +989,7 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 	}
 
 	if !IsValidRelation(relation) {
-		return nil, fmt.Errorf("invalid relation: %s (valid: %v)", relation, ValidRelations)
+		return nil, fmt.Errorf("invalid relation: %q (must be a non-empty valid identifier, e.g. relates_to, depends_on)", relation)
 	}
 
 	strength := getFloat64(args, "strength", 1.0)
@@ -855,39 +1003,42 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 	var fromNode, toNode Node
 	var receipt interface{}
 
-	if s.db != nil {
+	fromEID := normalizeNodeElementID(from)
+	toEID := normalizeNodeElementID(to)
+
+	exec, getNode, execErr := s.getExecutorAndGetNode(ctx)
+	if execErr != nil {
+		return nil, execErr
+	}
+	if exec != nil && getNode != nil {
 		// Verify source node exists and get its info
-		srcNode, err := s.db.GetNode(ctx, from)
+		srcNode, err := getNode(ctx, fromEID)
 		if err != nil {
 			return nil, fmt.Errorf("source node not found: %s", from)
 		}
 		fromNode = Node{
-			ID:    srcNode.ID,
+			ID:    fromEID,
 			Type:  getLabelType(srcNode.Labels),
 			Title: getStringProp(srcNode.Properties, "title"),
 		}
 
 		// Verify target node exists and get its info
-		tgtNode, err := s.db.GetNode(ctx, to)
+		tgtNode, err := getNode(ctx, toEID)
 		if err != nil {
 			return nil, fmt.Errorf("target node not found: %s", to)
 		}
 		toNode = Node{
-			ID:    tgtNode.ID,
+			ID:    toEID,
 			Type:  getLabelType(tgtNode.Labels),
 			Title: getStringProp(tgtNode.Properties, "title"),
 		}
 
 		// Create the edge via Cypher to capture receipt metadata
-		exec := s.db.GetCypherExecutor()
-		if exec == nil {
-			return nil, fmt.Errorf("cypher executor unavailable")
-		}
 		edgeType := strings.ReplaceAll(strings.ToUpper(relation), "`", "")
 		query := fmt.Sprintf("MATCH (a) WHERE elementId(a) = $from MATCH (b) WHERE elementId(b) = $to CREATE (a)-[r:`%s` $props]->(b) RETURN elementId(r) AS id", edgeType)
 		result, err := exec.Execute(ctx, query, map[string]interface{}{
-			"from":  from,
-			"to":    to,
+			"from":  fromEID,
+			"to":    toEID,
 			"props": edgeProps,
 		})
 		if err != nil {
@@ -907,10 +1058,10 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 			}
 		}
 	} else {
-		// Fallback for testing
+		// Fallback for testing (no db)
 		edgeID = fmt.Sprintf("edge-%d", time.Now().UnixNano())
-		fromNode = Node{ID: from}
-		toNode = Node{ID: to}
+		fromNode = Node{ID: fromEID}
+		toNode = Node{ID: toEID}
 	}
 
 	return LinkResult{
@@ -926,101 +1077,149 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 	id := getString(args, "id")
 	title := getString(args, "title")
 	description := getString(args, "description")
-	status := getString(args, "status")
+	status := strings.TrimSpace(getString(args, "status"))
 	priority := getString(args, "priority")
 	dependsOn := getStringSlice(args, "depends_on")
 	assign := getString(args, "assign")
+	complete := getBool(args, "complete", false)
+	del := getBool(args, "delete", false)
+
+	// Back-compat: "done" → "completed"
+	if strings.EqualFold(status, "done") {
+		status = "completed"
+	}
+
+	exec, getNode, execErr := s.getExecutorAndGetNode(ctx)
+	if execErr != nil {
+		return nil, execErr
+	}
 
 	// Update existing task
 	if id != "" {
-		if s.db != nil {
-			node, err := s.db.GetNode(ctx, id)
-			if err != nil {
-				return nil, fmt.Errorf("task not found: %s", id)
-			}
+		taskEID := normalizeNodeElementID(id)
 
-			// Update properties
-			updates := make(map[string]interface{})
-			if status != "" {
-				updates["status"] = status
-			} else {
-				// Toggle status if not provided
-				currentStatus := getStringProp(node.Properties, "status")
-				if currentStatus == "pending" || currentStatus == "" {
-					updates["status"] = "active"
-				} else if currentStatus == "active" {
-					updates["status"] = "completed"
-				}
-			}
-			if title != "" {
-				updates["title"] = title
-			}
-			if description != "" {
-				updates["description"] = description
-			}
-			if priority != "" {
-				updates["priority"] = priority
-			}
-			if assign != "" {
-				updates["assigned_to"] = assign
-			}
-			updates["updated_at"] = time.Now().Format(time.RFC3339)
-
-			exec := s.db.GetCypherExecutor()
+		// Delete task
+		if del {
 			if exec == nil {
-				return nil, fmt.Errorf("cypher executor unavailable")
+				return TaskResult{
+					Task:       Node{ID: taskEID, Type: "Task"},
+					NextAction: "Task deleted.",
+				}, nil
 			}
 			result, err := exec.Execute(ctx,
-				"MATCH (t:Task) WHERE elementId(t) = $id SET t += $props RETURN elementId(t) AS id",
-				map[string]interface{}{
-					"id":    id,
-					"props": updates,
-				},
+				"MATCH (t:Task) WHERE elementId(t) = $id DETACH DELETE t RETURN count(t) AS deleted",
+				map[string]interface{}{"id": taskEID},
 			)
 			if err != nil {
-				return nil, fmt.Errorf("failed to update task: %w", err)
+				return nil, fmt.Errorf("failed to delete task: %w", err)
 			}
-			var receipt interface{}
-			if result.Metadata != nil {
-				if rec, ok := result.Metadata["receipt"]; ok && rec != nil {
-					receipt = rec
+			var deleted int64
+			if len(result.Rows) > 0 && len(result.Rows[0]) > 0 {
+				switch v := result.Rows[0][0].(type) {
+				case int64:
+					deleted = v
+				case int:
+					deleted = int64(v)
+				case float64:
+					deleted = int64(v)
 				}
 			}
-			updatedNode, err := s.db.GetNode(ctx, id)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch updated task: %w", err)
-			}
-
 			return TaskResult{
-				Task: Node{
-					ID:         updatedNode.ID,
-					Type:       "Task",
-					Title:      getStringProp(updatedNode.Properties, "title"),
-					Content:    getStringProp(updatedNode.Properties, "description"),
-					Properties: sanitizePropertiesForLLM(updatedNode.Properties),
-				},
-				Receipt: receipt,
+				Task:       Node{ID: taskEID, Type: "Task"},
+				NextAction: fmt.Sprintf("Deleted %d task(s).", deleted),
 			}, nil
 		}
 
 		// Fallback without database
+		if exec == nil || getNode == nil {
+			props := map[string]interface{}{}
+			if status != "" {
+				props["status"] = status
+			}
+			if complete {
+				props["status"] = "completed"
+			}
+			return TaskResult{Task: Node{ID: taskEID, Type: "Task", Properties: props}}, nil
+		}
+
+		node, err := getNode(ctx, taskEID)
+		if err != nil {
+			return nil, fmt.Errorf("task not found: %s", id)
+		}
+
+		// Update properties
+		updates := make(map[string]interface{})
+		if complete {
+			updates["status"] = "completed"
+		} else if status != "" {
+			updates["status"] = status
+		} else {
+			// Toggle status if not provided
+			currentStatus := getStringProp(node.Properties, "status")
+			if currentStatus == "pending" || currentStatus == "" {
+				updates["status"] = "active"
+			} else if currentStatus == "active" {
+				updates["status"] = "completed"
+			}
+		}
+		if title != "" {
+			updates["title"] = title
+		}
+		if description != "" {
+			updates["description"] = description
+		}
+		if priority != "" {
+			updates["priority"] = priority
+		}
+		if assign != "" {
+			updates["assigned_to"] = assign
+		}
+		updates["updated_at"] = time.Now().Format(time.RFC3339)
+
+		result, err := exec.Execute(ctx,
+			"MATCH (t:Task) WHERE elementId(t) = $id SET t += $props RETURN elementId(t) AS id",
+			map[string]interface{}{
+				"id":    taskEID,
+				"props": updates,
+			},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to update task: %w", err)
+		}
+		var receipt interface{}
+		if result.Metadata != nil {
+			if rec, ok := result.Metadata["receipt"]; ok && rec != nil {
+				receipt = rec
+			}
+		}
+		updatedNode, err := getNode(ctx, taskEID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch updated task: %w", err)
+		}
+
 		return TaskResult{
 			Task: Node{
-				ID:   id,
-				Type: "Task",
-				Properties: map[string]interface{}{
-					"status": status,
-				},
+				ID:         taskEID,
+				Type:       "Task",
+				Title:      getStringProp(updatedNode.Properties, "title"),
+				Content:    getStringProp(updatedNode.Properties, "description"),
+				Properties: sanitizePropertiesForLLM(updatedNode.Properties),
 			},
+			Receipt: receipt,
 		}, nil
 	}
 
 	// Create new task
+	if del {
+		return nil, fmt.Errorf("id is required for delete")
+	}
 	if title == "" {
 		return nil, fmt.Errorf("title is required for new tasks")
 	}
 
-	if status == "" {
+	if complete {
+		status = "completed"
+	} else if status == "" {
 		status = "pending"
 	}
 	if priority == "" {
@@ -1040,11 +1239,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 
 	var taskID string
 	var receipt interface{}
-	if s.db != nil {
-		exec := s.db.GetCypherExecutor()
-		if exec == nil {
-			return nil, fmt.Errorf("cypher executor unavailable")
-		}
+	if exec != nil {
 		query := "CREATE (t:Task $props) RETURN elementId(t) AS id"
 		result, err := exec.Execute(ctx, query, map[string]interface{}{"props": props})
 		if err != nil {
@@ -1065,8 +1260,23 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 		}
 
 		// Create dependency edges
-		for _, depID := range dependsOn {
-			s.db.CreateEdge(ctx, taskID, depID, "DEPENDS_ON", nil)
+		if len(dependsOn) > 0 {
+			deps := make([]string, 0, len(dependsOn))
+			for _, depID := range dependsOn {
+				if strings.TrimSpace(depID) == "" {
+					continue
+				}
+				deps = append(deps, normalizeNodeElementID(depID))
+			}
+			if len(deps) > 0 {
+				_, _ = exec.Execute(ctx,
+					`MATCH (t:Task) WHERE elementId(t) = $id
+					 UNWIND $deps AS dep
+					 MATCH (d:Task) WHERE elementId(d) = dep
+					 CREATE (t)-[:DEPENDS_ON]->(d)`,
+					map[string]interface{}{"id": taskID, "deps": deps},
+				)
+			}
 		}
 	} else {
 		taskID = fmt.Sprintf("task-%d", time.Now().UnixNano())
@@ -1110,6 +1320,13 @@ func (s *Server) handleTasks(ctx context.Context, args map[string]interface{}) (
 	unblockedOnly := getBool(args, "unblocked_only", false)
 	limit := getInt(args, "limit", 20)
 
+	// Back-compat: "done" → "completed"
+	for i := range statuses {
+		if strings.EqualFold(statuses[i], "done") {
+			statuses[i] = "completed"
+		}
+	}
+
 	tasks := make([]Node, 0)
 	stats := TaskStats{
 		Total:      0,
@@ -1117,10 +1334,13 @@ func (s *Server) handleTasks(ctx context.Context, args map[string]interface{}) (
 		ByPriority: map[string]int{"critical": 0, "high": 0, "medium": 0, "low": 0},
 	}
 
-	if s.db != nil {
-		// Build Cypher query
-		query := "MATCH (t:Task)"
-		conditions := []string{}
+	exec, _, execErr := s.getExecutorAndGetNode(ctx)
+	if execErr != nil {
+		return nil, execErr
+	}
+	if exec != nil {
+		base := "MATCH (t:Task)"
+		conditions := make([]string, 0, 4)
 		params := map[string]interface{}{}
 
 		if len(statuses) > 0 {
@@ -1135,63 +1355,73 @@ func (s *Server) handleTasks(ctx context.Context, args map[string]interface{}) (
 			conditions = append(conditions, "t.assigned_to = $assigned_to")
 			params["assigned_to"] = assignedTo
 		}
-
-		if len(conditions) > 0 {
-			query += " WHERE " + strings.Join(conditions, " AND ")
-		}
-
-		// For unblocked only, exclude tasks with incomplete dependencies
 		if unblockedOnly {
-			query += ` 
-				AND NOT EXISTS {
-					MATCH (t)-[:DEPENDS_ON]->(dep:Task) 
-					WHERE dep.status <> 'completed'
-				}`
+			conditions = append(conditions, `NOT EXISTS {
+				MATCH (t)-[:DEPENDS_ON]->(dep:Task)
+				WHERE dep.status <> 'completed'
+			}`)
+		}
+		if len(conditions) > 0 {
+			base += " WHERE " + strings.Join(conditions, " AND ")
 		}
 
-		query += " RETURN t.id, t.title, t.description, t.status, t.priority, t.assigned_to ORDER BY t.created_at DESC LIMIT $limit"
+		// Task list (paged)
+		listQuery := base + " RETURN elementId(t) AS id, t.title AS title, t.description AS description, t.status AS status, t.priority AS priority, t.assigned_to AS assigned_to ORDER BY t.created_at DESC LIMIT $limit"
 		params["limit"] = limit
 
-		// Use typed execute for cleaner decoding
-		result, err := nornicdb.ExecuteCypherTyped[TaskRow](s.db, ctx, query, params)
-		if err == nil {
-			for _, task := range result.Rows {
-				taskNode := Node{
-					ID:      task.ID,
-					Type:    "Task",
-					Title:   task.Title,
-					Content: task.Description,
-					Properties: map[string]interface{}{
-						"status":      task.Status,
-						"priority":    task.Priority,
-						"assigned_to": task.AssignedTo,
-					},
-				}
-				tasks = append(tasks, taskNode)
-
-				// Update stats
-				stats.Total++
-				if task.Status != "" {
-					stats.ByStatus[task.Status]++
-				}
-				if task.Priority != "" {
-					stats.ByPriority[task.Priority]++
-				}
+		result, err := exec.Execute(ctx, listQuery, params)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list tasks: %w", err)
+		}
+		for _, row := range result.Rows {
+			if len(row) < 6 {
+				continue
 			}
+			id, _ := row[0].(string)
+			titleVal, _ := row[1].(string)
+			descVal, _ := row[2].(string)
+			statusVal, _ := row[3].(string)
+			priorityVal, _ := row[4].(string)
+			assignedVal, _ := row[5].(string)
+			tasks = append(tasks, Node{
+				ID:      id,
+				Type:    "Task",
+				Title:   titleVal,
+				Content: descVal,
+				Properties: map[string]interface{}{
+					"status":      statusVal,
+					"priority":    priorityVal,
+					"assigned_to": assignedVal,
+				},
+			})
 		}
 
-		// Get overall stats using typed results
-		statsQuery := `MATCH (t:Task) 
-			RETURN t.status as status, t.priority as priority, count(t) as count`
-		statsResult, _ := nornicdb.ExecuteCypherTyped[TaskStatRow](s.db, ctx, statsQuery, nil)
-		if statsResult != nil {
+		// Stats for the filtered set (no limit)
+		statsQuery := base + " RETURN t.status AS status, t.priority AS priority, count(t) AS count"
+		statsResult, err := exec.Execute(ctx, statsQuery, params)
+		if err == nil {
 			for _, row := range statsResult.Rows {
-				if row.Status != "" {
-					stats.ByStatus[row.Status] = int(row.Count)
+				if len(row) < 3 {
+					continue
 				}
-				if row.Priority != "" {
-					stats.ByPriority[row.Priority] = int(row.Count)
+				st, _ := row[0].(string)
+				pr, _ := row[1].(string)
+				var c int64
+				switch v := row[2].(type) {
+				case int64:
+					c = v
+				case int:
+					c = int64(v)
+				case float64:
+					c = int64(v)
 				}
+				if st != "" {
+					stats.ByStatus[st] += int(c)
+				}
+				if pr != "" {
+					stats.ByPriority[pr] += int(c)
+				}
+				stats.Total += int(c)
 			}
 		}
 	}
@@ -1259,6 +1489,66 @@ func hasAnyTag(nodeTags, targetTags []string) bool {
 		}
 	}
 	return false
+}
+
+const nodeElementIDPrefix = "4:nornicdb:"
+
+func extractDatabaseArg(args map[string]interface{}) string {
+	if args == nil {
+		return ""
+	}
+	var db string
+	if v, ok := args["database"].(string); ok {
+		db = v
+	}
+	delete(args, "database")
+	if db == "" {
+		if v, ok := args["db"].(string); ok {
+			db = v
+		}
+	}
+	delete(args, "db")
+	return strings.TrimSpace(db)
+}
+
+func normalizeNodeElementID(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	// Accept any elementId-like string as-is (e.g. "4:db:id").
+	if strings.HasPrefix(id, "4:") {
+		return id
+	}
+	return nodeElementIDPrefix + id
+}
+
+func localNodeIDFromAny(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return ""
+	}
+	if strings.HasPrefix(id, nodeElementIDPrefix) {
+		return strings.TrimPrefix(id, nodeElementIDPrefix)
+	}
+	// Best-effort: for other elementId formats, take the final segment.
+	if strings.HasPrefix(id, "4:") {
+		if idx := strings.LastIndex(id, ":"); idx != -1 && idx+1 < len(id) {
+			return id[idx+1:]
+		}
+	}
+	return id
+}
+
+func toInterfaceMap(props map[string]any) map[string]interface{} {
+	if props == nil {
+		return nil
+	}
+	out := make(map[string]interface{}, len(props))
+	for k, v := range props {
+		out[k] = v
+	}
+	return out
 }
 
 // =============================================================================
@@ -1439,51 +1729,118 @@ func getMap(m map[string]interface{}, key string) map[string]interface{} {
 // getRelatedNodes fetches related nodes up to the specified depth using graph traversal.
 // Returns a slice of RelatedNode with relationship information.
 func (s *Server) getRelatedNodes(ctx context.Context, nodeID string, depth int) []RelatedNode {
-	if depth <= 1 || s.db == nil {
+	if depth <= 1 {
 		return nil
 	}
 
-	// Use the database's Neighbors function for graph traversal
-	neighbors, err := s.db.Neighbors(ctx, nodeID, depth-1, "")
-	if err != nil || len(neighbors) == 0 {
+	engine, err := s.storageForContext(ctx)
+	if err != nil || engine == nil {
 		return nil
 	}
 
-	var related []RelatedNode
-	for _, mem := range neighbors {
-		// Calculate distance (we don't have exact path info from Neighbors, so estimate based on depth)
-		distance := 1 // Default to 1 hop - Neighbors returns all within depth range
+	startLocal := localNodeIDFromAny(nodeID)
+	if startLocal == "" {
+		return nil
+	}
 
-		// Get the relationship type if possible by checking edges
-		relType := "relates_to" // Default fallback
-		direction := ""
+	maxDepth := depth - 1
+	const maxRelated = 50
 
-		// Try to get the actual relationship from edges
-		if s.db != nil {
-			edges, err := s.db.GetEdgesForNode(ctx, nodeID)
-			if err == nil {
-				for _, edge := range edges {
-					if edge.Source == nodeID && edge.Target == mem.ID {
-						relType = edge.Type
-						direction = "outgoing"
-						break
-					} else if edge.Target == nodeID && edge.Source == mem.ID {
-						relType = edge.Type
-						direction = "incoming"
-						break
-					}
+	type state struct {
+		idLocal string
+		dist    int
+		path    []string // elementIds
+	}
+
+	visited := map[string]bool{startLocal: true}
+	queue := []state{{
+		idLocal: startLocal,
+		dist:    0,
+		path:    []string{normalizeNodeElementID(startLocal)},
+	}}
+
+	related := make([]RelatedNode, 0)
+	for len(queue) > 0 && len(related) < maxRelated {
+		cur := queue[0]
+		queue = queue[1:]
+
+		if cur.dist >= maxDepth {
+			continue
+		}
+
+		// Outgoing edges
+		out, _ := engine.GetOutgoingEdges(storage.NodeID(cur.idLocal))
+		for _, e := range out {
+			neighbor := string(e.EndNode)
+			if neighbor == "" || visited[neighbor] {
+				continue
+			}
+			visited[neighbor] = true
+			nextPath := append(append([]string{}, cur.path...), normalizeNodeElementID(neighbor))
+
+			ntype, ntitle := "Node", ""
+			if n, err := engine.GetNode(storage.NodeID(neighbor)); err == nil && n != nil {
+				props := toInterfaceMap(n.Properties)
+				ntype = getLabelType(n.Labels)
+				ntitle = getStringProp(props, "title")
+				if ntitle == "" {
+					ntitle = getStringProp(props, "name")
 				}
+			}
+
+			related = append(related, RelatedNode{
+				ID:           normalizeNodeElementID(neighbor),
+				Type:         ntype,
+				Title:        ntitle,
+				Distance:     cur.dist + 1,
+				Relationship: e.Type,
+				Direction:    "outgoing",
+				Path:         nextPath,
+			})
+			queue = append(queue, state{idLocal: neighbor, dist: cur.dist + 1, path: nextPath})
+			if len(related) >= maxRelated {
+				break
 			}
 		}
 
-		related = append(related, RelatedNode{
-			ID:           mem.ID,
-			Type:         string(mem.Tier),
-			Title:        mem.Title,
-			Distance:     distance,
-			Relationship: relType,
-			Direction:    direction,
-		})
+		if len(related) >= maxRelated {
+			break
+		}
+
+		// Incoming edges
+		in, _ := engine.GetIncomingEdges(storage.NodeID(cur.idLocal))
+		for _, e := range in {
+			neighbor := string(e.StartNode)
+			if neighbor == "" || visited[neighbor] {
+				continue
+			}
+			visited[neighbor] = true
+			nextPath := append(append([]string{}, cur.path...), normalizeNodeElementID(neighbor))
+
+			ntype, ntitle := "Node", ""
+			if n, err := engine.GetNode(storage.NodeID(neighbor)); err == nil && n != nil {
+				props := toInterfaceMap(n.Properties)
+				ntype = getLabelType(n.Labels)
+				ntitle = getStringProp(props, "title")
+				if ntitle == "" {
+					ntitle = getStringProp(props, "name")
+				}
+			}
+
+			related = append(related, RelatedNode{
+				ID:           normalizeNodeElementID(neighbor),
+				Type:         ntype,
+				Title:        ntitle,
+				Distance:     cur.dist + 1,
+				Relationship: e.Type,
+				Direction:    "incoming",
+				Path:         nextPath,
+			})
+			queue = append(queue, state{idLocal: neighbor, dist: cur.dist + 1, path: nextPath})
+			if len(related) >= maxRelated {
+				break
+			}
+		}
 	}
 
 	return related

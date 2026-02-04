@@ -82,7 +82,7 @@ func TestMCPE2E_StoreAndDiscover(t *testing.T) {
 	// Check if nodes are in the database
 	t.Log("\nVerifying nodes in database...")
 	for _, id := range storedIDs {
-		node, err := db.GetNode(ctx, id)
+		node, err := db.GetNode(ctx, localNodeIDFromAny(id))
 		if err != nil {
 			t.Errorf("Node %s not found: %v", id, err)
 			continue

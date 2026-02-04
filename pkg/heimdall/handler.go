@@ -22,11 +22,12 @@ import (
 //   - POST /api/bifrost/chat/completions - Chat with Heimdall
 //   - GET  /api/bifrost/events           - SSE stream for real-time events
 type Handler struct {
-	manager  *Manager
-	bifrost  *Bifrost
-	config   Config
-	database DatabaseRouter
-	metrics  MetricsReader
+	manager        *Manager
+	bifrost        *Bifrost
+	config         Config
+	database       DatabaseRouter
+	metrics        MetricsReader
+	inMemoryRunner InMemoryToolRunner // optional: e.g. MCP store/recall/discover for agentic loop
 }
 
 // NewHandler creates a Bifrost HTTP handler.
@@ -54,6 +55,13 @@ func (h *Handler) Bifrost() BifrostBridge {
 		return &NoOpBifrost{}
 	}
 	return h.bifrost
+}
+
+// SetInMemoryToolRunner sets the runner for MCP-style tools (store, recall, discover, etc.)
+// so the agentic loop can call them in process. When set, tools from the runner are merged
+// into the tool list and execution is dispatched in memory instead of via HTTP.
+func (h *Handler) SetInMemoryToolRunner(runner InMemoryToolRunner) {
+	h.inMemoryRunner = runner
 }
 
 // ServeHTTP routes requests to appropriate handlers.
@@ -658,8 +666,12 @@ func defaultExamples() []PromptExample {
 
 // runAgenticLoop runs the agentic loop for any provider: execute actions, feed results back, repeat until final answer.
 // For tool-capable providers (OpenAI/Ollama) uses GenerateWithTools; for local GGUF uses prompt-based multi-round.
+// When inMemoryRunner is set (e.g. MCP server), its tools (store, recall, discover, etc.) are included so the LLM can manage memories in process.
 func (h *Handler) runAgenticLoop(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, params GenerateParams) (finalResponse string, err error) {
 	tools := ActionsAsMCPTools()
+	if h.inMemoryRunner != nil {
+		tools = append(tools, h.inMemoryRunner.ToolDefinitions()...)
+	}
 	if h.manager.SupportsTools() && len(tools) > 0 {
 		return h.runAgenticLoopWithTools(ctx, lifecycle, userMessage, tools, params)
 	}
@@ -724,30 +736,58 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 			if preExecResult.ModifiedParams != nil {
 				paramsMap = preExecResult.ModifiedParams
 			}
-			actCtx := ActionContext{
-				Context: ctx, UserMessage: userMessage, Params: paramsMap,
-				Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics,
-				PrincipalRoles:     lifecycle.principalRoles,
-				DatabaseAccessMode: lifecycle.databaseAccessMode,
-				ResolvedAccess:     lifecycle.resolvedAccessResolver,
-			}
 			startTime := time.Now()
-			result, execErr := ExecuteAction(tc.Name, actCtx)
-			execDuration := time.Since(startTime)
-			if execErr != nil {
-				messages = append(messages, ToolRoundMessage{Role: "tool", ToolCallID: tc.Id, Content: FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()})})
-				continue
+			var toolContent string
+			if h.inMemoryRunner != nil && sliceContains(h.inMemoryRunner.ToolNames(), tc.Name) {
+				dbName := lifecycle.database.DefaultDatabaseName()
+				raw, execErr := h.inMemoryRunner.CallTool(ctx, tc.Name, paramsMap, dbName)
+				toolContent = FormatInMemoryToolResult(raw, execErr)
+				execDuration := time.Since(startTime)
+				hookResult := &ActionResult{Success: execErr == nil}
+				if execErr != nil {
+					hookResult.Message = execErr.Error()
+				} else {
+					hookResult.Message = "tool completed successfully"
+					hookResult.Data = map[string]interface{}{"result": raw}
+				}
+				postExecCtx := &PostExecuteContext{RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: hookResult, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
+				CallPostExecuteHooks(postExecCtx)
+				h.sendStreamNotifications(lifecycle, postExecCtx.DrainNotifications())
+			} else {
+				actCtx := ActionContext{
+					Context: ctx, UserMessage: userMessage, Params: paramsMap,
+					Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics,
+					PrincipalRoles:     lifecycle.principalRoles,
+					DatabaseAccessMode: lifecycle.databaseAccessMode,
+					ResolvedAccess:     lifecycle.resolvedAccessResolver,
+				}
+				result, execErr := ExecuteAction(tc.Name, actCtx)
+				execDuration := time.Since(startTime)
+				if execErr != nil {
+					toolContent = FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()})
+				} else {
+					postExecCtx := &PostExecuteContext{RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
+					CallPostExecuteHooks(postExecCtx)
+					h.sendStreamNotifications(lifecycle, postExecCtx.DrainNotifications())
+					toolContent = FormatActionResultForModel(result)
+				}
 			}
-			postExecCtx := &PostExecuteContext{RequestID: lifecycle.requestID, Action: tc.Name, Params: paramsMap, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData}
-			CallPostExecuteHooks(postExecCtx)
-			h.sendStreamNotifications(lifecycle, postExecCtx.DrainNotifications())
-			messages = append(messages, ToolRoundMessage{Role: "tool", ToolCallID: tc.Id, Content: FormatActionResultForModel(result)})
+			messages = append(messages, ToolRoundMessage{Role: "tool", ToolCallID: tc.Id, Content: toolContent})
 		}
 	}
 	if lastContent != "" {
 		return lastContent, nil
 	}
 	return "I've completed the available actions. Is there anything else?", nil
+}
+
+func sliceContains(ss []string, s string) bool {
+	for _, x := range ss {
+		if x == s {
+			return true
+		}
+	}
+	return false
 }
 
 // runAgenticLoopPromptBased uses prompt-based multi-round for local GGUF (or any provider without native tools).
@@ -791,22 +831,38 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 		if preExecResult.ModifiedParams != nil {
 			paramsToUse = preExecResult.ModifiedParams
 		}
-		actCtx := ActionContext{
-			Context: ctx, UserMessage: userMessage, Params: paramsToUse,
-			Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics,
-			PrincipalRoles:     lifecycle.principalRoles,
-			DatabaseAccessMode: lifecycle.databaseAccessMode,
-			ResolvedAccess:     lifecycle.resolvedAccessResolver,
-		}
 		startTime := time.Now()
-		result, execErr := ExecuteAction(parsedAction.Action, actCtx)
-		execDuration := time.Since(startTime)
-		if execErr != nil {
-			prompt = prompt + response + "\n\nTool result: " + FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()}) + "\n\nBased on the above, respond with another action or a final answer.\n\nAssistant: "
-			continue
+		var resultStr string
+		if h.inMemoryRunner != nil && sliceContains(h.inMemoryRunner.ToolNames(), parsedAction.Action) {
+			dbName := lifecycle.database.DefaultDatabaseName()
+			raw, execErr := h.inMemoryRunner.CallTool(ctx, parsedAction.Action, paramsToUse, dbName)
+			resultStr = FormatInMemoryToolResult(raw, execErr)
+			execDuration := time.Since(startTime)
+			hookResult := &ActionResult{Success: execErr == nil}
+			if execErr != nil {
+				hookResult.Message = execErr.Error()
+			} else {
+				hookResult.Message = "tool completed successfully"
+				hookResult.Data = map[string]interface{}{"result": raw}
+			}
+			CallPostExecuteHooks(&PostExecuteContext{RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: hookResult, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
+		} else {
+			actCtx := ActionContext{
+				Context: ctx, UserMessage: userMessage, Params: paramsToUse,
+				Bifrost: h.bifrost, Database: lifecycle.database, Metrics: lifecycle.metrics,
+				PrincipalRoles:     lifecycle.principalRoles,
+				DatabaseAccessMode: lifecycle.databaseAccessMode,
+				ResolvedAccess:     lifecycle.resolvedAccessResolver,
+			}
+			result, execErr := ExecuteAction(parsedAction.Action, actCtx)
+			execDuration := time.Since(startTime)
+			if execErr != nil {
+				prompt = prompt + response + "\n\nTool result: " + FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()}) + "\n\nBased on the above, respond with another action or a final answer.\n\nAssistant: "
+				continue
+			}
+			CallPostExecuteHooks(&PostExecuteContext{RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
+			resultStr = FormatActionResultForModel(result)
 		}
-		CallPostExecuteHooks(&PostExecuteContext{RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
-		resultStr := FormatActionResultForModel(result)
 		prompt = prompt + response + "\n\nTool result: " + resultStr + "\n\nBased on the tool result, respond with another action JSON or a final answer to the user.\n\nAssistant: "
 	}
 	return lastResponse, nil
@@ -1162,21 +1218,34 @@ func (h *Handler) handleStreamingResponse(w http.ResponseWriter, ctx context.Con
 			} else {
 				// === Phase 5: Execute action ===
 				startTime := time.Now()
-				actCtx := ActionContext{
-					Context:            ctx,
-					UserMessage:        prompt,
-					Params:             parsedAction.Params,
-					Bifrost:            h.bifrost,
-					Database:           h.database,
-					Metrics:            h.metrics,
-					PrincipalRoles:     lifecycle.principalRoles,
-					DatabaseAccessMode: lifecycle.databaseAccessMode,
-					ResolvedAccess:     lifecycle.resolvedAccessResolver,
-				}
-
 				var err error
-				result, err = ExecuteAction(parsedAction.Action, actCtx)
-				execDuration = time.Since(startTime)
+				if h.inMemoryRunner != nil && sliceContains(h.inMemoryRunner.ToolNames(), parsedAction.Action) {
+					dbName := lifecycle.database.DefaultDatabaseName()
+					raw, callErr := h.inMemoryRunner.CallTool(ctx, parsedAction.Action, parsedAction.Params, dbName)
+					err = callErr
+					execDuration = time.Since(startTime)
+					if err != nil {
+						actionResponse = fmt.Sprintf("Action failed: %v", err)
+						result = &ActionResult{Success: false, Message: actionResponse}
+					} else {
+						actionResponse = "Action completed successfully"
+						result = &ActionResult{Success: true, Message: actionResponse, Data: map[string]interface{}{"result": raw}}
+					}
+				} else {
+					actCtx := ActionContext{
+						Context:            ctx,
+						UserMessage:        prompt,
+						Params:             parsedAction.Params,
+						Bifrost:            h.bifrost,
+						Database:           h.database,
+						Metrics:            h.metrics,
+						PrincipalRoles:     lifecycle.principalRoles,
+						DatabaseAccessMode: lifecycle.databaseAccessMode,
+						ResolvedAccess:     lifecycle.resolvedAccessResolver,
+					}
+					result, err = ExecuteAction(parsedAction.Action, actCtx)
+					execDuration = time.Since(startTime)
+				}
 
 				if err != nil {
 					log.Printf("[Bifrost] Action execution failed: %v", err)

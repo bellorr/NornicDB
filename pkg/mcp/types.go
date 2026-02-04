@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"regexp"
 	"time"
 )
 
@@ -100,11 +101,12 @@ type Suggestion struct {
 
 // RecallParams - Input for recall tool
 type RecallParams struct {
-	ID    string    `json:"id,omitempty"`    // Optional, if provided ignores other filters
-	Type  []string  `json:"type,omitempty"`  // Optional, filter by types
-	Tags  []string  `json:"tags,omitempty"`  // Optional, filter by tags
-	Since time.Time `json:"since,omitempty"` // Optional, filter by creation time
-	Limit int       `json:"limit,omitempty"` // Optional, default: 10
+	ID       string    `json:"id,omitempty"`       // Optional, if provided ignores other filters
+	Type     []string  `json:"type,omitempty"`     // Optional, filter by types
+	Tags     []string  `json:"tags,omitempty"`     // Optional, filter by tags
+	Since    time.Time `json:"since,omitempty"`    // Optional, filter by creation time
+	Limit    int       `json:"limit,omitempty"`    // Optional, default: 10
+	Database string    `json:"database,omitempty"` // Optional, default: configured default database
 }
 
 // RecallResult - Output from recall tool
@@ -119,8 +121,9 @@ type DiscoverParams struct {
 	Query         string   `json:"query"`                    // Required
 	Type          []string `json:"type,omitempty"`           // Optional, filter by types
 	Limit         int      `json:"limit,omitempty"`          // Optional, default: 10
-	MinSimilarity float64  `json:"min_similarity,omitempty"` // Optional, default: 0.70
+	MinSimilarity float64  `json:"min_similarity,omitempty"` // Optional, fused score threshold (default: 0)
 	Depth         int      `json:"depth,omitempty"`          // Optional, default: 1, range: 1-3
+	Database      string   `json:"database,omitempty"`       // Optional, default: configured default database
 }
 
 // DiscoverResult - Output from discover tool
@@ -162,6 +165,7 @@ type LinkParams struct {
 	Relation string                 `json:"relation"`           // Required
 	Strength float64                `json:"strength,omitempty"` // Optional, default: 1.0
 	Metadata map[string]interface{} `json:"metadata,omitempty"` // Optional
+	Database string                 `json:"database,omitempty"` // Optional, default: configured default database
 }
 
 // LinkResult - Output from link tool
@@ -181,10 +185,11 @@ type TaskParams struct {
 	ID          string   `json:"id,omitempty"`          // Optional, for update/complete
 	Title       string   `json:"title,omitempty"`       // Required for create
 	Description string   `json:"description,omitempty"` // Optional
-	Status      string   `json:"status,omitempty"`      // Optional: pending|active|done|blocked
+	Status      string   `json:"status,omitempty"`      // Optional: pending|active|completed|blocked
 	Priority    string   `json:"priority,omitempty"`    // Optional: low|medium|high|critical
 	DependsOn   []string `json:"depends_on,omitempty"`  // Optional, task IDs
 	Assign      string   `json:"assign,omitempty"`      // Optional, agent/person
+	Database    string   `json:"database,omitempty"`    // Optional, default: configured default database
 }
 
 // TaskResult - Output from task tool
@@ -203,6 +208,7 @@ type TasksParams struct {
 	AssignedTo    string   `json:"assigned_to,omitempty"`    // Optional, filter by assignee
 	UnblockedOnly bool     `json:"unblocked_only,omitempty"` // Optional, default: false
 	Limit         int      `json:"limit,omitempty"`          // Optional, default: 20
+	Database      string   `json:"database,omitempty"`       // Optional, default: configured default database
 }
 
 // TasksResult - Output from tasks tool
@@ -255,31 +261,22 @@ type Edge struct {
 }
 
 // ============================================================================
-// Validation Enums
+// Validation
 // ============================================================================
 
-var (
-	// ValidNodeTypes for type validation
-	ValidNodeTypes = []string{
-		"memory", "decision", "concept", "file", "code",
-		"task", "note", "conversation", "project", "person",
-	}
+// validIdentifier matches Cypher-style identifiers: letter or underscore, then alphanumeric/underscore.
+// Keeps node types and relation types abstract (any valid identifier allowed).
+var validIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
+var (
 	// ValidTaskStatuses for task status validation
 	ValidTaskStatuses = []string{
-		"pending", "active", "done", "blocked",
+		"pending", "active", "completed", "blocked",
 	}
 
 	// ValidTaskPriorities for task priority validation
 	ValidTaskPriorities = []string{
 		"low", "medium", "high", "critical",
-	}
-
-	// ValidRelations for link relation validation
-	ValidRelations = []string{
-		"depends_on", "relates_to", "implements", "caused_by",
-		"blocks", "contains", "references", "uses",
-		"evolved_from", "contradicts",
 	}
 )
 
@@ -287,14 +284,9 @@ var (
 // Helper Functions
 // ============================================================================
 
-// IsValidNodeType checks if node type is valid
+// IsValidNodeType checks if node type is a valid identifier (abstract: any Cypher-safe label).
 func IsValidNodeType(t string) bool {
-	for _, valid := range ValidNodeTypes {
-		if t == valid {
-			return true
-		}
-	}
-	return false
+	return t != "" && validIdentifier.MatchString(t)
 }
 
 // IsValidTaskStatus checks if task status is valid
@@ -317,14 +309,9 @@ func IsValidTaskPriority(p string) bool {
 	return false
 }
 
-// IsValidRelation checks if relation type is valid
+// IsValidRelation checks if relation type is a valid identifier (abstract: any Cypher-safe relationship type).
 func IsValidRelation(r string) bool {
-	for _, valid := range ValidRelations {
-		if r == valid {
-			return true
-		}
-	}
-	return false
+	return r != "" && validIdentifier.MatchString(r)
 }
 
 // DefaultIfEmpty returns default value if s is empty

@@ -185,30 +185,37 @@ func TestLinkToolSchema(t *testing.T) {
 }
 
 func TestIsValidRelation(t *testing.T) {
-	// Valid relations (from types.go ValidRelations)
+	// Valid identifiers (abstract: any Cypher-safe relationship type)
 	validRelations := []string{
-		"depends_on", "relates_to", "implements", "caused_by",
-		"blocks", "contains", "references", "uses",
-		"evolved_from", "contradicts",
+		"depends_on", "relates_to", "implements", "lives_in", "has_habitat",
+		"LIVES_IN", "abc", "_private", "Type123",
 	}
-
 	for _, rel := range validRelations {
 		if !IsValidRelation(rel) {
-			t.Errorf("Expected %s to be valid", rel)
+			t.Errorf("Expected %q to be valid", rel)
 		}
 	}
 
-	// Invalid relations
-	if IsValidRelation("invalid_relation") {
-		t.Error("Expected 'invalid_relation' to be invalid")
-	}
-	if IsValidRelation("") {
-		t.Error("Expected empty string to be invalid")
+	// Invalid: empty or not a valid identifier
+	invalidRelations := []string{"", "123", "has-hyphen", "has space", "a-b"}
+	for _, rel := range invalidRelations {
+		if IsValidRelation(rel) {
+			t.Errorf("Expected %q to be invalid", rel)
+		}
 	}
 }
 
-func TestValidRelations(t *testing.T) {
-	if len(ValidRelations) != 10 {
-		t.Errorf("Expected 10 valid relations, got %d", len(ValidRelations))
+func TestIsValidNodeType(t *testing.T) {
+	validTypes := []string{"memory", "concept", "Animal", "Habitat", "_internal"}
+	for _, typ := range validTypes {
+		if !IsValidNodeType(typ) {
+			t.Errorf("Expected node type %q to be valid", typ)
+		}
+	}
+	invalidTypes := []string{"", "123", "has-dash", "with space"}
+	for _, typ := range invalidTypes {
+		if IsValidNodeType(typ) {
+			t.Errorf("Expected node type %q to be invalid", typ)
+		}
 	}
 }

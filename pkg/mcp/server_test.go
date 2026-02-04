@@ -442,10 +442,14 @@ func TestHandleLink_NoDB(t *testing.T) {
 		t.Error("Expected error for missing from")
 	}
 
-	// Invalid relation
-	_, err = server.handleLink(ctx, map[string]interface{}{"from": "a", "to": "b", "relation": "invalid"})
+	// Invalid relation (must be valid identifier; hyphen and leading digit are invalid)
+	_, err = server.handleLink(ctx, map[string]interface{}{"from": "a", "to": "b", "relation": "has-hyphen"})
 	if err == nil {
 		t.Error("Expected error for invalid relation")
+	}
+	_, err = server.handleLink(ctx, map[string]interface{}{"from": "a", "to": "b", "relation": "123"})
+	if err == nil {
+		t.Error("Expected error for invalid relation (leading digit)")
 	}
 }
 

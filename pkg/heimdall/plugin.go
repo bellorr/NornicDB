@@ -572,6 +572,28 @@ type MCPTool struct {
 	InputSchema json.RawMessage `json:"inputSchema"`
 }
 
+// InMemoryToolRunner provides MCP-style tools (e.g. store, recall, discover) that the
+// agentic loop can call in process instead of via HTTP. Used to expose pkg/mcp memory
+// tools to the LLM so it can manage memories through the same tool list.
+type InMemoryToolRunner interface {
+	// ToolDefinitions returns tool definitions for the LLM (name, description, inputSchema).
+	ToolDefinitions() []MCPTool
+	// ToolNames returns the list of tool names this runner handles (for dispatch).
+	ToolNames() []string
+	// CallTool executes the named tool with the given arguments in the given database context.
+	// dbName is the logical database name (e.g. from DefaultDatabaseName()); use "" for default.
+	CallTool(ctx context.Context, name string, args map[string]interface{}, dbName string) (interface{}, error)
+}
+
+// FormatInMemoryToolResult formats a raw tool result or error for the LLM (tool message content).
+func FormatInMemoryToolResult(raw interface{}, err error) string {
+	if err != nil {
+		return fmt.Sprintf(`{"success":false,"message":%q}`, err.Error())
+	}
+	b, _ := json.Marshal(raw)
+	return string(b)
+}
+
 // DatabaseRouter provides multi-database access for Heimdall actions and plugins.
 //
 // IMPORTANT:

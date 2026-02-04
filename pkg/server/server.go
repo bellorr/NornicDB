@@ -190,6 +190,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/qdrantgrpc"
 	"github.com/orneryd/nornicdb/pkg/search"
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // Errors for HTTP operations.
@@ -556,6 +557,65 @@ type Server struct {
 	roleEntitlementsStore *auth.RoleEntitlementsStore // per-role global entitlements when auth enabled
 }
 
+// mcpToolRunnerAdapter adapts pkg/mcp.Server to heimdall.InMemoryToolRunner so the agentic loop
+// can expose store, recall, discover, link, task, tasks to the LLM and execute them in process.
+type mcpToolRunnerAdapter struct {
+	s *mcp.Server
+}
+
+func (a *mcpToolRunnerAdapter) ToolDefinitions() []heimdall.MCPTool {
+	defs := a.s.ToolDefinitions()
+	out := make([]heimdall.MCPTool, len(defs))
+	for i, t := range defs {
+		out[i] = heimdall.MCPTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
+	}
+	return out
+}
+
+func (a *mcpToolRunnerAdapter) ToolNames() []string {
+	return mcp.AllTools()
+}
+
+func (a *mcpToolRunnerAdapter) CallTool(ctx context.Context, name string, args map[string]interface{}, dbName string) (interface{}, error) {
+	ctx = mcp.ContextWithDatabase(ctx, dbName)
+	return a.s.CallTool(ctx, name, args)
+}
+
+// mcpDatabaseScopedExecutor returns a callback that provides a Cypher executor and node getter for the given database.
+// Used so MCP tools (store, recall, link, etc.) run against the request's database when invoked from the agentic loop.
+func (s *Server) mcpDatabaseScopedExecutor() func(dbName string) (*cypher.StorageExecutor, func(context.Context, string) (*nornicdb.Node, error), error) {
+	return func(dbName string) (*cypher.StorageExecutor, func(context.Context, string) (*nornicdb.Node, error), error) {
+		exec, err := s.getExecutorForDatabase(dbName)
+		if err != nil {
+			return nil, nil, err
+		}
+		getNode := func(ctx context.Context, id string) (*nornicdb.Node, error) {
+			result, err := exec.Execute(ctx, "MATCH (n) WHERE elementId(n) = $id RETURN n", map[string]interface{}{"id": id})
+			if err != nil {
+				return nil, err
+			}
+			if len(result.Rows) == 0 || len(result.Rows[0]) == 0 {
+				return nil, nornicdb.ErrNotFound
+			}
+			v := result.Rows[0][0]
+			if snode, ok := v.(*storage.Node); ok {
+				props := make(map[string]interface{}, len(snode.Properties))
+				for k, val := range snode.Properties {
+					props[k] = val
+				}
+				return &nornicdb.Node{
+					ID:         string(snode.ID),
+					Labels:     snode.Labels,
+					Properties: props,
+					CreatedAt:  snode.CreatedAt,
+				}, nil
+			}
+			return nil, nornicdb.ErrNotFound
+		}
+		return exec, getNode, nil
+	}
+}
+
 // IPRateLimiter provides IP-based rate limiting to prevent DoS attacks.
 type IPRateLimiter struct {
 	mu              sync.RWMutex
@@ -775,6 +835,10 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			dbRouter := newHeimdallDBRouter(db, dbManager, featuresConfig)
 			metricsReader := &heimdallMetricsReader{}
 			heimdallHandler = heimdall.NewHandler(manager, heimdallCfg, dbRouter, metricsReader)
+			// Expose MCP memory tools (store, recall, discover, link, task, tasks) to the agentic loop in process
+			if mcpServer != nil {
+				heimdallHandler.SetInMemoryToolRunner(&mcpToolRunnerAdapter{s: mcpServer})
+			}
 
 			// Initialize Heimdall plugin subsystem
 			subsystemMgr := heimdall.GetSubsystemManager()
@@ -1032,6 +1096,14 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		basicAuthCache:  auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
 		searchServices:  make(map[string]*search.Service),
 		executors:       make(map[string]*cypher.StorageExecutor),
+	}
+
+	// Wire MCP to use per-database executors when invoked from the agentic loop (so link/store/recall use the request's database)
+	if mcpServer != nil && dbManager != nil {
+		mcpServer.SetDatabaseScopedExecutor(s.mcpDatabaseScopedExecutor())
+		mcpServer.SetDatabaseScopedStorage(func(dbName string) (storage.Engine, error) {
+			return s.dbManager.GetStorage(dbName)
+		})
 	}
 
 	// Initialize OAuth manager if authenticator is available
