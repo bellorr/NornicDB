@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -274,11 +275,6 @@ func (e *StorageExecutor) executeDelete(ctx context.Context, cypher string) (*Ex
 
 // executeSet handles MATCH ... SET queries.
 func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Substitute parameters AFTER routing to avoid keyword detection issues
-	if params := getParamsFromContext(ctx); params != nil {
-		cypher = e.substituteParams(cypher, params)
-	}
-
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
@@ -323,6 +319,13 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	} else {
 		setPart = strings.TrimSpace(normalized[setIdx+4:])
 	}
+	setPartForAssignments := setPart
+
+	// Substitute params for simple SET assignments (e.g., n.prop = $value).
+	// For SET += $props, defer to executeSetMerge which reads params directly.
+	if params := getParamsFromContext(ctx); params != nil && !strings.Contains(setPart, "+=") {
+		setPartForAssignments = e.substituteParams(setPart, params)
+	}
 
 	// Check for property merge operator: n += $properties
 	if strings.Contains(setPart, "+=") {
@@ -331,7 +334,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 
 	// Split SET clause into individual assignments, respecting brackets
 	// e.g., "n.embedding = [0.1, 0.2], n.dim = 4" -> ["n.embedding = [0.1, 0.2]", "n.dim = 4"]
-	assignments := e.splitSetAssignmentsRespectingBrackets(setPart)
+	assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
 
 	if len(assignments) == 0 || (len(assignments) == 1 && strings.TrimSpace(assignments[0]) == "") {
 		return nil, fmt.Errorf("SET clause requires at least one assignment")
@@ -626,6 +629,9 @@ func (e *StorageExecutor) executeSetMerge(ctx context.Context, matchResult *Exec
 func normalizePropsMap(value interface{}, source string) (map[string]interface{}, error) {
 	propsMap, ok := value.(map[string]interface{})
 	if ok {
+		for k, v := range propsMap {
+			propsMap[k] = normalizePropValue(v)
+		}
 		return propsMap, nil
 	}
 	if genericMap, ok := value.(map[interface{}]interface{}); ok {
@@ -635,11 +641,55 @@ func normalizePropsMap(value interface{}, source string) (map[string]interface{}
 			if !ok {
 				return nil, fmt.Errorf("SET += %s must be a map with string keys, got key type %T", source, k)
 			}
-			propsMap[keyStr] = v
+			propsMap[keyStr] = normalizePropValue(v)
 		}
 		return propsMap, nil
 	}
 	return nil, fmt.Errorf("SET += %s must be a map, got type %T", source, value)
+}
+
+func normalizePropValue(value interface{}) interface{} {
+	switch v := value.(type) {
+	case int:
+		return int64(v)
+	case int8:
+		return int64(v)
+	case int16:
+		return int64(v)
+	case int32:
+		return int64(v)
+	case int64:
+		return v
+	case uint:
+		return int64(v)
+	case uint8:
+		return int64(v)
+	case uint16:
+		return int64(v)
+	case uint32:
+		return int64(v)
+	case uint64:
+		if v > math.MaxInt64 {
+			return float64(v)
+		}
+		return int64(v)
+	case float32:
+		return float64(v)
+	case []interface{}:
+		out := make([]interface{}, len(v))
+		for i, item := range v {
+			out[i] = normalizePropValue(item)
+		}
+		return out
+	case map[string]interface{}:
+		out := make(map[string]interface{}, len(v))
+		for k, item := range v {
+			out[k] = normalizePropValue(item)
+		}
+		return out
+	default:
+		return value
+	}
 }
 
 // executeRemove handles MATCH ... REMOVE queries for property removal.
@@ -1127,11 +1177,13 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 			// Compare node ID with expected value
 			expectedVal := e.parseValue(right)
 			actualId := string(node.ID)
+			actualElementID := fmt.Sprintf("4:nornicdb:%s", actualId)
 			switch op {
 			case "=":
-				return e.compareEqual(actualId, expectedVal)
+				// Accept either elementId-style or raw internal ID
+				return e.compareEqual(actualElementID, expectedVal) || e.compareEqual(actualId, expectedVal)
 			case "<>", "!=":
-				return !e.compareEqual(actualId, expectedVal)
+				return !e.compareEqual(actualElementID, expectedVal) && !e.compareEqual(actualId, expectedVal)
 			default:
 				return true
 			}

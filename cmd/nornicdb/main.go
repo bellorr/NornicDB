@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -69,6 +70,9 @@ func parseMemorySize(s string) int64 {
 }
 
 func main() {
+	// Route logs to stdout so container/system log collectors see them.
+	log.SetOutput(os.Stdout)
+
 	rootCmd := &cobra.Command{
 		Use:   "nornicdb",
 		Short: "NornicDB - High-Performance Graph Database for LLM Agents",

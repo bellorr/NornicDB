@@ -2,6 +2,7 @@ package cypher
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -196,6 +197,48 @@ func TestCreateInlineWithProperties(t *testing.T) {
 	companies, _ := store.GetNodesByLabel("Company")
 	require.Len(t, companies, 1)
 	assert.Equal(t, "Acme", companies[0].Properties["name"])
+}
+
+// =============================================================================
+// Multiple MATCH + WHERE (compound CREATE) - parser must not truncate after first WHERE
+// =============================================================================
+
+// TestMatchMatchWhereCreate_TwoMatchWithWhere ensures multiple MATCH clauses each
+// with its own WHERE are parsed and executed correctly (variable 'a' and 'b' both bound).
+func TestMatchMatchWhereCreate_TwoMatchWithWhere(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	// Create two nodes
+	_, err := exec.Execute(ctx, `CREATE (a:Person {name: 'Alice'}), (b:Person {name: 'Bob'})`, nil)
+	require.NoError(t, err)
+
+	persons, err := store.GetNodesByLabel("Person")
+	require.NoError(t, err)
+	require.Len(t, persons, 2)
+
+	elemA := "4:nornicdb:" + string(persons[0].ID)
+	elemB := "4:nornicdb:" + string(persons[1].ID)
+	params := map[string]interface{}{"from": elemA, "to": elemB}
+
+	// Query that previously failed: parser truncated after first WHERE so 'a' was bound but 'b' was not
+	q := `MATCH (a) WHERE elementId(a) = $from MATCH (b) WHERE elementId(b) = $to CREATE (a)-[:KNOWS]->(b) RETURN elementId(a) AS aId, elementId(b) AS bId`
+	result, err := exec.Execute(ctx, q, params)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Stats.RelationshipsCreated, "should create one relationship")
+	require.Len(t, result.Rows, 1)
+	assert.Equal(t, elemA, fmt.Sprint(result.Rows[0][0]))
+	assert.Equal(t, elemB, fmt.Sprint(result.Rows[0][1]))
+
+	// Verify relationship exists in store
+	edges, err := store.GetOutgoingEdges(persons[0].ID)
+	require.NoError(t, err)
+	require.Len(t, edges, 1)
+	assert.Equal(t, "KNOWS", edges[0].Type)
+	assert.Equal(t, persons[1].ID, edges[0].EndNode)
 }
 
 // =============================================================================

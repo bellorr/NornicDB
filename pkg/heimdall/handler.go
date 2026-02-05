@@ -714,6 +714,7 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 			if paramsMap == nil {
 				paramsMap = make(map[string]interface{})
 			}
+			logToolCall(lifecycle.requestID, tc.Name, paramsMap)
 			preExecCtx := &PreExecuteContext{
 				RequestID: lifecycle.requestID, RequestTime: lifecycle.promptCtx.RequestTime,
 				Action: tc.Name, Params: paramsMap, PluginData: lifecycle.promptCtx.PluginData,
@@ -743,6 +744,7 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 				raw, execErr := h.inMemoryRunner.CallTool(ctx, tc.Name, paramsMap, dbName)
 				toolContent = FormatInMemoryToolResult(raw, execErr)
 				execDuration := time.Since(startTime)
+				logToolResult(lifecycle.requestID, tc.Name, execDuration, execErr)
 				hookResult := &ActionResult{Success: execErr == nil}
 				if execErr != nil {
 					hookResult.Message = execErr.Error()
@@ -763,6 +765,7 @@ func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *reques
 				}
 				result, execErr := ExecuteAction(tc.Name, actCtx)
 				execDuration := time.Since(startTime)
+				logToolResult(lifecycle.requestID, tc.Name, execDuration, execErr)
 				if execErr != nil {
 					toolContent = FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()})
 				} else {
@@ -788,6 +791,18 @@ func sliceContains(ss []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func logToolCall(requestID, action string, params map[string]interface{}) {
+	log.Printf("[Heimdall] Tool call: request=%s action=%s params=%v", requestID, action, params)
+}
+
+func logToolResult(requestID, action string, duration time.Duration, err error) {
+	if err != nil {
+		log.Printf("[Heimdall] Tool result: request=%s action=%s duration=%v error=%v", requestID, action, duration, err)
+		return
+	}
+	log.Printf("[Heimdall] Tool result: request=%s action=%s duration=%v success=true", requestID, action, duration)
 }
 
 // runAgenticLoopPromptBased uses prompt-based multi-round for local GGUF (or any provider without native tools).
@@ -831,6 +846,7 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 		if preExecResult.ModifiedParams != nil {
 			paramsToUse = preExecResult.ModifiedParams
 		}
+		logToolCall(lifecycle.requestID, parsedAction.Action, paramsToUse)
 		startTime := time.Now()
 		var resultStr string
 		if h.inMemoryRunner != nil && sliceContains(h.inMemoryRunner.ToolNames(), parsedAction.Action) {
@@ -838,6 +854,7 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 			raw, execErr := h.inMemoryRunner.CallTool(ctx, parsedAction.Action, paramsToUse, dbName)
 			resultStr = FormatInMemoryToolResult(raw, execErr)
 			execDuration := time.Since(startTime)
+			logToolResult(lifecycle.requestID, parsedAction.Action, execDuration, execErr)
 			hookResult := &ActionResult{Success: execErr == nil}
 			if execErr != nil {
 				hookResult.Message = execErr.Error()
@@ -856,6 +873,7 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 			}
 			result, execErr := ExecuteAction(parsedAction.Action, actCtx)
 			execDuration := time.Since(startTime)
+			logToolResult(lifecycle.requestID, parsedAction.Action, execDuration, execErr)
 			if execErr != nil {
 				prompt = prompt + response + "\n\nTool result: " + FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()}) + "\n\nBased on the above, respond with another action or a final answer.\n\nAssistant: "
 				continue

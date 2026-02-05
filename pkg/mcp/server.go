@@ -530,8 +530,13 @@ func (s *Server) ToolDefinitions() []Tool {
 
 // getExecutorAndGetNode returns the Cypher executor and node getter for this request.
 // If context has a database name and DatabaseScopedExecutor is set, uses that database; else uses s.db.
+// When dbName is empty but DatabaseScopedExecutor is set, uses DefaultDatabaseName() so store/recall/link
+// always use the same database as the rest of the server (e.g. agentic loop).
 func (s *Server) getExecutorAndGetNode(ctx context.Context) (exec *cypher.StorageExecutor, getNode func(context.Context, string) (*nornicdb.Node, error), err error) {
 	dbName := DatabaseFromContext(ctx)
+	if dbName == "" && s.config.DatabaseScopedExecutor != nil {
+		dbName = s.DefaultDatabaseName()
+	}
 	if dbName != "" && s.config.DatabaseScopedExecutor != nil {
 		e, gn, resolveErr := s.config.DatabaseScopedExecutor(dbName)
 		if resolveErr != nil {
@@ -558,6 +563,9 @@ func (s *Server) getExecutorAndGetNode(ctx context.Context) (exec *cypher.Storag
 
 func (s *Server) storageForContext(ctx context.Context) (storage.Engine, error) {
 	dbName := DatabaseFromContext(ctx)
+	if dbName == "" && s.config.DatabaseScopedStorage != nil {
+		dbName = s.DefaultDatabaseName()
+	}
 	if dbName != "" && s.config.DatabaseScopedStorage != nil {
 		return s.config.DatabaseScopedStorage(dbName)
 	}
@@ -632,10 +640,11 @@ func (s *Server) handleStore(ctx context.Context, args map[string]interface{}) (
 	}
 	if exec != nil {
 		safeLabel := strings.ReplaceAll(nodeType, "`", "")
-		if strings.TrimSpace(safeLabel) == "" {
-			return nil, fmt.Errorf("invalid node type")
+		if !IsValidNodeType(safeLabel) {
+			return nil, fmt.Errorf("invalid node type: %q (must be a valid identifier)", nodeType)
 		}
-		query := fmt.Sprintf("CREATE (n:`%s` $props) RETURN elementId(n) AS id", safeLabel)
+		// Use SET to apply props; avoid backticks since labels are already validated identifiers.
+		query := fmt.Sprintf("CREATE (n:%s) SET n += $props RETURN elementId(n) AS id", safeLabel)
 		result, err := exec.Execute(ctx, query, map[string]interface{}{"props": props})
 		if err != nil {
 			return nil, fmt.Errorf("failed to store node: %w", err)
@@ -655,16 +664,9 @@ func (s *Server) handleStore(ctx context.Context, args map[string]interface{}) (
 			}
 		}
 	} else {
-		// Fallback for testing without database
-		nodeID = fmt.Sprintf("node-%d", time.Now().UnixNano())
-
-		// If embedder available, call it directly (for testing)
-		if s.config.EmbeddingEnabled && s.embed != nil {
-			_, err := s.embed.Embed(ctx, content)
-			if err == nil {
-				embedded = true
-			}
-		}
+		// No executor: database unavailable (e.g. MCP not wired to server's DatabaseScopedExecutor).
+		// Return an error so the LLM/user sees failure instead of a fake ID that was never persisted.
+		return nil, fmt.Errorf("store failed: no database executor available (data would not persist); ensure MCP is wired to the server's default database")
 	}
 
 	return StoreResult{
@@ -1011,34 +1013,34 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 		return nil, execErr
 	}
 	if exec != nil && getNode != nil {
-		// Verify source node exists and get its info
-		srcNode, err := getNode(ctx, fromEID)
+		// Verify source node exists and get its info (support elementId or id property)
+		srcNode, srcEID, err := s.resolveNodeForLink(ctx, exec, getNode, from)
 		if err != nil {
 			return nil, fmt.Errorf("source node not found: %s", from)
 		}
 		fromNode = Node{
-			ID:    fromEID,
+			ID:    srcEID,
 			Type:  getLabelType(srcNode.Labels),
 			Title: getStringProp(srcNode.Properties, "title"),
 		}
 
 		// Verify target node exists and get its info
-		tgtNode, err := getNode(ctx, toEID)
+		tgtNode, tgtEID, err := s.resolveNodeForLink(ctx, exec, getNode, to)
 		if err != nil {
 			return nil, fmt.Errorf("target node not found: %s", to)
 		}
 		toNode = Node{
-			ID:    toEID,
+			ID:    tgtEID,
 			Type:  getLabelType(tgtNode.Labels),
 			Title: getStringProp(tgtNode.Properties, "title"),
 		}
 
 		// Create the edge via Cypher to capture receipt metadata
 		edgeType := strings.ReplaceAll(strings.ToUpper(relation), "`", "")
-		query := fmt.Sprintf("MATCH (a) WHERE elementId(a) = $from MATCH (b) WHERE elementId(b) = $to CREATE (a)-[r:`%s` $props]->(b) RETURN elementId(r) AS id", edgeType)
+		query := fmt.Sprintf("MATCH (a), (b) WHERE elementId(a) = $from AND elementId(b) = $to CREATE (a)-[r:%s]->(b) SET r += $props RETURN elementId(r) AS id", edgeType)
 		result, err := exec.Execute(ctx, query, map[string]interface{}{
-			"from":  fromEID,
-			"to":    toEID,
+			"from":  fromNode.ID,
+			"to":    toNode.ID,
 			"props": edgeProps,
 		})
 		if err != nil {
@@ -1070,6 +1072,63 @@ func (s *Server) handleLink(ctx context.Context, args map[string]interface{}) (i
 		To:      toNode,
 		Receipt: receipt,
 	}, nil
+}
+
+func (s *Server) resolveNodeForLink(ctx context.Context, exec *cypher.StorageExecutor, getNode func(context.Context, string) (*nornicdb.Node, error), id string) (*nornicdb.Node, string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return nil, "", nornicdb.ErrNotFound
+	}
+
+	elementID := normalizeNodeElementID(id)
+	if getNode != nil {
+		if node, err := getNode(ctx, elementID); err == nil && node != nil {
+			return node, elementID, nil
+		}
+	}
+
+	// Fallback: allow linking by node property "id" or "_nodeId" when tool callers pass those IDs.
+	if exec != nil {
+		localID := localNodeIDFromAny(id)
+		// First try internal id(n) match (handles raw storage IDs)
+		result, err := exec.Execute(ctx, "MATCH (n) WHERE id(n) = $id RETURN n", map[string]interface{}{"id": localID})
+		if err == nil && len(result.Rows) > 0 && len(result.Rows[0]) > 0 {
+			if snode, ok := result.Rows[0][0].(*storage.Node); ok && snode != nil {
+				props := make(map[string]interface{}, len(snode.Properties))
+				for k, val := range snode.Properties {
+					props[k] = val
+				}
+				node := &nornicdb.Node{
+					ID:         string(snode.ID),
+					Labels:     snode.Labels,
+					Properties: props,
+					CreatedAt:  snode.CreatedAt,
+				}
+				return node, normalizeNodeElementID(node.ID), nil
+			}
+		}
+
+		// Fallback: allow linking by node property "id" or "_nodeId"
+		query := "MATCH (n) WHERE n.id = $id OR n._nodeId = $id RETURN n"
+		result, err = exec.Execute(ctx, query, map[string]interface{}{"id": localID})
+		if err == nil && len(result.Rows) > 0 && len(result.Rows[0]) > 0 {
+			if snode, ok := result.Rows[0][0].(*storage.Node); ok && snode != nil {
+				props := make(map[string]interface{}, len(snode.Properties))
+				for k, val := range snode.Properties {
+					props[k] = val
+				}
+				node := &nornicdb.Node{
+					ID:         string(snode.ID),
+					Labels:     snode.Labels,
+					Properties: props,
+					CreatedAt:  snode.CreatedAt,
+				}
+				return node, normalizeNodeElementID(node.ID), nil
+			}
+		}
+	}
+
+	return nil, elementID, nornicdb.ErrNotFound
 }
 
 // handleTask implements the task tool - creates/manages tasks.
@@ -1240,7 +1299,7 @@ func (s *Server) handleTask(ctx context.Context, args map[string]interface{}) (i
 	var taskID string
 	var receipt interface{}
 	if exec != nil {
-		query := "CREATE (t:Task $props) RETURN elementId(t) AS id"
+		query := "CREATE (t:Task) SET t += $props RETURN elementId(t) AS id"
 		result, err := exec.Execute(ctx, query, map[string]interface{}{"props": props})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create task: %w", err)

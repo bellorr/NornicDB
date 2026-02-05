@@ -319,16 +319,15 @@ func TestHandleStore_NoDB(t *testing.T) {
 	server := NewServer(nil, nil)
 	ctx := context.Background()
 
+	// With no DB and no DatabaseScopedExecutor, store must fail (no silent fake ID).
 	result, err := server.handleStore(ctx, map[string]interface{}{
 		"content": "Test content",
 	})
-	if err != nil {
-		t.Fatalf("handleStore() error = %v", err)
+	if err == nil {
+		t.Fatalf("handleStore() expected error when no database executor available, got result: %v", result)
 	}
-
-	storeResult := result.(StoreResult)
-	if storeResult.ID == "" {
-		t.Error("Expected ID in result")
+	if result != nil {
+		t.Errorf("handleStore() expected nil result on error, got %v", result)
 	}
 
 	// Missing content
@@ -692,21 +691,18 @@ func TestHandleStore_WithEmbedding(t *testing.T) {
 	config.Embedder = embedder
 	config.EmbeddingEnabled = true
 
+	// With no DB (nil), store must fail; we no longer return a fake ID or call embedder.
 	server := NewServer(nil, config)
 	ctx := context.Background()
 
-	result, err := server.handleStore(ctx, map[string]interface{}{
+	_, err := server.handleStore(ctx, map[string]interface{}{
 		"content": "Test content for embedding",
 	})
-	if err != nil {
-		t.Fatalf("handleStore() error = %v", err)
+	if err == nil {
+		t.Fatal("handleStore() expected error when no database (nil db)")
 	}
-
-	storeResult := result.(StoreResult)
-	if !storeResult.Embedded {
-		t.Error("Expected Embedded=true when embedder available")
-	}
-	if !embedder.embedCalled {
-		t.Error("Expected embedder to be called")
+	// Embedder is not called when there is no executor (no persist path).
+	if embedder.embedCalled {
+		t.Error("Expected embedder not to be called when store fails (no DB)")
 	}
 }

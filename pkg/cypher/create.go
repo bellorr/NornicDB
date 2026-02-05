@@ -993,9 +993,34 @@ func (e *StorageExecutor) parseRelationshipTypeAndProps(relStr string) (string, 
 //	MATCH (s2:Supplier {supplierID: 2}), (c2:Category {categoryID: 2})
 //	CREATE (p2:Product {...})
 func (e *StorageExecutor) executeCompoundMatchCreate(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Substitute parameters AFTER routing to avoid keyword detection issues
+	// Substitute parameters AFTER routing to avoid keyword detection issues.
+	// If the query includes SET += (map merge), keep the SET segment intact
+	// so $props can be resolved from context instead of string-substitution.
 	if params := getParamsFromContext(ctx); params != nil {
-		cypher = e.substituteParams(cypher, params)
+		if containsKeywordOutsideStrings(cypher, "SET") && strings.Contains(cypher, "+=") {
+			setIdx := findKeywordIndex(cypher, "SET")
+			if setIdx >= 0 {
+				returnIdx := findKeywordIndex(cypher, "RETURN")
+				prefix := cypher[:setIdx]
+				setSegment := ""
+				suffix := ""
+				if returnIdx > setIdx {
+					setSegment = cypher[setIdx:returnIdx]
+					suffix = cypher[returnIdx:]
+				} else {
+					setSegment = cypher[setIdx:]
+				}
+				prefix = e.substituteParams(prefix, params)
+				if suffix != "" {
+					suffix = e.substituteParams(suffix, params)
+				}
+				cypher = prefix + setSegment + suffix
+			} else {
+				cypher = e.substituteParams(cypher, params)
+			}
+		} else {
+			cypher = e.substituteParams(cypher, params)
+		}
 	}
 
 	result := &ExecuteResult{
@@ -1243,6 +1268,14 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		createPart = strings.TrimSpace(createPart[:deleteIdx])
 	}
 
+	// Extract SET clause (e.g., MATCH ... CREATE ... SET r += $props)
+	setIdx := findKeywordIndex(createPart, "SET")
+	var setPart string
+	if setIdx > 0 {
+		setPart = strings.TrimSpace(createPart[setIdx+3:])
+		createPart = strings.TrimSpace(createPart[:setIdx])
+	}
+
 	// Parse all node patterns from MATCH clause and find matching nodes
 	// Start with existing vars from previous blocks
 	nodeVars := make(map[string]*storage.Node)
@@ -1254,22 +1287,17 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		edgeVars[k] = v
 	}
 
-	// Collect all patterns and their matching nodes for cartesian product
+	// Collect all patterns and their matching nodes for cartesian product.
+	// Parse per-MATCH WHERE: each "MATCH ... WHERE ..." segment keeps its own WHERE
+	// so we do not truncate matchPart after the first WHERE (which would drop
+	// subsequent MATCH clauses and leave variables like 'a' or 'b' unbound).
 	patternMatches := make([]struct {
 		variable string
 		nodes    []*storage.Node
 	}, 0)
+	var postFilterWhere string // WHERE that references multiple vars in one segment, applied after cartesian product
 
-	// Extract WHERE clause from matchPart if present (applies to all patterns)
-	var whereClause string
-	whereIdx := findKeywordIndex(matchPart, "WHERE")
-	if whereIdx > 0 {
-		whereClause = strings.TrimSpace(matchPart[whereIdx+5:]) // Skip "WHERE"
-		matchPart = strings.TrimSpace(matchPart[:whereIdx])     // Remove WHERE from matchPart
-	}
-
-	// Split by MATCH keyword to handle comma-separated patterns in MATCH
-	// Uses pre-compiled matchKeywordPattern from regex_patterns.go
+	// Split by MATCH keyword; matchPart is left intact (includes all WHERE clauses)
 	matchClauses := matchKeywordPattern.Split(matchPart, -1)
 
 	for _, clause := range matchClauses {
@@ -1278,10 +1306,31 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			continue
 		}
 
+		// Extract this segment's WHERE (only the first WHERE in this segment)
+		whereForClause := ""
+		if whereIdx := findKeywordIndex(clause, "WHERE"); whereIdx > 0 {
+			whereForClause = strings.TrimSpace(clause[whereIdx+5:])
+			clause = strings.TrimSpace(clause[:whereIdx])
+		}
+
 		// Split by comma but respect parentheses
 		patterns := e.splitNodePatterns(clause)
+		numPatternsInSegment := 0
+		for _, p := range patterns {
+			if strings.TrimSpace(p) != "" {
+				numPatternsInSegment++
+			}
+		}
+		applyWherePerNode := whereForClause != "" && numPatternsInSegment == 1
+		if whereForClause != "" && numPatternsInSegment > 1 {
+			if postFilterWhere != "" {
+				postFilterWhere = postFilterWhere + " AND " + whereForClause
+			} else {
+				postFilterWhere = whereForClause
+			}
+		}
 
-		// Collect ALL matched nodes from MATCH clause (for cartesian product)
+		// Collect ALL matched nodes from this MATCH clause (for cartesian product)
 		for _, pattern := range patterns {
 			pattern = strings.TrimSpace(pattern)
 			if pattern == "" {
@@ -1350,6 +1399,17 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				matchingNodes = filtered
 			}
 
+			// Apply this segment's WHERE when it applies to this single variable
+			if applyWherePerNode {
+				var filtered []*storage.Node
+				for _, node := range matchingNodes {
+					if e.evaluateWhere(node, nodeInfo.variable, whereForClause) {
+						filtered = append(filtered, node)
+					}
+				}
+				matchingNodes = filtered
+			}
+
 			if len(matchingNodes) > 0 {
 				patternMatches = append(patternMatches, struct {
 					variable string
@@ -1383,21 +1443,11 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		}
 	}
 
-	// Apply WHERE clause filtering to cartesian product if present
-	if whereClause != "" {
+	// Apply post-filter WHERE (multi-variable conditions from a single MATCH segment) if present
+	if postFilterWhere != "" {
 		var filtered []map[string]*storage.Node
 		for _, combination := range allCombinations {
-			// Check if this combination matches the WHERE clause
-			// WHERE clause can reference multiple variables, so we need to evaluate it
-			// with all variables in the combination
-			matches := true
-			for varName, node := range combination {
-				if !e.evaluateWhere(node, varName, whereClause) {
-					matches = false
-					break
-				}
-			}
-			if matches {
+			if e.evaluateWhereForContext(postFilterWhere, combination) {
 				filtered = append(filtered, combination)
 			}
 		}
@@ -1469,6 +1519,72 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			err := e.processCreateRelationship(rp, combinedNodeVars, edgeVars, result, store)
 			if err != nil {
 				return nil, err
+			}
+		}
+
+		// Apply SET clause after CREATE (supports SET += $props and SET var.prop = value)
+		if setPart != "" {
+			if strings.Contains(setPart, "+=") {
+				if err := e.applySetMergeToCreated(ctx, setPart, combinedNodeVars, edgeVars, result, store); err != nil {
+					return nil, err
+				}
+			} else {
+				setPartForAssignments := setPart
+				if params := getParamsFromContext(ctx); params != nil {
+					setPartForAssignments = e.substituteParams(setPart, params)
+				}
+				assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
+				for _, assignment := range assignments {
+					assignment = strings.TrimSpace(assignment)
+					if assignment == "" {
+						continue
+					}
+					eqIdx := strings.Index(assignment, "=")
+					if eqIdx == -1 {
+						// Label assignment: n:Label
+						colonIdx := strings.Index(assignment, ":")
+						if colonIdx > 0 {
+							varName := strings.TrimSpace(assignment[:colonIdx])
+							newLabel := strings.TrimSpace(assignment[colonIdx+1:])
+							if node, exists := combinedNodeVars[varName]; exists {
+								if !containsString(node.Labels, newLabel) {
+									node.Labels = append(node.Labels, newLabel)
+									if err := store.UpdateNode(node); err != nil {
+										return nil, fmt.Errorf("failed to add label: %w", err)
+									}
+									result.Stats.LabelsAdded++
+									e.notifyNodeMutated(string(node.ID))
+								}
+							}
+						}
+						continue
+					}
+					leftSide := strings.TrimSpace(assignment[:eqIdx])
+					rightSide := strings.TrimSpace(assignment[eqIdx+1:])
+					dotIdx := strings.Index(leftSide, ".")
+					if dotIdx == -1 {
+						return nil, fmt.Errorf("invalid SET assignment (expected var.property): %s", assignment)
+					}
+					varName := strings.TrimSpace(leftSide[:dotIdx])
+					propName := strings.TrimSpace(leftSide[dotIdx+1:])
+					value := e.parseValue(rightSide)
+					if node, exists := combinedNodeVars[varName]; exists {
+						node.Properties[propName] = value
+						if err := store.UpdateNode(node); err != nil {
+							return nil, fmt.Errorf("failed to update node property: %w", err)
+						}
+						result.Stats.PropertiesSet++
+						e.notifyNodeMutated(string(node.ID))
+					} else if edge, exists := edgeVars[varName]; exists {
+						edge.Properties[propName] = value
+						if err := store.UpdateEdge(edge); err != nil {
+							return nil, fmt.Errorf("failed to update edge property: %w", err)
+						}
+						result.Stats.PropertiesSet++
+					} else {
+						return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
+					}
+				}
 			}
 		}
 
@@ -1869,11 +1985,6 @@ func (e *StorageExecutor) executeCompoundCreateWithDelete(ctx context.Context, c
 // on newly created nodes/relationships.
 // Example: CREATE (n:Node {id: 'test'}) SET n.content = 'value' RETURN n
 func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (*ExecuteResult, error) {
-	// Substitute parameters AFTER routing to avoid keyword detection issues
-	if params := getParamsFromContext(ctx); params != nil {
-		cypher = e.substituteParams(cypher, params)
-	}
-
 	result := &ExecuteResult{
 		Columns: []string{},
 		Rows:    [][]interface{}{},
@@ -1902,11 +2013,18 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	} else {
 		setPart = strings.TrimSpace(normalized[setIdx+4:])
 	}
+	setPartForAssignments := setPart
+
+	// Substitute params for simple SET assignments (e.g., n.prop = $value).
+	// For SET += $props, defer to applySetMergeToCreated which reads params directly.
+	if params := getParamsFromContext(ctx); params != nil && !strings.Contains(setPart, "+=") {
+		setPartForAssignments = e.substituteParams(setPart, params)
+	}
 
 	// Pre-validate SET assignments BEFORE executing CREATE
 	// This ensures we fail fast and don't create nodes that would be orphaned
-	if !strings.Contains(setPart, "+=") {
-		assignments := e.splitSetAssignmentsRespectingBrackets(setPart)
+	if !strings.Contains(setPartForAssignments, "+=") {
+		assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
 		if err := e.validateSetAssignments(assignments); err != nil {
 			return nil, err
 		}
@@ -1923,14 +2041,14 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	// Check for property merge operator: n += $properties
 	if strings.Contains(setPart, "+=") {
 		// Handle property merge on created entities
-		err := e.applySetMergeToCreated(setPart, createdNodes, createdEdges, result, store)
+		err := e.applySetMergeToCreated(ctx, setPart, createdNodes, createdEdges, result, store)
 		if err != nil {
 			return nil, err
 		}
 	} else {
 		// Handle regular SET assignments
 		// Split SET clause into individual assignments
-		assignments := e.splitSetAssignmentsRespectingBrackets(setPart)
+		assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
 
 		for _, assignment := range assignments {
 			assignment = strings.TrimSpace(assignment)
@@ -2002,41 +2120,46 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	// Handle RETURN clause
 	if returnIdx > 0 {
 		returnPart := strings.TrimSpace(normalized[returnIdx+6:])
+		returnItems := e.parseReturnItems(returnPart)
+		row := make([]interface{}, len(returnItems))
 
-		// Parse return items
-		returnItems := splitReturnExpressions(returnPart)
-		for _, item := range returnItems {
-			item = strings.TrimSpace(item)
-			alias := item
-
-			// Check for alias
-			upperItem := strings.ToUpper(item)
-			if asIdx := strings.Index(upperItem, " AS "); asIdx > 0 {
-				alias = strings.TrimSpace(item[asIdx+4:])
-				item = strings.TrimSpace(item[:asIdx])
-			}
-
-			result.Columns = append(result.Columns, alias)
-
-			// Resolve the value
-			if node, exists := createdNodes[item]; exists {
-				if len(result.Rows) == 0 {
-					result.Rows = append(result.Rows, []interface{}{})
-				}
-				result.Rows[0] = append(result.Rows[0], node)
-			} else if edge, exists := createdEdges[item]; exists {
-				if len(result.Rows) == 0 {
-					result.Rows = append(result.Rows, []interface{}{})
-				}
-				result.Rows[0] = append(result.Rows[0], edge)
+		for i, item := range returnItems {
+			if item.alias != "" {
+				result.Columns = append(result.Columns, item.alias)
 			} else {
-				// Could be an expression or property access
-				if len(result.Rows) == 0 {
-					result.Rows = append(result.Rows, []interface{}{})
-				}
-				result.Rows[0] = append(result.Rows[0], nil)
+				result.Columns = append(result.Columns, item.expr)
 			}
+
+			// Prefer variable extracted from the return expression (handles elementId(n), n.prop, etc.)
+			if varName := extractVariableNameFromReturnItem(item.expr); varName != "" {
+				if node, ok := createdNodes[varName]; ok {
+					row[i] = e.resolveReturnItem(item, varName, node)
+					continue
+				}
+				if edge, ok := createdEdges[varName]; ok {
+					// Functions like type(r) need context evaluation; fall back to expression eval below.
+					if item.expr == varName {
+						row[i] = edge
+						continue
+					}
+				}
+			}
+
+			// Direct variable match (RETURN n)
+			if node, exists := createdNodes[item.expr]; exists {
+				row[i] = node
+				continue
+			}
+			if edge, exists := createdEdges[item.expr]; exists {
+				row[i] = edge
+				continue
+			}
+
+			// Evaluate expression with full context (e.g., elementId(n), type(r))
+			row[i] = e.evaluateExpressionWithContext(item.expr, createdNodes, createdEdges)
 		}
+
+		result.Rows = [][]interface{}{row}
 	} else {
 		// No RETURN clause - return created entities by default
 		for _, node := range createdNodes {
@@ -2054,7 +2177,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 }
 
 // applySetMergeToCreated applies SET += property merge to created entities.
-func (e *StorageExecutor) applySetMergeToCreated(setPart string, createdNodes map[string]*storage.Node, createdEdges map[string]*storage.Edge, result *ExecuteResult, store storage.Engine) error {
+func (e *StorageExecutor) applySetMergeToCreated(ctx context.Context, setPart string, createdNodes map[string]*storage.Node, createdEdges map[string]*storage.Edge, result *ExecuteResult, store storage.Engine) error {
 	// Parse: n += {prop: value, ...}
 	parts := strings.SplitN(setPart, "+=", 2)
 	if len(parts) != 2 {
@@ -2064,10 +2187,32 @@ func (e *StorageExecutor) applySetMergeToCreated(setPart string, createdNodes ma
 	varName := strings.TrimSpace(parts[0])
 	propsStr := strings.TrimSpace(parts[1])
 
-	// Parse the properties map
-	props := e.parseMapLiteral(propsStr)
-	if props == nil {
-		return fmt.Errorf("failed to parse properties in SET +=")
+	var props map[string]interface{}
+	if strings.HasPrefix(propsStr, "$") {
+		// Parameter reference: $props
+		paramName := strings.TrimSpace(propsStr[1:])
+		if paramName == "" {
+			return fmt.Errorf("SET += requires a valid parameter name after $")
+		}
+		params := getParamsFromContext(ctx)
+		if params == nil {
+			return fmt.Errorf("SET += parameter $%s requires parameters to be provided", paramName)
+		}
+		paramValue, exists := params[paramName]
+		if !exists {
+			return fmt.Errorf("SET += parameter $%s not found in provided parameters", paramName)
+		}
+		propsMap, err := normalizePropsMap(paramValue, fmt.Sprintf("parameter $%s", paramName))
+		if err != nil {
+			return err
+		}
+		props = propsMap
+	} else {
+		// Inline map literal: {key: value, ...}
+		props = e.parseMapLiteral(propsStr)
+		if props == nil {
+			return fmt.Errorf("failed to parse properties in SET +=")
+		}
 	}
 
 	// Apply to node or edge

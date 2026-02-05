@@ -1581,10 +1581,18 @@ func (i *ActionInvoker) Invoke(ctx context.Context, parsed ParsedAction, userMes
 // Returns the first cancellation encountered, or nil if no cancellations.
 func CallPrePromptHooks(ctx *PromptContext) {
 	if !HeimdallPluginsInitialized() {
+		log.Printf("[Heimdall] PrePrompt hooks skipped: plugins not initialized (request=%s)", ctx.RequestID)
 		return
 	}
 
 	plugins := ListHeimdallPlugins()
+	hookCount := 0
+	for _, p := range plugins {
+		if _, ok := p.Plugin.(PrePromptHook); ok {
+			hookCount++
+		}
+	}
+	log.Printf("[Heimdall] PrePrompt hooks: request=%s plugins=%d hooks=%d", ctx.RequestID, len(plugins), hookCount)
 	for _, p := range plugins {
 		// Check if plugin implements PrePromptHook
 		if hook, ok := p.Plugin.(PrePromptHook); ok {
@@ -1605,11 +1613,19 @@ func CallPrePromptHooks(ctx *PromptContext) {
 // This is synchronous - waits for each plugin with a timeout.
 func CallPreExecuteHooks(ctx *PreExecuteContext) PreExecuteResult {
 	if !HeimdallPluginsInitialized() {
+		log.Printf("[Heimdall] PreExecute hooks skipped: plugins not initialized (request=%s action=%s)", ctx.RequestID, ctx.Action)
 		return PreExecuteResult{Continue: true}
 	}
 
 	plugins := ListHeimdallPlugins()
 	result := PreExecuteResult{Continue: true}
+	hookCount := 0
+	for _, p := range plugins {
+		if _, ok := p.Plugin.(PreExecuteHook); ok {
+			hookCount++
+		}
+	}
+	log.Printf("[Heimdall] PreExecute hooks: request=%s action=%s plugins=%d hooks=%d", ctx.RequestID, ctx.Action, len(plugins), hookCount)
 
 	for _, p := range plugins {
 		// Check if plugin implements PreExecuteHook
@@ -1646,10 +1662,18 @@ func CallPreExecuteHooks(ctx *PreExecuteContext) PreExecuteResult {
 // This is fire-and-forget - runs asynchronously using a bounded worker pool.
 func CallPostExecuteHooks(ctx *PostExecuteContext) {
 	if !HeimdallPluginsInitialized() {
+		log.Printf("[Heimdall] PostExecute hooks skipped: plugins not initialized (request=%s action=%s)", ctx.RequestID, ctx.Action)
 		return
 	}
 
 	plugins := ListHeimdallPlugins()
+	hookCount := 0
+	for _, p := range plugins {
+		if _, ok := p.Plugin.(PostExecuteHook); ok {
+			hookCount++
+		}
+	}
+	log.Printf("[Heimdall] PostExecute hooks: request=%s action=%s plugins=%d hooks=%d", ctx.RequestID, ctx.Action, len(plugins), hookCount)
 	for _, p := range plugins {
 		// Check if plugin implements PostExecuteHook
 		if hook, ok := p.Plugin.(PostExecuteHook); ok {

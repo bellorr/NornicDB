@@ -577,6 +577,11 @@ func (a *mcpToolRunnerAdapter) ToolNames() []string {
 }
 
 func (a *mcpToolRunnerAdapter) CallTool(ctx context.Context, name string, args map[string]interface{}, dbName string) (interface{}, error) {
+	// Ensure we always pass a concrete database so MCP uses DatabaseScopedExecutor when set.
+	// Empty dbName would cause MCP to fall back to s.db, which can diverge from the default DB in multi-db setups.
+	if dbName == "" {
+		dbName = a.s.DefaultDatabaseName()
+	}
 	ctx = mcp.ContextWithDatabase(ctx, dbName)
 	return a.s.CallTool(ctx, name, args)
 }
@@ -893,6 +898,9 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			log.Printf("   → Plugins: %d loaded, %d actions available", len(plugins), len(actions))
 			log.Printf("   → Bifrost chat: /api/bifrost/chat/completions")
 			log.Printf("   → Status: /api/bifrost/status")
+			if len(plugins) == 0 {
+				log.Printf("   ⚠️  No Heimdall plugins loaded (Watcher logs will be absent). Ensure a .so exists in HeimdallPluginsDir.")
+			}
 
 			// Log available actions
 			for _, actionName := range actions {
