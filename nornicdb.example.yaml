@@ -464,6 +464,15 @@ heimdall:
   # Env: NORNICDB_HEIMDALL_MAX_USER_TOKENS
   max_user_tokens: 2000
 
+  # Expose MCP tools (store, recall, discover, link, task, tasks) to the Bifrost agentic loop.
+  # Default: false (reduces context size). Set true to let the LLM call memory tools in process.
+  # Env: NORNICDB_HEIMDALL_MCP_ENABLE
+  mcp_enable: false
+
+  # Allowlist of MCP tool names when mcp_enable is true. Omit = all tools; [] = none; [store, link] = only those.
+  # Env: NORNICDB_HEIMDALL_MCP_TOOLS (comma-separated; unset = all, empty = none)
+  # mcp_tools: [store, recall, discover, link, task, tasks]
+
 # =============================================================================
 # COMPLIANCE SETTINGS
 # Docs: https://github.com/orneryd/nornicdb/docs/compliance/

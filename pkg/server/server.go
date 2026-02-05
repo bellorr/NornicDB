@@ -392,7 +392,7 @@ func DefaultConfig() *Config {
 		Address:        "127.0.0.1",
 		Port:           7474,
 		ReadTimeout:    30 * time.Second,
-		WriteTimeout:   60 * time.Second,
+		WriteTimeout:   300 * time.Second, // Bifrost agentic loops (many tool calls) can run 1–2 min; avoid closing stream early
 		IdleTimeout:    120 * time.Second,
 		MaxRequestSize: 10 * 1024 * 1024, // 10MB
 		// CORS enabled by default for ease of use (allows all origins)
@@ -559,24 +559,56 @@ type Server struct {
 
 // mcpToolRunnerAdapter adapts pkg/mcp.Server to heimdall.InMemoryToolRunner so the agentic loop
 // can expose store, recall, discover, link, task, tasks to the LLM and execute them in process.
+// allowlist: nil = all tools, empty = no tools, non-empty = only those names.
 type mcpToolRunnerAdapter struct {
-	s *mcp.Server
+	s         *mcp.Server
+	allowlist []string
+}
+
+func (a *mcpToolRunnerAdapter) allowedNames() []string {
+	if a.allowlist == nil {
+		return mcp.AllTools()
+	}
+	return a.allowlist
+}
+
+func (a *mcpToolRunnerAdapter) allow(name string) bool {
+	allowed := a.allowedNames()
+	for _, n := range allowed {
+		if n == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *mcpToolRunnerAdapter) ToolDefinitions() []heimdall.MCPTool {
 	defs := a.s.ToolDefinitions()
-	out := make([]heimdall.MCPTool, len(defs))
-	for i, t := range defs {
-		out[i] = heimdall.MCPTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema}
+	allowed := a.allowedNames()
+	if len(allowed) == 0 {
+		return nil
+	}
+	allowSet := make(map[string]struct{}, len(allowed))
+	for _, n := range allowed {
+		allowSet[n] = struct{}{}
+	}
+	var out []heimdall.MCPTool
+	for _, t := range defs {
+		if _, ok := allowSet[t.Name]; ok {
+			out = append(out, heimdall.MCPTool{Name: t.Name, Description: t.Description, InputSchema: t.InputSchema})
+		}
 	}
 	return out
 }
 
 func (a *mcpToolRunnerAdapter) ToolNames() []string {
-	return mcp.AllTools()
+	return a.allowedNames()
 }
 
 func (a *mcpToolRunnerAdapter) CallTool(ctx context.Context, name string, args map[string]interface{}, dbName string) (interface{}, error) {
+	if !a.allow(name) {
+		return nil, fmt.Errorf("tool %q is not in the MCP allowlist", name)
+	}
 	// Ensure we always pass a concrete database so MCP uses DatabaseScopedExecutor when set.
 	// Empty dbName would cause MCP to fall back to s.db, which can diverge from the default DB in multi-db setups.
 	if dbName == "" {
@@ -840,9 +872,12 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			dbRouter := newHeimdallDBRouter(db, dbManager, featuresConfig)
 			metricsReader := &heimdallMetricsReader{}
 			heimdallHandler = heimdall.NewHandler(manager, heimdallCfg, dbRouter, metricsReader)
-			// Expose MCP memory tools (store, recall, discover, link, task, tasks) to the agentic loop in process
-			if mcpServer != nil {
-				heimdallHandler.SetInMemoryToolRunner(&mcpToolRunnerAdapter{s: mcpServer})
+			// Expose MCP tools to the agentic loop only when enabled (default off to avoid context bloat)
+			if mcpServer != nil && featuresConfig.HeimdallMCPEnable {
+				heimdallHandler.SetInMemoryToolRunner(&mcpToolRunnerAdapter{
+					s:         mcpServer,
+					allowlist: featuresConfig.HeimdallMCPTools,
+				})
 			}
 
 			// Initialize Heimdall plugin subsystem

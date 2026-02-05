@@ -197,7 +197,7 @@ Heimdall is the cognitive guardian and AI chat assistant. It supports **local** 
 
 Streaming (SSE) is supported for chat completions when the client requests it; the OpenAI and Ollama providers stream tokens as they are generated.
 
-See [Heimdall AI Assistant](../user-guides/heimdall-ai-assistant.md) for full configuration, provider examples, and YAML.
+See [Heimdall AI Assistant](../user-guides/heimdall-ai-assistant.md) for full configuration, provider examples, and YAML. To expose MCP memory tools (store, recall, link, etc.) in the Bifrost agentic loop, set `NORNICDB_HEIMDALL_MCP_ENABLE=true` and optionally `NORNICDB_HEIMDALL_MCP_TOOLS` (comma-separated allowlist); see [Enabling MCP tools in the agentic loop](../user-guides/heimdall-mcp-tools.md).
 
 ## Search Rerank (Stage-2 Reranking)
 

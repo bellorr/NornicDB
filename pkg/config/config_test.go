@@ -3,6 +3,7 @@ package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -344,6 +345,138 @@ func TestLoadFromEnv_CustomValues(t *testing.T) {
 			if cfg.Compliance.RetentionExemptRoles[i] != role {
 				t.Errorf("expected role %q at index %d, got %q", role, i, cfg.Compliance.RetentionExemptRoles[i])
 			}
+		}
+	}
+}
+
+// TestLoadDefaults_HeimdallMCPDefaults tests that Heimdall MCP defaults are set correctly.
+func TestLoadDefaults_HeimdallMCPDefaults(t *testing.T) {
+	cfg := LoadDefaults()
+	if cfg.Features.HeimdallMCPEnable {
+		t.Error("expected HeimdallMCPEnable to be false by default")
+	}
+	if cfg.Features.HeimdallMCPTools != nil {
+		t.Errorf("expected HeimdallMCPTools to be nil by default, got %v", cfg.Features.HeimdallMCPTools)
+	}
+}
+
+// TestLoadFromEnv_HeimdallMCP tests Heimdall MCP enable and allowlist env vars.
+func TestLoadFromEnv_HeimdallMCP(t *testing.T) {
+	t.Run("defaults_no_env", func(t *testing.T) {
+		clearEnvVars(t)
+		cfg := LoadFromEnv()
+		if cfg.Features.HeimdallMCPEnable {
+			t.Error("expected HeimdallMCPEnable false when env unset")
+		}
+		if cfg.Features.HeimdallMCPTools != nil {
+			t.Errorf("expected HeimdallMCPTools nil when env unset, got %v", cfg.Features.HeimdallMCPTools)
+		}
+	})
+
+	t.Run("enable_true", func(t *testing.T) {
+		clearEnvVars(t)
+		os.Setenv("NORNICDB_HEIMDALL_MCP_ENABLE", "true")
+		defer os.Unsetenv("NORNICDB_HEIMDALL_MCP_ENABLE")
+		cfg := LoadFromEnv()
+		if !cfg.Features.HeimdallMCPEnable {
+			t.Error("expected HeimdallMCPEnable true")
+		}
+		// MCP_TOOLS unset -> nil (all tools)
+		if cfg.Features.HeimdallMCPTools != nil {
+			t.Errorf("expected HeimdallMCPTools nil when MCP_TOOLS unset, got %v", cfg.Features.HeimdallMCPTools)
+		}
+	})
+
+	t.Run("enable_true_tools_empty", func(t *testing.T) {
+		clearEnvVars(t)
+		os.Setenv("NORNICDB_HEIMDALL_MCP_ENABLE", "true")
+		os.Setenv("NORNICDB_HEIMDALL_MCP_TOOLS", "")
+		defer func() {
+			os.Unsetenv("NORNICDB_HEIMDALL_MCP_ENABLE")
+			os.Unsetenv("NORNICDB_HEIMDALL_MCP_TOOLS")
+		}()
+		cfg := LoadFromEnv()
+		if !cfg.Features.HeimdallMCPEnable {
+			t.Error("expected HeimdallMCPEnable true")
+		}
+		if cfg.Features.HeimdallMCPTools == nil || len(cfg.Features.HeimdallMCPTools) != 0 {
+			t.Errorf("expected HeimdallMCPTools empty slice when MCP_TOOLS=\"\", got %v", cfg.Features.HeimdallMCPTools)
+		}
+	})
+
+	t.Run("enable_true_tools_allowlist", func(t *testing.T) {
+		clearEnvVars(t)
+		os.Setenv("NORNICDB_HEIMDALL_MCP_ENABLE", "true")
+		os.Setenv("NORNICDB_HEIMDALL_MCP_TOOLS", "store, link , tasks")
+		defer func() {
+			os.Unsetenv("NORNICDB_HEIMDALL_MCP_ENABLE")
+			os.Unsetenv("NORNICDB_HEIMDALL_MCP_TOOLS")
+		}()
+		cfg := LoadFromEnv()
+		if !cfg.Features.HeimdallMCPEnable {
+			t.Error("expected HeimdallMCPEnable true")
+		}
+		want := []string{"store", "link", "tasks"}
+		if len(cfg.Features.HeimdallMCPTools) != len(want) {
+			t.Errorf("expected %v, got %v", want, cfg.Features.HeimdallMCPTools)
+		} else {
+			for i := range want {
+				if cfg.Features.HeimdallMCPTools[i] != want[i] {
+					t.Errorf("expected [%d]=%q, got %q", i, want[i], cfg.Features.HeimdallMCPTools[i])
+				}
+			}
+		}
+	})
+
+	t.Run("getters", func(t *testing.T) {
+		clearEnvVars(t)
+		os.Setenv("NORNICDB_HEIMDALL_MCP_ENABLE", "1")
+		os.Setenv("NORNICDB_HEIMDALL_MCP_TOOLS", "recall,discover")
+		defer func() {
+			os.Unsetenv("NORNICDB_HEIMDALL_MCP_ENABLE")
+			os.Unsetenv("NORNICDB_HEIMDALL_MCP_TOOLS")
+		}()
+		cfg := LoadFromEnv()
+		if !cfg.Features.GetHeimdallMCPEnable() {
+			t.Error("GetHeimdallMCPEnable expected true")
+		}
+		got := cfg.Features.GetHeimdallMCPTools()
+		if len(got) != 2 || got[0] != "recall" || got[1] != "discover" {
+			t.Errorf("GetHeimdallMCPTools expected [recall discover], got %v", got)
+		}
+	})
+}
+
+// TestLoadFromFile_HeimdallMCP tests that YAML heimdall.mcp_enable and mcp_tools wire correctly.
+func TestLoadFromFile_HeimdallMCP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	err := os.WriteFile(path, []byte(`
+heimdall:
+  enabled: true
+  mcp_enable: true
+  mcp_tools: [store, link, task]
+`), 0o600)
+	if err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+
+	if !cfg.Features.HeimdallMCPEnable {
+		t.Error("expected HeimdallMCPEnable true from YAML")
+	}
+	want := []string{"store", "link", "task"}
+	if len(cfg.Features.HeimdallMCPTools) != len(want) {
+		t.Fatalf("expected mcp_tools %v, got %v", want, cfg.Features.HeimdallMCPTools)
+	}
+	for i := range want {
+		if cfg.Features.HeimdallMCPTools[i] != want[i] {
+			t.Errorf("mcp_tools[%d]: want %q, got %q", i, want[i], cfg.Features.HeimdallMCPTools[i])
 		}
 	}
 }
@@ -896,6 +1029,8 @@ func clearEnvVars(t *testing.T) {
 		"NORNICDB_BADGER_NODE_CACHE_MAX_ENTRIES",
 		"NORNICDB_BADGER_EDGE_TYPE_CACHE_MAX_TYPES",
 		"NORNICDB_STORAGE_SERIALIZER",
+		"NORNICDB_HEIMDALL_MCP_ENABLE",
+		"NORNICDB_HEIMDALL_MCP_TOOLS",
 	}
 	for _, v := range envVars {
 		os.Unsetenv(v)

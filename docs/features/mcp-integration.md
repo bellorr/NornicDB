@@ -1,9 +1,4 @@
 # MCP Tools Quick Reference
-
-> **Version:** 0.2.0 (Production)  
-> **Status:** ✅ All 6 tools fully implemented and tested  
-> **Docker:** `docker pull timothyswt/nornicdb-arm64-metal:latest`
-
 **For LLMs:** This is your cheat sheet for using NornicDB's memory system.
 
 > **Note:** `index` and `unindex` tools have been moved to Mimir (the intelligence layer).  
@@ -28,7 +23,7 @@
 | `store` | Remembering any information | `store(content="Use Postgres", type="decision")` |
 | `recall` | Getting something by ID or filters | `recall(id="node-123")` |
 | `discover` | Finding by meaning, not keywords | `discover(query="auth implementation")` |
-| `link` | Connecting related knowledge | `link(from="A", to="B", relation="depends_on")` |
+| `link` | Connecting two nodes (from/to must be node IDs from store or Cypher) | `link(from="node-abc", to="node-xyz", relation="depends_on")` |
 | `task` | Single task CRUD | `task(title="Fix bug", priority="high")` |
 | `tasks` | Query/list multiple tasks | `tasks(status=["pending"], unblocked_only=true)` |
 
@@ -59,9 +54,9 @@
 
 ### Code Search Pattern
 ```
-1. index(path="/workspace/src", patterns=["*.go"])
-2. discover(query="database connection pool", type=["file", "file_chunk"])
-3. recall(id="file-xyz")  # Get full file content
+# File indexing is done by Mimir; NornicDB stores and searches the result.
+1. discover(query="database connection pool", type=["file", "file_chunk"])
+2. recall(id="file-xyz")  # Get full file content
 ```
 
 ---
@@ -103,21 +98,6 @@ to: "node-456" ✅ REQUIRED
 relation: "depends_on" | "relates_to" | "implements" | "blocks" ✅ REQUIRED
 strength: 1.0 (0.0-1.0)
 metadata: {key: "value"}
-```
-
-### index
-```yaml
-path: "/workspace/src" ✅ REQUIRED
-patterns: ["*.go", "*.md"] (default: all text files)
-embeddings: true (generate vectors for search)
-recursive: true (include subdirectories)
-```
-
-### unindex
-```yaml
-path: "/workspace/old" (folder to remove)
-OR
-watch_id: "watch-123" (use ID instead)
 ```
 
 ### task
@@ -171,42 +151,6 @@ limit: 20
 ❌ tasks(id="task-123")            # tasks is for multiple!
 ✅ task(id="task-123")             # task is for single
 ```
-
----
-
-## 🎨 Relation Types Reference
-
-Use these in the `link` tool:
-
-| Relation | Meaning | Example |
-|----------|---------|---------|
-| `depends_on` | A requires B to complete | task depends_on decision |
-| `relates_to` | A and B are related | concept relates_to concept |
-| `implements` | A implements/executes B | task implements decision |
-| `caused_by` | A was caused by B | bug caused_by code_change |
-| `blocks` | A prevents B from progressing | bug blocks task |
-| `contains` | A contains B as part | project contains task |
-| `references` | A mentions/cites B | doc references code |
-| `uses` | A uses/depends on B | code uses library |
-| `evolved_from` | A is a newer version of B | decision_v2 evolved_from decision_v1 |
-| `contradicts` | A contradicts/conflicts with B | decision_new contradicts decision_old |
-
----
-
-## 🧠 Type System Reference
-
-Use these in `store` and `discover`:
-
-| Type | Purpose | Example Content |
-|------|---------|-----------------|
-| `memory` | General knowledge | "Team uses Slack for communication" |
-| `decision` | Architectural decisions | "Chose PostgreSQL over MongoDB" |
-| `concept` | Abstract concepts | "Microservices architecture explanation" |
-| `task` | Work items | "Implement user authentication" |
-| `note` | Temporary notes | "Remember to check logs" |
-| `file` | File metadata | "src/auth.go - authentication module" |
-| `code` | Code snippets | "Function for JWT validation" |
-| `conversation` | Chat history | "Discussion about API design" |
 
 ---
 
@@ -376,11 +320,8 @@ I recommend starting with:
 
 ## 📚 Further Reading
 
-- **Full Design Doc**: See `MCP_TOOLS_OPTIMIZATION.md` for rationale and architecture
-- **Implementation**: See `pkg/mcp/` for Go implementation
-- **Migration Guide**: See `MIGRATION_v0_to_v1.md` for upgrading from old tools
+- **Using MCP tools in Bifrost (agentic loop):** The same tools can be exposed to the Heimdall chat assistant so the LLM can call store/recall/link etc. in process. They are **off by default**. See [Enabling MCP tools in the agentic loop](../user-guides/heimdall-mcp-tools.md).
+- **Rationale and tool set:** This document describes the current MCP tool set (store, recall, discover, link, task, tasks); implementation lives in `pkg/mcp/`.
+- **Configuration:** To enable or restrict which MCP tools are available in the agentic loop, see [Configuration Guide](../operations/configuration.md) (Heimdall / MCP sections) and [heimdall-mcp-tools](../user-guides/heimdall-mcp-tools.md).
 
 ---
-
-**Last Updated:** 2025-11-28  
-**Version:** 0.1.3 (Production)

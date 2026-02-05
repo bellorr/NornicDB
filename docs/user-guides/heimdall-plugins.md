@@ -880,6 +880,8 @@ func (p *SecurityPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
 4. **Resource Management**: Monitor memory usage → trigger cleanup recommendations
 5. **Compliance Auditing**: Track sensitive operations → trigger audit reports
 
+For a full guide on wiring database event triggers to the model and running remediation (e.g. Cypher) from plugins or actions, see [Database event triggers and automatic remediation](heimdall-event-triggers-remediation.md). For how the agentic loop works and how PrePrompt/PreExecute/PostExecute fit in, see [Heimdall agentic loop](heimdall-agentic-loop.md).
+
 ### Notification Methods
 
 Within lifecycle hooks, use `PromptContext` notification methods:

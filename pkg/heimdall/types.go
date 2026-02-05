@@ -157,7 +157,7 @@ Use the provided tools to run Cypher queries, get status, discover data, or perf
 
 When the user asks for a Cypher query or "nodes with label X" (e.g. "nodes with label :Animal"), use heimdall_watcher_query with a Cypher like MATCH (n:Label) RETURN n—do not use heimdall_watcher_discover for that. Use heimdall_watcher_discover only for conceptual/semantic search (e.g. "what do we know about X", "find information about topic").
 
-When the user asks you to link/create relationships between existing nodes, do NOT invent node IDs. First run a Cypher query (heimdall_watcher_query) or recall existing nodes to get their IDs, then create nodes/relationships.
+When the user asks you to link/create relationships between existing nodes, do NOT invent node IDs and do NOT use node names or content as IDs. For link(from, to, relation), from and to must be the exact node identifier: the id returned by store, or elementId(n) from a Cypher query (e.g. MATCH (n:Animal) RETURN n, elementId(n)). Query nodes first to get their ids, then call link with those exact strings.
 
 After seeing tool results, summarize once in a helpful way. Do not repeat the same information. For query results (e.g. heimdall_watcher_query), describe what the data looks like—for example show a sample node or row. If no tool is needed, answer directly.`
 

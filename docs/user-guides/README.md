@@ -13,6 +13,9 @@
 - **[Clustering](clustering.md)** - High availability and replication
 - **[Heimdall AI Assistant](heimdall-ai-assistant.md)** - Built-in AI for natural language database interaction
 - **[Heimdall Context & Tokens](heimdall-context.md)** - Understanding the token budget and context handling
+- **[Enabling MCP tools in the agentic loop](heimdall-mcp-tools.md)** - Turn on store/recall/link etc. in Bifrost chat (default off)
+- **[Heimdall agentic loop](heimdall-agentic-loop.md)** - How the agentic loop works and how plugins interact
+- **[Event triggers and automatic remediation](heimdall-event-triggers-remediation.md)** - Database events → model inference → Cypher remediation
 - **[Complete Examples](complete-examples.md)** - Full application examples
 
 ### Query & Data Management
@@ -72,6 +75,15 @@
 
 **Build event-driven automation**
 → [Heimdall Plugins - Autonomous Actions](heimdall-plugins.md#autonomous-action-invocation-heimdallinvoker)
+
+**Enable MCP memory tools in chat (store, recall, link…)**
+→ [Enabling MCP tools in the agentic loop](heimdall-mcp-tools.md)
+
+**Understand how the agentic loop and plugins work**
+→ [Heimdall agentic loop](heimdall-agentic-loop.md)
+
+**Set up event triggers and automatic remediation**
+→ [Event triggers and automatic remediation](heimdall-event-triggers-remediation.md)
 
 ## 🤖 Heimdall Plugin Features
 

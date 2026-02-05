@@ -532,7 +532,9 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		params.Temperature = h.config.Temperature
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
+	// Use a longer timeout so agentic loops (many tool calls) can complete without "network error".
+	// Should be at least as long as the HTTP server's WriteTimeout for streaming (see server default).
+	ctx, cancel := context.WithTimeout(r.Context(), 300*time.Second)
 	defer cancel()
 
 	// Store PromptContext in request context for later phases; attach RBAC from request context

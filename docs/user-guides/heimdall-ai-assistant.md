@@ -178,6 +178,8 @@ Startup logs will show the active budget, e.g. `Token budget: 128K context = 100
 
 Heimdall actions follow the same shape as [MCP tools](https://modelcontextprotocol.io): each action has a **name**, **description**, and optional **inputSchema** (JSON Schema for parameters). Invocation uses action name plus **params** (equivalent to MCP `arguments`). Use `heimdall.ActionsAsMCPTools()` to export all registered actions in MCP tool list format for MCP clients or to merge with NornicDB’s MCP server tool list.
 
+**MCP memory tools in the agentic loop:** NornicDB can also expose built-in MCP tools (`store`, `recall`, `discover`, `link`, `task`, `tasks`) to the chat so the assistant can create nodes, link them, and run semantic search in process. These are **off by default** to keep context smaller. To enable them (and optionally restrict to an allowlist), see [Enabling MCP tools in the agentic loop](heimdall-mcp-tools.md). For how the agentic loop works and how plugins hook in, see [Heimdall agentic loop](heimdall-agentic-loop.md).
+
 ### Natural Language Actions
 
 Ask Heimdall in plain English:
@@ -513,6 +515,11 @@ func (p *MyPlugin) PrePrompt(ctx *heimdall.PromptContext) error {
 ---
 
 **See Also:**
-- [Configuration Reference](../configuration/)
-- [Docker Deployment](../getting-started/)
+
+- [Enabling MCP tools in the agentic loop](heimdall-mcp-tools.md) – Turn on store/recall/link etc. in chat
+- [Heimdall agentic loop](heimdall-agentic-loop.md) – How the loop works and how plugins interact
+- [Event triggers and automatic remediation](heimdall-event-triggers-remediation.md) – Database events → model inference → remediation
+- [Writing Heimdall Plugins](heimdall-plugins.md)
+- [Heimdall Context & Tokens](heimdall-context.md)
+- [Configuration Reference](../operations/configuration.md)
 - [API Reference](../api-reference/)

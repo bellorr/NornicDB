@@ -208,11 +208,11 @@ func getLinkTool(defaultDatabase string) Tool {
 		"properties": map[string]interface{}{
 			"from": map[string]interface{}{
 				"type":        "string",
-				"description": "Source node ID.",
+				"description": "Source node identifier: use the exact id returned by store, or elementId(n) / id(n) from a Cypher query. Never use display names or content.",
 			},
 			"to": map[string]interface{}{
 				"type":        "string",
-				"description": "Target node ID.",
+				"description": "Target node identifier: use the exact id returned by store, or elementId(n) / id(n) from a Cypher query. Never use display names or content.",
 			},
 			"relation": map[string]interface{}{
 				"type":        "string",
@@ -240,6 +240,10 @@ func getLinkTool(defaultDatabase string) Tool {
 		Name: "link",
 		Description: `Create a relationship between two nodes. Use this to connect related knowledge,
 show dependencies, or build knowledge graphs. Relationships have types and properties.
+
+from and to MUST be exact node identifiers (e.g. the id returned by store, or elementId(n) from
+a Cypher query like MATCH (n:Label) RETURN n, elementId(n)). Do NOT use human-readable names,
+titles, or content—only the exact id string. Query nodes first to get their ids, then call link.
 
 Examples:
 - link(from="<node-id-1>", to="<node-id-2>", relation="relates_to")

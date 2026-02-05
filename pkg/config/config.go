@@ -526,6 +526,15 @@ type FeatureFlagsConfig struct {
 	// Environment: NORNICDB_HEIMDALL_MEMORY_CURATION (default: false)
 	HeimdallMemoryCuration bool
 
+	// Expose MCP tools (store, recall, discover, link, task, tasks) to the Heimdall agentic loop.
+	// When false, the LLM does not see or call MCP tools (reduces context size). Default: false.
+	// Environment: NORNICDB_HEIMDALL_MCP_ENABLE (default: false)
+	HeimdallMCPEnable bool
+	// Allowlist of MCP tool names to expose when HeimdallMCPEnable is true. Nil = expose all tools;
+	// empty slice = expose none (disable); non-empty = only those names (e.g. ["store","link"]).
+	// Environment: NORNICDB_HEIMDALL_MCP_TOOLS (comma-separated; unset = all, empty string = none)
+	HeimdallMCPTools []string
+
 	// === Search Rerank (Stage-2 reranking, independent of Heimdall) ===
 	// Reranking can use a local GGUF model (like embeddings) or an external API
 	// (ollama/openai/cohere/HTTP), similar to Heimdall and embeddings.
@@ -627,6 +636,8 @@ func (f *FeatureFlagsConfig) GetHeimdallMemoryCuration() bool   { return f.Heimd
 func (f *FeatureFlagsConfig) GetHeimdallMaxContextTokens() int  { return f.HeimdallMaxContextTokens }
 func (f *FeatureFlagsConfig) GetHeimdallMaxSystemTokens() int   { return f.HeimdallMaxSystemTokens }
 func (f *FeatureFlagsConfig) GetHeimdallMaxUserTokens() int     { return f.HeimdallMaxUserTokens }
+func (f *FeatureFlagsConfig) GetHeimdallMCPEnable() bool        { return f.HeimdallMCPEnable }
+func (f *FeatureFlagsConfig) GetHeimdallMCPTools() []string     { return f.HeimdallMCPTools }
 
 // LoadFromEnv loads configuration from environment variables.
 //
@@ -1066,6 +1077,23 @@ func legacyLoadFromEnv() *Config {
 	if v := os.Getenv("NORNICDB_HEIMDALL_MEMORY_CURATION"); v != "" {
 		config.Features.HeimdallMemoryCuration = v == "true" || v == "1"
 	}
+	// MCP tools in agentic loop: default off to avoid context bloat
+	if v := os.Getenv("NORNICDB_HEIMDALL_MCP_ENABLE"); v != "" {
+		config.Features.HeimdallMCPEnable = v == "true" || v == "1"
+	}
+	if v, ok := os.LookupEnv("NORNICDB_HEIMDALL_MCP_TOOLS"); ok {
+		if strings.TrimSpace(v) == "" {
+			config.Features.HeimdallMCPTools = []string{}
+		} else {
+			parts := strings.Split(v, ",")
+			config.Features.HeimdallMCPTools = make([]string, 0, len(parts))
+			for _, p := range parts {
+				if name := strings.TrimSpace(p); name != "" {
+					config.Features.HeimdallMCPTools = append(config.Features.HeimdallMCPTools, name)
+				}
+			}
+		}
+	}
 	if v := os.Getenv("NORNICDB_SEARCH_RERANK_ENABLED"); v != "" {
 		config.Features.SearchRerankEnabled = v == "true" || v == "1"
 	}
@@ -1292,22 +1320,24 @@ type YAMLConfig struct {
 
 	// Heimdall AI guardian
 	Heimdall struct {
-		Enabled          bool    `yaml:"enabled"`
-		Model            string  `yaml:"model"`
-		Provider         string  `yaml:"provider"` // local, ollama, openai
-		APIURL           string  `yaml:"api_url"`  // for ollama/openai
-		APIKey           string  `yaml:"api_key"`  // for openai
-		GPULayers        *int    `yaml:"gpu_layers"`
-		ContextSize      int     `yaml:"context_size"`
-		BatchSize        int     `yaml:"batch_size"`
-		MaxTokens        int     `yaml:"max_tokens"`
-		Temperature      float64 `yaml:"temperature"`
-		AnomalyDetection bool    `yaml:"anomaly_detection"`
-		RuntimeDiagnosis bool    `yaml:"runtime_diagnosis"`
-		MemoryCuration   bool    `yaml:"memory_curation"`
-		MaxContextTokens int     `yaml:"max_context_tokens"`
-		MaxSystemTokens  int     `yaml:"max_system_tokens"`
-		MaxUserTokens    int     `yaml:"max_user_tokens"`
+		Enabled          bool     `yaml:"enabled"`
+		Model            string   `yaml:"model"`
+		Provider         string   `yaml:"provider"` // local, ollama, openai
+		APIURL           string   `yaml:"api_url"`   // for ollama/openai
+		APIKey           string   `yaml:"api_key"`  // for openai
+		GPULayers        *int     `yaml:"gpu_layers"`
+		ContextSize      int      `yaml:"context_size"`
+		BatchSize        int      `yaml:"batch_size"`
+		MaxTokens        int      `yaml:"max_tokens"`
+		Temperature      float64  `yaml:"temperature"`
+		AnomalyDetection bool     `yaml:"anomaly_detection"`
+		RuntimeDiagnosis bool     `yaml:"runtime_diagnosis"`
+		MemoryCuration   bool     `yaml:"memory_curation"`
+		MaxContextTokens int      `yaml:"max_context_tokens"`
+		MaxSystemTokens  int      `yaml:"max_system_tokens"`
+		MaxUserTokens    int      `yaml:"max_user_tokens"`
+		MCPEnable        bool     `yaml:"mcp_enable"` // expose MCP tools to agentic loop (default: false)
+		MCPTools         []string `yaml:"mcp_tools"`  // allowlist: nil/omit = all, [] = none, [store,link] = only those
 	} `yaml:"heimdall"`
 
 	// Search rerank (Stage-2 reranking: local GGUF or external API like embeddings/Heimdall).
@@ -1551,6 +1581,8 @@ func LoadDefaults() *Config {
 	config.Features.HeimdallAnomalyDetection = false
 	config.Features.HeimdallRuntimeDiagnosis = false
 	config.Features.HeimdallMemoryCuration = false
+	config.Features.HeimdallMCPEnable = false
+	config.Features.HeimdallMCPTools = nil
 	config.Features.SearchRerankEnabled = false
 	config.Features.SearchRerankProvider = "local"
 	config.Features.SearchRerankModel = "bge-reranker-v2-m3"
@@ -2041,6 +2073,23 @@ func applyEnvVars(config *Config) {
 	if getEnv("NORNICDB_HEIMDALL_MEMORY_CURATION", "") == "true" {
 		config.Features.HeimdallMemoryCuration = true
 	}
+	// MCP tools in agentic loop (NORNICDB_HEIMDALL_MCP_ENABLE, NORNICDB_HEIMDALL_MCP_TOOLS)
+	if v := os.Getenv("NORNICDB_HEIMDALL_MCP_ENABLE"); v != "" {
+		config.Features.HeimdallMCPEnable = v == "true" || v == "1"
+	}
+	if v, ok := os.LookupEnv("NORNICDB_HEIMDALL_MCP_TOOLS"); ok {
+		if strings.TrimSpace(v) == "" {
+			config.Features.HeimdallMCPTools = []string{}
+		} else {
+			parts := strings.Split(v, ",")
+			config.Features.HeimdallMCPTools = make([]string, 0, len(parts))
+			for _, p := range parts {
+				if name := strings.TrimSpace(p); name != "" {
+					config.Features.HeimdallMCPTools = append(config.Features.HeimdallMCPTools, name)
+				}
+			}
+		}
+	}
 	if getEnv("NORNICDB_SEARCH_RERANK_ENABLED", "") == "true" {
 		config.Features.SearchRerankEnabled = true
 	}
@@ -2476,6 +2525,10 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Heimdall.MaxUserTokens > 0 {
 		config.Features.HeimdallMaxUserTokens = yamlCfg.Heimdall.MaxUserTokens
+	}
+	config.Features.HeimdallMCPEnable = yamlCfg.Heimdall.MCPEnable
+	if yamlCfg.Heimdall.MCPTools != nil {
+		config.Features.HeimdallMCPTools = yamlCfg.Heimdall.MCPTools
 	}
 
 	// Search rerank settings

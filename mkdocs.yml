@@ -99,6 +99,9 @@ nav:
       - Plugin System: user-guides/plugin-system.md
       - Complete Examples: user-guides/complete-examples.md
       - Heimdall AI Assistant: user-guides/heimdall-ai-assistant.md
+      - Enabling MCP Tools (Agentic Loop): user-guides/heimdall-mcp-tools.md
+      - Heimdall Agentic Loop: user-guides/heimdall-agentic-loop.md
+      - Event Triggers & Remediation: user-guides/heimdall-event-triggers-remediation.md
       - Heimdall Plugins: user-guides/heimdall-plugins.md
       - Heimdall Context & Tokens: user-guides/heimdall-context.md
   - Architecture:
