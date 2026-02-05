@@ -8,8 +8,8 @@ The Autocomplete Plugin provides intelligent, database-aware Cypher query autoco
 
 ### Backend Components
 
-1. **Built-in Action**: `heimdall_autocomplete_suggest`
-   - Location: `pkg/heimdall/plugin.go` (BuiltinActions)
+1. **Plugin Action**: `heimdall_watcher_autocomplete_suggest`
+   - Location: `plugins/heimdall/plugin.go` (Watcher plugin)
    - Queries the database for:
      - All node labels (`CALL db.labels() YIELD label`)
      - All relationship types (`CALL db.relationshipTypes() YIELD relationshipType`)

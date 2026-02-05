@@ -1537,12 +1537,16 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullMath(
 					}
 
 					if matchFuncStartAndSuffix(transform, "id") {
-						// Extract id from relationship map
+						// Extract id from relationship map or *storage.Edge
 						if mapItem, ok := item.(map[string]interface{}); ok {
 							if id, ok := mapItem["_edgeId"]; ok {
 								result[i] = id
 								continue
 							}
+						}
+						if edge, ok := item.(*storage.Edge); ok {
+							result[i] = string(edge.ID)
+							continue
 						}
 					}
 

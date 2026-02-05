@@ -847,6 +847,7 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	properties map[string]interface{},
 	limit int,
 ) ([]*storage.Node, error) {
+	store := e.getStorage(ctx)
 	// Determine if we can use streaming optimization
 	canStream := len(properties) == 0 // Can't filter properties inline yet
 
@@ -856,8 +857,8 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 	if canStream && limit > 0 {
 		// Use streaming with early termination for LIMIT queries
 		nodes = make([]*storage.Node, 0, limit)
-		if streamer, ok := e.storage.(storage.StreamingEngine); ok {
-			hideSystemNodes := shouldHideSystemNodes(e.storage)
+		if streamer, ok := store.(storage.StreamingEngine); ok {
+			hideSystemNodes := shouldHideSystemNodes(store)
 			err = streamer.StreamNodes(ctx, func(node *storage.Node) error {
 				// Skip system nodes (labels starting with _)
 				if hideSystemNodes && isSystemNode(node) {
@@ -896,18 +897,18 @@ func (e *StorageExecutor) collectNodesWithStreaming(
 		// Fall through to standard path if streaming not supported
 	}
 
-	// Standard path: load all nodes then filter
+	// Standard path: load all nodes then filter (use same store as CREATE for consistency)
 	if len(labels) > 0 {
-		nodes, err = e.storage.GetNodesByLabel(labels[0])
+		nodes, err = store.GetNodesByLabel(labels[0])
 	} else {
-		nodes, err = e.storage.AllNodes()
+		nodes, err = store.AllNodes()
 	}
 	if err != nil {
 		return nil, err
 	}
 
 	// Filter out system nodes (labels starting with _)
-	hideSystemNodes := shouldHideSystemNodes(e.storage)
+	hideSystemNodes := shouldHideSystemNodes(store)
 	filteredNodes := make([]*storage.Node, 0, len(nodes))
 	for _, node := range nodes {
 		if !hideSystemNodes || !isSystemNode(node) {

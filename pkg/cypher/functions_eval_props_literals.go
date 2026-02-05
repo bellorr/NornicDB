@@ -68,11 +68,9 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 		if rel == nil {
 			return nil
 		}
-		return map[string]interface{}{
-			"_edgeId":    string(rel.ID),
-			"type":       rel.Type,
-			"properties": rel.Properties,
-		}
+		// Return *storage.Edge so Bolt encodes it as a proper Relationship (0x52);
+		// returning a map caused drivers to receive a generic map and display null for r.
+		return rel
 	}
 	// Check if this is a path variable - return the PathResult as a map
 	// This allows path functions like length(path), relationships(path) to work after WITH

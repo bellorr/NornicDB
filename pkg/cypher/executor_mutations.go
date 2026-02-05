@@ -1126,6 +1126,20 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 		return e.evaluateIsNull(node, variable, whereClause, true)
 	}
 
+	// Handle relationship patterns like (n)-[:TYPE]->() that may appear as "n)-[:TYPE]->()"
+	// after stripping outer parens from NOT (n)-[:TYPE]->(). Must run BEFORE operator check
+	// so "->" is not misinterpreted as ">" comparison.
+	hasRelPattern := (strings.Contains(whereClause, "-[") && (strings.Contains(whereClause, "]->") || strings.Contains(whereClause, "<-")))
+	refsVar := strings.Contains(whereClause, "("+variable+")") || strings.Contains(whereClause, "("+variable+":") ||
+		strings.HasPrefix(whereClause, variable+")") || strings.HasPrefix(whereClause, variable+":")
+	if hasRelPattern && refsVar {
+		pattern := whereClause
+		if strings.HasPrefix(whereClause, variable+")") || strings.HasPrefix(whereClause, variable+":") {
+			pattern = "(" + whereClause // restore (n)-[:TYPE]->() for relationship check
+		}
+		return e.evaluateRelationshipPatternInWhere(node, variable, pattern)
+	}
+
 	// Determine operator and split accordingly
 	var op string
 	var opIdx int
@@ -1567,6 +1581,52 @@ func (e *StorageExecutor) substituteNodeInSubquery(subquery, variable string, no
 	})
 
 	return result
+}
+
+// evaluateRelationshipPatternInWhere evaluates a WHERE clause relationship pattern
+// like "(n)-[:SUPERSEDED_BY]->()" and returns true if the node has a matching edge.
+// Used when NOT (n)-[:TYPE]->() is evaluated after stripping outer parens to "n)-[:TYPE]->()".
+func (e *StorageExecutor) evaluateRelationshipPatternInWhere(node *storage.Node, variable, pattern string) bool {
+	if !strings.Contains(pattern, "("+variable+")") && !strings.Contains(pattern, "("+variable+":") {
+		return false
+	}
+	relationshipCount := strings.Count(pattern, "-[")
+	if relationshipCount > 1 {
+		return e.checkChainedPattern(node, variable, pattern, "")
+	}
+	_ = e.extractTargetVariable(pattern, variable) // not needed for simple (var)-[]->() pattern
+	var checkIncoming, checkOutgoing bool
+	var relTypes []string
+	if strings.Contains(pattern, "<-[") {
+		checkIncoming = true
+		relTypes = e.extractRelTypesFromPattern(pattern, "<-[")
+	}
+	if strings.Contains(pattern, "]->(") || strings.Contains(pattern, "]->") {
+		checkOutgoing = true
+		relTypes = e.extractRelTypesFromPattern(pattern, "-[")
+	}
+	if checkIncoming {
+		edges, _ := e.storage.GetIncomingEdges(node.ID)
+		for _, edge := range edges {
+			if len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes) {
+				return true
+			}
+		}
+	}
+	if checkOutgoing {
+		edges, _ := e.storage.GetOutgoingEdges(node.ID)
+		for _, edge := range edges {
+			if len(relTypes) == 0 || e.edgeTypeMatches(edge.Type, relTypes) {
+				return true
+			}
+		}
+	}
+	if !checkIncoming && !checkOutgoing {
+		incoming, _ := e.storage.GetIncomingEdges(node.ID)
+		outgoing, _ := e.storage.GetOutgoingEdges(node.ID)
+		return len(incoming) > 0 || len(outgoing) > 0
+	}
+	return false
 }
 
 // checkSubqueryMatch checks if the subquery matches for a given node

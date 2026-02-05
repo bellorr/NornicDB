@@ -68,19 +68,20 @@ func TestMatchRelationshipWithWhereIdFunction(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 2, "Should find 2 outgoing edges from node-1")
 
-		// Verify first edge (KNOWS) - edges are returned as maps
-		edge1Map, ok := result.Rows[0][0].(map[string]interface{})
-		require.True(t, ok, "First row should contain edge map")
-		assert.Equal(t, "edge-1", edge1Map["_edgeId"], "First edge ID should be edge-1")
-		assert.Equal(t, "KNOWS", edge1Map["type"], "First edge type should be KNOWS")
+		// Verify first edge (KNOWS) - edges are returned as *storage.Edge for Bolt Relationship encoding
+		edge1Val := result.Rows[0][0]
+		edge1, ok := edge1Val.(*storage.Edge)
+		require.True(t, ok, "First row should contain edge (*storage.Edge)")
+		assert.Equal(t, storage.EdgeID("edge-1"), edge1.ID, "First edge ID should be edge-1")
+		assert.Equal(t, "KNOWS", edge1.Type, "First edge type should be KNOWS")
 		assert.Equal(t, "node-1", result.Rows[0][1], "Source should be node-1")
 		assert.Equal(t, "node-2", result.Rows[0][2], "Target should be node-2")
 
 		// Verify second edge (WORKS_AT)
-		edge2Map, ok := result.Rows[1][0].(map[string]interface{})
-		require.True(t, ok, "Second row should contain edge map")
-		assert.Equal(t, "edge-2", edge2Map["_edgeId"], "Second edge ID should be edge-2")
-		assert.Equal(t, "WORKS_AT", edge2Map["type"], "Second edge type should be WORKS_AT")
+		edge2, ok := result.Rows[1][0].(*storage.Edge)
+		require.True(t, ok, "Second row should contain edge (*storage.Edge)")
+		assert.Equal(t, storage.EdgeID("edge-2"), edge2.ID, "Second edge ID should be edge-2")
+		assert.Equal(t, "WORKS_AT", edge2.Type, "Second edge type should be WORKS_AT")
 		assert.Equal(t, "node-1", result.Rows[1][1], "Source should be node-1")
 		assert.Equal(t, "node-3", result.Rows[1][2], "Target should be node-3")
 	})
@@ -94,11 +95,11 @@ func TestMatchRelationshipWithWhereIdFunction(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, result.Rows, 1, "Should find 1 incoming edge to node-2")
 
-		// Verify edge - edges are returned as maps
-		edge1Map, ok := result.Rows[0][0].(map[string]interface{})
-		require.True(t, ok, "Row should contain edge map")
-		assert.Equal(t, "edge-1", edge1Map["_edgeId"], "Edge ID should be edge-1")
-		assert.Equal(t, "KNOWS", edge1Map["type"], "Edge type should be KNOWS")
+		// Verify edge - edges are returned as *storage.Edge for Bolt Relationship encoding
+		edge1, ok := result.Rows[0][0].(*storage.Edge)
+		require.True(t, ok, "Row should contain edge (*storage.Edge)")
+		assert.Equal(t, storage.EdgeID("edge-1"), edge1.ID, "Edge ID should be edge-1")
+		assert.Equal(t, "KNOWS", edge1.Type, "Edge type should be KNOWS")
 		assert.Equal(t, "node-1", result.Rows[0][1], "Source should be node-1")
 		assert.Equal(t, "node-2", result.Rows[0][2], "Target should be node-2")
 	})

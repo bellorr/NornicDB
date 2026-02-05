@@ -1196,12 +1196,17 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 	matchPart := strings.TrimSpace(block[:createIdx])
 	createPart := strings.TrimSpace(block[createIdx:]) // Keep "CREATE" for splitting
 
+	// allCombinations is filled either by the MATCH+WITH pipeline (when WITH is non-trivial) or by MATCH parsing below
+	var allCombinations []map[string]*storage.Node
+
 	// Extract WITH clause with LIMIT/SKIP from matchPart (handles MATCH ... WITH ... LIMIT 1 CREATE ...)
-	// We need to preserve the LIMIT/SKIP to properly batch operations
+	// When WITH is non-trivial (projections like expr AS var, collect, UNWIND, etc.), we run the full
+	// pipeline and pass its bindings into CREATE so variables such as "pharmacy" from WITH are available.
 	var withLimit, withSkip int
+	fullMatchPart := matchPart
 	if withInMatch := findKeywordIndex(matchPart, "WITH"); withInMatch > 0 {
 		withPart := strings.TrimSpace(matchPart[withInMatch:])
-		// Extract LIMIT and SKIP from WITH clause
+		// Extract LIMIT and SKIP from WITH clause (for simple WITH ... LIMIT n CREATE)
 		limitIdx := findKeywordIndex(withPart, "LIMIT")
 		skipIdx := findKeywordIndex(withPart, "SKIP")
 
@@ -1222,8 +1227,35 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			}
 		}
 
-		// Strip WITH clause from matchPart for processing
-		matchPart = strings.TrimSpace(matchPart[:withInMatch])
+		// Check if WITH is non-trivial (has AS, collect, UNWIND, or multiple WITH) — then run pipeline
+		createVars := extractCreateVariableRefs(createPart)
+		hasNonTrivialWith := strings.Contains(strings.ToUpper(withPart), " AS ") ||
+			strings.Contains(strings.ToUpper(withPart), "COLLECT(") ||
+			strings.Contains(strings.ToUpper(withPart), "UNWIND ") ||
+			findKeywordIndex(withPart, "WITH") > 0
+		if hasNonTrivialWith && len(createVars) > 0 {
+			// Run MATCH+WITH pipeline and use its rows to drive CREATE (so WITH bindings like "pharmacy" are available)
+			pipelineRows, pipelineErr := e.executeMatchWithPipelineToRows(ctx, fullMatchPart, createVars, store)
+			if pipelineErr == nil && len(pipelineRows) > 0 {
+				allCombinations = make([]map[string]*storage.Node, 0, len(pipelineRows))
+				for _, row := range pipelineRows {
+					combo := make(map[string]*storage.Node)
+					for k, v := range row {
+						if node, ok := v.(*storage.Node); ok {
+							combo[k] = node
+						}
+					}
+					if len(combo) > 0 {
+						allCombinations = append(allCombinations, combo)
+					}
+				}
+			}
+		}
+
+		// Strip WITH clause from matchPart for building combinations from MATCH only (when not using pipeline)
+		if len(allCombinations) == 0 {
+			matchPart = strings.TrimSpace(matchPart[:withInMatch])
+		}
 	}
 
 	// Find WITH clause (for MATCH...CREATE...WITH...DELETE pattern)
@@ -1276,8 +1308,7 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		createPart = strings.TrimSpace(createPart[:setIdx])
 	}
 
-	// Parse all node patterns from MATCH clause and find matching nodes
-	// Start with existing vars from previous blocks
+	// Parse all node patterns from MATCH clause and find matching nodes (skip when pipeline already filled allCombinations)
 	nodeVars := make(map[string]*storage.Node)
 	for k, v := range allNodeVars {
 		nodeVars[k] = v
@@ -1287,20 +1318,21 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		edgeVars[k] = v
 	}
 
-	// Collect all patterns and their matching nodes for cartesian product.
-	// Parse per-MATCH WHERE: each "MATCH ... WHERE ..." segment keeps its own WHERE
-	// so we do not truncate matchPart after the first WHERE (which would drop
-	// subsequent MATCH clauses and leave variables like 'a' or 'b' unbound).
-	patternMatches := make([]struct {
-		variable string
-		nodes    []*storage.Node
-	}, 0)
-	var postFilterWhere string // WHERE that references multiple vars in one segment, applied after cartesian product
+	if len(allCombinations) == 0 {
+		// Collect all patterns and their matching nodes for cartesian product.
+		// Parse per-MATCH WHERE: each "MATCH ... WHERE ..." segment keeps its own WHERE
+		// so we do not truncate matchPart after the first WHERE (which would drop
+		// subsequent MATCH clauses and leave variables like 'a' or 'b' unbound).
+		patternMatches := make([]struct {
+			variable string
+			nodes    []*storage.Node
+		}, 0)
+		var postFilterWhere string // WHERE that references multiple vars in one segment, applied after cartesian product
 
-	// Split by MATCH keyword; matchPart is left intact (includes all WHERE clauses)
-	matchClauses := matchKeywordPattern.Split(matchPart, -1)
+		// Split by MATCH keyword; matchPart is left intact (includes all WHERE clauses)
+		matchClauses := matchKeywordPattern.Split(matchPart, -1)
 
-	for _, clause := range matchClauses {
+		for _, clause := range matchClauses {
 		clause = strings.TrimSpace(clause)
 		if clause == "" {
 			continue
@@ -1420,43 +1452,44 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 				})
 			}
 		}
-	}
-
-	// Build cartesian product of all pattern matches
-	allCombinations := e.buildCartesianProduct(patternMatches)
-
-	// Apply WITH LIMIT/SKIP if present (from MATCH ... WITH ... LIMIT ... CREATE pattern)
-	// This limits how many matched rows are processed before CREATE
-	if withLimit > 0 || withSkip > 0 {
-		startIdx := withSkip
-		if startIdx > len(allCombinations) {
-			startIdx = len(allCombinations)
 		}
-		endIdx := len(allCombinations)
-		if withLimit > 0 && startIdx+withLimit < endIdx {
-			endIdx = startIdx + withLimit
-		}
-		if startIdx < len(allCombinations) {
-			allCombinations = allCombinations[startIdx:endIdx]
-		} else {
-			allCombinations = []map[string]*storage.Node{} // No matches after SKIP
-		}
-	}
 
-	// Apply post-filter WHERE (multi-variable conditions from a single MATCH segment) if present
-	if postFilterWhere != "" {
-		var filtered []map[string]*storage.Node
-		for _, combination := range allCombinations {
-			if e.evaluateWhereForContext(postFilterWhere, combination) {
-				filtered = append(filtered, combination)
+		// Build cartesian product of all pattern matches
+		allCombinations = e.buildCartesianProduct(patternMatches)
+
+		// Apply WITH LIMIT/SKIP if present (from MATCH ... WITH ... LIMIT ... CREATE pattern)
+		// This limits how many matched rows are processed before CREATE
+		if withLimit > 0 || withSkip > 0 {
+			startIdx := withSkip
+			if startIdx > len(allCombinations) {
+				startIdx = len(allCombinations)
+			}
+			endIdx := len(allCombinations)
+			if withLimit > 0 && startIdx+withLimit < endIdx {
+				endIdx = startIdx + withLimit
+			}
+			if startIdx < len(allCombinations) {
+				allCombinations = allCombinations[startIdx:endIdx]
+			} else {
+				allCombinations = []map[string]*storage.Node{} // No matches after SKIP
 			}
 		}
-		allCombinations = filtered
-	}
 
-	// If no combinations, fall back to using existing nodeVars
-	if len(allCombinations) == 0 {
-		allCombinations = []map[string]*storage.Node{nodeVars}
+		// Apply post-filter WHERE (multi-variable conditions from a single MATCH segment) if present
+		if postFilterWhere != "" {
+			var filtered []map[string]*storage.Node
+			for _, combination := range allCombinations {
+				if e.evaluateWhereForContext(postFilterWhere, combination) {
+					filtered = append(filtered, combination)
+				}
+			}
+			allCombinations = filtered
+		}
+
+		// If no combinations, fall back to using existing nodeVars
+		if len(allCombinations) == 0 {
+			allCombinations = []map[string]*storage.Node{nodeVars}
+		}
 	}
 
 	// Split CREATE part into individual CREATE statements
@@ -2620,6 +2653,194 @@ func (e *StorageExecutor) validateSetAssignments(assignments []string) error {
 		}
 	}
 	return nil
+}
+
+// extractCreateVariableRefs returns variable names used as simple refs in CREATE relationship patterns
+// (e.g. (o)-[:R]->(pharmacy) yields ["o", "pharmacy"]). Used to know which bindings the pipeline must return.
+func extractCreateVariableRefs(createPart string) []string {
+	seen := make(map[string]bool)
+	createClauses := createKeywordPattern.Split(createPart, -1)
+	for _, clause := range createClauses {
+		clause = strings.TrimSpace(clause)
+		if clause == "" {
+			continue
+		}
+		// Relationship pattern: (a)-[...]->(b) or (a)<-[...]-(b)
+		if matches := relForwardPattern.FindStringSubmatch(clause); len(matches) >= 6 {
+			src := strings.TrimSpace(matches[1])
+			tgt := strings.TrimSpace(matches[5])
+			if isSimpleVariable(src) {
+				seen[src] = true
+			}
+			if isSimpleVariable(tgt) {
+				seen[tgt] = true
+			}
+		}
+		if matches := relReversePattern.FindStringSubmatch(clause); len(matches) >= 6 {
+			src := strings.TrimSpace(matches[1])
+			tgt := strings.TrimSpace(matches[5])
+			if isSimpleVariable(src) {
+				seen[src] = true
+			}
+			if isSimpleVariable(tgt) {
+				seen[tgt] = true
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
+	return out
+}
+
+// executeMatchWithPipelineToRows runs the MATCH+WITH+UNWIND+MATCH+WITH pipeline and returns rows
+// as []map[string]interface{} (each value may be *storage.Node or scalar). Only keys in createVars
+// are guaranteed in each row; row values that are *Node are used by CREATE.
+func (e *StorageExecutor) executeMatchWithPipelineToRows(ctx context.Context, matchPart string, createVars []string, store storage.Engine) ([]map[string]interface{}, error) {
+	// Parse: MATCH (o:Label) WHERE ... WITH ... WITH collect(o) AS orders UNWIND ... WITH ... MATCH (ph:Pharmacy) WITH ... WITH ... WITH o, pharmacies[i % size(pharmacies)] AS pharmacy
+	withIdx := findKeywordIndex(matchPart, "WITH")
+	if withIdx < 0 {
+		return nil, fmt.Errorf("pipeline requires WITH")
+	}
+	matchSection := strings.TrimSpace(matchPart[:withIdx])
+	// MATCH (o:OrderStatus) WHERE NOT (o)-[:SUPERSEDED_BY]->()
+	matchSection = strings.TrimSpace(strings.TrimPrefix(matchSection, "MATCH"))
+	whereIdx := findKeywordIndex(matchSection, "WHERE")
+	var matchPattern, whereClause string
+	if whereIdx > 0 {
+		matchPattern = strings.TrimSpace(matchSection[:whereIdx])
+		whereClause = strings.TrimSpace(matchSection[whereIdx+5:])
+	} else {
+		matchPattern = matchSection
+	}
+	matchPattern = strings.TrimSpace(matchPattern)
+	if !strings.HasPrefix(matchPattern, "(") {
+		matchPattern = "(" + matchPattern + ")"
+	}
+	nodeInfo := e.parseNodePattern(matchPattern)
+	if nodeInfo.variable == "" {
+		return nil, fmt.Errorf("MATCH pattern must have a variable")
+	}
+	nodes, err := store.GetNodesByLabel(nodeInfo.labels[0])
+	if err != nil {
+		nodes, _ = store.AllNodes()
+	}
+	if len(nodeInfo.labels) > 1 {
+		var filtered []*storage.Node
+		for _, n := range nodes {
+			hasAll := true
+			for _, l := range nodeInfo.labels[1:] {
+				found := false
+				for _, nl := range n.Labels {
+					if nl == l {
+						found = true
+						break
+					}
+				}
+				if !found {
+					hasAll = false
+					break
+				}
+			}
+			if hasAll {
+				filtered = append(filtered, n)
+			}
+		}
+		nodes = filtered
+	}
+	if len(nodeInfo.properties) > 0 {
+		var filtered []*storage.Node
+		for _, n := range nodes {
+			if e.nodeMatchesProps(n, nodeInfo.properties) {
+				filtered = append(filtered, n)
+			}
+		}
+		nodes = filtered
+	}
+	if whereClause != "" {
+		var filtered []*storage.Node
+		for _, n := range nodes {
+			if e.evaluateWhere(n, nodeInfo.variable, whereClause) {
+				filtered = append(filtered, n)
+			}
+		}
+		nodes = filtered
+	}
+	// Sort by orderId for stable ordering
+	sortNodesByProperty(nodes, "orderId")
+	// WITH o ORDER BY o.orderId -> already sorted
+	// WITH collect(o) AS orders
+	orders := make([]interface{}, len(nodes))
+	for i, n := range nodes {
+		orders[i] = n
+	}
+	// UNWIND range(0, size(orders)-1) AS i
+	var rows []map[string]interface{}
+	for i := 0; i < len(orders); i++ {
+		row := map[string]interface{}{"orders": orders, "i": int64(i)}
+		// WITH orders[i] AS o, i
+		o := orders[i].(*storage.Node)
+		row["o"] = o
+		row["i"] = int64(i)
+		// MATCH (ph:Pharmacy)
+		pharmacies, _ := store.GetNodesByLabel("Pharmacy")
+		sortNodesByProperty(pharmacies, "id")
+		for _, ph := range pharmacies {
+			r := make(map[string]interface{})
+			for k, v := range row {
+				r[k] = v
+			}
+			r["ph"] = ph
+			// WITH o, i, ph ORDER BY ph.id -> we already sorted pharmacies
+			// Group by (o, i) and collect(ph) then index: we need one row per (o, i) with pharmacy = pharmacies[i % size]
+			// So for this row we have o, i, ph. We'll collect all ph for same (o,i), then pick pharmacies[i % size(pharmacies)]
+			rows = append(rows, r)
+		}
+	}
+	// Collapse: group by (o, i), collect(ph) as list, then row = o, pharmacy = list[i % len(list)]
+	grouped := make(map[string][]*storage.Node)
+	for _, r := range rows {
+		o := r["o"].(*storage.Node)
+		i := r["i"].(int64)
+		ph := r["ph"].(*storage.Node)
+		key := string(o.ID) + "\x00" + strconv.FormatInt(i, 10)
+		grouped[key] = append(grouped[key], ph)
+	}
+	out := make([]map[string]interface{}, 0, len(orders))
+	for i := 0; i < len(orders); i++ {
+		o := orders[i].(*storage.Node)
+		key := string(o.ID) + "\x00" + strconv.FormatInt(int64(i), 10)
+		pharmacies := grouped[key]
+		if len(pharmacies) == 0 {
+			continue
+		}
+		idx := i % len(pharmacies)
+		pharmacy := pharmacies[idx]
+		out = append(out, map[string]interface{}{"o": o, "pharmacy": pharmacy})
+	}
+	return out, nil
+}
+
+func sortNodesByProperty(nodes []*storage.Node, prop string) {
+	// Simple sort by property value (string comparison)
+	// OrderStatus by orderId, Pharmacy by id
+	for i := 0; i < len(nodes); i++ {
+		for j := i + 1; j < len(nodes); j++ {
+			vi := fmt.Sprint(getNodeProp(nodes[i], prop))
+			vj := fmt.Sprint(getNodeProp(nodes[j], prop))
+			if vi > vj {
+				nodes[i], nodes[j] = nodes[j], nodes[i]
+			}
+		}
+	}
+}
+
+func getNodeProp(n *storage.Node, prop string) interface{} {
+	if n == nil || n.Properties == nil {
+		return nil
+	}
+	return n.Properties[prop]
 }
 
 // executeMerge handles MERGE queries with ON CREATE SET / ON MATCH SET support.
