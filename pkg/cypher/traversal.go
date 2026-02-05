@@ -1618,6 +1618,32 @@ func (e *StorageExecutor) evaluateWhereOnPath(whereClause string, context PathCo
 		return e.evaluateWhereOnPath(left, context) || e.evaluateWhereOnPath(right, context)
 	}
 
+	// Handle NOT prefix (before operators so "->" in NOT (n)-[:X]->() is not parsed as ">")
+	if strings.HasPrefix(upperClause, "NOT ") {
+		inner := strings.TrimSpace(whereClause[4:])
+		return !e.evaluateWhereOnPath(inner, context)
+	}
+
+	// Handle relationship patterns (n)-[:TYPE]->() or (n)<-[:TYPE]-() before operator check
+	hasRelPattern := (strings.Contains(whereClause, "-[") && (strings.Contains(whereClause, "]->") || strings.Contains(whereClause, "<-")))
+	if hasRelPattern && context.nodes != nil {
+		for variable, node := range context.nodes {
+			if node == nil {
+				continue
+			}
+			refsVar := strings.Contains(whereClause, "("+variable+")") || strings.Contains(whereClause, "("+variable+":") ||
+				strings.HasPrefix(whereClause, variable+")") || strings.HasPrefix(whereClause, variable+":")
+			if !refsVar {
+				continue
+			}
+			pattern := whereClause
+			if strings.HasPrefix(whereClause, variable+")") || strings.HasPrefix(whereClause, variable+":") {
+				pattern = "(" + whereClause
+			}
+			return e.evaluateRelationshipPatternInWhere(node, variable, pattern)
+		}
+	}
+
 	// Handle comparison operators: =, <>, <, >, <=, >=
 	operators := []string{"<>", "<=", ">=", "=", "<", ">"}
 	for _, op := range operators {
