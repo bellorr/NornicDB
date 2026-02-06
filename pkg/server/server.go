@@ -902,10 +902,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			}
 			subsystemMgr.SetContext(subsystemCtx)
 
-			// Register built-in actions (core system actions)
-			heimdall.InitBuiltinActions()
-
-			// Load plugins from configured directories
+			// Load plugins from configured directories (all actions come from plugins)
 			// Auto-detects plugin types: function plugins (APOC) and Heimdall plugins
 			// APOC plugins provide Cypher functions, Heimdall plugins provide AI actions
 			if config.PluginsDir != "" {

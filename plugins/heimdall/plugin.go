@@ -68,13 +68,6 @@ type WatcherPlugin struct {
 	started  time.Time
 	requests int64
 	errors   int64
-
-	// === Event Accumulation for Autonomous Actions ===
-	// These track database events for autonomous action triggering
-	queryFailures     int64     // Count of failed queries
-	lastFailureReset  time.Time // When failure count was last reset
-	nodeCreations     int64     // Track node creation rate
-	lastCreationReset time.Time
 }
 
 // === Identity Methods ===
@@ -253,72 +246,109 @@ func (p *WatcherPlugin) ConfigSchema() map[string]interface{} {
 
 // === Actions ===
 
+// autocompleteSuggestInputSchema is JSON Schema for the autocomplete_suggest action (query param).
+var autocompleteSuggestInputSchema = json.RawMessage([]byte(`{"type":"object","properties":{"query":{"type":"string","description":"Partial Cypher query to complete"}},"required":["query"]}`))
+
 func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 	return map[string]heimdall.ActionFunc{
-		"hello": {
-			Description: "Hello World - A simple test action to verify Heimdall is working",
-			Category:    "test",
-			Handler:     p.actionHello,
+		"help": {
+			Description: "List all available SLM actions",
+			Category:    "system",
+			Handler:     p.actionHelp,
 		},
 		"status": {
-			Description: "Get comprehensive NornicDB status including database, runtime, and Heimdall metrics",
-			Category:    "monitoring",
+			Description: "Get SLM system status (plugins, actions, database, runtime)",
+			Category:    "system",
 			Handler:     p.actionStatus,
 		},
-		"health": {
-			Description: "Check system health status",
-			Category:    "monitoring",
-			Handler:     p.actionHealth,
-		},
-		"config": {
-			Description: "Get current SLM configuration",
-			Category:    "configuration",
-			Handler:     p.actionConfig,
-		},
-		"set_config": {
-			Description: "Update SLM configuration (params: max_tokens, temperature)",
-			Category:    "configuration",
-			Handler:     p.actionSetConfig,
-		},
-		"metrics": {
-			Description: "Get detailed metrics: runtime, memory, goroutines, GC, database stats",
-			Category:    "monitoring",
-			Handler:     p.actionMetrics,
-		},
-		"events": {
-			Description: "Get recent system events (params: limit)",
-			Category:    "monitoring",
-			Handler:     p.actionEvents,
-		},
-		"query": {
-			Description: "Execute a read-only Cypher query. Use when the user asks for a Cypher query, nodes with a label (e.g. :Animal), or to run MATCH/RETURN. Params: cypher (required), params (optional).",
-			Category:    "database",
-			Handler:     p.actionQuery,
-		},
-		"db_stats": {
-			Description: "Get database statistics: node/edge counts, k-means clusters, embeddings, feature flags",
-			Category:    "database",
-			Handler:     p.actionDBStats,
-		},
-		"broadcast": {
-			Description: "Broadcast a message to all connected Bifrost clients (params: message)",
-			Category:    "system",
-			Handler:     p.actionBroadcast,
-		},
-		"notify": {
-			Description: "Send a notification via Bifrost (params: type, title, message)",
-			Category:    "system",
-			Handler:     p.actionNotify,
-		},
-		"discover": {
-			Description: "Semantic search in the knowledge graph (params: query, types, limit, depth). Use only for conceptual search like 'what do we know about X'. Do not use for 'nodes with label X' or explicit Cypher—use heimdall_watcher_query instead.",
-			Category:    "search",
-			Handler:     p.actionDiscover,
+		"autocomplete_suggest": {
+			Description: "Generate Cypher query autocomplete suggestions based on database schema",
+			Category:    "query",
+			InputSchema: autocompleteSuggestInputSchema,
+			Handler:     p.actionAutocompleteSuggest,
 		},
 	}
 }
 
 // Action Handlers
+
+// actionHelp returns the action catalog from the package (all registered actions by category).
+func (p *WatcherPlugin) actionHelp(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
+	p.mu.Lock()
+	p.requests++
+	p.mu.Unlock()
+
+	catalog := heimdall.ActionCatalog()
+	p.addEvent("info", "Help: listed actions", nil)
+	return &heimdall.ActionResult{
+		Success: true,
+		Message: "Available actions by category",
+		Data:    map[string]interface{}{"catalog": catalog},
+	}, nil
+}
+
+// actionAutocompleteSuggest returns database schema (labels, relationship types, properties) for Cypher autocomplete.
+func (p *WatcherPlugin) actionAutocompleteSuggest(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
+	p.mu.Lock()
+	p.requests++
+	p.mu.Unlock()
+
+	query, _ := ctx.Params["query"].(string)
+	if query == "" {
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: "query parameter required",
+		}, nil
+	}
+
+	var labels, properties, relTypes []string
+	if ctx.Database != nil {
+		dbName, _ := ctx.Params["database"].(string)
+		if dbName == "" {
+			dbName, _ = ctx.Params["db"].(string)
+		}
+		labelResults, err := ctx.Database.Query(ctx.Context, dbName, "CALL db.labels() YIELD label RETURN label", nil)
+		if err == nil {
+			for _, row := range labelResults {
+				if label, ok := row["label"].(string); ok {
+					labels = append(labels, label)
+				}
+			}
+		}
+		relResults, err := ctx.Database.Query(ctx.Context, dbName, "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType", nil)
+		if err == nil {
+			for _, row := range relResults {
+				if relType, ok := row["relationshipType"].(string); ok {
+					relTypes = append(relTypes, relType)
+				}
+			}
+		}
+		propResults, err := ctx.Database.Query(ctx.Context, dbName, `
+			MATCH (n) WITH n, keys(n) as props UNWIND props as prop RETURN DISTINCT prop LIMIT 50
+		`, nil)
+		if err == nil {
+			for _, row := range propResults {
+				if prop, ok := row["prop"].(string); ok {
+					properties = append(properties, prop)
+				}
+			}
+		}
+	}
+	schemaInfo := map[string]interface{}{
+		"labels":     labels,
+		"properties": properties,
+		"relTypes":   relTypes,
+	}
+	return &heimdall.ActionResult{
+		Success: true,
+		Message: "Autocomplete suggestions",
+		Data: map[string]interface{}{
+			"query":      query,
+			"schema":     schemaInfo,
+			"suggestion": "",
+		},
+	}, nil
+}
 
 // actionHello is a simple test action to verify Heimdall is working.
 // Prompt examples that should trigger this:
@@ -631,239 +661,6 @@ func (p *WatcherPlugin) actionNotify(ctx heimdall.ActionContext) (*heimdall.Acti
 			"type":    notifType,
 			"title":   title,
 			"message": message,
-		},
-	}, nil
-}
-
-// actionQuery executes a read-only Cypher query against the database.
-func (p *WatcherPlugin) actionQuery(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
-	p.mu.Lock()
-	p.requests++
-	p.mu.Unlock()
-
-	cypher, ok := ctx.Params["cypher"].(string)
-	if !ok || cypher == "" {
-		return &heimdall.ActionResult{
-			Success: false,
-			Message: "Missing required parameter: cypher",
-		}, nil
-	}
-
-	// Check if database is available
-	if ctx.Database == nil {
-		return &heimdall.ActionResult{
-			Success: false,
-			Message: "Database access not available",
-		}, nil
-	}
-
-	// Get query params
-	queryParams := make(map[string]interface{})
-	if params, ok := ctx.Params["params"].(map[string]interface{}); ok {
-		queryParams = params
-	}
-
-	// Execute query
-	dbName := getDatabaseParam(ctx.Params)
-	results, err := ctx.Database.Query(ctx.Context, dbName, cypher, queryParams)
-	if err != nil {
-		p.mu.Lock()
-		p.errors++
-		p.mu.Unlock()
-		return &heimdall.ActionResult{
-			Success: false,
-			Message: fmt.Sprintf("Query failed: %v", err),
-		}, nil
-	}
-
-	p.addEvent("info", fmt.Sprintf("Query executed: %s", cypher), map[string]interface{}{
-		"result_count": len(results),
-	})
-
-	return &heimdall.ActionResult{
-		Success: true,
-		Message: fmt.Sprintf("Query returned %d results", len(results)),
-		Data: map[string]interface{}{
-			"results": results,
-			"count":   len(results),
-		},
-	}, nil
-}
-
-// actionDiscover performs semantic search in the knowledge graph.
-// This is the primary way to search for information by meaning.
-func (p *WatcherPlugin) actionDiscover(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
-	p.mu.Lock()
-	p.requests++
-	p.mu.Unlock()
-
-	query, ok := ctx.Params["query"].(string)
-	if !ok || query == "" {
-		return &heimdall.ActionResult{
-			Success: false,
-			Message: "Missing required parameter: query",
-		}, nil
-	}
-
-	// Check if database supports discover
-	if ctx.Database == nil {
-		return &heimdall.ActionResult{
-			Success: false,
-			Message: "Database access not available",
-		}, nil
-	}
-
-	// Get optional parameters
-	limit := 10
-	if l, ok := ctx.Params["limit"].(float64); ok && l > 0 {
-		limit = int(l)
-	}
-	if l, ok := ctx.Params["limit"].(int); ok && l > 0 {
-		limit = l
-	}
-
-	depth := 2 // Default: get related nodes up to 2 hops
-	if d, ok := ctx.Params["depth"].(float64); ok && d >= 1 && d <= 3 {
-		depth = int(d)
-	}
-	if d, ok := ctx.Params["depth"].(int); ok && d >= 1 && d <= 3 {
-		depth = d
-	}
-
-	var nodeTypes []string
-	if types, ok := ctx.Params["types"].([]interface{}); ok {
-		for _, t := range types {
-			if s, ok := t.(string); ok {
-				nodeTypes = append(nodeTypes, s)
-			}
-		}
-	}
-	if typeStr, ok := ctx.Params["type"].(string); ok && typeStr != "" {
-		nodeTypes = append(nodeTypes, typeStr)
-	}
-
-	// Call Discover
-	dbName := getDatabaseParam(ctx.Params)
-	result, err := ctx.Database.Discover(ctx.Context, dbName, query, nodeTypes, limit, depth)
-	if err != nil {
-		p.mu.Lock()
-		p.errors++
-		p.mu.Unlock()
-		return &heimdall.ActionResult{
-			Success: false,
-			Message: fmt.Sprintf("Search failed: %v", err),
-		}, nil
-	}
-
-	p.addEvent("info", fmt.Sprintf("Discover query: %s", query), map[string]interface{}{
-		"result_count": result.Total,
-		"method":       result.Method,
-		"depth":        depth,
-	})
-
-	// Format results nicely for the user
-	return p.formatDiscoverResults(result, query)
-}
-
-// formatDiscoverResults creates a nicely formatted response for discover results.
-// Tuned for readability - concise output without overwhelming detail.
-func (p *WatcherPlugin) formatDiscoverResults(result *heimdall.DiscoverResult, query string) (*heimdall.ActionResult, error) {
-	if result.Total == 0 {
-		return &heimdall.ActionResult{
-			Success: true,
-			Message: fmt.Sprintf("No results found for '%s'", query),
-			Data:    map[string]interface{}{"results": []interface{}{}, "total": 0},
-		}, nil
-	}
-
-	// Build formatted message - concise and readable
-	var msg strings.Builder
-	msg.WriteString(fmt.Sprintf("Found %d results for '%s':\n\n", result.Total, query))
-
-	// Show top 5 results only in message
-	showCount := 5
-	if result.Total < showCount {
-		showCount = result.Total
-	}
-
-	for i := 0; i < showCount; i++ {
-		r := result.Results[i]
-		// Result header with title
-		title := r.Title
-		if title == "" {
-			// Try to get name from properties
-			if name, ok := r.Properties["name"].(string); ok && name != "" {
-				title = name
-			} else {
-				title = r.ID
-			}
-		}
-		msg.WriteString(fmt.Sprintf("**%d. [%s] %s**\n", i+1, r.Type, title))
-
-		// Content preview - truncated
-		if r.ContentPreview != "" {
-			preview := r.ContentPreview
-			if len(preview) > 150 {
-				preview = preview[:150] + "..."
-			}
-			msg.WriteString(fmt.Sprintf("   %s\n", preview))
-		}
-
-		// Related summary - just count and key relationships
-		if len(r.Related) > 0 {
-			// Count by relationship type
-			relTypes := make(map[string]int)
-			for _, rel := range r.Related {
-				relTypes[rel.Relationship]++
-			}
-			// Show top 3 relationship types
-			msg.WriteString("   🔗 ")
-			shown := 0
-			for relType, count := range relTypes {
-				if shown > 0 {
-					msg.WriteString(", ")
-				}
-				if shown >= 3 {
-					msg.WriteString("...")
-					break
-				}
-				msg.WriteString(fmt.Sprintf("%d %s", count, relType))
-				shown++
-			}
-			msg.WriteString("\n")
-		}
-		msg.WriteString("\n")
-	}
-
-	if result.Total > showCount {
-		msg.WriteString(fmt.Sprintf("... and %d more results\n", result.Total-showCount))
-	}
-
-	// Build compact data payload - essential fields only
-	resultData := make([]map[string]interface{}, len(result.Results))
-	for i, r := range result.Results {
-		resultData[i] = map[string]interface{}{
-			"id":    r.ID,
-			"type":  r.Type,
-			"title": r.Title,
-		}
-		if r.ContentPreview != "" {
-			resultData[i]["preview"] = r.ContentPreview
-		}
-		// Only include count of related, not full details
-		if len(r.Related) > 0 {
-			resultData[i]["related_count"] = len(r.Related)
-		}
-	}
-
-	return &heimdall.ActionResult{
-		Success: true,
-		Message: msg.String(),
-		Data: map[string]interface{}{
-			"results": resultData,
-			"total":   result.Total,
-			"method":  result.Method,
-			"query":   query,
 		},
 	}, nil
 }
@@ -1540,102 +1337,4 @@ func max(a, b int64) int64 {
 		return a
 	}
 	return b
-}
-
-// =============================================================================
-// DatabaseEventHook Implementation - Autonomous Action Triggering
-// =============================================================================
-
-// OnDatabaseEvent is called when database operations occur.
-// This demonstrates AUTONOMOUS ACTION INVOCATION:
-// - Accumulates events over time
-// - When thresholds are exceeded, triggers SLM analysis automatically
-// - Uses HeimdallInvoker to invoke actions without user prompting
-//
-// Example scenarios:
-//  1. Multiple query failures → trigger anomaly detection
-//  2. High node creation rate → trigger memory curation
-//  3. Security-related events → trigger security analysis
-func (p *WatcherPlugin) OnDatabaseEvent(event *heimdall.DatabaseEvent) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	// === Track Query Failures ===
-	if event.Type == heimdall.EventQueryFailed {
-		// Reset counter every 5 minutes
-		if time.Since(p.lastFailureReset) > 5*time.Minute {
-			p.queryFailures = 0
-			p.lastFailureReset = time.Now()
-		}
-		p.queryFailures++
-
-		// AUTONOMOUS ACTION: After 5 failures in 5 minutes, analyze
-		if p.queryFailures >= 5 && p.ctx.Heimdall != nil {
-			log.Printf("[Watcher] Autonomous action: %d query failures detected, triggering analysis", p.queryFailures)
-
-			// Option 1: Directly invoke an action
-			p.ctx.Heimdall.InvokeActionAsync("heimdall_watcher_status", map[string]interface{}{
-				"trigger":  "autonomous",
-				"reason":   "query_failures",
-				"failures": p.queryFailures,
-			})
-
-			// Reset counter after triggering
-			p.queryFailures = 0
-			p.lastFailureReset = time.Now()
-
-			// Log the autonomous action
-			p.addEvent("info", "Autonomous analysis triggered due to query failures", map[string]interface{}{
-				"failures_count": p.queryFailures,
-				"time_window":    "5m",
-			})
-		}
-	}
-
-	// === Track High Node Creation Rate ===
-	if event.Type == heimdall.EventNodeCreated {
-		// Reset counter every minute
-		if time.Since(p.lastCreationReset) > time.Minute {
-			p.nodeCreations = 0
-			p.lastCreationReset = time.Now()
-		}
-		p.nodeCreations++
-
-		// AUTONOMOUS ACTION: After 1000 nodes/minute, notify about high creation rate
-		if p.nodeCreations >= 1000 && p.ctx.Bifrost != nil && p.ctx.Bifrost.IsConnected() {
-			log.Printf("[Watcher] Autonomous notification: High node creation rate (%d/min)", p.nodeCreations)
-
-			// Send notification to connected clients
-			p.ctx.Bifrost.SendNotification("warning", "High Activity",
-				fmt.Sprintf("Detected %d node creations in the last minute", p.nodeCreations))
-
-			// Option 2: Send a natural language prompt to the SLM
-			// The SLM will interpret this and decide what action to take
-			if p.ctx.Heimdall != nil {
-				p.ctx.Heimdall.SendPromptAsync(
-					fmt.Sprintf("Analyze high node creation rate: %d nodes created in 1 minute. Should we investigate?",
-						p.nodeCreations))
-			}
-
-			// Reset counter after notification
-			p.nodeCreations = 0
-			p.lastCreationReset = time.Now()
-		}
-	}
-
-	// === Log interesting events ===
-	switch event.Type {
-	case heimdall.EventNodeDeleted:
-		p.addEvent("info", "Node deleted", map[string]interface{}{
-			"node_id": event.NodeID,
-			"labels":  event.NodeLabels,
-		})
-	case heimdall.EventQueryExecuted:
-		if event.Duration > 5*time.Second {
-			p.addEvent("warning", "Slow query detected", map[string]interface{}{
-				"query":    event.Query,
-				"duration": event.Duration.String(),
-			})
-		}
-	}
 }

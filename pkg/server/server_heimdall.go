@@ -128,6 +128,15 @@ func (r *heimdallDBRouter) executorForDatabase(database string) (dbName string, 
 		}
 	}
 
+	// Wire embed queue so nodes created/mutated via Heimdall (e.g. OrderStatus CREATE) get embeddings.
+	if r.db != nil {
+		if q := r.db.GetEmbedQueue(); q != nil {
+			exec.SetNodeMutatedCallback(func(nodeID string) {
+				q.Enqueue(nodeID)
+			})
+		}
+	}
+
 	// Cache executor
 	r.executorsMu.Lock()
 	if r.executors == nil {

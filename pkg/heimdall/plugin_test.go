@@ -652,16 +652,19 @@ func TestListHeimdallActions(t *testing.T) {
 
 func TestActionsAsMCPTools(t *testing.T) {
 	globalManager = nil
-	InitBuiltinActions()
+	manager := GetSubsystemManager()
+	ctx := SubsystemContext{Config: DefaultConfig(), Bifrost: &NoOpBifrost{}}
+	manager.SetContext(ctx)
+	plugin := NewMockPlugin("test")
+	_ = manager.RegisterPlugin(plugin, "", true)
 
 	tools := ActionsAsMCPTools()
-	require.NotEmpty(t, tools, "builtin actions should produce MCP tools")
+	require.NotEmpty(t, tools, "plugin actions should produce MCP tools")
 
 	for _, tool := range tools {
 		assert.NotEmpty(t, tool.Name, "MCP tool must have name")
 		assert.NotEmpty(t, tool.Description, "MCP tool must have description")
 		assert.NotEmpty(t, tool.InputSchema, "MCP tool must have inputSchema (default or set)")
-		// InputSchema should be valid JSON (object with type/properties)
 		var schema map[string]interface{}
 		err := json.Unmarshal(tool.InputSchema, &schema)
 		assert.NoError(t, err, "InputSchema for %s must be valid JSON", tool.Name)

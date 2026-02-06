@@ -477,7 +477,7 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 		ActionPrompt: ActionPrompt(), // IMMUTABLE - always first
 		UserMessage:  userMessage,
 		Messages:     req.Messages,
-		Examples:     defaultExamples(),
+		Examples:     nil, // Plugins add examples via PrePrompt hooks
 		PluginData:   make(map[string]interface{}),
 	}
 	// Set Bifrost for notifications (fire-and-forget SSE messages)
@@ -614,58 +614,6 @@ func (h *Handler) sendStreamNotifications(lifecycle *requestLifecycle, notifs []
 	}
 }
 
-// defaultExamples returns built-in examples for action mapping.
-// These help Heimdall understand common user intents and map them to actions.
-func defaultExamples() []PromptExample {
-	return []PromptExample{
-		// === STATUS & METRICS ===
-		{UserSays: "status", ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`},
-		{UserSays: "what is the status", ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`},
-		{UserSays: "show me metrics", ActionJSON: `{"action": "heimdall_watcher_metrics", "params": {}}`},
-		{UserSays: "database stats", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
-		{UserSays: "health check", ActionJSON: `{"action": "heimdall_watcher_status", "params": {}}`},
-
-		// === CLUSTERING & EMBEDDINGS (db_stats) ===
-		{UserSays: "how many k-means clusters", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
-		{UserSays: "show clustering info", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
-		{UserSays: "how many embeddings", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
-		{UserSays: "what features are enabled", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
-		{UserSays: "show feature flags", ActionJSON: `{"action": "heimdall_watcher_db_stats", "params": {}}`},
-
-		// === COUNTING & STATISTICS ===
-		{UserSays: "how many nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN count(n) AS total_nodes"}}`},
-		{UserSays: "count all relationships", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH ()-[r]->() RETURN count(r) AS total_relationships"}}`},
-		{UserSays: "what labels exist", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "CALL db.labels() YIELD label RETURN label"}}`},
-		{UserSays: "show relationship types", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "CALL db.relationshipTypes() YIELD relationshipType RETURN relationshipType"}}`},
-
-		// === SAMPLING & EXPLORATION ===
-		{UserSays: "show me some nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN n LIMIT 10"}}`},
-		{UserSays: "sample Person nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n:Person) RETURN n LIMIT 5"}}`},
-		{UserSays: "cypher query for nodes with label Animal", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n:Animal) RETURN n"}}`},
-		{UserSays: "nodes with label :Animal", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n:Animal) RETURN n"}}`},
-		{UserSays: "show relationships", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (a)-[r]->(b) RETURN a, type(r), b LIMIT 10"}}`},
-
-		// === SEARCHING ===
-		{UserSays: "find nodes with name Alice", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n {name: 'Alice'}) RETURN n"}}`},
-		{UserSays: "search for nodes containing test", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) WHERE n.name CONTAINS 'test' RETURN n LIMIT 20"}}`},
-
-		// === AGGREGATIONS ===
-		{UserSays: "nodes per label", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN labels(n) AS label, count(n) AS count ORDER BY count DESC"}}`},
-		{UserSays: "relationship distribution", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH ()-[r]->() RETURN type(r) AS type, count(r) AS count ORDER BY count DESC"}}`},
-
-		// === GRAPH ANALYSIS ===
-		{UserSays: "find highly connected nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n)-[r]-() RETURN n, count(r) AS connections ORDER BY connections DESC LIMIT 10"}}`},
-		{UserSays: "orphan nodes", ActionJSON: `{"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) WHERE NOT (n)--() RETURN n LIMIT 20"}}`},
-
-		// === SEMANTIC SEARCH (discover) ===
-		// Generic examples - domain-specific examples come from domain plugins
-		{UserSays: "search for X", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "X"}}`},
-		{UserSays: "find information about Y", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "Y"}}`},
-		{UserSays: "what do we know about Z", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "Z"}}`},
-		{UserSays: "tell me about topic", ActionJSON: `{"action": "heimdall_watcher_discover", "params": {"query": "topic"}}`},
-	}
-}
-
 // runAgenticLoop runs the agentic loop for any provider: execute actions, feed results back, repeat until final answer.
 // For tool-capable providers (OpenAI/Ollama) uses GenerateWithTools; for local GGUF uses prompt-based multi-round.
 // When inMemoryRunner is set (e.g. MCP server), its tools (store, recall, discover, etc.) are included so the LLM can manage memories in process.
@@ -675,15 +623,16 @@ func (h *Handler) runAgenticLoop(ctx context.Context, lifecycle *requestLifecycl
 		tools = append(tools, h.inMemoryRunner.ToolDefinitions()...)
 	}
 	if h.manager.SupportsTools() && len(tools) > 0 {
-		return h.runAgenticLoopWithTools(ctx, lifecycle, userMessage, tools, params)
+		return h.runAgenticLoopWithTools(ctx, lifecycle, systemPrompt, userMessage, tools, params)
 	}
 	return h.runAgenticLoopPromptBased(ctx, lifecycle, systemPrompt, userMessage, params)
 }
 
 // runAgenticLoopWithTools uses native tool calling (OpenAI/Ollama). Execute toolCalls, append results, repeat.
-func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *requestLifecycle, userMessage string, tools []MCPTool, params GenerateParams) (string, error) {
+// systemPrompt is the full prompt built from plugins (PrePrompt hooks set AdditionalInstructions etc.); no domain logic here.
+func (h *Handler) runAgenticLoopWithTools(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, tools []MCPTool, params GenerateParams) (string, error) {
 	messages := []ToolRoundMessage{
-		{Role: "system", Content: AgenticSystemPromptTools},
+		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: userMessage},
 	}
 	var lastContent string
@@ -891,7 +840,11 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 // handleNonStreamingResponse generates complete response with lifecycle hooks.
 // Uses agentic loop for any provider: execute actions, feed results back, LLM infers and formats final response.
 func (h *Handler) handleNonStreamingResponse(w http.ResponseWriter, ctx context.Context, prompt string, params GenerateParams, model string, lifecycle *requestLifecycle) {
-	finalResponse, err := h.runAgenticLoop(ctx, lifecycle, lifecycle.promptCtx.BuildFinalPrompt(), lifecycle.promptCtx.UserMessage, params)
+	systemPrompt := lifecycle.promptCtx.BuildFinalPrompt()
+	if h.manager.SupportsTools() && len(ActionsAsMCPTools()) > 0 {
+		systemPrompt = lifecycle.promptCtx.BuildFinalPromptForTools()
+	}
+	finalResponse, err := h.runAgenticLoop(ctx, lifecycle, systemPrompt, lifecycle.promptCtx.UserMessage, params)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("Generation error: %v", err), http.StatusInternalServerError)
 		return
@@ -942,7 +895,9 @@ func (h *Handler) handleStreamingWithTools(w http.ResponseWriter, ctx context.Co
 	lifecycle.StreamModel = model
 	h.sendStreamNotifications(lifecycle, lifecycle.promptCtx.DrainNotifications())
 
-	finalResponse, err := h.runAgenticLoop(ctx, lifecycle, lifecycle.promptCtx.BuildFinalPrompt(), lifecycle.promptCtx.UserMessage, params)
+	// Use tools-friendly prompt so the model answers from context when possible instead of calling tools
+	systemPrompt := lifecycle.promptCtx.BuildFinalPromptForTools()
+	finalResponse, err := h.runAgenticLoop(ctx, lifecycle, systemPrompt, lifecycle.promptCtx.UserMessage, params)
 	if err != nil {
 		chunk := ChatResponse{
 			ID: lifecycle.requestID, Object: "chat.completion.chunk", Model: model, Created: time.Now().Unix(),

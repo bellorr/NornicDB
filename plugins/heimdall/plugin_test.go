@@ -98,11 +98,10 @@ func TestWatcherPlugin_Actions(t *testing.T) {
 	}
 }
 
-// TestWatcherPlugin_HelloAction tests the hello action specifically
-func TestWatcherPlugin_HelloAction(t *testing.T) {
+// TestWatcherPlugin_HelpAction tests the help action (lists action catalog)
+func TestWatcherPlugin_HelpAction(t *testing.T) {
 	p := &WatcherPlugin{}
 
-	// Initialize plugin
 	ctx := heimdall.SubsystemContext{
 		Config: heimdall.Config{
 			Model:       "test-model",
@@ -113,37 +112,17 @@ func TestWatcherPlugin_HelloAction(t *testing.T) {
 	require.NoError(t, p.Initialize(ctx))
 	require.NoError(t, p.Start())
 
-	t.Run("default greeting", func(t *testing.T) {
-		actionCtx := newActionCtx(map[string]interface{}{})
+	actionCtx := newActionCtx(map[string]interface{}{})
 
-		result, err := p.actionHello(actionCtx)
-		require.NoError(t, err)
-		require.NotNil(t, result)
+	result, err := p.actionHelp(actionCtx)
+	require.NoError(t, err)
+	require.NotNil(t, result)
 
-		assert.True(t, result.Success)
-		assert.Contains(t, result.Message, "Hello, World!")
-		assert.Contains(t, result.Message, "Heimdall is operational")
-
-		// Check data fields
-		assert.NotNil(t, result.Data)
-		assert.NotEmpty(t, result.Data["greeting"])
-		assert.NotEmpty(t, result.Data["timestamp"])
-		assert.Equal(t, "test-model", result.Data["model"])
-		assert.Equal(t, "running", result.Data["status"])
-	})
-
-	t.Run("custom name", func(t *testing.T) {
-		actionCtx := newActionCtx(map[string]interface{}{
-			"name": "NornicDB",
-		})
-
-		result, err := p.actionHello(actionCtx)
-		require.NoError(t, err)
-		require.NotNil(t, result)
-
-		assert.True(t, result.Success)
-		assert.Contains(t, result.Message, "Hello, NornicDB!")
-	})
+	assert.True(t, result.Success)
+	assert.Contains(t, result.Message, "Available actions")
+	assert.NotNil(t, result.Data)
+	_, hasCatalog := result.Data["catalog"]
+	assert.True(t, hasCatalog, "result.Data should have catalog key")
 }
 
 // TestWatcherPlugin_StatusAction tests the status action

@@ -1054,16 +1054,10 @@ func TestPromptContext_ActionPromptImmutable(t *testing.T) {
 }
 
 func TestDefaultExamples(t *testing.T) {
-	examples := defaultExamples()
-
-	assert.Greater(t, len(examples), 0, "Should have default examples")
-
-	// Check structure
-	for _, ex := range examples {
-		assert.NotEmpty(t, ex.UserSays)
-		assert.NotEmpty(t, ex.ActionJSON)
-		assert.Contains(t, ex.ActionJSON, "action")
-	}
+	// Examples are no longer defined in the handler; plugins add them via PrePrompt hooks.
+	// Prompt context starts with nil examples.
+	var examples []PromptExample
+	assert.Len(t, examples, 0, "Handler does not define default examples; plugins supply them")
 }
 
 func TestRequestLifecycle_Structure(t *testing.T) {

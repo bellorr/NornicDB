@@ -153,13 +153,11 @@ const MaxAgenticRounds = 10
 // AgenticSystemPromptTools is the short system prompt when using native tools (OpenAI/Ollama).
 // The model receives tools via the API; no need to list actions in the prompt.
 const AgenticSystemPromptTools = `You are Heimdall, the AI assistant for NornicDB, a high-performance graph database.
-Use the provided tools to run Cypher queries, get status, discover data, or perform other actions when the user asks.
+Use the provided tools when the user asks for something that requires an action. If no tool is needed, answer directly.
 
-When the user asks for a Cypher query or "nodes with label X" (e.g. "nodes with label :Animal"), use heimdall_watcher_query with a Cypher like MATCH (n:Label) RETURN n—do not use heimdall_watcher_discover for that. Use heimdall_watcher_discover only for conceptual/semantic search (e.g. "what do we know about X", "find information about topic").
+When the user asks you to link/create relationships between existing nodes, do NOT invent node IDs. For link(from, to, relation), from and to must be the exact node identifier (e.g. from a query or store). Query nodes first to get their ids, then call link with those exact strings.
 
-When the user asks you to link/create relationships between existing nodes, do NOT invent node IDs and do NOT use node names or content as IDs. For link(from, to, relation), from and to must be the exact node identifier: the id returned by store, or elementId(n) from a Cypher query (e.g. MATCH (n:Animal) RETURN n, elementId(n)). Query nodes first to get their ids, then call link with those exact strings.
-
-After seeing tool results, summarize once in a helpful way. Do not repeat the same information. For query results (e.g. heimdall_watcher_query), describe what the data looks like—for example show a sample node or row. If no tool is needed, answer directly.`
+After seeing tool results, summarize once in a helpful way. Do not repeat the same information.`
 
 // GeneratorWithTools is implemented by generators that support native tool/function calling.
 // When used, the handler runs an agentic loop: call GenerateWithTools, execute any toolCalls,
@@ -588,17 +586,26 @@ func EstimateTokens(text string) int {
 	return int(float64(len(text)) * TokensPerChar)
 }
 
-// BuildFinalPrompt constructs the complete prompt for Heimdall.
+// BuildFinalPrompt constructs the complete prompt for Heimdall (prompt-based flow: model outputs JSON actions).
 // ActionPrompt is ALWAYS first and immutable.
 // Falls back to minimal prompt if full prompt exceeds budget.
 func (p *PromptContext) BuildFinalPrompt() string {
-	// Try full prompt first
 	fullPrompt := p.buildFullPrompt()
 	if EstimateTokens(fullPrompt) <= MaxSystemPromptTokens() {
 		return fullPrompt
 	}
+	return p.buildMinimalPrompt()
+}
 
-	// Fall back to minimal prompt (actions only)
+// BuildFinalPromptForTools constructs the system prompt when the provider uses native tool calling.
+// Same as BuildFinalPrompt but with tools-friendly instructions: answer in natural language when
+// the context contains the answer; use tools only when an action is needed. Plugins inject context
+// via AdditionalInstructions (e.g. order status); the model should use it and reply in plain text.
+func (p *PromptContext) BuildFinalPromptForTools() string {
+	fullPrompt := p.buildFullPromptForTools()
+	if EstimateTokens(fullPrompt) <= MaxSystemPromptTokens() {
+		return fullPrompt
+	}
 	return p.buildMinimalPrompt()
 }
 
@@ -624,14 +631,11 @@ Your role is to help users manage the database by executing actions and running 
 	// === RESPONSE MODES ===
 	sb.WriteString(`RESPONSE MODES:
 
-1. ACTION MODE - For database operations, respond with JSON:
-   {"action": "heimdall_watcher_status", "params": {}}
-   {"action": "heimdall_watcher_query", "params": {"cypher": "MATCH (n) RETURN count(n)"}}
+1. ACTION MODE - When the user needs an action, respond with JSON:
+   {"action": "<action_name>", "params": {...}}
+   Use one of the actions listed in ACTIONS above.
 
-2. HELP MODE - For Cypher questions, explain and provide examples:
-   - If asked about Cypher syntax, explain clearly with examples
-   - If asked how to write a query, provide the query AND explain it
-   - Be helpful and educational
+2. HELP MODE - For Cypher questions, explain and provide examples. Be helpful and educational.
 
 IMPORTANT: Always complete your JSON responses with proper closing braces.
 
@@ -659,6 +663,48 @@ IMPORTANT: Always complete your JSON responses with proper closing braces.
 	return sb.String()
 }
 
+// buildFullPromptForTools is like buildFullPrompt but for native tool-calling providers.
+// Instructs the model to answer in natural language when context has the answer; use tools only when needed.
+func (p *PromptContext) buildFullPromptForTools() string {
+	var sb strings.Builder
+
+	sb.WriteString(`You are Heimdall, the AI assistant for NornicDB - a high-performance graph database.
+Your role is to help users by answering from context or by using tools when an action is needed.
+
+`)
+
+	sb.WriteString("AVAILABLE ACTIONS (invoke via tools when needed):\n")
+	sb.WriteString(p.ActionPrompt)
+	sb.WriteString("\n")
+
+	sb.WriteString(CypherPrimer)
+	sb.WriteString("\n")
+
+	sb.WriteString(`RESPONSE RULES:
+- If the ADDITIONAL CONTEXT below (or above) contains the answer to the user's question, reply in plain natural language. Do not call any tool.
+- If the user needs an action (e.g. run a query, get status, list actions), use the appropriate tool.
+- Be concise. Do not repeat yourself.
+
+`)
+
+	if p.AdditionalInstructions != "" {
+		sb.WriteString("ADDITIONAL CONTEXT:\n")
+		sb.WriteString(p.AdditionalInstructions)
+		sb.WriteString("\n\n")
+	}
+
+	if len(p.Examples) > 0 {
+		sb.WriteString("EXAMPLES:\n")
+		for _, ex := range p.Examples {
+			sb.WriteString(fmt.Sprintf("User: \"%s\"\n→ %s\n\n", ex.UserSays, ex.ActionJSON))
+		}
+	}
+
+	sb.WriteString("Reply with natural language when you can answer from context; otherwise use the appropriate tool.\n")
+
+	return sb.String()
+}
+
 // buildMinimalPrompt creates a minimal fallback prompt when full prompt is too large.
 func (p *PromptContext) buildMinimalPrompt() string {
 	var sb strings.Builder
@@ -666,7 +712,7 @@ func (p *PromptContext) buildMinimalPrompt() string {
 	sb.WriteString("You are Heimdall, AI assistant for NornicDB graph database.\n\n")
 	sb.WriteString("ACTIONS:\n")
 	sb.WriteString(p.ActionPrompt)
-	sb.WriteString("\nFor queries: {\"action\": \"heimdall_watcher_query\", \"params\": {\"cypher\": \"...\"}}\n")
+	sb.WriteString("\nRespond with JSON: {\"action\": \"<name>\", \"params\": {...}} using an action from the list above.\n")
 	sb.WriteString("Do not duplicate content in your response; end after one response.\n")
 
 	return sb.String()
