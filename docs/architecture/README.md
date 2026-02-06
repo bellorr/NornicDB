@@ -6,6 +6,7 @@
 
 - **[System Design](system-design.md)** - High-level architecture overview
 - **[Embedding Search](embedding-search.md)** - Embedding storage model and search paths
+- **[Graph-RAG: NornicDB vs Typical](graph-rag-nornicdb-comparison.md)** - In-memory vs distributed Graph-RAG and latency comparison
 - **[Replication](replication.md)** - Clustering and replication internals
 - **[Clustering Roadmap](clustering-roadmap.md)** - Future sharding and scaling plans
 - **[Plugin System](plugin-system.md)** - Extensibility architecture

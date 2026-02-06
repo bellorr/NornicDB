@@ -762,7 +762,7 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 	prompt := systemPrompt + "\n\nUser: " + userMessage + "\n\n" + answerFromContextHint
 	var lastResponse string
 	for round := 0; round < MaxAgenticRounds; round++ {
-		rawResponse, err := h.manager.Generate(ctx, prompt, params)
+		response, err := h.manager.Generate(ctx, prompt, params)
 		if err != nil {
 			return "", err
 		}

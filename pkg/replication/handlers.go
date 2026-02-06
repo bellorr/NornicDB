@@ -3,6 +3,7 @@ package replication
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // RegisterClusterHandlers wires a Replicator's handler methods into a ClusterTransport.
@@ -127,7 +128,7 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 	type raftAppendHandler interface {
 		HandleRaftAppendEntries(req *RaftAppendEntriesRequest) (*RaftAppendEntriesResponse, error)
 	}
-	if h, ok := r.(raftAppendHandler); ok {
+		if h, ok := r.(raftAppendHandler); ok {
 		t.RegisterHandler(ClusterMsgAppendEntries, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
 			_ = ctx
 			_ = nodeID
@@ -144,6 +145,36 @@ func RegisterClusterHandlers(t *ClusterTransport, r Replicator) {
 				return nil, fmt.Errorf("encode raft append resp: %w", err)
 			}
 			return &ClusterMessage{Type: ClusterMsgAppendEntriesResponse, Payload: payload}, nil
+		})
+	}
+
+	// Write forwarding: leader applies commands forwarded from followers
+	type forwardApplyHandler interface {
+		HandleForwardApply(cmd *Command, timeout time.Duration) error
+	}
+	if h, ok := r.(forwardApplyHandler); ok {
+		t.RegisterHandler(ClusterMsgForwardApply, func(ctx context.Context, nodeID string, msg *ClusterMessage) (*ClusterMessage, error) {
+			_ = nodeID
+			var cmd Command
+			if err := decodeGob(msg.Payload, &cmd); err != nil {
+				return nil, fmt.Errorf("decode forward apply: %w", err)
+			}
+			timeout := 30 * time.Second
+			if deadline, ok := ctx.Deadline(); ok {
+				if d := time.Until(deadline); d > 0 && d < timeout {
+					timeout = d
+				}
+			}
+			err := h.HandleForwardApply(&cmd, timeout)
+			respPayload := forwardApplyResponse{}
+			if err != nil {
+				respPayload.Err = err.Error()
+			}
+			payload, encErr := encodeGob(respPayload)
+			if encErr != nil {
+				return nil, fmt.Errorf("encode forward apply resp: %w", encErr)
+			}
+			return &ClusterMessage{Type: ClusterMsgForwardApplyResponse, Payload: payload}, nil
 		})
 	}
 }

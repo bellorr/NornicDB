@@ -1201,7 +1201,19 @@ func (r *RaftReplicator) handleIncomingConnection(ctx context.Context, conn Peer
 	}
 }
 
+// forwardApplySender is implemented by cluster connections that support forwarding writes to the leader.
+type forwardApplySender interface {
+	SendForwardApply(ctx context.Context, cmd *Command, timeout time.Duration) error
+}
+
+// HandleForwardApply applies a command received from a follower (write forwarding).
+// Only the leader should receive these; it applies the command through Raft as usual.
+func (r *RaftReplicator) HandleForwardApply(cmd *Command, timeout time.Duration) error {
+	return r.Apply(cmd, timeout)
+}
+
 // Apply applies a command through Raft consensus.
+// If this node is not the leader, it forwards the command to the leader automatically.
 func (r *RaftReplicator) Apply(cmd *Command, timeout time.Duration) error {
 	if r.closed.Load() {
 		return ErrClosed
@@ -1212,9 +1224,26 @@ func (r *RaftReplicator) Apply(cmd *Command, timeout time.Duration) error {
 
 	r.mu.RLock()
 	isLeader := r.state == StateLeader
+	leaderAddr := r.leaderAddr
 	r.mu.RUnlock()
 
 	if !isLeader {
+		// Forward write to leader so clients can send writes to any node
+		if leaderAddr == "" {
+			return ErrNoLeader
+		}
+		if r.transport == nil {
+			return ErrNotLeader
+		}
+		fwdCtx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		conn, err := r.transport.Connect(fwdCtx, leaderAddr)
+		if err != nil {
+			return fmt.Errorf("forward to leader: %w", err)
+		}
+		if fa, ok := conn.(forwardApplySender); ok {
+			return fa.SendForwardApply(fwdCtx, cmd, timeout)
+		}
 		return ErrNotLeader
 	}
 

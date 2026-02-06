@@ -276,7 +276,16 @@ NORNICDB_CLUSTER_HA_ROLE=primary
 
 ## Mode 2: Raft Cluster (3+ Nodes)
 
-Raft provides strong consistency with automatic leader election. All writes go through the elected leader and are replicated to followers before acknowledgment.
+Raft provides strong consistency with automatic leader election. Data is replicated to **all** nodes (leader + followers), so every node has a full copy of the data.
+
+### Reads vs writes
+
+| Operation | Any node? | Notes |
+| --------- | --------- | ----- |
+| **Query / search / read** | Yes | All nodes have the same data; you can send reads to any node (e.g. via a load balancer). |
+| **Write** | Yes | You can send writes to **any** node. If the request hits a follower, the server **automatically forwards** it to the current Raft leader and returns the leader’s response. No client-side leader routing is required. |
+
+So: **query, search, and write from any node**. Writes are applied on the leader and replicated to all followers via Raft; clients do not need to discover or target the leader.
 
 ### Configuration Overview
 
@@ -1046,7 +1055,7 @@ NornicDB uses two separate network protocols:
 - Standard Neo4j Bolt protocol for client connections
 - Used by all Neo4j drivers (Python, Java, Go, etc.)
 - Handles Cypher query execution and result streaming
-- In a cluster, followers forward write queries to the leader via Bolt
+- In a cluster, writes sent to a follower are automatically forwarded to the leader over the cluster protocol
 
 **Port 7688 (Cluster Protocol):**
 

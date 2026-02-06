@@ -8,12 +8,13 @@
 //
 //   - Neo4j driver compatibility for client queries
 //
-//     Note: automatic "write forwarding" over Bolt (follower/standby -> leader/primary)
-//     is not implemented yet. Today, clients should connect to the leader/primary for
-//     writes (followers/standby will reject writes with ErrNotLeader).
+//   - Writes can be sent to any node: if a write hits a follower, the cluster
+//     transport automatically forwards it to the leader (ForwardApply) and returns
+//     the leader's response, so clients do not need to route writes to the leader.
 //
 // 2. **Cluster Protocol (default port 7000)** - Used for:
 //   - Raft consensus (RequestVote, AppendEntries)
+//   - Write forwarding (ForwardApply from follower to leader)
 //   - WAL streaming for HA standby
 //   - Heartbeats and health checks
 //   - Cluster coordination
@@ -75,7 +76,17 @@ const (
 	ClusterMsgLeaveResponse
 	ClusterMsgStatus
 	ClusterMsgStatusResponse
+
+	// Write forwarding: follower sends write to leader for application
+	ClusterMsgForwardApply
+	ClusterMsgForwardApplyResponse
 )
+
+// forwardApplyResponse is the payload of ClusterMsgForwardApplyResponse.
+// Err is empty on success; otherwise the leader's error message.
+type forwardApplyResponse struct {
+	Err string
+}
 
 // ClusterMessage is the on-wire format for cluster communication.
 type ClusterMessage struct {
@@ -680,6 +691,34 @@ func (c *ClusterConnection) SendRaftAppendEntries(ctx context.Context, req *Raft
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return &result, nil
+}
+
+// SendForwardApply sends a write command to the leader for application.
+// Used by followers to forward writes to the leader automatically.
+func (c *ClusterConnection) SendForwardApply(ctx context.Context, cmd *Command, timeout time.Duration) error {
+	if cmd == nil {
+		return errors.New("nil command")
+	}
+	payload, err := encodeGob(cmd)
+	if err != nil {
+		return fmt.Errorf("encode command: %w", err)
+	}
+	msg := &ClusterMessage{
+		Type:    ClusterMsgForwardApply,
+		Payload: payload,
+	}
+	resp, err := c.sendRPC(ctx, msg)
+	if err != nil {
+		return err
+	}
+	var result forwardApplyResponse
+	if err := decodeGob(resp.Payload, &result); err != nil {
+		return fmt.Errorf("decode forward apply response: %w", err)
+	}
+	if result.Err != "" {
+		return fmt.Errorf("%s", result.Err)
+	}
+	return nil
 }
 
 // Close closes the connection.
