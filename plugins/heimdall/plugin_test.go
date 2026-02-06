@@ -70,21 +70,18 @@ func TestWatcherPlugin_Lifecycle(t *testing.T) {
 	assert.Equal(t, heimdall.StatusUninitialized, p.Status())
 }
 
-// TestWatcherPlugin_Actions tests that all actions are registered
+// TestWatcherPlugin_Actions tests that all actions are registered (GRAPH-RAG + system).
 func TestWatcherPlugin_Actions(t *testing.T) {
 	p := &WatcherPlugin{}
 	actions := p.Actions()
 
 	expectedActions := []string{
-		"hello",      // Hello World test action
-		"status",     // Get status
-		"health",     // Check health
-		"config",     // Get config
-		"set_config", // Set config
-		"metrics",    // Get metrics
-		"events",     // Get events
-		"broadcast",  // Broadcast message
-		"notify",     // Send notification
+		"help",               // List available actions
+		"status",             // Get status
+		"autocomplete_suggest", // Cypher schema suggestions
+		"discover",           // Semantic search (GRAPH-RAG)
+		"query",              // Read-only Cypher
+		"db_stats",           // Database statistics
 	}
 
 	for _, name := range expectedActions {

@@ -249,6 +249,12 @@ func (p *WatcherPlugin) ConfigSchema() map[string]interface{} {
 // autocompleteSuggestInputSchema is JSON Schema for the autocomplete_suggest action (query param).
 var autocompleteSuggestInputSchema = json.RawMessage([]byte(`{"type":"object","properties":{"query":{"type":"string","description":"Partial Cypher query to complete"}},"required":["query"]}`))
 
+// discoverInputSchema is JSON Schema for the discover action (semantic search in the graph).
+var discoverInputSchema = json.RawMessage([]byte(`{"type":"object","properties":{"query":{"type":"string","description":"Natural language or keyword search query"},"limit":{"type":"integer","description":"Max results (default 10)"},"depth":{"type":"integer","description":"Traversal depth for relationships from matched nodes (default 1)"}},"required":["query"]}`))
+
+// queryInputSchema is JSON Schema for the query action (read-only Cypher).
+var queryInputSchema = json.RawMessage([]byte(`{"type":"object","properties":{"cypher":{"type":"string","description":"Cypher query to execute"},"params":{"type":"object","description":"Optional query parameters"},"database":{"type":"string","description":"Logical database name (optional)"}},"required":["cypher"]}`))
+
 func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 	return map[string]heimdall.ActionFunc{
 		"help": {
@@ -266,6 +272,23 @@ func (p *WatcherPlugin) Actions() map[string]heimdall.ActionFunc {
 			Category:    "query",
 			InputSchema: autocompleteSuggestInputSchema,
 			Handler:     p.actionAutocompleteSuggest,
+		},
+		"discover": {
+			Description: "Semantic search in the knowledge graph. Use for conceptual search (e.g. 'pharmacy', 'my orders', 'prescription status'). Params: query (required), limit (optional), depth (optional).",
+			Category:    "search",
+			InputSchema: discoverInputSchema,
+			Handler:     p.actionDiscover,
+		},
+		"query": {
+			Description: "Execute a read-only Cypher query. Use when the user asks for explicit Cypher, MATCH/RETURN, or nodes by label. Params: cypher (required), params (optional), database (optional).",
+			Category:    "database",
+			InputSchema: queryInputSchema,
+			Handler:     p.actionQuery,
+		},
+		"db_stats": {
+			Description: "Get database statistics: node/edge counts, labels, k-means clusters, embeddings, feature flags",
+			Category:    "database",
+			Handler:     p.actionDBStats,
 		},
 	}
 }
@@ -347,6 +370,115 @@ func (p *WatcherPlugin) actionAutocompleteSuggest(ctx heimdall.ActionContext) (*
 			"schema":     schemaInfo,
 			"suggestion": "",
 		},
+	}, nil
+}
+
+// actionDiscover runs semantic search on the graph and returns formatted results for the LLM.
+func (p *WatcherPlugin) actionDiscover(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
+	p.mu.Lock()
+	p.requests++
+	p.mu.Unlock()
+
+	query, _ := ctx.Params["query"].(string)
+	if query == "" {
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: "query parameter required",
+		}, nil
+	}
+	limit := 10
+	if l, ok := ctx.Params["limit"].(float64); ok && l > 0 && l <= 50 {
+		limit = int(l)
+	}
+	depth := 1 // relationship hop from matched nodes (1 = direct neighbors)
+	if d, ok := ctx.Params["depth"].(float64); ok && d >= 0 && d <= 5 {
+		depth = int(d)
+	}
+	dbName := getDatabaseParam(ctx.Params)
+	if dbName == "" && ctx.Database != nil {
+		dbName = ctx.Database.DefaultDatabaseName()
+	}
+
+	if ctx.Database == nil {
+		return &heimdall.ActionResult{Success: false, Message: "database not available"}, nil
+	}
+
+	discoverCtx, cancel := context.WithTimeout(ctx.Context, 15*time.Second)
+	defer cancel()
+	result, err := ctx.Database.Discover(discoverCtx, dbName, query, nil, limit, depth)
+	if err != nil {
+		log.Printf("[Watcher] discover failed: %v", err)
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: fmt.Sprintf("Search failed: %v", err),
+		}, nil
+	}
+	formatted := formatDiscoverResult(result)
+	// Put formatted context in Message so the agentic loop sends readable context to the LLM
+	msg := formatted
+	if len(msg) > 8000 {
+		msg = msg[:8000] + "\n... (truncated)"
+	}
+	if msg == "" {
+		msg = fmt.Sprintf("Found %d result(s) (%s search); no formatted summary.", result.Total, result.Method)
+	}
+	p.addEvent("info", "Discover: semantic search executed", map[string]interface{}{
+		"query": query, "total": result.Total, "method": result.Method,
+	})
+	return &heimdall.ActionResult{
+		Success: true,
+		Message: msg,
+		Data:    map[string]interface{}{"results": result.Results, "total": result.Total},
+	}, nil
+}
+
+// actionQuery executes a read-only Cypher query and returns rows for the LLM.
+func (p *WatcherPlugin) actionQuery(ctx heimdall.ActionContext) (*heimdall.ActionResult, error) {
+	p.mu.Lock()
+	p.requests++
+	p.mu.Unlock()
+
+	cypher, _ := ctx.Params["cypher"].(string)
+	if cypher == "" {
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: "cypher parameter required",
+		}, nil
+	}
+	if len(cypher) > 10000 {
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: "query too long (max 10000 characters)",
+		}, nil
+	}
+	dbName := getDatabaseParam(ctx.Params)
+	if dbName == "" && ctx.Database != nil {
+		dbName = ctx.Database.DefaultDatabaseName()
+	}
+	var params map[string]interface{}
+	if p, ok := ctx.Params["params"].(map[string]interface{}); ok {
+		params = p
+	}
+
+	if ctx.Database == nil {
+		return &heimdall.ActionResult{Success: false, Message: "database not available"}, nil
+	}
+
+	rows, err := ctx.Database.Query(ctx.Context, dbName, cypher, params)
+	if err != nil {
+		log.Printf("[Watcher] query failed: %v", err)
+		return &heimdall.ActionResult{
+			Success: false,
+			Message: fmt.Sprintf("Query failed: %v", err),
+		}, nil
+	}
+	p.addEvent("info", "Query: Cypher executed", map[string]interface{}{
+		"database": dbName, "rows": len(rows),
+	})
+	return &heimdall.ActionResult{
+		Success: true,
+		Message: fmt.Sprintf("Query returned %d row(s)", len(rows)),
+		Data:    map[string]interface{}{"rows": rows},
 	}, nil
 }
 
@@ -982,14 +1114,14 @@ func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext) string {
 		}
 	}
 
-	// Perform semantic search with depth=2 for neighbor context
+	// Perform semantic search with depth=1 for relationship traversal from matched nodes
 	result, err := p.ctx.Database.Discover(
 		context.Background(),
 		"", // default database
 		ctx.UserMessage,
 		nil, // all node types
 		5,   // limit to top 5 results
-		2,   // depth 2 for neighbors
+		1,   // depth 1: include direct relationship neighbors
 	)
 	if err != nil {
 		log.Printf("[Watcher] Graph-RAG search failed: %v", err)
@@ -999,41 +1131,59 @@ func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext) string {
 	if result.Total == 0 {
 		return ""
 	}
+	return formatDiscoverResult(result)
+}
 
-	// Format results as context for Heimdall
+// internalDiscoverPropertyKeys are property names to omit from Graph-RAG context (embedding/managed internals).
+var internalDiscoverPropertyKeys = map[string]bool{
+	"embedding":            true,
+	"embedding_model":      true,
+	"embedding_dimensions": true,
+	"has_embedding":        true,
+	"embedded_at":         true,
+	"chunk_count":         true,
+	"orderLevelLookupKey": true,
+	"fetchedAt":            true,
+	"id":                   true,
+	"created_at":          true,
+	"updated_at":          true,
+}
+
+// formatDiscoverResult formats DiscoverResult as context text for the LLM (PrePrompt or action result).
+// Excludes internal/embedding properties; otherwise general-purpose (no domain-specific ordering or emphasis).
+func formatDiscoverResult(result *heimdall.DiscoverResult) string {
+	if result == nil || len(result.Results) == 0 {
+		return ""
+	}
 	var sb strings.Builder
 	sb.WriteString("\n\n=== KNOWLEDGE FROM GRAPH DATABASE ===\n")
 	sb.WriteString("The following information was found in the knowledge graph and may help answer the user's question:\n\n")
 
 	for i, r := range result.Results {
-		// Main result
 		title := r.Title
 		if title == "" {
 			title = r.ID
 		}
 		sb.WriteString(fmt.Sprintf("### %d. [%s] %s\n", i+1, r.Type, title))
 
-		// Content/properties
 		if r.ContentPreview != "" {
 			sb.WriteString(fmt.Sprintf("Content: %s\n", r.ContentPreview))
 		}
 
-		// Key properties (skip embedding, internal IDs)
 		if len(r.Properties) > 0 {
 			sb.WriteString("Properties:\n")
 			for k, v := range r.Properties {
-				// Skip internal/large properties
-				if k == "embedding" || k == "id" || k == "created_at" || k == "updated_at" {
+				if internalDiscoverPropertyKeys[k] {
 					continue
 				}
-				if s, ok := v.(string); ok && len(s) > 200 {
-					v = s[:200] + "..."
+				valStr := fmt.Sprint(v)
+				if len(valStr) > 300 {
+					valStr = valStr[:300] + "..."
 				}
-				sb.WriteString(fmt.Sprintf("  - %s: %v\n", k, v))
+				sb.WriteString(fmt.Sprintf("  - %s: %s\n", k, valStr))
 			}
 		}
 
-		// Related nodes (neighbors)
 		if len(r.Related) > 0 {
 			sb.WriteString("Related:\n")
 			shown := 0
@@ -1058,8 +1208,7 @@ func (p *WatcherPlugin) performGraphRAG(ctx *heimdall.PromptContext) string {
 	}
 
 	sb.WriteString("=== END KNOWLEDGE ===\n\n")
-	sb.WriteString("Use the above knowledge to help answer the user's question. If you can answer directly, do so. ")
-	sb.WriteString("If more detailed search is needed, use the heimdall_watcher_discover action.\n")
+	sb.WriteString("The above lists nodes (with Properties) and their Related nodes (relationship links). Use this information to answer the user in one short sentence. Do not call any action when this knowledge answers the question.\n")
 
 	return sb.String()
 }

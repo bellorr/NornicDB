@@ -972,6 +972,52 @@ func TestHandler_ActionExecution(t *testing.T) {
 }
 
 // =============================================================================
+// trimAgenticResponse (prompt-based agentic loop)
+// =============================================================================
+
+func TestTrimAgenticResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"empty", "", ""},
+		{"only json", `{"action": "heimdall_watcher_status", "params": {}}`, `{"action": "heimdall_watcher_status", "params": {}}`},
+		{"thinking then json", "Okay, let me think...\n\n{\"action\": \"heimdall_watcher_discover\", \"params\": {\"query\": \"pharmacy\"}}", `{"action": "heimdall_watcher_discover", "params": {"query": "pharmacy"}}`},
+		{"direct answer one line", "Your orders are at Pharmacy A and Pharmacy B.", "Your orders are at Pharmacy A and Pharmacy B."},
+		{"direct answer multi-line", "Here is the answer.\n\nMore detail.", "Here is the answer."},
+		{"json with trailing junk", `{"action":"x","params":{}} [{ "data": "..." }]`, `{"action":"x","params":{}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := trimAgenticResponse(tt.input)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+func TestExtractNonJSONAnswer(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		expected string
+	}{
+		{"empty", "", ""},
+		{"json then answer", `{"action": "none", "params": {}}
+
+No additional context provided to answer the question about pharmacies.`, "No additional context provided to answer the question about pharmacies."},
+		{"answer before json", "Your orders are at CVS Store #4521 and CVS Mail Order.\n{\"action\": \"none\", \"params\": {}}", "Your orders are at CVS Store #4521 and CVS Mail Order."},
+		{"only json", `{"action": "none", "params": {}}`, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractNonJSONAnswer(tt.input)
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
+// =============================================================================
 // Lifecycle Hook Tests
 // =============================================================================
 
@@ -991,7 +1037,7 @@ func TestPromptContext_BuildFinalPrompt(t *testing.T) {
 				"You are Heimdall",
 				"AVAILABLE ACTIONS:",
 				"status: Get status",
-				"Respond with JSON action command only",
+				"Respond with exactly one line",
 			},
 		},
 		{

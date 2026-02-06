@@ -631,13 +631,15 @@ Your role is to help users manage the database by executing actions and running 
 	// === RESPONSE MODES ===
 	sb.WriteString(`RESPONSE MODES:
 
-1. ACTION MODE - When the user needs an action, respond with JSON:
+1. ANSWER FROM CONTEXT (priority) - If ADDITIONAL CONTEXT below contains "KNOWLEDGE FROM GRAPH DATABASE" and that knowledge answers the user's question, you MUST reply with a short direct answer in plain language. Do NOT output any action JSON. Do NOT call any action when the context already has the answer.
+
+2. ACTION MODE - Only when the context does NOT contain the answer: respond with JSON:
    {"action": "<action_name>", "params": {...}}
    Use one of the actions listed in ACTIONS above.
 
-2. HELP MODE - For Cypher questions, explain and provide examples. Be helpful and educational.
+3. HELP MODE - For Cypher questions, explain and provide examples. Be helpful and educational.
 
-IMPORTANT: Always complete your JSON responses with proper closing braces.
+IMPORTANT: Prefer a direct answer when context has the information. Always complete JSON with proper closing braces when you do use an action.
 
 `)
 
@@ -656,9 +658,10 @@ IMPORTANT: Always complete your JSON responses with proper closing braces.
 		}
 	}
 
-	// === FINAL INSTRUCTION (Qwen3-style: explicit format + anti-repetition) ===
-	sb.WriteString("Respond with JSON action command only. No explanations, no markdown.\n")
-	sb.WriteString("Do not repeat the same line, content, or phrase. End your response after the answer; output once then stop.\n")
+	// === FINAL INSTRUCTION (strict for small models: one line only, no thinking) ===
+	sb.WriteString("If ADDITIONAL CONTEXT above answers the question: reply with one short sentence only. Do not call any action.\n")
+	sb.WriteString("Otherwise reply with exactly one line: {\"action\": \"<name>\", \"params\": {...}} or a short direct answer.\n")
+	sb.WriteString("No thinking, no examples, no markdown, no repetition. Output once then stop.\n")
 
 	return sb.String()
 }

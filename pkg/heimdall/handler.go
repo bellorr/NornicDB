@@ -758,16 +758,20 @@ func logToolResult(requestID, action string, duration time.Duration, err error) 
 
 // runAgenticLoopPromptBased uses prompt-based multi-round for local GGUF (or any provider without native tools).
 func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requestLifecycle, systemPrompt, userMessage string, params GenerateParams) (string, error) {
-	prompt := systemPrompt + "\n\nUser: " + userMessage + "\n\nRespond with either {\"action\": \"...\", \"params\": {...}} or a direct answer.\n\nAssistant: "
+	answerFromContextHint := "If the ADDITIONAL CONTEXT above contains KNOWLEDGE FROM GRAPH DATABASE, answer from it in one short sentence. Otherwise output one line: {\"action\": \"<name>\", \"params\": {...}} or a direct answer.\n\nAssistant: "
+	prompt := systemPrompt + "\n\nUser: " + userMessage + "\n\n" + answerFromContextHint
 	var lastResponse string
 	for round := 0; round < MaxAgenticRounds; round++ {
-		response, err := h.manager.Generate(ctx, prompt, params)
+		rawResponse, err := h.manager.Generate(ctx, prompt, params)
 		if err != nil {
 			return "", err
 		}
-		response = strings.TrimSpace(response)
 		lastResponse = response
 		parsedAction, actionError := h.tryParseAction(response)
+		// Treat "none" as "no action, answering from context" and return any text the model produced
+		if parsedAction != nil && (parsedAction.Action == "none" || parsedAction.Action == "") {
+			return response, nil
+		}
 		if actionError != "" {
 			return actionError, nil
 		}
@@ -826,13 +830,13 @@ func (h *Handler) runAgenticLoopPromptBased(ctx context.Context, lifecycle *requ
 			execDuration := time.Since(startTime)
 			logToolResult(lifecycle.requestID, parsedAction.Action, execDuration, execErr)
 			if execErr != nil {
-				prompt = prompt + response + "\n\nTool result: " + FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()}) + "\n\nBased on the above, respond with another action or a final answer.\n\nAssistant: "
+				prompt = prompt + response + "\n\nTool result: " + FormatActionResultForModel(&ActionResult{Success: false, Message: execErr.Error()}) + "\n\nOutput exactly one line: either {\"action\": \"<name>\", \"params\": {...}} or a brief direct answer. no repetition.\n\nAssistant: "
 				continue
 			}
 			CallPostExecuteHooks(&PostExecuteContext{RequestID: lifecycle.requestID, Action: parsedAction.Action, Params: paramsToUse, Result: result, Duration: execDuration, PluginData: lifecycle.promptCtx.PluginData})
 			resultStr = FormatActionResultForModel(result)
 		}
-		prompt = prompt + response + "\n\nTool result: " + resultStr + "\n\nBased on the tool result, respond with another action JSON or a final answer to the user.\n\nAssistant: "
+		prompt = prompt + response + "\n\nTool result: " + resultStr + "\n\nOutput exactly one line: either {\"action\": \"<name>\", \"params\": {...}} or a brief direct answer to the user. No thinking, no examples, no repetition.\n\nAssistant: "
 	}
 	return lastResponse, nil
 }

@@ -298,8 +298,8 @@ func (r *heimdallDBRouter) Discover(ctx context.Context, database string, query 
 			}
 		}
 
-		// Get related nodes if depth > 1
-		if depth > 1 {
+		// Get related nodes when depth >= 1 (1 = direct neighbors, 2+ = multi-hop)
+		if depth >= 1 {
 			sr.Related = r.getRelatedNodes(engine, r0.ID, depth)
 		}
 
