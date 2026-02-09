@@ -93,7 +93,7 @@ COPY docker/entrypoint.sh /app/entrypoint-real.sh
 COPY docker/cuda-fallback-wrapper.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/entrypoint-real.sh
 
-# Embed both models: BGE-M3 for embeddings + Qwen for Heimdall
+# Embed BGE-M3 (embeddings), BGE-Reranker (search), and Qwen (Heimdall)
 RUN --mount=type=bind,source=models,target=/models,ro \
     echo "Embedding BGE-M3 model..." && \
     if [ -f /models/bge-m3.gguf ]; then \
@@ -102,6 +102,13 @@ RUN --mount=type=bind,source=models,target=/models,ro \
     else \
       echo "ERROR: models/bge-m3.gguf not found" && exit 1; \
     fi && \
+    if [ -f /models/bge-reranker-v2-m3.gguf ]; then \
+      cp /models/bge-reranker-v2-m3.gguf /app/models/ && echo "✓ Embedded bge-reranker-v2-m3.gguf"; \
+    elif [ -f /models/bge-reranker-v2-m3-Q4_K_M.gguf ]; then \
+      cp /models/bge-reranker-v2-m3-Q4_K_M.gguf /app/models/bge-reranker-v2-m3.gguf && echo "✓ Embedded bge-reranker-v2-m3.gguf (from Q4_K_M)"; \
+    else \
+      echo "ERROR: models/bge-reranker-v2-m3.gguf or bge-reranker-v2-m3-Q4_K_M.gguf not found" && exit 1; \
+    fi && \
     echo "Embedding Heimdall SLM model..." && \
     if [ -f /models/qwen3-0.6b-instruct.gguf ]; then \
       cp /models/qwen3-0.6b-instruct.gguf /app/models/ && \
@@ -109,7 +116,7 @@ RUN --mount=type=bind,source=models,target=/models,ro \
     else \
       echo "ERROR: models/qwen3-0.6b-instruct.gguf not found" && exit 1; \
     fi && \
-    echo "✓ Heimdall cognitive features enabled"
+    echo "✓ Heimdall cognitive features + reranker enabled"
 
 EXPOSE 7474 7687
 
@@ -127,6 +134,9 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_NO_AUTH=true \
     NORNICDB_GPU_ENABLED=true \
     NORNICDB_PLUGINS_DIR=/app/plugins \
+    NORNICDB_SEARCH_RERANK_ENABLED=true \
+    NORNICDB_SEARCH_RERANK_PROVIDER=local \
+    NORNICDB_SEARCH_RERANK_MODEL=bge-reranker-v2-m3.gguf \
     NORNICDB_HEIMDALL_ENABLED=true \
     NORNICDB_HEIMDALL_MODEL=qwen3-0.6b-instruct \
     NORNICDB_HEIMDALL_PLUGINS_DIR=/app/plugins/heimdall \

@@ -77,6 +77,7 @@ DOCKER_DIR := docker
 MODELS_DIR := models
 BGE_MODEL := $(MODELS_DIR)/bge-m3.gguf
 QWEN_MODEL := $(MODELS_DIR)/qwen3-0.6b-instruct.gguf
+# Reranker: download target uses Q4_K_M; Dockerfiles accept either bge-reranker-v2-m3.gguf or bge-reranker-v2-m3-Q4_K_M.gguf
 BGE_RERANKER_MODEL := $(MODELS_DIR)/bge-reranker-v2-m3-Q4_K_M.gguf
 BGE_URL := https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf
 # Ungated community mirror (single-file Q4_K_M). Official Qwen repo may require auth.
@@ -204,11 +205,11 @@ else
 	fi
 endif
 
-# Download both models if missing
-download-models: download-bge download-qwen
+# Download all models if missing (BGE + Qwen for Heimdall + BGE reranker for search)
+download-models: download-bge download-qwen download-bge-reranker
 	@echo ""
 	@echo "╔══════════════════════════════════════════════════════════════╗"
-	@echo "║ ✓ All Heimdall models ready                                  ║"
+	@echo "║ ✓ All Heimdall + search models ready                         ║"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 
 # Check if models exist (without downloading)
@@ -227,6 +228,7 @@ ifeq ($(HOST_OS),windows)
 		echo Qwen model missing: $(QWEN_MODEL) && \
 		echo   Run: make download-qwen \
 	)
+	@if exist "$(BGE_RERANKER_MODEL)" (echo BGE-Reranker model: $(BGE_RERANKER_MODEL)) else (if exist "$(MODELS_DIR)\bge-reranker-v2-m3.gguf" (echo BGE-Reranker model: $(MODELS_DIR)\bge-reranker-v2-m3.gguf) else (echo BGE-Reranker model missing && echo   Run: make download-bge-reranker))
 else
 	@if [ -f "$(BGE_MODEL)" ]; then \
 		echo "✓ BGE model: $(BGE_MODEL)"; \
@@ -240,6 +242,12 @@ else
 		echo "✗ Qwen model missing: $(QWEN_MODEL)"; \
 		echo "  Run: make download-qwen"; \
 	fi
+	@if [ -f "$(BGE_RERANKER_MODEL)" ] || [ -f "$(MODELS_DIR)/bge-reranker-v2-m3.gguf" ]; then \
+		echo "✓ BGE-Reranker model: $(BGE_RERANKER_MODEL) or $(MODELS_DIR)/bge-reranker-v2-m3.gguf"; \
+	else \
+		echo "✗ BGE-Reranker model missing (need $(BGE_RERANKER_MODEL) or $(MODELS_DIR)/bge-reranker-v2-m3.gguf)"; \
+		echo "  Run: make download-bge-reranker"; \
+	fi
 endif
 
 # ==============================================================================
@@ -252,7 +260,7 @@ build-arm64-metal:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 -t $(IMAGE_ARM64) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
 
-build-arm64-metal-bge: download-bge
+build-arm64-metal-bge: download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_ARM64_BGE) [with BGE model]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
@@ -276,7 +284,7 @@ build-amd64-cuda:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 -t $(IMAGE_AMD64) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
 
-build-amd64-cuda-bge: download-bge
+build-amd64-cuda-bge: download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64_BGE) [with BGE model]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
@@ -306,16 +314,16 @@ build-amd64-cpu-headless:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg HEADLESS=true -t $(IMAGE_AMD64_CPU_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.amd64-cpu .
 
-# CPU-only with BGE embeddings (cross-platform: works on both AMD64 and ARM64)
-build-cpu-bge: download-bge
+# CPU-only with BGE embeddings + reranker (cross-platform: works on both AMD64 and ARM64)
+build-cpu-bge: download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
-	@echo "║ Building: $(IMAGE_CPU_BGE) [CPU + BGE embeddings]"
+	@echo "║ Building: $(IMAGE_CPU_BGE) [CPU + BGE embeddings + reranker]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) -t $(IMAGE_CPU_BGE) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
 
-build-cpu-bge-headless: download-bge
+build-cpu-bge-headless: download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
-	@echo "║ Building: $(IMAGE_CPU_BGE_HEADLESS) [CPU + BGE, headless]"
+	@echo "║ Building: $(IMAGE_CPU_BGE_HEADLESS) [CPU + BGE + reranker, headless]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --build-arg HEADLESS=true -t $(IMAGE_CPU_BGE_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.cpu-bge .
 
@@ -326,7 +334,7 @@ build-amd64-vulkan:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 -t $(IMAGE_AMD64_VULKAN) -f $(DOCKER_DIR)/Dockerfile.amd64-vulkan .
 
-build-amd64-vulkan-bge: download-bge
+build-amd64-vulkan-bge: download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64_VULKAN_BGE) [Vulkan + BGE model]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"

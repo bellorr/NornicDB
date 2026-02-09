@@ -97,7 +97,7 @@ COPY docker/entrypoint.sh /app/entrypoint-real.sh
 COPY docker/cuda-fallback-wrapper.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh /app/entrypoint-real.sh
 
-# Model embedding: only copy when EMBED_MODEL=true (uses BuildKit mount to avoid layer bloat)
+# Model embedding: only copy when EMBED_MODEL=true (BGE + BGE-Reranker; uses BuildKit mount)
 ARG EMBED_MODEL=false
 ARG HEADLESS=false
 RUN --mount=type=bind,source=models,target=/models,ro \
@@ -107,6 +107,13 @@ RUN --mount=type=bind,source=models,target=/models,ro \
         echo "✓ Embedded bge-m3.gguf model ($(du -h /app/models/bge-m3.gguf | cut -f1))"; \
       else \
         echo "ERROR: EMBED_MODEL=true but models/bge-m3.gguf not found" && exit 1; \
+      fi && \
+      if [ -f /models/bge-reranker-v2-m3.gguf ]; then \
+        cp /models/bge-reranker-v2-m3.gguf /app/models/ && echo "✓ Embedded bge-reranker-v2-m3.gguf"; \
+      elif [ -f /models/bge-reranker-v2-m3-Q4_K_M.gguf ]; then \
+        cp /models/bge-reranker-v2-m3-Q4_K_M.gguf /app/models/bge-reranker-v2-m3.gguf && echo "✓ Embedded bge-reranker-v2-m3.gguf (from Q4_K_M)"; \
+      else \
+        echo "ERROR: EMBED_MODEL=true but models/bge-reranker-v2-m3.gguf (or Q4_K_M) not found" && exit 1; \
       fi; \
     else \
       echo "→ BYOM mode (no embedded model)"; \
@@ -120,7 +127,7 @@ EXPOSE 7474 7687
 HEALTHCHECK --interval=30s --timeout=10s --start-period=10s --retries=3 \
     CMD wget --spider -q http://localhost:7474/health || exit 1
 
-# Set NORNICDB_HEADLESS based on build arg
+# Set NORNICDB_HEADLESS and reranker (when EMBED_MODEL=true we set reranker env for runtime)
 ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_HTTP_PORT=7474 \
     NORNICDB_BOLT_PORT=7687 \
@@ -133,6 +140,9 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_GPU_ENABLED=true \
     NORNICDB_HEADLESS=${HEADLESS} \
     NORNICDB_PLUGINS_DIR=/app/plugins \
+    NORNICDB_SEARCH_RERANK_ENABLED=true \
+    NORNICDB_SEARCH_RERANK_PROVIDER=local \
+    NORNICDB_SEARCH_RERANK_MODEL=bge-reranker-v2-m3.gguf \
     NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility
 

@@ -110,18 +110,23 @@ COPY --from=builder /build/plugins/heimdall/built-plugins /app/plugins/heimdall/
 COPY docker/entrypoint.sh /app/
 RUN chmod +x /app/entrypoint.sh
 
-# Embed BOTH models: BGE-M3 (embeddings) and qwen3-0.6b (Heimdall SLM)
+# Embed BGE-M3 (embeddings), BGE-Reranker (search), and qwen3-0.6b (Heimdall SLM)
 # Using BuildKit mount to avoid layer bloat during COPY
 RUN --mount=type=bind,source=models,target=/models,ro \
     echo "=== Embedding models for batteries-included deployment ===" && \
-    # BGE-M3 embedding model (required)
     if [ -f /models/bge-m3.gguf ]; then \
       cp /models/bge-m3.gguf /app/models/ && \
       echo "✓ Embedded bge-m3.gguf ($(du -h /app/models/bge-m3.gguf | cut -f1))"; \
     else \
       echo "ERROR: models/bge-m3.gguf not found" && exit 1; \
     fi && \
-    # qwen3-0.6b-Instruct for Heimdall (required for this build)
+    if [ -f /models/bge-reranker-v2-m3.gguf ]; then \
+      cp /models/bge-reranker-v2-m3.gguf /app/models/ && echo "✓ Embedded bge-reranker-v2-m3.gguf"; \
+    elif [ -f /models/bge-reranker-v2-m3-Q4_K_M.gguf ]; then \
+      cp /models/bge-reranker-v2-m3-Q4_K_M.gguf /app/models/bge-reranker-v2-m3.gguf && echo "✓ Embedded bge-reranker-v2-m3.gguf (from Q4_K_M)"; \
+    else \
+      echo "ERROR: models/bge-reranker-v2-m3.gguf or bge-reranker-v2-m3-Q4_K_M.gguf not found" && exit 1; \
+    fi && \
     if [ -f /models/qwen3-0.6b-instruct.gguf ]; then \
       cp /models/qwen3-0.6b-instruct.gguf /app/models/ && \
       echo "✓ Embedded qwen3-0.6b-instruct.gguf ($(du -h /app/models/qwen3-0.6b-instruct.gguf | cut -f1))"; \
@@ -146,6 +151,10 @@ ENV NORNICDB_DATA_DIR=/data \
     NORNICDB_EMBEDDING_DIMENSIONS=1024 \
     NORNICDB_MODELS_DIR=/app/models \
     NORNICDB_EMBEDDING_GPU_LAYERS=0 \
+    # Search reranker (Stage-2)
+    NORNICDB_SEARCH_RERANK_ENABLED=true \
+    NORNICDB_SEARCH_RERANK_PROVIDER=local \
+    NORNICDB_SEARCH_RERANK_MODEL=bge-reranker-v2-m3.gguf \
     # Heimdall configuration (cognitive guardian)
     NORNICDB_HEIMDALL_ENABLED=true \
     NORNICDB_HEIMDALL_MODEL=qwen3-0.6b-instruct \
