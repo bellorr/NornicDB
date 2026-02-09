@@ -972,8 +972,69 @@ func TestHandler_ActionExecution(t *testing.T) {
 }
 
 // =============================================================================
-// trimAgenticResponse (prompt-based agentic loop)
+// trimAgenticResponse / extractNonJSONAnswer (prompt-based agentic loop helpers)
 // =============================================================================
+
+// trimAgenticResponse extracts the first JSON object from the response, or the first paragraph if no JSON.
+// Used by tests that validate prompt-based agentic response trimming.
+func trimAgenticResponse(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if idx := strings.Index(s, "{"); idx >= 0 {
+		if obj := extractFirstJSONObject(s[idx:]); obj != "" {
+			return obj
+		}
+	}
+	// No JSON: return first paragraph (up to first \n\n)
+	if i := strings.Index(s, "\n\n"); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return s
+}
+
+// extractNonJSONAnswer returns the prose answer part (before or after the first JSON object), or "" if only JSON.
+func extractNonJSONAnswer(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	idx := strings.Index(s, "{")
+	if idx < 0 {
+		return s
+	}
+	before := strings.TrimSpace(s[:idx])
+	obj := extractFirstJSONObject(s[idx:])
+	if obj == "" {
+		return s
+	}
+	after := strings.TrimSpace(s[idx+len(obj):])
+	if before != "" {
+		return before
+	}
+	return after
+}
+
+// extractFirstJSONObject returns the first balanced {...} substring, or "" if not found.
+func extractFirstJSONObject(s string) string {
+	if len(s) == 0 || s[0] != '{' {
+		return ""
+	}
+	depth := 0
+	for i := 0; i < len(s); i++ {
+		switch s[i] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[:i+1]
+			}
+		}
+	}
+	return ""
+}
 
 func TestTrimAgenticResponse(t *testing.T) {
 	tests := []struct {
@@ -1037,7 +1098,7 @@ func TestPromptContext_BuildFinalPrompt(t *testing.T) {
 				"You are Heimdall",
 				"AVAILABLE ACTIONS:",
 				"status: Get status",
-				"Respond with exactly one line",
+				"reply with exactly one line",
 			},
 		},
 		{
