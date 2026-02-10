@@ -1138,6 +1138,22 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		executors:       make(map[string]*cypher.StorageExecutor),
 	}
 
+	// So EmbeddingCount() aggregates across all databases (not just default)
+	s.db.SetAllDatabasesProvider(func() []nornicdb.DatabaseAndStorage {
+		var out []nornicdb.DatabaseAndStorage
+		for _, info := range s.dbManager.ListDatabases() {
+			if info.Name == "system" {
+				continue
+			}
+			storageEngine, err := s.dbManager.GetStorage(info.Name)
+			if err != nil {
+				continue
+			}
+			out = append(out, nornicdb.DatabaseAndStorage{Name: info.Name, Storage: storageEngine})
+		}
+		return out
+	})
+
 	// Wire MCP to use per-database executors when invoked from the agentic loop (so link/store/recall use the request's database)
 	if mcpServer != nil && dbManager != nil {
 		mcpServer.SetDatabaseScopedExecutor(s.mcpDatabaseScopedExecutor())

@@ -28,19 +28,26 @@ import (
 //	# Start NornicDB server first (in another terminal)
 //	./nornicdb --http-port 7474 --data-dir ./data/test
 //
-//	# Run benchmark
+//	# Run benchmark (local)
 //	go run testing/benchmarks/http_write_latency/main.go \
 //		-url http://localhost:7474 \
-//		-database neo4j \
+//		-database testdb \
 //		-requests 1000 \
 //		-concurrency 10 \
-//		-auth admin:admin \
-//		-pprof-enabled
+//		-auth admin:admin
+//
+//	# Run benchmark (sit2, Neo4j HTTP over base path /nornic-db; all writes go to testdb via URL path)
+//	go run testing/benchmarks/http_write_latency/main.go \
+//		-url https://remote-url.com/remote-path \
+//		-database testdb \
+//		-requests 1000 \
+//		-concurrency 10 \
+//		-auth admin:password
 //
 //	# With pprof profiling (requires NORNICDB_ENABLE_PPROF=true on server)
 //	go run testing/benchmarks/http_write_latency/main.go \
 //		-url http://localhost:7474 \
-//		-database neo4j \
+//		-database testdb \
 //		-requests 1000 \
 //		-concurrency 10 \
 //		-auth admin:admin \
@@ -49,10 +56,10 @@ import (
 func main() {
 	var (
 		url           = flag.String("url", "http://localhost:7474", "NornicDB HTTP server URL")
-		database      = flag.String("database", "neo4j", "Database name")
+		database      = flag.String("database", "testdb", "Database name (used in URL path /db/{database}/tx/commit)")
 		requests      = flag.Int("requests", 1000, "Total number of requests")
 		concurrency   = flag.Int("concurrency", runtime.GOMAXPROCS(0), "Number of concurrent goroutines")
-		auth          = flag.String("auth", "admin:admin", "Basic auth credentials (username:password)")
+		auth          = flag.String("auth", "admin:password", "Basic auth credentials (username:password)")
 		pprofEnabled  = flag.Bool("pprof-enabled", false, "Enable pprof profiling (requires server to have pprof enabled)")
 		pprofDuration = flag.Duration("pprof-duration", 30*time.Second, "Duration for pprof CPU profile")
 		warmup        = flag.Int("warmup", 10, "Number of warmup requests")

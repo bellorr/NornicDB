@@ -16,10 +16,31 @@ NORNICDB_ENABLE_PPROF=true ./nornicdb --http-port 7474
 
 ### 2. Run Benchmark
 
+**Local (default database `testdb`):**
 ```bash
 go run testing/benchmarks/http_write_latency/main.go \
     -url http://localhost:7474 \
-    -database neo4j \
+    -database testdb \
+    -requests 10000 \
+    -concurrency 50 \
+    -auth admin:admin
+```
+
+**Sit2 (Neo4j HTTP over base path; all writes to `testdb`):**
+```bash
+go run testing/benchmarks/http_write_latency/main.go \
+    -url https://remote-url.com/remote-path \
+    -database testdb \
+    -requests 10000 \
+    -concurrency 50 \
+    -auth admin:password
+```
+
+**With pprof:**
+```bash
+go run testing/benchmarks/http_write_latency/main.go \
+    -url http://localhost:7474 \
+    -database testdb \
     -requests 10000 \
     -concurrency 50 \
     -auth admin:admin \
@@ -53,7 +74,7 @@ go tool pprof -base=before.pb.gz -http=:8080 after.pb.gz
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-url` | `http://localhost:7474` | NornicDB HTTP server URL |
-| `-database` | `neo4j` | Database name |
+| `-database` | `testdb` | Database name (URL path `/db/{database}/tx/commit`; use `testdb` to avoid default `nornic`) |
 | `-requests` | `1000` | Total number of requests |
 | `-concurrency` | `GOMAXPROCS` | Number of concurrent goroutines |
 | `-auth` | `admin:admin` | Basic auth credentials (username:password) |

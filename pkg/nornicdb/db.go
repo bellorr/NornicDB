@@ -508,6 +508,16 @@ type DB struct {
 	replicator         replication.Replicator
 	replicationAdapter *replication.StorageAdapter
 	replicationTrans   replication.Transport
+
+	// Optional: when set, EmbeddingCount() aggregates across all DBs returned by this provider (used by server with multi-db).
+	allDatabasesProvider func() []DatabaseAndStorage
+}
+
+// DatabaseAndStorage pairs a database name with its storage engine.
+// Used by SetAllDatabasesProvider so EmbeddingCount() can aggregate across all databases.
+type DatabaseAndStorage struct {
+	Name    string
+	Storage storage.Engine
 }
 
 // Open opens or creates a NornicDB database at the specified directory.
@@ -1491,13 +1501,37 @@ func (db *DB) EmbedQueueStats() *QueueStats {
 }
 
 // EmbeddingCount returns the total number of nodes with embeddings.
-// This is O(1) - the count is tracked by the vector index.
+// When allDatabasesProvider is set (e.g. by the server in multi-db mode), it get-or-creates
+// the search service for each database and sums their tracked counts (O(1) per DB).
+// Otherwise returns the count for the default database only.
 func (db *DB) EmbeddingCount() int {
+	if db.allDatabasesProvider != nil {
+		var total int
+		for _, d := range db.allDatabasesProvider() {
+			if d.Name == "system" {
+				continue
+			}
+			svc, err := db.GetOrCreateSearchService(d.Name, d.Storage)
+			if err != nil || svc == nil {
+				continue
+			}
+			total += svc.EmbeddingCount()
+		}
+		return total
+	}
 	svc, err := db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
 	if err != nil || svc == nil {
 		return 0
 	}
 	return svc.EmbeddingCount()
+}
+
+// SetAllDatabasesProvider sets an optional provider so EmbeddingCount() aggregates across all databases.
+// The server sets this when multi-database is enabled so "Total embeddings" reflects every DB.
+func (db *DB) SetAllDatabasesProvider(provider func() []DatabaseAndStorage) {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+	db.allDatabasesProvider = provider
 }
 
 // VectorIndexDimensions returns the actual dimensions of the search service's vector index.
