@@ -200,9 +200,8 @@ class NornicDBClient {
     return await res.json();
   }
 
-  async executeCypher(statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
-    // Get default database name (will fetch from discovery endpoint if not cached)
-    const dbName = await this.getDefaultDatabase();
+  async executeCypher(statement: string, parameters?: Record<string, unknown>, database?: string): Promise<CypherResponse> {
+    const dbName = database != null && database !== '' ? database : await this.getDefaultDatabase();
     const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -282,6 +281,12 @@ class NornicDBClient {
     return infos.filter((x): x is DatabaseInfo => Boolean(x));
   }
 
+  /** Returns database names for the query dropdown (user-visible DBs, excludes system). */
+  async listDatabaseNames(): Promise<string[]> {
+    const list = await this.listDatabases();
+    return list.map((d) => d.name);
+  }
+
   private quoteCypherIdentifier(identifier: string): string {
     // Cypher uses backticks for identifier quoting; escape embedded backticks by doubling them.
     // Example: db name `a`b` => `a``b`
@@ -318,12 +323,12 @@ class NornicDBClient {
     }
   }
 
-  async deleteNodes(nodeIds: string[]): Promise<{ success: boolean; deleted: number; errors: string[] }> {
+  async deleteNodes(nodeIds: string[], database?: string): Promise<{ success: boolean; deleted: number; errors: string[] }> {
     if (nodeIds.length === 0) {
       return { success: true, deleted: 0, errors: [] };
     }
 
-    const dbName = await this.getDefaultDatabase();
+    const dbName = database != null && database !== '' ? database : await this.getDefaultDatabase();
     
     try {
       // First, verify the nodes exist before deleting (safety check)
@@ -431,8 +436,8 @@ class NornicDBClient {
     }
   }
 
-  async updateNodeProperties(nodeId: string, properties: Record<string, unknown>): Promise<{ success: boolean; error?: string }> {
-    const dbName = await this.getDefaultDatabase();
+  async updateNodeProperties(nodeId: string, properties: Record<string, unknown>, database?: string): Promise<{ success: boolean; error?: string }> {
+    const dbName = database != null && database !== '' ? database : await this.getDefaultDatabase();
     
     // Build SET clause
     const setParts: string[] = [];

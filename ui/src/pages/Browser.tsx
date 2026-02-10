@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { Terminal, Sparkles } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Terminal, Sparkles, Database } from "lucide-react";
 import { useAppStore } from "../store/appStore";
 import { Bifrost } from "../../Bifrost";
 import { api } from "../utils/api";
@@ -27,10 +27,15 @@ interface EmbedData {
 }
 
 export function Browser() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const {
     stats,
     connected,
     fetchStats,
+    fetchDatabases,
+    databaseList,
+    selectedDatabase,
+    setSelectedDatabase,
     cypherQuery,
     setCypherQuery,
     cypherResult,
@@ -121,6 +126,28 @@ export function Browser() {
     return () => clearInterval(interval);
   }, [fetchStats]);
 
+  useEffect(() => {
+    fetchDatabases();
+  }, [fetchDatabases]);
+
+  // Sync URL ?database= with selected database (apply URL when list is loaded)
+  useEffect(() => {
+    const dbFromUrl = searchParams.get("database");
+    if (dbFromUrl && databaseList.length > 0 && databaseList.includes(dbFromUrl)) {
+      setSelectedDatabase(dbFromUrl);
+    }
+  }, [databaseList, searchParams, setSelectedDatabase]);
+
+  const handleDatabaseChange = (dbName: string) => {
+    const value = dbName === "" ? null : dbName;
+    setSelectedDatabase(value);
+    if (value) {
+      setSearchParams({ database: value });
+    } else {
+      setSearchParams({});
+    }
+  };
+
   const handleDeleteNodes = async () => {
     setDeleting(true);
     setDeleteError(null);
@@ -150,7 +177,7 @@ export function Browser() {
     nodeId: string,
     props: Record<string, unknown>
   ) => {
-    return await api.updateNodeProperties(nodeId, props);
+    return await api.updateNodeProperties(nodeId, props, selectedDatabase ?? undefined);
   };
 
   const handleRefresh = () => {
@@ -178,6 +205,27 @@ export function Browser() {
       <div className="flex-1 flex">
         {/* Left Panel - Query/Search */}
         <div className="w-1/2 border-r border-norse-rune flex flex-col">
+          {/* Database selector - all queries run against this database */}
+          <div className="flex items-center gap-2 px-4 py-2 border-b border-norse-rune bg-norse-shadow/30">
+            <Database className="w-4 h-4 text-norse-silver shrink-0" aria-hidden />
+            <label htmlFor="browser-database" className="text-sm text-norse-silver shrink-0">
+              Database
+            </label>
+            <select
+              id="browser-database"
+              value={selectedDatabase ?? ""}
+              onChange={(e) => handleDatabaseChange(e.target.value)}
+              className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary focus:border-transparent"
+              title="All Cypher queries and node operations use this database"
+            >
+              <option value="">Default (from server)</option>
+              {databaseList.map((name: string) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
           {/* Tabs */}
           <div className="flex border-b border-norse-rune">
             <button

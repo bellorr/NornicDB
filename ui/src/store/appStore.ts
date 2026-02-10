@@ -17,6 +17,12 @@ interface AppState {
   // Database
   stats: DatabaseStats | null;
   connected: boolean;
+  /** Selected database for queries (null = use server default). */
+  selectedDatabase: string | null;
+  /** List of database names for the dropdown (user-visible, excludes system). */
+  databaseList: string[];
+  setSelectedDatabase: (db: string | null) => void;
+  fetchDatabases: () => Promise<void>;
   
   // Query
   cypherQuery: string;
@@ -61,6 +67,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   authLoading: true,
   stats: null,
   connected: false,
+  selectedDatabase: null,
+  databaseList: [],
   cypherQuery: 'MATCH (n) RETURN n LIMIT 25',
   cypherResult: null,
   queryLoading: false,
@@ -107,16 +115,27 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  setSelectedDatabase: (db) => set({ selectedDatabase: db }),
+
+  fetchDatabases: async () => {
+    try {
+      const names = await api.listDatabaseNames();
+      set({ databaseList: names });
+    } catch {
+      set({ databaseList: [] });
+    }
+  },
+
   // Query actions
   setCypherQuery: (query) => set({ cypherQuery: query }),
 
   executeCypher: async () => {
-    const { cypherQuery, queryHistory } = get();
+    const { cypherQuery, queryHistory, selectedDatabase } = get();
     if (!cypherQuery.trim()) return;
 
     set({ queryLoading: true, queryError: null });
     try {
-      const result = await api.executeCypher(cypherQuery);
+      const result = await api.executeCypher(cypherQuery, undefined, selectedDatabase ?? undefined);
       
       // Check for errors in response
       if (result.errors && result.errors.length > 0) {
