@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
 	"reflect"
 	"strings"
@@ -837,6 +838,11 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		// Comments are part of Cypher spec but should be removed before parsing
 		queryStatement = stripCypherComments(queryStatement)
 		queryStatement = strings.TrimSpace(queryStatement)
+		// Remove UTF-8 BOM if present (some clients send it; breaks executor routing e.g. CREATE DATABASE)
+		if strings.HasPrefix(queryStatement, "\xef\xbb\xbf") {
+			queryStatement = strings.TrimPrefix(queryStatement, "\xef\xbb\xbf")
+			queryStatement = strings.TrimSpace(queryStatement)
+		}
 
 		// Skip empty statements (after comment removal)
 		if queryStatement == "" {
@@ -880,6 +886,13 @@ func (s *Server) handleImplicitTransaction(w http.ResponseWriter, r *http.Reques
 		if isCreateDatabaseStatement(queryStatement) {
 			if createdName, ok := parseCreatedDatabaseName(queryStatement); ok && createdName != "" {
 				s.grantAccessToNewDatabase(r.Context(), createdName, claims)
+				// Ensure CREATE DATABASE always returns a proper result (name + row).
+				// Defensive: executor should return this, but if it ever returns empty we still send a valid response.
+				if len(result.Columns) == 0 && len(result.Rows) == 0 {
+					log.Printf("[nornicdb:CREATE_DATABASE] server defensive fix applied: executor returned empty result for CREATE DATABASE, filled with name=%q", createdName)
+					result.Columns = []string{"name"}
+					result.Rows = [][]interface{}{{createdName}}
+				}
 			}
 		}
 

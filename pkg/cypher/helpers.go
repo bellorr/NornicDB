@@ -2,9 +2,17 @@ package cypher
 
 import (
 	"math"
+	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/convert"
 )
+
+// trimBOM removes UTF-8 BOM (0xEF, 0xBB, 0xBF) from the start of s.
+// Some clients (browsers, UIs) send this; it breaks routing (e.g. CREATE DATABASE)
+// because strings.HasPrefix(upperQuery, "CREATE") is false when BOM is present.
+func trimBOM(s string) string {
+	return strings.TrimPrefix(s, "\xef\xbb\xbf")
+}
 
 // toFloat64 is a package-level alias to convert.ToFloat64 for internal use.
 // This avoids updating 100+ call sites while still consolidating the implementation.

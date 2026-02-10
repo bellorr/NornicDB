@@ -3,6 +3,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -327,6 +328,7 @@ func (e *StorageExecutor) executeShowDatabases(ctx context.Context, cypher strin
 //   - Error: If database already exists (unless IF NOT EXISTS is used)
 //   - Error: If DatabaseManager is not configured
 func (e *StorageExecutor) executeCreateDatabase(ctx context.Context, cypher string) (*ExecuteResult, error) {
+	log.Printf("[nornicdb:CREATE_DATABASE] executeCreateDatabase called, cypher=%q", cypher)
 	if e.dbManager == nil {
 		return nil, fmt.Errorf("database manager not available - CREATE DATABASE requires multi-database support")
 	}
@@ -418,8 +420,10 @@ func (e *StorageExecutor) executeCreateDatabase(ctx context.Context, cypher stri
 	// Create database
 	err = e.dbManager.CreateDatabase(dbName)
 	if err != nil {
+		log.Printf("[nornicdb:CREATE_DATABASE] CreateDatabase(%q) failed: %v", dbName, err)
 		return nil, fmt.Errorf("failed to create database '%s': %w", dbName, err)
 	}
+	log.Printf("[nornicdb:CREATE_DATABASE] CreateDatabase(%q) succeeded", dbName)
 
 	return &ExecuteResult{
 		Columns: []string{"name"},

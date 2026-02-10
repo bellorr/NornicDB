@@ -112,6 +112,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -514,7 +515,8 @@ func queryDeletesNodes(query string) bool {
 //	Returns detailed error messages for syntax errors, type mismatches,
 //	and execution failures with Neo4j-compatible error codes.
 func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map[string]interface{}) (*ExecuteResult, error) {
-	// Normalize query
+	// Normalize query: trim BOM (some clients send it) then whitespace
+	cypher = trimBOM(cypher)
 	cypher = strings.TrimSpace(cypher)
 	if cypher == "" {
 		return nil, fmt.Errorf("empty query")
@@ -653,6 +655,18 @@ func (e *StorageExecutor) Execute(ctx context.Context, cypher string, params map
 		return e.executeInTransaction(ctx, cypher, upperQuery)
 	}
 
+	// System commands (CREATE/DROP DATABASE, SHOW DATABASES, etc.) must not use the async engine
+	// or implicit transactions: they operate on dbManager/metadata, not graph storage.
+	// Routing them through executeWithoutTransaction directly ensures correct handling and
+	// avoids the write path (tryAsyncCreateNodeBatch / executeWithImplicitTransaction).
+	if isSystemCommandNoGraph(cypher) {
+		result, err := e.executeWithoutTransaction(ctx, cypher, upperQuery)
+		if err != nil {
+			return nil, err
+		}
+		return result, nil
+	}
+
 	// Auto-commit single query - use async path for performance
 	// This uses AsyncEngine's write-behind cache instead of synchronous disk I/O
 	// For strict ACID, users should use explicit BEGIN/COMMIT transactions
@@ -774,6 +788,12 @@ func (e *StorageExecutor) resolveImplicitTxEngines() implicitTxEngines {
 func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher string) (*ExecuteResult, error, bool) {
 	upper := strings.ToUpper(strings.TrimSpace(cypher))
 	if !strings.HasPrefix(upper, "CREATE") {
+		return nil, nil, false
+	}
+	// System commands (CREATE DATABASE / COMPOSITE DATABASE / ALIAS) must not be handled here
+	if findMultiWordKeywordIndex(cypher, "CREATE", "DATABASE") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "COMPOSITE DATABASE") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "ALIAS") == 0 {
 		return nil, nil, false
 	}
 	for _, keyword := range []string{
@@ -1555,6 +1575,20 @@ func (e *StorageExecutor) findNodeByLabelAndProperty(label, prop string, val any
 	return nil
 }
 
+// isSystemCommandNoGraph returns true for statements that operate on database metadata
+// (CREATE/DROP DATABASE, SHOW DATABASES, etc.) and must not use the async engine or
+// implicit transactions. These are routed to executeWithoutTransaction directly.
+func isSystemCommandNoGraph(cypher string) bool {
+	return findMultiWordKeywordIndex(cypher, "CREATE", "COMPOSITE DATABASE") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "DATABASE") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "ALIAS") == 0 ||
+		findMultiWordKeywordIndex(cypher, "DROP", "COMPOSITE DATABASE") == 0 ||
+		findMultiWordKeywordIndex(cypher, "DROP", "DATABASE") == 0 ||
+		findMultiWordKeywordIndex(cypher, "DROP", "ALIAS") == 0 ||
+		findMultiWordKeywordIndex(cypher, "SHOW", "DATABASES") == 0 ||
+		findMultiWordKeywordIndex(cypher, "ALTER", "DATABASE") == 0
+}
+
 // executeWithoutTransaction executes query without transaction wrapping (original path).
 func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher string, upperQuery string) (*ExecuteResult, error) {
 	// FAST PATH: Check for common compound query patterns using pre-compiled regex
@@ -1705,6 +1739,17 @@ func (e *StorageExecutor) executeWithoutTransaction(ctx context.Context, cypher 
 				return e.executeMatchWithCallProcedure(ctx, cypher)
 			}
 		}
+	}
+
+	// Log CREATE routing to diagnose CREATE DATABASE not creating DB (executor path taken)
+	if startsWithCreate {
+		createDbIdx := findMultiWordKeywordIndex(cypher, "CREATE", "DATABASE")
+		createCompositeIdx := findMultiWordKeywordIndex(cypher, "CREATE", "COMPOSITE DATABASE")
+		prefix := cypher
+		if len(prefix) > 100 {
+			prefix = prefix[:100] + "..."
+		}
+		log.Printf("[nornicdb:CREATE_DATABASE] executor routing: cypher=%q createDbIdx=%d createCompositeIdx=%d", prefix, createDbIdx, createCompositeIdx)
 	}
 
 	switch {
