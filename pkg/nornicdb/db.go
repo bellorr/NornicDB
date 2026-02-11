@@ -344,6 +344,10 @@ type Config struct {
 	WALAutoCompactionEnabled   bool          `yaml:"wal_auto_compaction_enabled"`   // Enable automatic snapshots + WAL truncation
 	WALRetentionLedgerDefaults bool          `yaml:"wal_ledger_retention_defaults"` // Enable ledger-grade retention defaults when unset
 
+	// Snapshot file retention (keeps disk from growing unbounded)
+	WALSnapshotRetentionMaxCount int           `yaml:"wal_snapshot_retention_max_count"` // Max snapshot files to keep (0 = use WAL default, typically 3)
+	WALSnapshotRetentionMaxAge   time.Duration `yaml:"wal_snapshot_retention_max_age"`   // Max age of snapshot files to keep (0 = unlimited)
+
 	// BadgerEngine in-process caches (hot read paths)
 	BadgerNodeCacheMaxEntries   int `yaml:"badger_node_cache_max_entries"`    // Max hot nodes cached in-process (default: 10000)
 	BadgerEdgeTypeCacheMaxTypes int `yaml:"badger_edge_type_cache_max_types"` // Max edge types cached for GetEdgesByType (default: 50)
@@ -422,6 +426,8 @@ func DefaultConfig() *Config {
 		WALRetentionMaxAge:              0,                     // Unlimited by default
 		WALAutoCompactionEnabled:        true,                  // Auto-compaction enabled by default
 		WALRetentionLedgerDefaults:      false,                 // Ledger defaults disabled by default
+		WALSnapshotRetentionMaxCount:    0,                     // 0 = use storage default (3)
+		WALSnapshotRetentionMaxAge:     0,                     // Unlimited by default
 		BadgerNodeCacheMaxEntries:       10000,                 // Cache up to 10K hot nodes
 		BadgerEdgeTypeCacheMaxTypes:     50,                    // Cache up to 50 distinct edge types
 		StorageSerializer:               "msgpack",
@@ -503,6 +509,10 @@ type DB struct {
 
 	// Background goroutine tracking
 	bgWg sync.WaitGroup
+
+	// buildCtx is cancelled when the DB closes so startup index build stops promptly.
+	buildCtx   context.Context
+	buildCancel context.CancelFunc
 
 	// Replication / HA (optional; enabled when NORNICDB_CLUSTER_MODE != standalone)
 	replicator         replication.Replicator
@@ -934,6 +944,12 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		if config.WALRetentionMaxAge > 0 {
 			walConfig.RetentionMaxAge = config.WALRetentionMaxAge
 		}
+		if config.WALSnapshotRetentionMaxCount > 0 {
+			walConfig.SnapshotRetentionMaxCount = config.WALSnapshotRetentionMaxCount
+		}
+		if config.WALSnapshotRetentionMaxAge > 0 {
+			walConfig.SnapshotRetentionMaxAge = config.WALSnapshotRetentionMaxAge
+		}
 		wal, err := storage.NewWAL(walConfig.Dir, walConfig)
 		if err != nil {
 			badgerEngine.Close()
@@ -1120,7 +1136,25 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	db.embeddingDims = embeddingDims
 	db.searchMinSimilarity = config.SearchMinSimilarity
 	db.searchServices = make(map[string]*dbSearchService)
-	log.Printf("🔍 Search services enabled (lazy per-database init, %d-dimension vector index)", embeddingDims)
+	log.Printf("🔍 Search services enabled (per-database init, %d-dimension vector index)", embeddingDims)
+
+	// Start the embed queue early (with nil embedder) when auto-embed is enabled, so worker
+	// goroutines start immediately and log "Embed worker started". SetEmbedder(embedder) will
+	// be called by the server when the model loads and will activate the worker.
+	if config.AutoEmbedEnabled && db.baseStorage != nil && db.embedWorkerConfig != nil {
+		db.embedQueue = NewEmbedQueue(nil, db.baseStorage, db.embedWorkerConfig)
+		db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
+			db.onNodeEmbedded(node)
+		})
+		if db.cypherExecutor != nil {
+			db.cypherExecutor.SetNodeMutatedCallback(func(nodeID string) {
+				if db.embedQueue != nil {
+					db.embedQueue.Enqueue(nodeID)
+				}
+			})
+		}
+		log.Printf("🧠 Embed queue started (waiting for embedding model to load)")
+	}
 
 	// Wire Cypher vector procedures through the unified search service.
 	// This preserves Neo4j/Cypher interface compatibility while centralizing the
@@ -1177,35 +1211,75 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Enable k-means clustering if feature flag is set (applied lazily per database).
 	if nornicConfig.IsGPUClusteringEnabled() {
-		fmt.Println("🔬 K-means clustering enabled (per-database, lazy init)")
+		fmt.Println("🔬 K-means clustering enabled (per-database init)")
 	}
 
 	// Note: Database encryption is now handled at the BadgerDB storage level (see above)
 	// When encryption is enabled, ALL data is encrypted at rest using AES-256.
 
-	// Build search indexes for the default DB in background (other DBs are lazy).
+	// Build search indexes (BM25 + vector) for all databases on startup, then run k-means.
+	// This ensures search is ready before first query and k-means runs after indexes exist.
+	// Use a context cancelled on DB close so the build stops when the process is killed.
 	defaultDBName := db.defaultDatabaseName()
+	db.buildCtx, db.buildCancel = context.WithCancel(context.Background())
 	db.bgWg.Add(1)
 	go func() {
 		defer db.bgWg.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		ctx, cancel := context.WithTimeout(db.buildCtx, 4*time.Hour)
 		defer cancel()
-		// EnsureSearchIndexesBuilt also lazily creates the per-DB service entry.
-		// Without this, the background build can run before the service is created
-		// (e.g., before any request hits EmbeddingCount/Search), leaving the vector
-		// index empty until a manual rebuild/regenerate happens.
-		if _, err := db.EnsureSearchIndexesBuilt(ctx, defaultDBName, db.storage); err != nil {
-			fmt.Printf("⚠️  Failed to build search indexes: %v\n", err)
-		} else {
-			fmt.Println("✅ Search indexes built from existing data")
 
-			// If the clustering timer is active, it already runs immediately on startup.
-			// Avoid duplicating work by triggering clustering here only when there's no timer.
+		// Collect all database names: default plus any from storage namespace listing.
+		dbNames := make(map[string]struct{})
+		dbNames[defaultDBName] = struct{}{}
+		if lister, ok := db.baseStorage.(storage.NamespaceLister); ok {
+			for _, ns := range lister.ListNamespaces() {
+				if ns != "" && ns != "system" {
+					dbNames[ns] = struct{}{}
+				}
+			}
+		}
+
+		// Build search indexes (BM25 + vector) for each database before k-means.
+		var built, failed int
+		for dbName := range dbNames {
+			if ctx.Err() != nil {
+				break // Shutdown requested
+			}
+			var storageEngine storage.Engine
+			if dbName == defaultDBName {
+				storageEngine = db.storage
+			}
+			log.Printf("🔍 Building BM25 + vector indexes for database %s...", dbName)
+			if _, err := db.EnsureSearchIndexesBuilt(ctx, dbName, storageEngine); err != nil {
+				if ctx.Err() != nil {
+					log.Printf("🔍 Search index build cancelled for db %s (shutdown)", dbName)
+					break
+				}
+				log.Printf("⚠️  Failed to build search indexes for db %s: %v", dbName, err)
+				failed++
+			} else {
+				built++
+				if len(dbNames) > 1 {
+					log.Printf("✅ BM25 + vector indexes built for db %s", dbName)
+				}
+			}
+		}
+		if built > 0 && len(dbNames) == 1 {
+			log.Printf("✅ BM25 + vector search indexes ready (default database)")
+		} else if built > 0 {
+			log.Printf("✅ BM25 + vector search indexes ready for %d database(s)", built)
+		}
+		if failed > 0 {
+			log.Printf("⚠️  Search index build failed for %d database(s)", failed)
+		}
+
+		// Run k-means only after all search indexes are built (skip if build was cancelled).
+		if ctx.Err() == nil {
 			db.mu.RLock()
 			timerActive := db.clusterTicker != nil
 			db.mu.RUnlock()
 			if !timerActive {
-				db.runClusteringOnceAllDatabases()
+				db.runClusteringOnceAllDatabases(ctx)
 			}
 		}
 	}()
@@ -1297,11 +1371,17 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	}
 
 	if db.embedQueue != nil {
-		// Already created, just update embedder
+		// Queue was created in Open(); activate with loaded embedder and start cluster timer
 		db.embedQueue.SetEmbedder(embedder)
-		log.Printf("🧠 Embed worker activated with %s (%d dims)",
+		log.Printf("🧠 Auto-embed queue started using %s (%d dims)",
 			embedder.Model(), embedder.Dimensions())
 		db.mu.Unlock()
+		if nornicConfig.IsGPUClusteringEnabled() {
+			interval := db.config.KmeansClusterInterval
+			if interval > 0 {
+				db.startClusteringTimer(interval)
+			}
+		}
 		return
 	}
 
@@ -1443,6 +1523,11 @@ func (db *DB) Close() error {
 func (db *DB) closeInternal() error {
 	// Stop clustering timer first (before waiting for goroutines)
 	db.stopClusteringTimer()
+
+	// Cancel build context so startup index-build goroutine exits promptly (e.g. on SIGINT/SIGTERM).
+	if db.buildCancel != nil {
+		db.buildCancel()
+	}
 
 	// Wait for background goroutines to complete
 	db.bgWg.Wait()
@@ -1608,9 +1693,9 @@ func (db *DB) ClearAllEmbeddings() (int, error) {
 }
 
 // EmbedQuery generates an embedding for a search query.
-// Returns nil if embeddings are not enabled.
+// Returns nil if embeddings are not enabled or embedder is not yet set (e.g. still loading).
 func (db *DB) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
-	if db.embedQueue == nil {
+	if db.embedQueue == nil || db.embedQueue.embedder == nil {
 		return nil, nil // Not an error - just no embedding available
 	}
 

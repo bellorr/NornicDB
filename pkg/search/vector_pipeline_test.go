@@ -284,7 +284,7 @@ func TestVectorSearchPipeline_UsesBruteForceWhenClusteredAndSmall(t *testing.T) 
 		require.NoError(t, svc.IndexNode(node))
 	}
 
-	require.NoError(t, svc.TriggerClustering())
+	require.NoError(t, svc.TriggerClustering(context.Background()))
 
 	pipeline, err := svc.getOrCreateVectorPipeline()
 	require.NoError(t, err)

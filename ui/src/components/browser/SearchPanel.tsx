@@ -13,6 +13,8 @@ interface SearchPanelProps {
   setSearchQuery: (query: string) => void;
   searchLoading: boolean;
   searchResults: SearchResult[];
+  /** Current database name for semantic search (empty = default). Shown as context. */
+  selectedDatabase: string;
   selectedNodeIds: Set<string>;
   selectedNode: SearchResult | null;
   deleteError: string | null;
@@ -37,6 +39,7 @@ export function SearchPanel({
   setSearchQuery,
   searchLoading,
   searchResults,
+  selectedDatabase,
   selectedNodeIds,
   selectedNode,
   deleteError,
@@ -60,8 +63,13 @@ export function SearchPanel({
     searchResults.length > 0 &&
     searchResults.every((r) => selectedNodeIds.has(r.node.id));
 
+  const searchTargetLabel = selectedDatabase ? selectedDatabase : "default";
+
   return (
     <div className="flex-1 flex flex-col p-4 gap-4">
+      <p className="text-xs text-norse-silver">
+        Searching in: <span className="font-medium text-norse-silver">{searchTargetLabel}</span>
+      </p>
       <form onSubmit={handleSubmit} className="flex gap-2">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-norse-fog" />

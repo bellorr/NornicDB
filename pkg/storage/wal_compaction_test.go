@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -43,6 +44,44 @@ func TestWALCompactionConfig(t *testing.T) {
 		cfg := DefaultWALConfig()
 		assert.Equal(t, int64(100000), cfg.MaxEntries)
 	})
+
+	t.Run("snapshot_retention_defaults", func(t *testing.T) {
+		cfg := DefaultWALConfig()
+		assert.Equal(t, 3, cfg.SnapshotRetentionMaxCount)
+		assert.Equal(t, time.Duration(0), cfg.SnapshotRetentionMaxAge)
+	})
+}
+
+// TestPruneOldSnapshotFiles tests snapshot file retention pruning.
+func TestPruneOldSnapshotFiles(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
+
+	dir := t.TempDir()
+	// Create 4 snapshot files (minimal valid JSON)
+	content := []byte(`{"Sequence":1,"Timestamp":"2020-01-01T00:00:00Z","Nodes":[],"Edges":[],"Version":1}`)
+	for i := 1; i <= 4; i++ {
+		name := fmt.Sprintf("snapshot-2020010%d-120000.json", i)
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, content, 0644))
+		// Ensure mtime order: 1 oldest, 4 newest
+		require.NoError(t, os.Chtimes(path, time.Now().Add(-time.Duration(4-i)*time.Hour), time.Now().Add(-time.Duration(4-i)*time.Hour)))
+	}
+
+	// Keep only 2 most recent
+	cfg := &WALConfig{SnapshotRetentionMaxCount: 2}
+	err := PruneOldSnapshotFiles(dir, cfg)
+	require.NoError(t, err)
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	var count int
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasPrefix(e.Name(), "snapshot-") && strings.HasSuffix(e.Name(), ".json") {
+			count++
+		}
+	}
+	assert.Equal(t, 2, count, "should keep only 2 snapshots")
 }
 
 // TestWALTruncateAfterSnapshot tests WAL truncation functionality.

@@ -98,7 +98,11 @@ func (db *DB) TriggerSearchClustering() error {
 		return nil
 	}
 
-	db.runClusteringOnceAllDatabases()
+	ctx := db.buildCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	db.runClusteringOnceAllDatabases(ctx)
 	return nil
 }
 
@@ -123,8 +127,14 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 		defer db.bgWg.Done()
 		log.Printf("🔬 K-means clustering timer started (interval: %v)", interval)
 
+		// Use buildCtx so clustering stops when DB is closed (e.g. SIGINT/SIGTERM).
+		ctx := db.buildCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+
 		// Run immediately on startup
-		db.runClusteringOnceAllDatabases()
+		db.runClusteringOnceAllDatabases(ctx)
 
 		// Then run on timer
 		for {
@@ -133,7 +143,7 @@ func (db *DB) startClusteringTimer(interval time.Duration) {
 				log.Printf("🔬 K-means clustering timer stopped")
 				return
 			case <-t.C:
-				db.runClusteringOnceAllDatabases()
+				db.runClusteringOnceAllDatabases(ctx)
 			}
 		}
 	}(ticker, stopCh)

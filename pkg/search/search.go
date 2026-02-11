@@ -477,7 +477,7 @@ func (s *Service) SetGPUManager(manager *gpu.Manager) {
 //	gpuManager, _ := gpu.NewManager(nil)
 //	svc.EnableClustering(gpuManager, 100) // 100 clusters
 //	svc.BuildIndexes(ctx)
-//	svc.TriggerClustering() // Run k-means
+//	svc.TriggerClustering(ctx) // Run k-means
 func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -563,6 +563,7 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 const DefaultMinEmbeddingsForClustering = 1000
 
 // TriggerClustering runs k-means clustering on all indexed embeddings.
+// Stops promptly when ctx is cancelled (e.g. process shutdown).
 //
 // Trigger Policies:
 //   - After bulk loads: Automatically called after BuildIndexes() completes
@@ -576,7 +577,10 @@ const DefaultMinEmbeddingsForClustering = 1000
 // Returns nil (not error) if there are too few embeddings - clustering will
 // be skipped silently as brute-force search is faster for small datasets.
 // Returns error only if clustering is not enabled or fails unexpectedly.
-func (s *Service) TriggerClustering() error {
+func (s *Service) TriggerClustering(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s.mu.RLock()
 	clusterIndex := s.clusterIndex
 	threshold := s.minEmbeddingsForClustering
@@ -599,10 +603,18 @@ func (s *Service) TriggerClustering() error {
 		return nil
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	log.Printf("[K-MEANS] 🔄 STARTING | embeddings=%d", embeddingCount)
 	startTime := time.Now()
 
-	if err := clusterIndex.Cluster(); err != nil {
+	if err := clusterIndex.ClusterWithContext(ctx); err != nil {
+		if ctx.Err() != nil {
+			log.Printf("[K-MEANS] ⏹️  CANCELLED | embeddings=%d (shutdown)", embeddingCount)
+			return err
+		}
 		log.Printf("[K-MEANS] ❌ FAILED | embeddings=%d error=%v", embeddingCount, err)
 		return fmt.Errorf("clustering failed: %w", err)
 	}
@@ -616,8 +628,14 @@ func (s *Service) TriggerClustering() error {
 	s.vectorPipeline = nil
 	s.pipelineMu.Unlock()
 
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", true) {
-		if err := s.rebuildClusterHNSWIndexes(clusterIndex); err != nil {
+		if err := s.rebuildClusterHNSWIndexes(ctx, clusterIndex); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			log.Printf("[IVF-HNSW] ⚠️  build skipped: %v", err)
 		}
 	}
@@ -625,7 +643,10 @@ func (s *Service) TriggerClustering() error {
 	return nil
 }
 
-func (s *Service) rebuildClusterHNSWIndexes(clusterIndex *gpu.ClusterIndex) error {
+func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *gpu.ClusterIndex) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	if clusterIndex == nil || !clusterIndex.IsClustered() {
 		return fmt.Errorf("cluster index not clustered")
 	}
@@ -658,6 +679,9 @@ func (s *Service) rebuildClusterHNSWIndexes(clusterIndex *gpu.ClusterIndex) erro
 	defer vi.mu.RUnlock()
 
 	for cid := 0; cid < numClusters; cid++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		memberIDs := clusterIndex.GetClusterMemberIDsForCluster(cid)
 		if len(memberIDs) < minClusterSize {
 			continue
@@ -711,7 +735,7 @@ func (s *Service) IsClusteringEnabled() bool {
 //	svc.SetMinEmbeddingsForClustering(500) // Lower threshold for faster clustering
 //	svc.EnableClustering(gpuManager, 100)
 //	svc.BuildIndexes(ctx)
-//	svc.TriggerClustering() // Will cluster if >= 500 embeddings
+//	svc.TriggerClustering(ctx) // Will cluster if >= 500 embeddings
 func (s *Service) SetMinEmbeddingsForClustering(threshold int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1239,6 +1263,7 @@ type NodeIterator interface {
 
 // BuildIndexes builds search indexes from all nodes in the engine.
 // Prefers streaming iteration to avoid loading all nodes into memory.
+// Stops promptly when ctx is cancelled (e.g. process shutdown).
 func (s *Service) BuildIndexes(ctx context.Context) error {
 	// Try streaming iterator first (memory efficient)
 	if iterator, ok := s.engine.(NodeIterator); ok {
@@ -1250,7 +1275,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			default:
 				_ = s.IndexNode(node)
 				count++
-				if count%100 == 0 {
+				if count%1000 == 0 {
 					fmt.Printf("📊 Indexed %d nodes...\n", count)
 				}
 				return true // Continue
@@ -1259,6 +1284,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
+		if ctx.Err() != nil {
+			return ctx.Err() // Cancelled (e.g. shutdown)
+		}
 		fmt.Printf("📊 Indexed %d total nodes\n", count)
 		return nil
 	}
@@ -1266,11 +1294,14 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	// Use streaming fallback with chunked processing
 	count := 0
 	err := storage.StreamNodesWithFallback(ctx, s.engine, 1000, func(node *storage.Node) error {
+		if ctx.Err() != nil {
+			return ctx.Err() // Stop on shutdown/cancel
+		}
 		if err := s.IndexNode(node); err != nil {
 			return nil // Continue on indexing errors
 		}
 		count++
-		if count%100 == 0 {
+		if count%1000 == 0 {
 			fmt.Printf("📊 Indexed %d nodes...\n", count)
 		}
 		return nil

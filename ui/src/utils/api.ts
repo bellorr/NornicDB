@@ -180,22 +180,46 @@ class NornicDBClient {
     return await res.json();
   }
 
-  async search(query: string, limit: number = 10, labels?: string[]): Promise<SearchResult[]> {
+  async search(
+    query: string,
+    limit: number = 10,
+    labels?: string[],
+    database?: string
+  ): Promise<SearchResult[]> {
+    const body: { query: string; limit: number; labels?: string[]; database?: string } = {
+      query,
+      limit,
+      labels,
+    };
+    if (database != null && database !== "") {
+      body.database = database;
+    }
     const res = await fetch(`${BASE_PATH}/nornicdb/search`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ query, limit, labels }),
+      body: JSON.stringify(body),
     });
     return await res.json();
   }
 
-  async findSimilar(nodeId: string, limit: number = 10): Promise<SearchResult[]> {
+  async findSimilar(
+    nodeId: string,
+    limit: number = 10,
+    database?: string
+  ): Promise<SearchResult[]> {
+    const body: { node_id: string; limit: number; database?: string } = {
+      node_id: nodeId,
+      limit,
+    };
+    if (database != null && database !== "") {
+      body.database = database;
+    }
     const res = await fetch(`${BASE_PATH}/nornicdb/similar`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       credentials: 'include',
-      body: JSON.stringify({ node_id: nodeId, limit }),
+      body: JSON.stringify(body),
     });
     return await res.json();
   }

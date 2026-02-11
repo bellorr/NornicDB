@@ -278,7 +278,7 @@ func TestRRFHybridSearch_WithClusterIndex(t *testing.T) {
 	}
 
 	// Trigger clustering
-	err = svc.TriggerClustering()
+	err = svc.TriggerClustering(context.Background())
 	if err != nil {
 		t.Logf("Clustering failed (expected in some environments): %v", err)
 		// Continue test without clustering
@@ -406,7 +406,7 @@ func TestRRFHybridSearch_MinEmbeddingsThreshold(t *testing.T) {
 	}
 
 	// Without calling EnableClustering, TriggerClustering should return error
-	err := svc.TriggerClustering()
+	err := svc.TriggerClustering(context.Background())
 	assert.Error(t, err, "TriggerClustering should error without EnableClustering")
 
 	// Clustering should NOT be active

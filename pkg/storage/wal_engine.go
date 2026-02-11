@@ -177,6 +177,12 @@ func (w *WALEngine) createSnapshotAndCompact() error {
 		return fmt.Errorf("failed to truncate WAL (snapshot saved): %w", err)
 	}
 
+	// Prune old snapshot files so disk space stays bounded
+	if err := PruneOldSnapshotFiles(w.snapshotDir, w.wal.config); err != nil {
+		// Log but don't fail the compaction
+		fmt.Printf("WAL snapshot pruning failed: %v\n", err)
+	}
+
 	// Update stats
 	w.totalSnapshots.Add(1)
 	w.lastSnapshotTime.Store(time.Now().UnixNano())

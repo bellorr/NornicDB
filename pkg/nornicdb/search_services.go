@@ -266,7 +266,11 @@ func (db *DB) removeNodeFromEvent(nodeID storage.NodeID) {
 	}
 }
 
-func (db *DB) runClusteringOnceAllDatabases() {
+// runClusteringOnceAllDatabases runs k-means for each database. Stops when ctx is cancelled (e.g. shutdown).
+func (db *DB) runClusteringOnceAllDatabases(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	// Ensure the default database service exists so an immediate clustering run
 	// produces deterministic behavior even before the first search request.
 	if _, err := db.getOrCreateSearchService(db.defaultDatabaseName(), db.storage); err != nil {
@@ -294,10 +298,13 @@ func (db *DB) runClusteringOnceAllDatabases() {
 	db.searchServicesMu.RUnlock()
 
 	for _, entry := range entries {
+		if ctx.Err() != nil {
+			return
+		}
 		if entry == nil || entry.dbName == "system" {
 			continue
 		}
-		if entry == nil || entry.svc == nil || !entry.svc.IsClusteringEnabled() {
+		if entry.svc == nil || !entry.svc.IsClusteringEnabled() {
 			continue
 		}
 
@@ -310,8 +317,11 @@ func (db *DB) runClusteringOnceAllDatabases() {
 			continue
 		}
 
-		if err := entry.svc.TriggerClustering(); err != nil {
+		if err := entry.svc.TriggerClustering(ctx); err != nil {
 			entry.clusterMu.Unlock()
+			if ctx.Err() != nil {
+				return
+			}
 			log.Printf("⚠️  K-means clustering skipped for db %s: %v", entry.dbName, err)
 			continue
 		}

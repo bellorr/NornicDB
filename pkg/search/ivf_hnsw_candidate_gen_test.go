@@ -35,7 +35,7 @@ func TestIVFHNSW_UsedAfterClustering_CPUOnly(t *testing.T) {
 		require.NoError(t, svc.IndexNode(n))
 	}
 
-	require.NoError(t, svc.TriggerClustering())
+	require.NoError(t, svc.TriggerClustering(context.Background()))
 
 	pipeline, err := svc.getOrCreateVectorPipeline()
 	require.NoError(t, err)

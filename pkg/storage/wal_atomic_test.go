@@ -14,6 +14,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/config"
 )
 
 // =============================================================================
@@ -22,6 +24,8 @@ import (
 
 // TestAtomicWALWriteFormat verifies the atomic write format structure.
 func TestAtomicWALWriteFormat(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 
 	cfg := &WALConfig{
@@ -77,6 +81,8 @@ func TestAtomicWALWriteFormat(t *testing.T) {
 
 // TestAtomicWALMultipleEntries verifies multiple entries are written correctly.
 func TestAtomicWALMultipleEntries(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 
 	cfg := &WALConfig{
@@ -121,6 +127,8 @@ func TestAtomicWALMultipleEntries(t *testing.T) {
 
 // TestAtomicWALDetectsPartialMagic verifies partial magic write is detected.
 func TestAtomicWALDetectsPartialMagic(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 
@@ -147,6 +155,8 @@ func TestAtomicWALDetectsPartialMagic(t *testing.T) {
 
 // TestAtomicWALDetectsPartialHeader verifies partial header is detected.
 func TestAtomicWALDetectsPartialHeader(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 
@@ -177,6 +187,8 @@ func TestAtomicWALDetectsPartialHeader(t *testing.T) {
 
 // TestAtomicWALDetectsPartialPayload verifies partial payload is detected.
 func TestAtomicWALDetectsPartialPayload(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 
@@ -208,6 +220,8 @@ func TestAtomicWALDetectsPartialPayload(t *testing.T) {
 
 // TestAtomicWALDetectsMissingCRC verifies missing CRC is detected.
 func TestAtomicWALDetectsMissingCRC(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 
@@ -336,6 +350,8 @@ func TestLegacyJSONFormatReadable(t *testing.T) {
 // TestFormatAutoDetection verifies format is correctly auto-detected.
 func TestFormatAutoDetection(t *testing.T) {
 	t.Run("atomic format", func(t *testing.T) {
+		config.EnableWAL()
+		defer config.DisableWAL()
 		dir := t.TempDir()
 		cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
 		wal, _ := NewWAL(dir, cfg)
@@ -394,6 +410,8 @@ func TestFormatAutoDetection(t *testing.T) {
 
 // TestAtomicWALFullRecovery tests complete write-crash-recover cycle.
 func TestAtomicWALFullRecovery(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 
 	// Phase 1: Write data
@@ -442,6 +460,8 @@ func TestAtomicWALFullRecovery(t *testing.T) {
 
 // TestAtomicWALRecoveryWithPartialWrite tests recovery after simulated crash.
 func TestAtomicWALRecoveryWithPartialWrite(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 
@@ -511,6 +531,8 @@ func containsSubstr(s, sub string) bool {
 
 // TestAtomicWALV2TrailerPresent verifies the trailer canary is written.
 func TestAtomicWALV2TrailerPresent(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 
 	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
@@ -550,6 +572,8 @@ func TestAtomicWALV2TrailerPresent(t *testing.T) {
 
 // TestAtomicWALV2Alignment verifies records are 8-byte aligned.
 func TestAtomicWALV2Alignment(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 
 	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
@@ -581,6 +605,8 @@ func TestAtomicWALV2Alignment(t *testing.T) {
 
 // TestAtomicWALV2DetectsMissingTrailer verifies missing trailer is detected.
 func TestAtomicWALV2DetectsMissingTrailer(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 
@@ -628,6 +654,8 @@ func TestAtomicWALV2DetectsMissingTrailer(t *testing.T) {
 
 // TestAtomicWALV2DetectsCorruptedTrailer verifies corrupted trailer is detected.
 func TestAtomicWALV2DetectsCorruptedTrailer(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 	walPath := filepath.Join(dir, "wal.log")
 
@@ -685,6 +713,8 @@ func TestAtomicWALV2DetectsCorruptedTrailer(t *testing.T) {
 
 // TestAtomicWALV2CanReadMultipleEntries verifies v2 entries are read correctly.
 func TestAtomicWALV2CanReadMultipleEntries(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 
 	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}
@@ -721,6 +751,8 @@ func TestAtomicWALV2CanReadMultipleEntries(t *testing.T) {
 
 // TestAtomicWALV2BatchWriterTrailer verifies batch writes include trailer.
 func TestAtomicWALV2BatchWriterTrailer(t *testing.T) {
+	config.EnableWAL()
+	defer config.DisableWAL()
 	dir := t.TempDir()
 
 	cfg := &WALConfig{Dir: dir, SyncMode: "immediate"}

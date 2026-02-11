@@ -296,8 +296,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	searchSvc, err := s.db.EnsureSearchIndexesBuilt(ctx, dbName, storageEngine)
 	if err != nil {
-		// Best effort: continue with whatever is currently indexed.
 		log.Printf("⚠️ Failed to build search indexes for db %s: %v", dbName, err)
+	}
+	if searchSvc == nil {
+		s.writeError(w, http.StatusServiceUnavailable, "search service unavailable", ErrInternalError)
+		return
 	}
 
 	// If embeddings are available, chunk long queries by length so vector search

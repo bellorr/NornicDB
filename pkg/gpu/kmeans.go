@@ -229,7 +229,16 @@ func NewClusterIndex(manager *Manager, embConfig *EmbeddingIndexConfig, kmeansCo
 //	stats := index.ClusterStats()
 //	fmt.Printf("Created %d clusters in %v\n",
 //	    stats.NumClusters, stats.LastClusterTime)
+// Cluster runs k-means clustering. For cancellable clustering (e.g. on shutdown), use ClusterWithContext.
 func (ci *ClusterIndex) Cluster() error {
+	return ci.ClusterWithContext(context.Background())
+}
+
+// ClusterWithContext runs k-means clustering and stops promptly if ctx is cancelled (e.g. process shutdown).
+func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ci.mu.Lock()
 	ci.clusterMu.Lock()
 	defer ci.mu.Unlock()
@@ -238,6 +247,10 @@ func (ci *ClusterIndex) Cluster() error {
 	n := len(ci.nodeIDs)
 	if n == 0 {
 		return nil
+	}
+
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Determine K
@@ -271,6 +284,10 @@ func (ci *ClusterIndex) Cluster() error {
 		return err
 	}
 
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	// Allocate assignments
 	ci.assignments = make([]int, n)
 
@@ -285,9 +302,12 @@ func (ci *ClusterIndex) Cluster() error {
 	// Check if GPU acceleration is available
 	gpuEnabled := ci.EmbeddingIndex.manager != nil && ci.EmbeddingIndex.manager.IsEnabled()
 
-	// Iterate until convergence
+	// Iterate until convergence (check ctx each iteration so shutdown can cancel)
 	ci.iterations = 0
 	for iter := 0; iter < ci.config.MaxIterations; iter++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		// Assignment step (GPU or CPU)
 		var changed int
 		if gpuEnabled {

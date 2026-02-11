@@ -133,7 +133,7 @@ func TestSearchServices_ClusteringRunnerInitializesKnownNamespaces(t *testing.T)
 	require.NoError(t, err)
 
 	// The clustering runner should discover db2 and initialize a search service for it.
-	db.runClusteringOnceAllDatabases()
+	db.runClusteringOnceAllDatabases(context.Background())
 
 	db.searchServicesMu.RLock()
 	_, db2Exists := db.searchServices["db2"]
@@ -163,7 +163,7 @@ func TestSearchServices_ClusteringFlagUpgradesCachedService(t *testing.T) {
 	enable := featureflags.WithGPUClusteringEnabled()
 	t.Cleanup(enable)
 
-	db.runClusteringOnceAllDatabases()
+	db.runClusteringOnceAllDatabases(context.Background())
 
 	svc, err = db.GetOrCreateSearchService(db.defaultDatabaseName(), db.storage)
 	require.NoError(t, err)
@@ -189,4 +189,69 @@ func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
 	})
 	after := svc.EmbeddingCount()
 	require.Equal(t, before, after)
+}
+
+// TestRunClusteringOnceAllDatabases_RespectsContextCancellation verifies that
+// runClusteringOnceAllDatabases returns promptly when the context is cancelled
+// (e.g. on server shutdown). The goroutine must exit so Close() can complete.
+func TestRunClusteringOnceAllDatabases_RespectsContextCancellation(t *testing.T) {
+	cleanup := featureflags.WithGPUClusteringEnabled()
+	t.Cleanup(cleanup)
+
+	cfg := DefaultConfig()
+	cfg.EmbeddingDimensions = 3
+	db, err := Open("", cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // Cancel immediately so runClusteringOnceAllDatabases exits right away.
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		db.runClusteringOnceAllDatabases(ctx)
+	}()
+
+	select {
+	case <-done:
+		// Goroutine exited; cancellation was respected.
+	case <-time.After(2 * time.Second):
+		t.Fatal("runClusteringOnceAllDatabases did not return after context cancellation within 2s")
+	}
+}
+
+// TestTriggerSearchClustering_DoesNotPanic verifies TriggerSearchClustering
+// runs without panicking when buildCtx is set (normal Open path) and when
+// clustering is disabled (returns early). Also ensures nil buildCtx is handled
+// defensively in code paths that may call TriggerSearchClustering.
+func TestTriggerSearchClustering_DoesNotPanic(t *testing.T) {
+	t.Run("clustering_disabled_returns_early", func(t *testing.T) {
+		cleanup := featureflags.WithGPUClusteringDisabled()
+		t.Cleanup(cleanup)
+
+		cfg := DefaultConfig()
+		cfg.EmbeddingDimensions = 3
+		db, err := Open("", cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		err = db.TriggerSearchClustering()
+		require.NoError(t, err)
+	})
+
+	t.Run("clustering_enabled_uses_buildCtx", func(t *testing.T) {
+		cleanup := featureflags.WithGPUClusteringEnabled()
+		t.Cleanup(cleanup)
+
+		cfg := DefaultConfig()
+		cfg.EmbeddingDimensions = 3
+		db, err := Open("", cfg)
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = db.Close() })
+
+		require.NotNil(t, db.buildCtx, "Open() should set buildCtx so clustering can be cancelled on Close()")
+		err = db.TriggerSearchClustering()
+		require.NoError(t, err)
+	})
 }

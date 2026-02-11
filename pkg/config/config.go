@@ -186,6 +186,14 @@ type DatabaseConfig struct {
 	// Environment: NORNICDB_WAL_LEDGER_RETENTION_DEFAULTS
 	WALRetentionLedgerDefaults bool
 
+	// WALSnapshotRetentionMaxCount is the max number of snapshot files to keep (0 = use storage default, typically 3).
+	// Environment: NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_COUNT
+	WALSnapshotRetentionMaxCount int
+
+	// WALSnapshotRetentionMaxAge is the max age of snapshot files to keep (0 = unlimited).
+	// Environment: NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_AGE
+	WALSnapshotRetentionMaxAge time.Duration
+
 	// EncryptionEnabled controls whether database encryption is active
 	// Env: NORNICDB_ENCRYPTION_ENABLED
 	EncryptionEnabled bool
@@ -1242,6 +1250,8 @@ type YAMLConfig struct {
 		WALRetentionMaxSegments     int    `yaml:"wal_retention_max_segments"`
 		WALRetentionMaxAge          string `yaml:"wal_retention_max_age"`
 		WALRetentionLedgerDefaults  bool   `yaml:"wal_ledger_retention_defaults"`
+		WALSnapshotRetentionMaxCount int   `yaml:"wal_snapshot_retention_max_count"`
+		WALSnapshotRetentionMaxAge  string `yaml:"wal_snapshot_retention_max_age"`
 		EncryptionEnabled           bool   `yaml:"encryption_enabled"`
 		EncryptionPassword          string `yaml:"encryption_password"`
 		BadgerNodeCacheMaxEntries   int    `yaml:"badger_node_cache_max_entries"`
@@ -1461,6 +1471,8 @@ func LoadDefaults() *Config {
 	config.Database.WALRetentionMaxSegments = 0 // Unlimited by default
 	config.Database.WALRetentionMaxAge = 0      // Unlimited by default
 	config.Database.WALRetentionLedgerDefaults = false
+	config.Database.WALSnapshotRetentionMaxCount = 0  // 0 = use storage default (3)
+	config.Database.WALSnapshotRetentionMaxAge = 0   // Unlimited by default
 	config.Database.EncryptionPassword = "" // disabled by default
 	config.Database.AsyncWritesEnabled = true
 	config.Database.AsyncFlushInterval = 50 * time.Millisecond
@@ -1701,6 +1713,12 @@ func applyEnvVars(config *Config) {
 		config.Database.WALRetentionMaxAge == 0 {
 		config.Database.WALRetentionMaxSegments = 24
 		config.Database.WALRetentionMaxAge = 7 * 24 * time.Hour
+	}
+	if v := getEnvInt("NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_COUNT", 0); v > 0 {
+		config.Database.WALSnapshotRetentionMaxCount = v
+	}
+	if v := getEnvDuration("NORNICDB_WAL_SNAPSHOT_RETENTION_MAX_AGE", 0); v > 0 {
+		config.Database.WALSnapshotRetentionMaxAge = v
 	}
 
 	// Async write settings
@@ -2269,6 +2287,14 @@ func LoadFromFile(configPath string) (*Config, error) {
 		config.Database.WALRetentionMaxAge == 0 {
 		config.Database.WALRetentionMaxSegments = 24
 		config.Database.WALRetentionMaxAge = 7 * 24 * time.Hour
+	}
+	if yamlCfg.Database.WALSnapshotRetentionMaxCount > 0 {
+		config.Database.WALSnapshotRetentionMaxCount = yamlCfg.Database.WALSnapshotRetentionMaxCount
+	}
+	if yamlCfg.Database.WALSnapshotRetentionMaxAge != "" {
+		if d, err := time.ParseDuration(yamlCfg.Database.WALSnapshotRetentionMaxAge); err == nil {
+			config.Database.WALSnapshotRetentionMaxAge = d
+		}
 	}
 	// Encryption settings
 	if yamlCfg.Database.EncryptionEnabled {

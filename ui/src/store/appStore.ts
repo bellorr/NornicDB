@@ -168,7 +168,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   setSearchQuery: (query) => set({ searchQuery: query }),
 
   executeSearch: async () => {
-    const { searchQuery } = get();
+    const { searchQuery, selectedDatabase } = get();
     if (!searchQuery.trim()) {
       set({ searchResults: [] });
       return;
@@ -176,7 +176,12 @@ export const useAppStore = create<AppState>((set, get) => ({
 
     set({ searchLoading: true });
     try {
-      const results = await api.search(searchQuery, 20);
+      const results = await api.search(
+        searchQuery,
+        20,
+        undefined,
+        selectedDatabase ?? undefined
+      );
       set({ searchResults: results, searchLoading: false });
     } catch {
       set({ searchResults: [], searchLoading: false });
@@ -202,10 +207,14 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   // Find similar with inline expansion (doesn't replace search results)
   findSimilar: async (nodeId) => {
-    // Start loading for this node
+    const { selectedDatabase } = get();
     set({ expandedSimilar: { nodeId, results: [], loading: true } });
     try {
-      const results = await api.findSimilar(nodeId, 6); // Show 6 similar items
+      const results = await api.findSimilar(
+        nodeId,
+        6,
+        selectedDatabase ?? undefined
+      );
       set({ expandedSimilar: { nodeId, results, loading: false } });
     } catch {
       set({ expandedSimilar: null });

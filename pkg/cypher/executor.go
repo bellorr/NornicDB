@@ -815,6 +815,12 @@ func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher st
 		}
 	}
 
+	// Substitute parameters before parsing so (n:Label $props) becomes (n:Label { ... })
+	// and the label is not mis-parsed as "Label $props".
+	if params := getParamsFromContext(ctx); params != nil {
+		cypher = e.substituteParams(cypher, params)
+	}
+
 	returnIdx := findKeywordIndex(cypher, "RETURN")
 	createPart := cypher
 	if returnIdx > 0 {

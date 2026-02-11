@@ -39,6 +39,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -243,6 +244,15 @@ type WALConfig struct {
 	// RetentionMaxAge keeps segments newer than this duration (0 = unlimited).
 	RetentionMaxAge time.Duration
 
+	// SnapshotRetentionMaxCount is the maximum number of snapshot files to keep in the
+	// snapshot directory (0 = keep all). Oldest snapshots are deleted after each new one.
+	// Recommended 3–5 so disk space stays bounded while keeping recovery options.
+	SnapshotRetentionMaxCount int
+
+	// SnapshotRetentionMaxAge is the maximum age of snapshot files to keep (0 = unlimited).
+	// Snapshots older than this are deleted even if under MaxCount.
+	SnapshotRetentionMaxAge time.Duration
+
 	// Logger receives WAL diagnostics events (optional).
 	// If nil, a default stdlib-backed logger is used.
 	Logger WALLogger
@@ -256,12 +266,14 @@ type WALConfig struct {
 // DefaultWALConfig returns sensible defaults.
 func DefaultWALConfig() *WALConfig {
 	return &WALConfig{
-		Dir:               "data/wal",
-		SyncMode:          "batch",
-		BatchSyncInterval: 100 * time.Millisecond,
-		MaxFileSize:       100 * 1024 * 1024, // 100MB
-		MaxEntries:        100000,
-		SnapshotInterval:  1 * time.Hour,
+		Dir:                        "data/wal",
+		SyncMode:                   "batch",
+		BatchSyncInterval:          100 * time.Millisecond,
+		MaxFileSize:                100 * 1024 * 1024, // 100MB
+		MaxEntries:                 100000,
+		SnapshotInterval:           1 * time.Hour,
+		SnapshotRetentionMaxCount:  3, // Keep last 3 snapshots so disk doesn't grow unbounded
+		SnapshotRetentionMaxAge:    0, // No age limit by default
 	}
 }
 
@@ -1065,8 +1077,9 @@ func SaveSnapshot(snapshot *Snapshot, path string) error {
 		return fmt.Errorf("wal: failed to create snapshot file: %w", err)
 	}
 
+	// Compact JSON (no indent) to minimize snapshot size on disk.
+	// Indented JSON was 2–3x larger and caused multi-GB snapshot files.
 	encoder := json.NewEncoder(file)
-	encoder.SetIndent("", "  ")
 	if err := encoder.Encode(snapshot); err != nil {
 		file.Close()
 		os.Remove(tmpPath)
@@ -1111,6 +1124,65 @@ func LoadSnapshot(path string) (*Snapshot, error) {
 	}
 
 	return &snapshot, nil
+}
+
+// snapshotFileInfo holds path and mod time for retention pruning.
+type snapshotFileInfo struct {
+	path    string
+	modTime time.Time
+}
+
+// PruneOldSnapshotFiles removes old snapshot files in dir according to cfg retention.
+// Keeps at most SnapshotRetentionMaxCount snapshots (newest by mtime) and deletes
+// any older than SnapshotRetentionMaxAge. Idempotent; safe to call after each save.
+func PruneOldSnapshotFiles(dir string, cfg *WALConfig) error {
+	if cfg == nil || (cfg.SnapshotRetentionMaxCount <= 0 && cfg.SnapshotRetentionMaxAge <= 0) {
+		return nil
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return fmt.Errorf("wal: list snapshot dir: %w", err)
+	}
+	var files []snapshotFileInfo
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		if !strings.HasPrefix(name, "snapshot-") || !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		info, err := os.Stat(path)
+		if err != nil {
+			continue
+		}
+		files = append(files, snapshotFileInfo{path: path, modTime: info.ModTime()})
+	}
+	if len(files) == 0 {
+		return nil
+	}
+	now := time.Now()
+	if cfg.SnapshotRetentionMaxAge > 0 {
+		cutoff := now.Add(-cfg.SnapshotRetentionMaxAge)
+		var kept []snapshotFileInfo
+		for _, f := range files {
+			if f.modTime.After(cutoff) {
+				kept = append(kept, f)
+			} else {
+				_ = os.Remove(f.path)
+			}
+		}
+		files = kept
+	}
+	if cfg.SnapshotRetentionMaxCount <= 0 || len(files) <= cfg.SnapshotRetentionMaxCount {
+		return nil
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].modTime.After(files[j].modTime) })
+	for i := cfg.SnapshotRetentionMaxCount; i < len(files); i++ {
+		_ = os.Remove(files[i].path)
+	}
+	return nil
 }
 
 // TruncateAfterSnapshot truncates the WAL after a successful snapshot.

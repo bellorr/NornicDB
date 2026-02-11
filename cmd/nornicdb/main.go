@@ -473,6 +473,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	dbConfig.WALRetentionMaxAge = cfg.Database.WALRetentionMaxAge
 	dbConfig.WALRetentionLedgerDefaults = cfg.Database.WALRetentionLedgerDefaults
 	dbConfig.WALAutoCompactionEnabled = cfg.Database.WALAutoCompactionEnabled
+	dbConfig.WALSnapshotRetentionMaxCount = cfg.Database.WALSnapshotRetentionMaxCount
+	dbConfig.WALSnapshotRetentionMaxAge = cfg.Database.WALSnapshotRetentionMaxAge
 
 	// Badger in-process cache sizing (hot read paths)
 	dbConfig.BadgerNodeCacheMaxEntries = cfg.Database.BadgerNodeCacheMaxEntries

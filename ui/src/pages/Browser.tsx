@@ -216,7 +216,7 @@ export function Browser() {
               value={selectedDatabase ?? ""}
               onChange={(e) => handleDatabaseChange(e.target.value)}
               className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary focus:border-transparent"
-              title="All Cypher queries and node operations use this database"
+              title="Cypher queries and semantic search run against this database"
             >
               <option value="">Default (from server)</option>
               {databaseList.map((name: string) => (
@@ -290,6 +290,7 @@ export function Browser() {
               setSearchQuery={setSearchQuery}
               searchLoading={searchLoading}
               searchResults={searchResults}
+              selectedDatabase={selectedDatabase ?? ""}
               selectedNodeIds={selectedNodeIds}
               selectedNode={selectedNode}
               deleteError={deleteError}

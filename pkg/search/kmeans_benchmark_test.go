@@ -221,7 +221,7 @@ func TestKMeansCandidateGen_Integration(t *testing.T) {
 	}
 
 	// Trigger clustering
-	require.NoError(t, svc.TriggerClustering())
+	require.NoError(t, svc.TriggerClustering(context.Background()))
 
 	// Perform search - should use k-means routing
 	query := []float32{1, 0, 0, 0}
