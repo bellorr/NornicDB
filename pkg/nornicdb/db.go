@@ -299,6 +299,10 @@ type Config struct {
 	// Storage
 	DataDir string `yaml:"data_dir"`
 
+	// Search index persistence: when true, BM25 and vector indexes are saved under DataDir
+	// and loaded on startup so BuildIndexes can skip the full storage iteration. Default false.
+	PersistSearchIndexes bool `yaml:"persist_search_indexes"`
+
 	// Embeddings
 	EmbeddingProvider     string  `yaml:"embedding_provider"` // ollama, openai
 	EmbeddingAPIURL       string  `yaml:"embedding_api_url"`
@@ -436,6 +440,7 @@ func DefaultConfig() *Config {
 		BoltPort:                        7687,
 		HTTPPort:                        7474,
 		KmeansClusterInterval:           15 * time.Minute, // Run k-means every 15 min (skips if no changes)
+		PersistSearchIndexes:            false,            // Rebuild indexes on startup by default
 	}
 }
 
@@ -1533,6 +1538,15 @@ func (db *DB) closeInternal() error {
 	db.bgWg.Wait()
 
 	var errs []error
+
+	// Persist search indexes to disk so the latest state is saved on next startup.
+	db.searchServicesMu.RLock()
+	for _, entry := range db.searchServices {
+		if entry != nil && entry.svc != nil {
+			entry.svc.PersistIndexesToDisk()
+		}
+	}
+	db.searchServicesMu.RUnlock()
 
 	if db.decay != nil {
 		db.decay.Stop()

@@ -73,6 +73,15 @@
 //
 // This way, a place that's #2 in both lists beats a place that's #1 in one
 // but missing from the other!
+//
+// Index persistence and WAL alignment:
+//
+// NornicDB storage uses a write-ahead log (WAL) for durability; graph state is recovered
+// from WAL (and snapshots) on startup. Search indexes (BM25 and vector) are built or
+// loaded after storage recovery, so they always reflect the WAL-consistent state. Index
+// files use semver format versioning (Qdrant-style): only indexes with the same format
+// version are loaded; older or newer versions are rejected so the caller can rebuild.
+// Persisted indexes are saved on a debounced schedule after mutations and on shutdown.
 package search
 
 import (
@@ -286,6 +295,16 @@ type Service struct {
 	// Vector search pipeline (lazy-initialized)
 	vectorPipeline *VectorSearchPipeline
 	pipelineMu     sync.RWMutex
+
+	// Index persistence: when both paths are set, BuildIndexes tries to load BM25 and vector
+	// indexes from disk; if both load successfully with count > 0, the full iteration is skipped.
+	fulltextIndexPath string
+	vectorIndexPath  string
+
+	// Debounced persist: after IndexNode/RemoveNode we schedule a write to disk after an idle delay.
+	persistMu        sync.Mutex
+	persistTimer     *time.Timer
+	buildInProgress  atomic.Bool
 }
 
 // NewService creates a new search Service with empty indexes.
@@ -770,6 +789,99 @@ func (s *Service) GetDefaultMinSimilarity() float64 {
 	return s.defaultMinSimilarity
 }
 
+// SetFulltextIndexPath sets the path for persisting the BM25 fulltext index.
+// When both fulltext and vector paths are set, BuildIndexes() will try to load both;
+// if both load with count > 0, the full storage iteration is skipped.
+func (s *Service) SetFulltextIndexPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fulltextIndexPath = path
+}
+
+// SetVectorIndexPath sets the path for persisting the vector index.
+// When both fulltext and vector paths are set, BuildIndexes() will try to load both;
+// if both load with count > 0, the full storage iteration is skipped.
+func (s *Service) SetVectorIndexPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.vectorIndexPath = path
+}
+
+// schedulePersist schedules a write of BM25 and vector indexes to disk after an idle delay.
+// Called after IndexNode/RemoveNode when paths are set; resets the timer on each mutation
+// so we only write after activity settles. No-ops during BuildIndexes (we save at end there).
+// Delay is NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC (default 30).
+func (s *Service) schedulePersist() {
+	if s.buildInProgress.Load() {
+		return
+	}
+	s.mu.RLock()
+	ftPath := s.fulltextIndexPath
+	vPath := s.vectorIndexPath
+	s.mu.RUnlock()
+	if ftPath == "" || vPath == "" {
+		return
+	}
+
+	delay := envDurationSec("NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC", 30)
+	if delay <= 0 {
+		delay = 30 * time.Second
+	}
+
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+	if s.persistTimer != nil {
+		s.persistTimer.Stop()
+		s.persistTimer = nil
+	}
+	s.persistTimer = time.AfterFunc(delay, func() {
+		s.persistMu.Lock()
+		s.persistTimer = nil
+		s.persistMu.Unlock()
+		s.runPersist()
+	})
+}
+
+// runPersist writes the current in-memory BM25 and vector indexes to disk.
+// Run in the background (from the debounce timer); does not hold s.mu across I/O.
+func (s *Service) runPersist() {
+	s.mu.RLock()
+	ftPath := s.fulltextIndexPath
+	vPath := s.vectorIndexPath
+	vi := s.vectorIndex
+	s.mu.RUnlock()
+	if ftPath == "" && vPath == "" {
+		return
+	}
+	if ftPath != "" {
+		if err := s.fulltextIndex.Save(ftPath); err != nil {
+			log.Printf("⚠️ Background persist: failed to save BM25 index to %s: %v", ftPath, err)
+		} else {
+			log.Printf("📇 Background persist: BM25 index saved to %s", ftPath)
+		}
+	}
+	if vPath != "" && vi != nil {
+		if err := vi.Save(vPath); err != nil {
+			log.Printf("⚠️ Background persist: failed to save vector index to %s: %v", vPath, err)
+		} else {
+			log.Printf("📇 Background persist: vector index saved to %s", vPath)
+		}
+	}
+}
+
+// PersistIndexesToDisk writes the current BM25 and vector indexes to disk immediately.
+// Call this on shutdown so the latest in-memory state is saved before exit.
+// Cancels any pending debounced persist so no write runs after shutdown.
+func (s *Service) PersistIndexesToDisk() {
+	s.persistMu.Lock()
+	if s.persistTimer != nil {
+		s.persistTimer.Stop()
+		s.persistTimer = nil
+	}
+	s.persistMu.Unlock()
+	s.runPersist()
+}
+
 // resolveMinSimilarity returns the MinSimilarity to use for a search.
 // Priority: explicit opts value > service default > hardcoded fallback (0.5)
 func (s *Service) resolveMinSimilarity(opts *SearchOptions) *float64 {
@@ -940,6 +1052,7 @@ func (s *Service) ClearVectorIndex() {
 // IndexNode adds a node to all search indexes.
 // All embeddings are stored in ChunkEmbeddings (even single chunk = array of 1).
 func (s *Service) IndexNode(node *storage.Node) error {
+	defer s.schedulePersist()
 	s.maybeAutoSetVectorDimensions(firstVectorDimensions(node))
 
 	s.mu.Lock()
@@ -1225,6 +1338,7 @@ func (s *Service) removeNodeLocked(nodeIDStr string) {
 // RemoveNode removes a node from all search indexes.
 // Also removes all chunk embeddings (for nodes with multiple chunks).
 func (s *Service) RemoveNode(nodeID storage.NodeID) error {
+	defer s.schedulePersist()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1262,43 +1376,85 @@ type NodeIterator interface {
 }
 
 // BuildIndexes builds search indexes from all nodes in the engine.
-// Prefers streaming iteration to avoid loading all nodes into memory.
-// Stops promptly when ctx is cancelled (e.g. process shutdown).
+// Call this after storage (and WAL recovery) so indexes reflect durable state.
+// When both fulltext and vector index paths are set, tries to load both from disk;
+// if both load with count > 0 (and semver format version matches), the full iteration
+// is skipped. Otherwise iterates over storage and saves both indexes at the end when paths are set.
 func (s *Service) BuildIndexes(ctx context.Context) error {
-	// Try streaming iterator first (memory efficient)
+	s.buildInProgress.Store(true)
+	defer s.buildInProgress.Store(false)
+
+	s.mu.RLock()
+	fulltextPath := s.fulltextIndexPath
+	vectorPath := s.vectorIndexPath
+	s.mu.RUnlock()
+
+	skipIteration := false
+
+	if fulltextPath != "" {
+		_ = s.fulltextIndex.Load(fulltextPath)
+	}
+	if vectorPath != "" && s.vectorIndex != nil {
+		_ = s.vectorIndex.Load(vectorPath)
+	}
+	// When both paths are set and both indexes have content, skip the full iteration.
+	if fulltextPath != "" && vectorPath != "" && s.fulltextIndex.Count() > 0 && s.vectorIndex != nil && s.vectorIndex.Count() > 0 {
+		skipIteration = true
+		log.Printf("📇 Search indexes loaded from disk (BM25: %d docs, vector: %d); skipping rebuild",
+			s.fulltextIndex.Count(), s.vectorIndex.Count())
+	}
+
+	if skipIteration {
+		return nil
+	}
+
+	// Build indexes by iterating over storage.
 	if iterator, ok := s.engine.(NodeIterator); ok {
 		count := 0
 		err := iterator.IterateNodes(func(node *storage.Node) bool {
 			select {
 			case <-ctx.Done():
-				return false // Stop iteration
+				return false
 			default:
 				_ = s.IndexNode(node)
 				count++
 				if count%1000 == 0 {
 					fmt.Printf("📊 Indexed %d nodes...\n", count)
 				}
-				return true // Continue
+				return true
 			}
 		})
 		if err != nil {
 			return err
 		}
 		if ctx.Err() != nil {
-			return ctx.Err() // Cancelled (e.g. shutdown)
+			return ctx.Err()
 		}
 		fmt.Printf("📊 Indexed %d total nodes\n", count)
+		if fulltextPath != "" {
+			if err := s.fulltextIndex.Save(fulltextPath); err != nil {
+				log.Printf("⚠️ Failed to save BM25 index to %s: %v", fulltextPath, err)
+			} else {
+				log.Printf("📇 BM25 index saved to %s", fulltextPath)
+			}
+		}
+		if vectorPath != "" && s.vectorIndex != nil {
+			if err := s.vectorIndex.Save(vectorPath); err != nil {
+				log.Printf("⚠️ Failed to save vector index to %s: %v", vectorPath, err)
+			} else {
+				log.Printf("📇 Vector index saved to %s", vectorPath)
+			}
+		}
 		return nil
 	}
 
-	// Use streaming fallback with chunked processing
 	count := 0
 	err := storage.StreamNodesWithFallback(ctx, s.engine, 1000, func(node *storage.Node) error {
 		if ctx.Err() != nil {
-			return ctx.Err() // Stop on shutdown/cancel
+			return ctx.Err()
 		}
 		if err := s.IndexNode(node); err != nil {
-			return nil // Continue on indexing errors
+			return nil
 		}
 		count++
 		if count%1000 == 0 {
@@ -1310,6 +1466,20 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		return err
 	}
 	fmt.Printf("📊 Indexed %d total nodes\n", count)
+	if fulltextPath != "" {
+		if err := s.fulltextIndex.Save(fulltextPath); err != nil {
+			log.Printf("⚠️ Failed to save BM25 index to %s: %v", fulltextPath, err)
+		} else {
+			log.Printf("📇 BM25 index saved to %s", fulltextPath)
+		}
+	}
+	if vectorPath != "" && s.vectorIndex != nil {
+		if err := s.vectorIndex.Save(vectorPath); err != nil {
+			log.Printf("⚠️ Failed to save vector index to %s: %v", vectorPath, err)
+		} else {
+			log.Printf("📇 Vector index saved to %s", vectorPath)
+		}
+	}
 	return nil
 }
 

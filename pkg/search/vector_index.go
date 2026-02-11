@@ -104,7 +104,10 @@ package search
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -397,4 +400,92 @@ func (v *VectorIndex) HasVector(id string) bool {
 // GetDimensions returns the vector dimensions.
 func (v *VectorIndex) GetDimensions() int {
 	return v.dimensions
+}
+
+// vectorIndexFormatVersion is the semver written into saved index files (Qdrant-style).
+// On load, if the file's version is not equal to this, the file is not loaded (caller rebuilds).
+const vectorIndexFormatVersion = "1.0.0"
+
+// vectorIndexSnapshot is the serializable form of the vector index (no mutex).
+type vectorIndexSnapshot struct {
+	Version     string
+	Dimensions  int
+	Vectors     map[string][]float32
+	RawVectors  map[string][]float32
+}
+
+// Save writes the vector index to path (gob format). Dir is created if needed.
+// Caller should not mutate the index concurrently.
+func (v *VectorIndex) Save(path string) error {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	snap := vectorIndexSnapshot{
+		Version:    vectorIndexFormatVersion,
+		Dimensions: v.dimensions,
+		Vectors:    v.vectors,
+		RawVectors: v.rawVectors,
+	}
+	return gob.NewEncoder(file).Encode(&snap)
+}
+
+// Load replaces the vector index with the one stored at path (gob format).
+// If the file does not exist or decode fails, the index is left empty (or unchanged on
+// missing file) and no error is returned, so the caller can proceed with a full rebuild.
+// Returns an error only for unexpected I/O (e.g. permission denied).
+func (v *VectorIndex) Load(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // No saved index; caller will rebuild
+		}
+		return err
+	}
+	defer file.Close()
+
+	var snap vectorIndexSnapshot
+	if err := gob.NewDecoder(file).Decode(&snap); err != nil {
+		// Corrupt or wrong format; clear index so caller rebuilds
+		v.mu.Lock()
+		v.vectors = make(map[string][]float32)
+		v.rawVectors = make(map[string][]float32)
+		v.mu.Unlock()
+		return nil
+	}
+	if snap.Vectors == nil {
+		snap.Vectors = make(map[string][]float32)
+	}
+	if snap.RawVectors == nil {
+		snap.RawVectors = make(map[string][]float32)
+	}
+	if !searchIndexVersionCompatible(snap.Version, vectorIndexFormatVersion, "vector") {
+		v.mu.Lock()
+		v.vectors = make(map[string][]float32)
+		v.rawVectors = make(map[string][]float32)
+		v.mu.Unlock()
+		return nil
+	}
+	// Require dimensions to match the existing index (service was created with fixed dimensions).
+	if snap.Dimensions <= 0 || snap.Dimensions != v.dimensions {
+		v.mu.Lock()
+		v.vectors = make(map[string][]float32)
+		v.rawVectors = make(map[string][]float32)
+		v.mu.Unlock()
+		return nil // Mismatch or invalid; caller will rebuild
+	}
+
+	v.mu.Lock()
+	v.vectors = snap.Vectors
+	v.rawVectors = snap.RawVectors
+	v.mu.Unlock()
+	return nil
 }

@@ -3,6 +3,7 @@ package search
 
 import (
 	"context"
+	"encoding/gob"
 	"fmt"
 	"math"
 	"os"
@@ -658,6 +659,113 @@ func TestFulltextIndex_PhraseSearch(t *testing.T) {
 		}
 	}
 	assert.True(t, foundDoc1, "Should find doc1 with exact phrase 'quick brown'")
+}
+
+// TestFulltextIndex_SaveLoad tests BM25 index persistence (Save/Load round-trip).
+func TestFulltextIndex_SaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bm25.gob")
+
+	idx := NewFulltextIndex()
+	idx.Index("doc1", "machine learning algorithms")
+	idx.Index("doc2", "deep learning neural networks")
+	idx.Index("doc3", "graph database")
+
+	err := idx.Save(path)
+	require.NoError(t, err)
+
+	idx2 := NewFulltextIndex()
+	err = idx2.Load(path)
+	require.NoError(t, err)
+
+	assert.Equal(t, idx.Count(), idx2.Count())
+	results := idx2.Search("learning", 10)
+	require.Len(t, results, 2) // doc1 and doc2
+}
+
+// TestVectorIndex_SaveLoad tests vector index persistence (Save/Load round-trip).
+func TestVectorIndex_SaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "vectors.gob")
+
+	idx := NewVectorIndex(4)
+	require.NoError(t, idx.Add("a", []float32{1, 0, 0, 0}))
+	require.NoError(t, idx.Add("b", []float32{0, 1, 0, 0}))
+	require.NoError(t, idx.Add("c", []float32{0, 0, 1, 0}))
+
+	err := idx.Save(path)
+	require.NoError(t, err)
+
+	idx2 := NewVectorIndex(4)
+	err = idx2.Load(path)
+	require.NoError(t, err)
+
+	assert.Equal(t, idx.Count(), idx2.Count())
+	assert.Equal(t, 3, idx2.Count())
+}
+
+// TestFulltextIndex_LoadMissingOrCorrupt verifies that Load does not return an error
+// when the file is missing or corrupt; the index is left empty so the caller can rebuild.
+func TestFulltextIndex_LoadMissingOrCorrupt(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("missing file", func(t *testing.T) {
+		idx := NewFulltextIndex()
+		err := idx.Load(filepath.Join(dir, "nonexistent.gob"))
+		require.NoError(t, err)
+		assert.Equal(t, 0, idx.Count())
+	})
+
+	t.Run("corrupt file", func(t *testing.T) {
+		corruptPath := filepath.Join(dir, "corrupt.gob")
+		require.NoError(t, os.WriteFile(corruptPath, []byte("not valid gob"), 0644))
+		idx := NewFulltextIndex()
+		idx.Index("doc1", "some content") // pre-populate
+		err := idx.Load(corruptPath)
+		require.NoError(t, err)
+		assert.Equal(t, 0, idx.Count()) // index cleared so caller can rebuild
+	})
+
+	t.Run("old format version", func(t *testing.T) {
+		oldPath := filepath.Join(dir, "old_bm25.gob")
+		// Write a snapshot with old semver "0.9.0"; Load should reject and leave index empty.
+		f, err := os.Create(oldPath)
+		require.NoError(t, err)
+		require.NoError(t, gob.NewEncoder(f).Encode(&fulltextIndexSnapshot{
+			Version:       "0.9.0",
+			Documents:     map[string]string{"doc1": "hello world"},
+			InvertedIndex: map[string]map[string]int{"hello": {"doc1": 1}},
+			DocLengths:    map[string]int{"doc1": 2},
+			AvgDocLength:  2,
+			DocCount:      1,
+		}))
+		require.NoError(t, f.Close())
+		idx := NewFulltextIndex()
+		err = idx.Load(oldPath)
+		require.NoError(t, err)
+		assert.Equal(t, 0, idx.Count()) // old version not loaded; caller will rebuild
+	})
+}
+
+// TestVectorIndex_LoadOldVersion verifies that a vector index file with an old or wrong
+// format version (semver) is not loaded (index stays empty so caller can rebuild).
+func TestVectorIndex_LoadOldVersion(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := filepath.Join(dir, "old_vectors.gob")
+	// Write a snapshot with old semver "0.9.0"; Load should reject and leave index empty.
+	f, err := os.Create(oldPath)
+	require.NoError(t, err)
+	require.NoError(t, gob.NewEncoder(f).Encode(&vectorIndexSnapshot{
+		Version:    "0.9.0",
+		Dimensions: 4,
+		Vectors:    map[string][]float32{"a": {1, 0, 0, 0}},
+		RawVectors: map[string][]float32{"a": {1, 0, 0, 0}},
+	}))
+	require.NoError(t, f.Close())
+	idx := NewVectorIndex(4)
+	err = idx.Load(oldPath)
+	require.NoError(t, err)
+	assert.Equal(t, 0, idx.Count()) // old version not loaded; caller will rebuild
 }
 
 // TestSearchService_RemoveNode tests node removal from search service.

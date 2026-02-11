@@ -480,6 +480,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	dbConfig.BadgerNodeCacheMaxEntries = cfg.Database.BadgerNodeCacheMaxEntries
 	dbConfig.BadgerEdgeTypeCacheMaxTypes = cfg.Database.BadgerEdgeTypeCacheMaxTypes
 	dbConfig.StorageSerializer = cfg.Database.StorageSerializer
+	dbConfig.PersistSearchIndexes = cfg.Database.PersistSearchIndexes
 
 	// Open database
 	fmt.Println("📂 Opening database...")

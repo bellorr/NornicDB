@@ -2,7 +2,11 @@
 package search
 
 import (
+	"encoding/gob"
+	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -43,6 +47,103 @@ func NewFulltextIndex() *FulltextIndex {
 		invertedIndex: make(map[string]map[string]int),
 		docLengths:    make(map[string]int),
 	}
+}
+
+// fulltextIndexFormatVersion is the semver written into saved index files (Qdrant-style).
+// On load, if the file's version is not equal to this, the file is not loaded (caller rebuilds).
+// If the file was written by a newer version, we log and skip so the user can upgrade.
+const fulltextIndexFormatVersion = "1.0.0"
+
+// fulltextIndexSnapshot is the serializable form of the BM25 index (no mutex).
+type fulltextIndexSnapshot struct {
+	Version       string
+	Documents     map[string]string
+	InvertedIndex map[string]map[string]int
+	DocLengths    map[string]int
+	AvgDocLength  float64
+	DocCount      int
+}
+
+// Save writes the fulltext index to path (gob format). Dir is created if needed.
+// Caller should not mutate the index concurrently.
+func (f *FulltextIndex) Save(path string) error {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	snap := fulltextIndexSnapshot{
+		Version:       fulltextIndexFormatVersion,
+		Documents:     f.documents,
+		InvertedIndex: f.invertedIndex,
+		DocLengths:    f.docLengths,
+		AvgDocLength:  f.avgDocLength,
+		DocCount:      f.docCount,
+	}
+	return gob.NewEncoder(file).Encode(&snap)
+}
+
+// Load replaces the fulltext index with the one stored at path (gob format).
+// If the file does not exist or decode fails, the index is left empty (or unchanged on
+// missing file) and no error is returned, so the caller can proceed with a full rebuild.
+// Returns an error only for unexpected I/O (e.g. permission denied).
+func (f *FulltextIndex) Load(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // No saved index; caller will rebuild
+		}
+		return err
+	}
+	defer file.Close()
+
+	var snap fulltextIndexSnapshot
+	if err := gob.NewDecoder(file).Decode(&snap); err != nil {
+		// Corrupt or wrong format; clear index so caller rebuilds
+		f.mu.Lock()
+		f.documents = make(map[string]string)
+		f.invertedIndex = make(map[string]map[string]int)
+		f.docLengths = make(map[string]int)
+		f.avgDocLength = 0
+		f.docCount = 0
+		f.mu.Unlock()
+		return nil
+	}
+	if !searchIndexVersionCompatible(snap.Version, fulltextIndexFormatVersion, "BM25") {
+		f.mu.Lock()
+		f.documents = make(map[string]string)
+		f.invertedIndex = make(map[string]map[string]int)
+		f.docLengths = make(map[string]int)
+		f.avgDocLength = 0
+		f.docCount = 0
+		f.mu.Unlock()
+		return nil
+	}
+	if snap.Documents == nil {
+		snap.Documents = make(map[string]string)
+	}
+	if snap.InvertedIndex == nil {
+		snap.InvertedIndex = make(map[string]map[string]int)
+	}
+	if snap.DocLengths == nil {
+		snap.DocLengths = make(map[string]int)
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.documents = snap.Documents
+	f.invertedIndex = snap.InvertedIndex
+	f.docLengths = snap.DocLengths
+	f.avgDocLength = snap.AvgDocLength
+	f.docCount = snap.DocCount
+	return nil
 }
 
 // Index adds or updates a document in the index.

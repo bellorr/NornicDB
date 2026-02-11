@@ -235,21 +235,27 @@ func (ci *ClusterIndex) Cluster() error {
 }
 
 // ClusterWithContext runs k-means clustering and stops promptly if ctx is cancelled (e.g. process shutdown).
+// It copies embedding data out, runs the iteration without holding clusterMu, then applies the result.
+// This allows search to continue using the previous clustering state while k-means runs in the background.
 func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	ci.mu.Lock()
+
+	// Lock order: always clusterMu before mu (matches GetClusterMemberIDs, OnNodeUpdate).
 	ci.clusterMu.Lock()
-	defer ci.mu.Unlock()
-	defer ci.clusterMu.Unlock()
+	ci.mu.Lock()
 
 	n := len(ci.nodeIDs)
 	if n == 0 {
+		ci.mu.Unlock()
+		ci.clusterMu.Unlock()
 		return nil
 	}
 
 	if err := ctx.Err(); err != nil {
+		ci.mu.Unlock()
+		ci.clusterMu.Unlock()
 		return err
 	}
 
@@ -258,27 +264,40 @@ func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 	if k <= 0 || ci.config.AutoK {
 		k = optimalK(n)
 	}
-
 	if k > n {
 		k = n
 	}
-
 	if k < 1 {
+		ci.mu.Unlock()
+		ci.clusterMu.Unlock()
 		return ErrInvalidK
 	}
-
 	if n < k {
+		ci.mu.Unlock()
+		ci.clusterMu.Unlock()
 		return ErrTooFewEmbeddings
 	}
 
+	dims := ci.dimensions
+	// Copy vectors so we can release both locks during the long-running iteration.
+	// Search needs ci.mu.RLock() in GetClusterMemberIDs, so we must not hold ci.mu.
+	vectorsCopy := make([]float32, len(ci.cpuVectors))
+	copy(vectorsCopy, ci.cpuVectors)
+	initMethod := ci.config.InitMethod
+	maxIter := ci.config.MaxIterations
+
+	ci.mu.Unlock()
+	ci.clusterMu.Unlock()
+
 	start := time.Now()
 
-	// Initialize centroids
+	// Initialize centroids on the copy (no lock held)
+	var centroids [][]float32
 	var err error
-	if ci.config.InitMethod == "kmeans++" {
-		ci.centroids, err = ci.initCentroidsKMeansPlusPlus(k)
+	if initMethod == "kmeans++" {
+		centroids, err = initCentroidsKMeansPlusPlusFromVectors(vectorsCopy, n, dims, k)
 	} else {
-		ci.centroids, err = ci.initCentroidsRandom(k)
+		centroids, err = initCentroidsRandomFromVectors(vectorsCopy, n, dims, k)
 	}
 	if err != nil {
 		return err
@@ -288,53 +307,59 @@ func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 		return err
 	}
 
-	// Allocate assignments
-	ci.assignments = make([]int, n)
-
-	// Pre-allocate centroid update buffers to avoid allocations in hot loop
-	dims := ci.dimensions
+	assignments := make([]int, n)
 	centroidSums := make([][]float64, k)
 	centroidCounts := make([]int, k)
 	for c := 0; c < k; c++ {
 		centroidSums[c] = make([]float64, dims)
 	}
 
-	// Check if GPU acceleration is available
-	gpuEnabled := ci.EmbeddingIndex.manager != nil && ci.EmbeddingIndex.manager.IsEnabled()
-
-	// Iterate until convergence (check ctx each iteration so shutdown can cancel)
-	ci.iterations = 0
-	for iter := 0; iter < ci.config.MaxIterations; iter++ {
+	iterations := 0
+	for iter := 0; iter < maxIter; iter++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Assignment step (GPU or CPU)
-		var changed int
-		if gpuEnabled {
-			changed = ci.assignToCentroidsGPU()
-		} else {
-			changed = ci.assignToCentroids()
-		}
-
-		// Update centroids (using pre-allocated buffers)
-		ci.updateCentroidsWithBuffer(centroidSums, centroidCounts)
-
-		ci.iterations++
-		atomic.AddInt64(&ci.clusterIterations, 1)
-
-		// Check convergence
+		changed := assignToCentroidsFromVectors(vectorsCopy, centroids, assignments, n, dims, k)
+		updateCentroidsFromVectors(vectorsCopy, assignments, centroids, centroidSums, centroidCounts, n, dims, k)
+		iterations++
 		if changed == 0 {
 			break
 		}
 	}
 
-	// Build cluster map for fast lookup
-	ci.buildClusterMap()
+	clusterMap := buildClusterMapFromAssignments(assignments)
 
+	// Brief lock to publish new cluster state (order: clusterMu then mu).
+	// If the index grew during clustering, extend assignments and clusterMap for new embeddings.
+	ci.clusterMu.Lock()
+	ci.mu.Lock()
+	defer ci.mu.Unlock()
+	defer ci.clusterMu.Unlock()
+	nowN := len(ci.nodeIDs)
+	if nowN > n {
+		// Extend assignments for new indices and add them to clusterMap
+		extended := make([]int, nowN)
+		copy(extended, assignments)
+		for i := n; i < nowN; i++ {
+			embStart := i * dims
+			if embStart+dims <= len(ci.cpuVectors) {
+				extended[i] = nearestCentroidFromList(ci.cpuVectors[embStart:embStart+dims], centroids)
+				cid := extended[i]
+				clusterMap[cid] = append(clusterMap[cid], i)
+			}
+		}
+		assignments = extended
+	}
+	ci.centroids = centroids
+	ci.assignments = assignments
+	ci.clusterMap = clusterMap
 	ci.clustered = true
+	ci.iterations = iterations
 	ci.lastClusterTime = time.Now()
 	ci.lastClusterDuration = time.Since(start)
 	ci.updatesSinceCluster = 0
+
+	atomic.AddInt64(&ci.clusterIterations, int64(iterations))
 
 	return nil
 }
@@ -349,6 +374,144 @@ func optimalK(n int) int {
 		k = 1000 // Maximum clusters
 	}
 	return k
+}
+
+// initCentroidsKMeansPlusPlusFromVectors initializes centroids using k-means++ on a vector slice.
+// Used by ClusterWithContext when running on a copy so clusterMu can be released during iteration.
+func initCentroidsKMeansPlusPlusFromVectors(vectors []float32, n, dims, k int) ([][]float32, error) {
+	centroids := make([][]float32, k)
+	firstIdx := rand.Intn(n)
+	centroids[0] = make([]float32, dims)
+	start := firstIdx * dims
+	copy(centroids[0], vectors[start:start+dims])
+
+	minDistances := make([]float64, n)
+	for i := 0; i < n; i++ {
+		embStart := i * dims
+		minDistances[i] = squaredEuclidean(vectors[embStart:embStart+dims], centroids[0])
+	}
+
+	for c := 1; c < k; c++ {
+		totalWeight := 0.0
+		for i := 0; i < n; i++ {
+			totalWeight += minDistances[i]
+		}
+		target := rand.Float64() * totalWeight
+		cumWeight := 0.0
+		selectedIdx := n - 1
+		for i := 0; i < n; i++ {
+			cumWeight += minDistances[i]
+			if cumWeight >= target {
+				selectedIdx = i
+				break
+			}
+		}
+		centroids[c] = make([]float32, dims)
+		start := selectedIdx * dims
+		copy(centroids[c], vectors[start:start+dims])
+		for i := 0; i < n; i++ {
+			embStart := i * dims
+			distToNew := squaredEuclidean(vectors[embStart:embStart+dims], centroids[c])
+			if distToNew < minDistances[i] {
+				minDistances[i] = distToNew
+			}
+		}
+	}
+	return centroids, nil
+}
+
+// initCentroidsRandomFromVectors initializes centroids by random selection from a vector slice.
+func initCentroidsRandomFromVectors(vectors []float32, n, dims, k int) ([][]float32, error) {
+	centroids := make([][]float32, k)
+	selected := make(map[int]bool)
+	for i := 0; i < k; i++ {
+		var idx int
+		for {
+			idx = rand.Intn(n)
+			if !selected[idx] {
+				selected[idx] = true
+				break
+			}
+		}
+		centroids[i] = make([]float32, dims)
+		start := idx * dims
+		copy(centroids[i], vectors[start:start+dims])
+	}
+	return centroids, nil
+}
+
+// assignToCentroidsFromVectors assigns each embedding to nearest centroid; returns number changed.
+func assignToCentroidsFromVectors(vectors []float32, centroids [][]float32, assignments []int, n, dims, k int) int {
+	changed := 0
+	for i := 0; i < n; i++ {
+		embStart := i * dims
+		emb := vectors[embStart : embStart+dims]
+		minDist := math.MaxFloat64
+		nearest := 0
+		for c := 0; c < k; c++ {
+			dist := squaredEuclidean(emb, centroids[c])
+			if dist < minDist {
+				minDist = dist
+				nearest = c
+			}
+		}
+		if assignments[i] != nearest {
+			assignments[i] = nearest
+			changed++
+		}
+	}
+	return changed
+}
+
+// updateCentroidsFromVectors recomputes centroids from assignments using pre-allocated buffers.
+func updateCentroidsFromVectors(vectors []float32, assignments []int, centroids [][]float32, sums [][]float64, counts []int, n, dims, k int) {
+	for c := 0; c < k; c++ {
+		counts[c] = 0
+		for d := 0; d < dims; d++ {
+			sums[c][d] = 0
+		}
+	}
+	for i := 0; i < n; i++ {
+		cluster := assignments[i]
+		embStart := i * dims
+		counts[cluster]++
+		for d := 0; d < dims; d++ {
+			sums[cluster][d] += float64(vectors[embStart+d])
+		}
+	}
+	for c := 0; c < k; c++ {
+		if counts[c] > 0 {
+			for d := 0; d < dims; d++ {
+				centroids[c][d] = float32(sums[c][d] / float64(counts[c]))
+			}
+		}
+	}
+}
+
+// buildClusterMapFromAssignments builds cluster ID -> embedding indices from assignments.
+func buildClusterMapFromAssignments(assignments []int) map[int][]int {
+	out := make(map[int][]int)
+	for i, cluster := range assignments {
+		out[cluster] = append(out[cluster], i)
+	}
+	return out
+}
+
+// nearestCentroidFromList returns the index of the centroid nearest to the embedding.
+func nearestCentroidFromList(embedding []float32, centroids [][]float32) int {
+	if len(centroids) == 0 {
+		return -1
+	}
+	minDist := math.MaxFloat64
+	nearest := 0
+	for c, centroid := range centroids {
+		dist := squaredEuclidean(embedding, centroid)
+		if dist < minDist {
+			minDist = dist
+			nearest = c
+		}
+	}
+	return nearest
 }
 
 // initCentroidsRandom initializes centroids by random selection.

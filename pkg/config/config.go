@@ -244,6 +244,11 @@ type DatabaseConfig struct {
 	// StorageSerializer selects the storage serialization format ("gob", "msgpack").
 	// Env: NORNICDB_STORAGE_SERIALIZER (default: gob)
 	StorageSerializer string
+
+	// PersistSearchIndexes when true saves BM25 and vector indexes under DataDir and loads
+	// them on startup so BuildIndexes can skip the full storage iteration. Default: false.
+	// Env: NORNICDB_PERSIST_SEARCH_INDEXES
+	PersistSearchIndexes bool
 }
 
 // ServerConfig holds server settings.
@@ -1257,6 +1262,7 @@ type YAMLConfig struct {
 		BadgerNodeCacheMaxEntries   int    `yaml:"badger_node_cache_max_entries"`
 		BadgerEdgeTypeCacheMaxTypes int    `yaml:"badger_edge_type_cache_max_types"`
 		StorageSerializer           string `yaml:"storage_serializer"`
+		PersistSearchIndexes        bool   `yaml:"persist_search_indexes"`
 	} `yaml:"database"`
 
 	// Storage alias for database
@@ -1745,6 +1751,7 @@ func applyEnvVars(config *Config) {
 	if v := getEnv("NORNICDB_STORAGE_SERIALIZER", ""); v != "" {
 		config.Database.StorageSerializer = strings.ToLower(v)
 	}
+	config.Database.PersistSearchIndexes = getEnvBool("NORNICDB_PERSIST_SEARCH_INDEXES", false)
 
 	// Server settings - Bolt
 	if getEnv("NORNICDB_BOLT_ENABLED", "") == "false" {
@@ -2314,6 +2321,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Database.StorageSerializer != "" {
 		config.Database.StorageSerializer = strings.ToLower(yamlCfg.Database.StorageSerializer)
+	}
+	if yamlCfg.Database.PersistSearchIndexes {
+		config.Database.PersistSearchIndexes = true
 	}
 
 	// === Authentication ===

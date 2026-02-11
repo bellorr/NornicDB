@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -97,6 +98,14 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	}
 	svc := search.NewServiceWithDimensions(storageEngine, dims)
 	svc.SetDefaultMinSimilarity(minSim)
+
+	// When PersistSearchIndexes is true, set paths so BuildIndexes saves indexes after a
+	// build and loads them on startup (skipping the full iteration when both are present).
+	if db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes {
+		base := filepath.Join(db.config.DataDir, "search", dbName)
+		svc.SetFulltextIndexPath(filepath.Join(base, "bm25.gob"))
+		svc.SetVectorIndexPath(filepath.Join(base, "vectors.gob"))
+	}
 
 	// Enable GPU brute-force search if a GPU manager is configured.
 	if gpuMgr != nil {
