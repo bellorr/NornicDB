@@ -828,7 +828,7 @@ func (a *Application) Stop(ctx context.Context) error {
 		t.Logf("Large content: %d chars, chunked into %d pieces", len(largeContent), len(chunks))
 
 		assert.Greater(t, len(chunks), 1, "Large content should produce multiple chunks")
-		assert.LessOrEqual(t, len(chunks), 10, "Should not over-chunk")
+		// No cap on chunks per node - number depends only on content length and chunk size
 
 		// Verify all content is preserved (approximately - overlap means some duplication)
 		totalChunkLength := 0

@@ -349,6 +349,22 @@ func TestLoadFromEnv_CustomValues(t *testing.T) {
 	}
 }
 
+// TestLoadFromEnv_EmbeddingWorkerNumWorkers ensures NORNICDB_EMBED_WORKER_NUM_WORKERS is applied.
+func TestLoadFromEnv_EmbeddingWorkerNumWorkers(t *testing.T) {
+	clearEnvVars(t)
+	cfg := LoadFromEnv()
+	if cfg.EmbeddingWorker.NumWorkers != 1 {
+		t.Errorf("expected default NumWorkers 1, got %d", cfg.EmbeddingWorker.NumWorkers)
+	}
+
+	os.Setenv("NORNICDB_EMBED_WORKER_NUM_WORKERS", "2")
+	t.Cleanup(func() { os.Unsetenv("NORNICDB_EMBED_WORKER_NUM_WORKERS") })
+	cfg = LoadFromEnv()
+	if cfg.EmbeddingWorker.NumWorkers != 2 {
+		t.Errorf("expected NumWorkers 2 from env, got %d", cfg.EmbeddingWorker.NumWorkers)
+	}
+}
+
 // TestLoadDefaults_HeimdallMCPDefaults tests that Heimdall MCP defaults are set correctly.
 func TestLoadDefaults_HeimdallMCPDefaults(t *testing.T) {
 	cfg := LoadDefaults()

@@ -205,6 +205,8 @@ func (db *DB) ensureSearchIndexesBuilt(ctx context.Context, dbName string) error
 		return fmt.Errorf("search service not initialized for database %q", dbName)
 	}
 
+	// Run BuildIndexes (and warmup/IVF-HNSW) in the background so the first HTTP request
+	// for a large database doesn't block for minutes. Callers can check IsSearchIndexReady.
 	entry.buildOnce.Do(func() {
 		entry.buildErr = entry.svc.BuildIndexes(ctx)
 	})

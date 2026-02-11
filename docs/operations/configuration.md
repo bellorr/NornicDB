@@ -216,6 +216,80 @@ search:
   min_similarity: 0.3             # Lower threshold for AI assistants
 ```
 
+### Search index persistence
+
+By default, BM25 (full-text) and vector (HNSW) search indexes are built in memory on startup by scanning storage. When **persist search indexes** is enabled, NornicDB saves these indexes to disk under the data directory and loads them on startup when present, skipping the full scan and speeding up startup for large graphs.
+
+**When to use:**
+- Large databases where rebuilding indexes on every startup is slow.
+- Restarts or deployments where you want search to be ready immediately after storage recovery.
+
+**YAML** (under `database`):
+
+```yaml
+database:
+  persist_search_indexes: true   # Default: false. Requires data_dir to be set.
+```
+
+**Environment variable:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NORNICDB_PERSIST_SEARCH_INDEXES` | `false` | When `true`, save and load BM25 and vector indexes under `DataDir/search/<dbname>/` (e.g. `bm25.gob`, `vectors.gob`). Has no effect if `NORNICDB_DATA_DIR` (or config `data_dir`) is not set. |
+
+**Behavior:**
+- Indexes are written under `data_dir/search/<database_name>/` (e.g. `bm25.gob`, `vectors.gob`).
+- After node index/remove operations, changes are persisted after a short debounce delay (configurable via `NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC`); on graceful shutdown, indexes are flushed to disk.
+- On startup, if both index files exist and are compatible with the current format version, they are loaded and the full storage iteration is skipped; otherwise indexes are rebuilt as usual.
+- Storage recovery (WAL) runs first; search indexes are built or loaded after storage is consistent.
+
+### Vector search strategy and HNSW tuning
+
+Vector search chooses a strategy automatically based on dataset size and features (GPU, clustering). All thresholds and HNSW parameters are configurable via environment variables.
+
+**Strategy selection (order of precedence):**
+
+1. **GPU brute-force** – when GPU is enabled and vector count is in `[NORNICDB_VECTOR_GPU_BRUTE_MIN_N, NORNICDB_VECTOR_GPU_BRUTE_MAX_N]`.
+2. **CPU brute-force** – when vector count is under 5000 (fixed constant `NSmallMax`; no env override).
+3. **Cluster-based** (IVF-HNSW or k-means) – when clustering is enabled and built.
+4. **Global HNSW** – when vector count is 5000 or more and neither GPU nor clustering is chosen.
+
+So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you see slow search with more than 5k vectors, ensure the HNSW index is being used (e.g. check logs for `HNSW index created`) and consider the HNSW quality/efSearch settings below.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| **Strategy thresholds** | | |
+| `NORNICDB_VECTOR_GPU_BRUTE_MIN_N` | `20000` | Min vector count to use GPU brute-force (exact search). |
+| `NORNICDB_VECTOR_GPU_BRUTE_MAX_N` | `250000` | Max vector count for GPU brute-force; above this, cluster or HNSW is used when applicable. |
+| `NORNICDB_VECTOR_IVF_HNSW_ENABLED` | `true` | When clustered, use IVF-HNSW (per-cluster HNSW) when available. |
+| `NORNICDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE` | `200` | Min cluster size to build a cluster HNSW index. |
+| `NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS` | `1024` | Max number of clusters for IVF-HNSW. |
+| **HNSW index (quality preset)** | | |
+| `NORNICDB_VECTOR_ANN_QUALITY` | `balanced` | Preset: `fast` \| `balanced` \| `accurate`. See table below. |
+| `NORNICDB_VECTOR_HNSW_M` | (preset) | Max connections per node (e.g. 16 or 32). Overrides preset. |
+| `NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION` | (preset) | Candidate list size during index build. Overrides preset. |
+| `NORNICDB_VECTOR_HNSW_EF_SEARCH` | (preset) | Candidate list size during search; higher = better recall, slower. Overrides preset. |
+| **HNSW Metal (GPU)** | | |
+| `NORNICDB_VECTOR_HNSW_METAL_MIN_CANDIDATES` | `0` | If greater than 0, use Metal for HNSW search when candidate count meets threshold. `0` = disabled. |
+| **HNSW maintenance** | | |
+| `NORNICDB_HNSW_MAINT_INTERVAL_MS` | `30000` | Interval (ms) for HNSW maintenance (tombstone checks). |
+| `NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC` | `60` | Min interval between HNSW rebuilds (seconds). |
+| `NORNICDB_HNSW_TOMBSTONE_REBUILD_RATIO` | `0.50` | Rebuild when tombstone ratio exceeds this. |
+| `NORNICDB_HNSW_MAX_TOMBSTONE_OVERHEAD_FACTOR` | `2.0` | Max tombstone overhead before rebuild. |
+| `NORNICDB_HNSW_REBUILD_ENABLED` | `true` | Enable periodic HNSW rebuilds when tombstone ratio is high. |
+| **Index persistence** | | |
+| `NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC` | `30` | Debounce delay (seconds) before writing BM25/vector indexes to disk after updates. |
+
+**HNSW quality presets:**
+
+| Preset | M | efConstruction | efSearch | Use case |
+|--------|---|----------------|----------|----------|
+| `fast` | 16 | 100 | 50 | Faster queries, lower recall. |
+| `balanced` | 16 | 200 | 100 | Default; good balance. |
+| `accurate` | 32 | 400 | 200 | Higher recall, slower search. |
+
+To reduce latency (e.g. if search is ~4s), try `NORNICDB_VECTOR_ANN_QUALITY=fast` or lower `NORNICDB_VECTOR_HNSW_EF_SEARCH` (e.g. `50`). Ensure you have ≥ 5000 vectors so the pipeline uses HNSW instead of CPU brute-force.
+
 ## Heimdall AI Assistant
 
 Heimdall is the cognitive guardian and AI chat assistant. It supports **local** (GGUF BYOM), **ollama**, and **openai** providers—matching the embedding subsystem style.
@@ -301,6 +375,7 @@ export NORNICDB_ASYNC_FLUSH_INTERVAL=50ms
 
 # Search
 export NORNICDB_SEARCH_MIN_SIMILARITY=0.5
+export NORNICDB_PERSIST_SEARCH_INDEXES=true   # Save/load BM25 and vector indexes (requires data_dir)
 
 # Embeddings
 export NORNICDB_EMBEDDINGS_PROVIDER=local

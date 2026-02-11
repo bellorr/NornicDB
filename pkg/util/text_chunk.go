@@ -4,6 +4,7 @@ import "strings"
 
 // ChunkText splits text into chunks with overlap, trying to break at natural boundaries.
 // Returns the original text as a single chunk if it fits within chunkSize.
+// There is no limit on the number of chunks returned; long documents produce as many chunks as needed.
 //
 // This is used for embedding inputs (store content and long discover queries).
 func ChunkText(text string, chunkSize, overlap int) []string {

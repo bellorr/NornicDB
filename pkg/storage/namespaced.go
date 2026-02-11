@@ -911,6 +911,14 @@ func (n *NamespacedEngine) MarkNodeEmbedded(nodeID NodeID) {
 	}
 }
 
+// AddToPendingEmbeddings adds a node back to the pending embeddings index (e.g. after a failed embed so it can be retried).
+func (n *NamespacedEngine) AddToPendingEmbeddings(nodeID NodeID) {
+	if mgr, ok := n.inner.(interface{ AddToPendingEmbeddings(NodeID) }); ok {
+		prefixedID := n.prefixNodeID(nodeID)
+		mgr.AddToPendingEmbeddings(prefixedID)
+	}
+}
+
 // Ensure NamespacedEngine implements Engine interface
 var _ Engine = (*NamespacedEngine)(nil)
 

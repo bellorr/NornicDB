@@ -2175,6 +2175,14 @@ func (ae *AsyncEngine) MarkNodeEmbedded(nodeID NodeID) {
 	}
 }
 
+// AddToPendingEmbeddings delegates to the underlying engine, if supported.
+// Call this to re-queue a node for embedding after a failed attempt (e.g. so another worker can retry).
+func (ae *AsyncEngine) AddToPendingEmbeddings(nodeID NodeID) {
+	if mgr, ok := ae.engine.(interface{ AddToPendingEmbeddings(NodeID) }); ok {
+		mgr.AddToPendingEmbeddings(nodeID)
+	}
+}
+
 // IterateNodes iterates through all nodes, checking cache first.
 func (ae *AsyncEngine) IterateNodes(fn func(*Node) bool) error {
 	// First iterate cache

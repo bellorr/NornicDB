@@ -53,6 +53,9 @@ type EmbedWorker struct {
 	clusterDebounceMu      sync.Mutex
 	pendingClusterCount    int  // Accumulated count for debounced callback
 	clusterDebounceRunning bool // Whether a debounce timer is active
+
+	// claimMu serializes find+claim so only one worker can take a node at a time (prevents double-processing).
+	claimMu sync.Mutex
 }
 
 // EmbedWorkerConfig holds configuration for the embedding worker.
@@ -444,9 +447,11 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		ew.mu.Unlock()
 	}()
 
-	// Find one node without embedding
+	// Serialize find+claim so only one worker can take a node at a time (prevents double-processing).
+	ew.claimMu.Lock()
 	node := ew.findNodeWithoutEmbedding()
 	if node == nil {
+		ew.claimMu.Unlock()
 		return false // Nothing to process
 	}
 
@@ -456,6 +461,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// Check for cancellation before processing
 	select {
 	case <-ew.ctx.Done():
+		ew.claimMu.Unlock()
 		return false
 	default:
 	}
@@ -466,9 +472,9 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	existingNode, err := ew.storage.GetNode(node.ID)
 	if err != nil {
 		// Node was deleted - remove from pending index and skip
-		// This is a stale entry - remove it immediately to prevent re-processing
 		fmt.Printf("⚠️  Node %s from pending index doesn't exist - removing stale entry\n", node.ID)
 		ew.markNodeEmbedded(node.ID)
+		ew.claimMu.Unlock()
 		return false // Skip this node, try next one
 	}
 
@@ -476,6 +482,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	if existingNode == nil {
 		fmt.Printf("⚠️  Node %s from pending index is nil - removing stale entry\n", node.ID)
 		ew.markNodeEmbedded(node.ID)
+		ew.claimMu.Unlock()
 		return false
 	}
 
@@ -486,25 +493,28 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	ew.mu.Lock()
 	if lastProcessed, ok := ew.recentlyProcessed[string(node.ID)]; ok {
 		if time.Since(lastProcessed) < 30*time.Second {
-			// Only log skip message once per node to avoid spam
 			if !ew.loggedSkip[string(node.ID)] {
 				ew.loggedSkip[string(node.ID)] = true
 				fmt.Printf("⏭️  Skipping node %s: recently processed (waiting for DB sync)\n", node.ID)
 			}
 			ew.mu.Unlock()
+			ew.claimMu.Unlock()
 			return false // Temporary skip - don't continue looping
 		}
-		// Time expired, clear the logged flag so we log again if needed
 		delete(ew.loggedSkip, string(node.ID))
 	}
 	// Clean up old entries (older than 1 minute)
 	for id, t := range ew.recentlyProcessed {
 		if time.Since(t) > time.Minute {
 			delete(ew.recentlyProcessed, id)
-			delete(ew.loggedSkip, id) // Also clean up logged skip flag
+			delete(ew.loggedSkip, id)
 		}
 	}
 	ew.mu.Unlock()
+
+	// Claim the node so no other worker can pick it (remove from pending index now; re-queue on failure).
+	ew.markNodeEmbedded(node.ID)
+	ew.claimMu.Unlock()
 
 	fmt.Printf("🔄 Processing node %s for embedding...\n", node.ID)
 
@@ -521,13 +531,14 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	}
 	text := buildEmbeddingText(node.Properties, node.Labels, opts)
 
-	// Chunk text if needed
+	// Chunk text if needed (no limit on number of chunks per node)
 	chunks := util.ChunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
 
 	// Embed all chunks (all nodes are handled the same way - no special File handling)
 	embeddings, err := ew.embedder.EmbedBatch(ew.ctx, chunks)
 	if err != nil {
 		fmt.Printf("⚠️  Failed to embed node %s: %v\n", node.ID, err)
+		ew.addNodeToPendingEmbeddings(node.ID) // Re-queue so another worker can retry
 		ew.mu.Lock()
 		ew.failed++
 		ew.mu.Unlock()
@@ -537,6 +548,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// Validate embeddings were generated
 	if len(embeddings) == 0 || embeddings[0] == nil || len(embeddings[0]) == 0 {
 		fmt.Printf("⚠️  Failed to generate embedding for node %s: empty embedding\n", node.ID)
+		ew.addNodeToPendingEmbeddings(node.ID) // Re-queue so another worker can retry
 		ew.mu.Lock()
 		ew.failed++
 		ew.mu.Unlock()
@@ -636,13 +648,13 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		updateErr = ew.storage.UpdateNode(node)
 	}
 	if updateErr != nil {
-		// If update failed because node doesn't exist, skip it
+		// If update failed because node doesn't exist, skip it (already claimed, don't re-queue)
 		if updateErr == storage.ErrNotFound {
 			fmt.Printf("⚠️  Node %s doesn't exist - skipping update to prevent orphaned node\n", node.ID)
-			ew.markNodeEmbedded(node.ID)
 			return false
 		}
 		fmt.Printf("⚠️  Failed to update node %s: %v\n", node.ID, updateErr)
+		ew.addNodeToPendingEmbeddings(node.ID) // Re-queue so another worker can retry
 		ew.mu.Lock()
 		ew.failed++
 		ew.mu.Unlock()
@@ -723,6 +735,13 @@ func (ew *EmbedWorker) refreshEmbeddingIndex() int {
 func (ew *EmbedWorker) markNodeEmbedded(nodeID storage.NodeID) {
 	if mgr, ok := ew.storage.(EmbeddingIndexManager); ok {
 		mgr.MarkNodeEmbedded(nodeID)
+	}
+}
+
+// addNodeToPendingEmbeddings re-queues a node for embedding (e.g. after a failed attempt so another worker can retry).
+func (ew *EmbedWorker) addNodeToPendingEmbeddings(nodeID storage.NodeID) {
+	if adder, ok := ew.storage.(interface{ AddToPendingEmbeddings(storage.NodeID) }); ok {
+		adder.AddToPendingEmbeddings(nodeID)
 	}
 }
 

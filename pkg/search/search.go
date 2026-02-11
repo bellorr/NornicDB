@@ -1405,6 +1405,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	}
 
 	if skipIteration {
+		s.warmupVectorPipeline(ctx)
 		return nil
 	}
 
@@ -1445,6 +1446,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 				log.Printf("📇 Vector index saved to %s", vectorPath)
 			}
 		}
+		s.warmupVectorPipeline(ctx)
 		return nil
 	}
 
@@ -1480,7 +1482,64 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			log.Printf("📇 Vector index saved to %s", vectorPath)
 		}
 	}
+	s.warmupVectorPipeline(ctx)
 	return nil
+}
+
+// warmupVectorPipeline creates the vector search pipeline (and builds HNSW or IVF-HNSW if needed) so that
+// the first user search is fast. When clustering is enabled and there are enough embeddings, runs
+// k-means and builds per-cluster HNSW (IVF-HNSW) first so the pipeline uses IVF-HNSW instead of global HNSW.
+func (s *Service) warmupVectorPipeline(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	n := 0
+	if s.vectorIndex != nil {
+		n = s.vectorIndex.Count()
+	}
+	if n == 0 {
+		return
+	}
+	log.Printf("🔍 Warming up vector search pipeline (%d vectors)...", n)
+	start := time.Now()
+
+	// When clustering is enabled and we have enough embeddings, run k-means and build IVF-HNSW first.
+	// That way the pipeline uses per-cluster HNSW instead of building a single global HNSW (faster search, better scaling).
+	if s.IsClusteringEnabled() && n >= s.GetMinEmbeddingsForClustering() {
+		s.mu.RLock()
+		clusterIndex := s.clusterIndex
+		s.mu.RUnlock()
+		if clusterIndex != nil && clusterIndex.Count() < n {
+			// Backfill cluster index from vector index (e.g. after loading indexes from disk).
+			s.vectorIndex.mu.RLock()
+			ids := make([]string, 0, len(s.vectorIndex.vectors))
+			embs := make([][]float32, 0, len(s.vectorIndex.vectors))
+			for id, vec := range s.vectorIndex.vectors {
+				if len(vec) == 0 {
+					continue
+				}
+				copyVec := make([]float32, len(vec))
+				copy(copyVec, vec)
+				ids = append(ids, id)
+				embs = append(embs, copyVec)
+			}
+			s.vectorIndex.mu.RUnlock()
+			_ = clusterIndex.AddBatch(ids, embs)
+			log.Printf("🔍 Backfilled cluster index with %d vectors for IVF-HNSW warmup", len(ids))
+		}
+		if err := s.TriggerClustering(ctx); err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("⚠️ Clustering during warmup failed (will use global HNSW): %v", err)
+		}
+	}
+
+	if _, err := s.getOrCreateVectorPipeline(); err != nil {
+		log.Printf("⚠️ Vector pipeline warmup failed (first search may be slow): %v", err)
+		return
+	}
+	log.Printf("🔍 Vector search pipeline ready in %v", time.Since(start))
 }
 
 // Search performs hybrid search with automatic fallback.
@@ -1843,19 +1902,22 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 
 	// Auto strategy: choose candidate generator based on dataset size and clustering
 	var candidateGen CandidateGenerator
+	var strategyName string
 
 	gpuEnabled := s.gpuManager != nil && s.gpuManager.IsEnabled() && s.gpuEmbeddingIndex != nil
-	gpuMinN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 20000)
-	gpuMaxN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 250000)
+	gpuMinN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 5000)
+	gpuMaxN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 100000)
 
 	// Prefer GPU brute-force (exact) when enabled and within configured thresholds.
 	// This path is exact and typically highest-throughput within its tuned N range.
 	if gpuEnabled && vectorCount >= gpuMinN && vectorCount <= gpuMaxN {
 		candidateGen = NewGPUBruteForceCandidateGen(s.gpuEmbeddingIndex)
+		strategyName = "GPU brute-force"
 	} else if vectorCount < NSmallMax {
 		// Small dataset: use brute-force on CPU (exact).
 		// Even if clustering is available, centroid routing reduces recall and adds overhead at small N.
 		candidateGen = NewBruteForceCandidateGen(s.vectorIndex)
+		strategyName = "CPU brute-force"
 	} else if s.clusterIndex != nil && s.clusterIndex.IsClustered() {
 		// If clustering is enabled and clusters are built, use centroid routing on CPU
 		// (GPU subset scoring when GPU is enabled but full brute is out-of-range, else IVF-HNSW when available,
@@ -1867,6 +1929,7 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 		// ScoreSubset uses GPU when possible and falls back to CPU gracefully.
 		if gpuEnabled && vectorCount > gpuMaxN {
 			candidateGen = NewGPUKMeansCandidateGen(s.clusterIndex, numClustersToSearch)
+			strategyName = "GPU k-means (cluster routing)"
 		} else {
 			if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", true) && !gpuEnabled {
 				s.clusterHNSWMu.RLock()
@@ -1878,10 +1941,12 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 						defer s.clusterHNSWMu.RUnlock()
 						return s.clusterHNSW[clusterID]
 					}, numClustersToSearch)
+					strategyName = "IVF-HNSW (per-cluster HNSW)"
 				}
 			}
 			if candidateGen == nil {
 				candidateGen = NewKMeansCandidateGen(s.clusterIndex, s.vectorIndex, numClustersToSearch)
+				strategyName = "CPU k-means (cluster routing)"
 			}
 		}
 	} else {
@@ -1891,7 +1956,10 @@ func (s *Service) getOrCreateVectorPipeline() (*VectorSearchPipeline, error) {
 			return nil, fmt.Errorf("failed to create HNSW index: %w", err)
 		}
 		candidateGen = NewHNSWCandidateGen(hnswIndex)
+		strategyName = "HNSW"
 	}
+
+	log.Printf("🔍 Vector search strategy: %s (N=%d vectors)", strategyName, vectorCount)
 
 	// Exact scoring defaults to SIMD CPU scoring.
 	var exactScorer ExactScorer

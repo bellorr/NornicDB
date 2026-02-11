@@ -201,7 +201,7 @@ func encodeNode(n *Node) ([]byte, bool, error) {
 		nodeCopy.Properties = make(map[string]any)
 	}
 	nodeCopy.Properties["_embeddings_stored_separately"] = true
-	nodeCopy.Properties["_embedding_chunk_count"] = len(embeddingsToStore)
+	nodeCopy.Properties["_embedding_chunk_count"] = int64(len(embeddingsToStore))
 
 	// Final encode with flag
 	data, err = encodeValue(&nodeCopy)

@@ -275,6 +275,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if dbName == "" {
 		dbName = s.dbManager.DefaultDatabaseName()
 	}
+	log.Printf("🔍 Search request database=%q query=%q", dbName, req.Query)
 
 	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
 	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
@@ -286,6 +287,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	// Get namespaced storage for the specified database
 	storageEngine, err := s.dbManager.GetStorage(dbName)
 	if err != nil {
+		log.Printf("⚠️ Search database=%q: %v", dbName, err)
 		s.writeError(w, http.StatusNotFound, fmt.Sprintf("Database '%s' not found", dbName), ErrNotFound)
 		return
 	}
