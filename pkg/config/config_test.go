@@ -481,6 +481,36 @@ heimdall:
 	}
 }
 
+// TestLoadFromFile_EmbeddingProperties tests embedding_worker properties_include/exclude and include_labels from YAML.
+func TestLoadFromFile_EmbeddingProperties(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+embedding_worker:
+  properties_include: [content, title]
+  properties_exclude: [internal_id]
+  include_labels: false
+`), 0o600)
+	if err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	wantInclude := []string{"content", "title"}
+	if len(cfg.EmbeddingWorker.PropertiesInclude) != 2 || cfg.EmbeddingWorker.PropertiesInclude[0] != "content" || cfg.EmbeddingWorker.PropertiesInclude[1] != "title" {
+		t.Errorf("expected properties_include %v, got %v", wantInclude, cfg.EmbeddingWorker.PropertiesInclude)
+	}
+	wantExclude := []string{"internal_id"}
+	if len(cfg.EmbeddingWorker.PropertiesExclude) != 1 || cfg.EmbeddingWorker.PropertiesExclude[0] != "internal_id" {
+		t.Errorf("expected properties_exclude %v, got %v", wantExclude, cfg.EmbeddingWorker.PropertiesExclude)
+	}
+	if cfg.EmbeddingWorker.IncludeLabels {
+		t.Error("expected include_labels false from YAML")
+	}
+}
+
 // TestLoadFromEnv_HeimdallProvider tests Heimdall provider env vars (openai/ollama/local).
 func TestLoadFromEnv_HeimdallProvider(t *testing.T) {
 	os.Setenv("NORNICDB_HEIMDALL_PROVIDER", "openai")

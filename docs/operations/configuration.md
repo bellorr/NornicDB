@@ -147,6 +147,39 @@ embeddings:
 
 > Note: embedding generation is **disabled by default** in current releases. Enable it explicitly with `NORNICDB_EMBEDDING_ENABLED=true` (or `nornicdb serve --embedding-enabled`) to get semantic search without manually storing vectors.
 
+### Embedding text: which properties are used
+
+By default, the embedding worker builds text from **all node properties** (except built-in metadata like `embedding`, `embedded_at`, `id`, etc.) plus **node labels**. You can restrict this so that only specific properties are embedded, or exclude certain properties.
+
+Use this when you want to:
+- **Embed only one field** (e.g. only `content`) to avoid re-embedding stored embeddings or noisy fields.
+- **Exclude internal or large fields** (e.g. `internal_id`, `raw_html`) from the embedding text.
+
+**YAML** (under `embedding_worker`):
+
+```yaml
+embedding_worker:
+  # Optional: only these property keys are used when building embedding text (empty = all).
+  properties_include: [content]              # e.g. only "content", or [content, title, description]
+  # Optional: these property keys are never used (in addition to built-in metadata skips).
+  properties_exclude: [internal_id, raw_html]
+  # Whether to prepend node labels to the embedding text (default: true).
+  include_labels: true
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `NORNICDB_EMBEDDING_PROPERTIES_INCLUDE` | (empty) | Comma-separated list of property keys to use. If set, **only** these keys (and optionally labels) are embedded. Example: `content` or `content,title,description`. |
+| `NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE` | (empty) | Comma-separated list of property keys to exclude from embedding text. Example: `internal_id,raw_html`. |
+| `NORNICDB_EMBEDDING_INCLUDE_LABELS` | `true` | Set to `false` to omit node labels from the embedding text (e.g. when embedding only a single field). |
+
+**Behavior:**
+- If **properties_include** is set, only those keys (minus any in the exclude list and built-in skips) are used.
+- **properties_exclude** is applied on top of the built-in skip list; it is also applied when include is set (so an excluded key is never embedded even if listed in include).
+- Precedence: defaults → config file → environment variables (env wins).
+
 ### Search Similarity ⭐ New
 
 Configure minimum similarity thresholds for vector search:

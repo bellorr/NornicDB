@@ -312,6 +312,9 @@ type ServerConfig struct {
 //   - NORNICDB_EMBED_CHUNK_SIZE: Max characters per chunk (default: 512)
 //   - NORNICDB_EMBED_CHUNK_OVERLAP: Characters to overlap between chunks (default: 50)
 //   - NORNICDB_EMBED_WORKER_NUM_WORKERS: Number of concurrent embedding workers (default: 1)
+//   - NORNICDB_EMBEDDING_PROPERTIES_INCLUDE: Comma-separated property keys to use for embedding text (empty = all)
+//   - NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE: Comma-separated property keys to exclude from embedding text
+//   - NORNICDB_EMBEDDING_INCLUDE_LABELS: Whether to prepend node labels to embedding text (default: true)
 type EmbeddingWorkerConfig struct {
 	// NumWorkers is the number of concurrent workers processing embeddings
 	// Use more workers for network-based embedders (OpenAI, etc.) or multiple GPUs
@@ -326,6 +329,13 @@ type EmbeddingWorkerConfig struct {
 	ChunkSize int
 	// ChunkOverlap is characters to overlap between chunks (matches MIMIR_EMBEDDINGS_CHUNK_OVERLAP)
 	ChunkOverlap int
+	// PropertiesInclude: if non-empty, only these property keys are used when building embedding text.
+	// Enables "embed only content" or "embed only title,description". Empty = use all (subject to PropertiesExclude).
+	PropertiesInclude []string
+	// PropertiesExclude: these property keys are never used when building embedding text (in addition to built-in skips).
+	PropertiesExclude []string
+	// IncludeLabels: if true (default), node labels are prepended to the embedding text.
+	IncludeLabels bool
 }
 
 // MemoryConfig holds NornicDB memory decay settings and runtime memory management.
@@ -974,6 +984,9 @@ func legacyLoadFromEnv() *Config {
 	config.EmbeddingWorker.MaxRetries = getEnvInt("NORNICDB_EMBED_MAX_RETRIES", 3)
 	config.EmbeddingWorker.ChunkSize = getEnvInt("NORNICDB_EMBED_CHUNK_SIZE", 512)
 	config.EmbeddingWorker.ChunkOverlap = getEnvInt("NORNICDB_EMBED_CHUNK_OVERLAP", 50)
+	config.EmbeddingWorker.PropertiesInclude = getEnvStringSlice("NORNICDB_EMBEDDING_PROPERTIES_INCLUDE", nil)
+	config.EmbeddingWorker.PropertiesExclude = getEnvStringSlice("NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE", nil)
+	config.EmbeddingWorker.IncludeLabels = getEnvBool("NORNICDB_EMBEDDING_INCLUDE_LABELS", true)
 
 	// Compliance settings (NornicDB-specific, framework-agnostic)
 	// Audit Logging
@@ -1310,11 +1323,14 @@ type YAMLConfig struct {
 
 	// Embedding worker configuration
 	EmbeddingWorker struct {
-		ScanInterval string `yaml:"scan_interval"`
-		BatchDelay   string `yaml:"batch_delay"`
-		MaxRetries   int    `yaml:"max_retries"`
-		ChunkSize    int    `yaml:"chunk_size"`
-		ChunkOverlap int    `yaml:"chunk_overlap"`
+		ScanInterval      string   `yaml:"scan_interval"`
+		BatchDelay        string   `yaml:"batch_delay"`
+		MaxRetries        int      `yaml:"max_retries"`
+		ChunkSize         int      `yaml:"chunk_size"`
+		ChunkOverlap      int      `yaml:"chunk_overlap"`
+		PropertiesInclude []string `yaml:"properties_include"`
+		PropertiesExclude []string `yaml:"properties_exclude"`
+		IncludeLabels     *bool    `yaml:"include_labels"`
 	} `yaml:"embedding_worker"`
 
 	// K-means clustering
@@ -1544,6 +1560,9 @@ func LoadDefaults() *Config {
 	config.EmbeddingWorker.MaxRetries = 3
 	config.EmbeddingWorker.ChunkSize = 512
 	config.EmbeddingWorker.ChunkOverlap = 50
+	config.EmbeddingWorker.PropertiesInclude = nil
+	config.EmbeddingWorker.PropertiesExclude = nil
+	config.EmbeddingWorker.IncludeLabels = true
 
 	// Compliance defaults
 	config.Compliance.AuditEnabled = true
@@ -1927,6 +1946,15 @@ func applyEnvVars(config *Config) {
 	}
 	if v := getEnvInt("NORNICDB_EMBED_CHUNK_OVERLAP", 0); v > 0 {
 		config.EmbeddingWorker.ChunkOverlap = v
+	}
+	if v := getEnvStringSlice("NORNICDB_EMBEDDING_PROPERTIES_INCLUDE", nil); len(v) > 0 {
+		config.EmbeddingWorker.PropertiesInclude = v
+	}
+	if v := getEnvStringSlice("NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE", nil); len(v) > 0 {
+		config.EmbeddingWorker.PropertiesExclude = v
+	}
+	if v := getEnv("NORNICDB_EMBEDDING_INCLUDE_LABELS", ""); v != "" {
+		config.EmbeddingWorker.IncludeLabels = getEnvBool("NORNICDB_EMBEDDING_INCLUDE_LABELS", config.EmbeddingWorker.IncludeLabels)
 	}
 
 	// Compliance settings
@@ -2462,6 +2490,15 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.EmbeddingWorker.ChunkOverlap > 0 {
 		config.EmbeddingWorker.ChunkOverlap = yamlCfg.EmbeddingWorker.ChunkOverlap
+	}
+	if len(yamlCfg.EmbeddingWorker.PropertiesInclude) > 0 {
+		config.EmbeddingWorker.PropertiesInclude = yamlCfg.EmbeddingWorker.PropertiesInclude
+	}
+	if len(yamlCfg.EmbeddingWorker.PropertiesExclude) > 0 {
+		config.EmbeddingWorker.PropertiesExclude = yamlCfg.EmbeddingWorker.PropertiesExclude
+	}
+	if yamlCfg.EmbeddingWorker.IncludeLabels != nil {
+		config.EmbeddingWorker.IncludeLabels = *yamlCfg.EmbeddingWorker.IncludeLabels
 	}
 
 	// === Feature Flags ===

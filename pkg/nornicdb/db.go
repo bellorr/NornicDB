@@ -309,9 +309,12 @@ type Config struct {
 	EmbeddingAPIKey       string  `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
 	EmbeddingModel        string  `yaml:"embedding_model"`
 	EmbeddingDimensions   int     `yaml:"embedding_dimensions"`
-	AutoEmbedEnabled      bool    `yaml:"auto_embed_enabled"`       // Auto-generate embeddings on node create/update
-	EmbedWorkerNumWorkers int     `yaml:"embed_worker_num_workers"` // Number of concurrent embedding workers (default: 1, use more for network/parallel processing)
-	SearchMinSimilarity   float64 `yaml:"search_min_similarity"`    // Min cosine similarity for vector search (0.0 = no filter)
+	AutoEmbedEnabled           bool     `yaml:"auto_embed_enabled"`            // Auto-generate embeddings on node create/update
+	EmbedWorkerNumWorkers      int      `yaml:"embed_worker_num_workers"`   // Number of concurrent embedding workers (default: 1)
+	EmbeddingPropertiesInclude []string `yaml:"embedding_properties_include"` // If non-empty, only these property keys used for embedding text
+	EmbeddingPropertiesExclude []string `yaml:"embedding_properties_exclude"` // Property keys to exclude from embedding text (in addition to built-in)
+	EmbeddingIncludeLabels     bool     `yaml:"embedding_include_labels"`    // Whether to prepend node labels to embedding text (default: true)
+	SearchMinSimilarity        float64  `yaml:"search_min_similarity"`       // Min cosine similarity for vector search (0.0 = no filter)
 
 	// Decay
 	DecayEnabled                    bool          `yaml:"decay_enabled"`
@@ -405,6 +408,9 @@ func DefaultConfig() *Config {
 		EmbeddingDimensions:             1024,
 		AutoEmbedEnabled:                true, // Auto-generate embeddings on node creation
 		EmbedWorkerNumWorkers:           1,    // Single worker by default, increase for network-based embedders or multiple GPUs
+		EmbeddingPropertiesInclude:      nil,   // Empty = use all properties (subject to exclude)
+		EmbeddingPropertiesExclude:      nil,
+		EmbeddingIncludeLabels:          true,
 		DecayEnabled:                    true,
 		DecayRecalculateInterval:        time.Hour,
 		DecayArchiveThreshold:           0.05,
@@ -1131,6 +1137,9 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		ChunkOverlap:         50,
 		ClusterDebounceDelay: 30 * time.Second, // Wait 30s after last embedding before k-means
 		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
+		PropertiesInclude:    config.EmbeddingPropertiesInclude,
+		PropertiesExclude:     config.EmbeddingPropertiesExclude,
+		IncludeLabels:        config.EmbeddingIncludeLabels,
 	}
 
 	// Initialize search service config (per-database services are created lazily).

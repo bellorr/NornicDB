@@ -53,6 +53,41 @@ export NORNICDB_EMBEDDING_MODEL_PATH=/models/mxbai-embed-large.gguf
 export NORNICDB_EMBEDDING_GPU_LAYERS=-1  # Auto-detect
 ```
 
+### Which properties are embedded
+
+By default, the embedding worker builds text from **all node properties** (except metadata like `embedding`, `embedded_at`, `id`, etc.) and **node labels**. You can limit this so that only specific properties are used, or exclude others.
+
+**Use cases:**
+- **Embed only one field** (e.g. `content`) so you don’t re-embed stored vectors or noisy fields.
+- **Exclude internal or large fields** (e.g. `internal_id`, `raw_html`) from the text sent to the embedder.
+
+**YAML** (in your config file under `embedding_worker`):
+
+```yaml
+embedding_worker:
+  properties_include: [content]              # Only these keys (empty = all)
+  properties_exclude: [internal_id, raw_html]
+  include_labels: true                       # Prepend labels (default: true)
+```
+
+**Environment variables:**
+
+```bash
+# Embed only the "content" property (and labels)
+export NORNICDB_EMBEDDING_PROPERTIES_INCLUDE=content
+
+# Embed only content and title
+export NORNICDB_EMBEDDING_PROPERTIES_INCLUDE=content,title
+
+# Exclude internal fields (all other properties still embedded)
+export NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE=internal_id,raw_html
+
+# Omit labels from embedding text (e.g. when using a single field)
+export NORNICDB_EMBEDDING_INCLUDE_LABELS=false
+```
+
+If `properties_include` is set, only those keys are used (and exclude still applies). If only `properties_exclude` is set, all properties except those and the built-in metadata list are used. See [Configuration Guide](../operations/configuration.md#embedding-text-which-properties-are-used) for full details.
+
 ## Automatic Embedding
 
 ### On Node Creation

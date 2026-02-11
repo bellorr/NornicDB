@@ -9,7 +9,7 @@ Last Updated: November 25, 2025
 ## Quick Navigation
 
 📁 **[Detailed Function Docs](functions/)** - Complete guides with examples  
-🧠 **[Memory Decay System](functions/07_DECAY_SYSTEM.md)** - How memory fading works  
+🧠 **[Memory Decay System](../../features/memory-decay.md)** - How memory fading works  
 📊 **Status:** 52 functions documented (100% coverage)
 
 ---
@@ -430,7 +430,7 @@ RETURN c.symbol,
 - `kalman.adaptive.init()`, `kalman.adaptive.process()`
 
 ### 🧠 Memory Management
-- Decay system functions (see [07_DECAY_SYSTEM.md](functions/07_DECAY_SYSTEM.md))
+- Decay system functions (see [Memory Decay System](../../features/memory-decay.md))
 
 ---
 

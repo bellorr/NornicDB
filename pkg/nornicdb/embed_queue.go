@@ -70,6 +70,14 @@ type EmbedWorkerConfig struct {
 	// Debounce settings for k-means clustering trigger
 	ClusterDebounceDelay time.Duration // How long to wait after last embedding before triggering k-means (default: 30s)
 	ClusterMinBatchSize  int           // Minimum embeddings processed before triggering k-means (default: 10)
+
+	// Property include/exclude for embedding text (optional)
+	// PropertiesInclude: if non-empty, only these property keys are used when building embedding text.
+	PropertiesInclude []string
+	// PropertiesExclude: these property keys are never used (in addition to built-in metadata skips).
+	PropertiesExclude []string
+	// IncludeLabels: if true (default), node labels are prepended to the embedding text.
+	IncludeLabels bool
 }
 
 // DefaultEmbedWorkerConfig returns sensible defaults.
@@ -83,6 +91,9 @@ func DefaultEmbedWorkerConfig() *EmbedWorkerConfig {
 		ChunkOverlap:         50,
 		ClusterDebounceDelay: 30 * time.Second, // Wait 30s after last embedding before k-means
 		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
+		PropertiesInclude:    nil,
+		PropertiesExclude:    nil,
+		IncludeLabels:        true,
 	}
 }
 
@@ -502,9 +513,13 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// Modifying the Properties map directly causes "concurrent map iteration and map write"
 	node = copyNodeForEmbedding(node)
 
-	// Build text for embedding - always includes labels and all properties
-	// Every node gets an embedding, even if it only has labels
-	text := buildEmbeddingText(node.Properties, node.Labels)
+	// Build text for embedding (labels and properties per config include/exclude)
+	opts := &EmbedTextOptions{
+		Include:       ew.config.PropertiesInclude,
+		Exclude:       ew.config.PropertiesExclude,
+		IncludeLabels: ew.config.IncludeLabels,
+	}
+	text := buildEmbeddingText(node.Properties, node.Labels, opts)
 
 	// Chunk text if needed
 	chunks := util.ChunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
@@ -768,24 +783,35 @@ func averageEmbeddings(embeddings [][]float32) []float32 {
 	return avg
 }
 
+// EmbedTextOptions controls which properties and labels are used when building embedding text.
+type EmbedTextOptions struct {
+	// Include: if non-empty, only these property keys are used (plus built-in skips and Exclude applied).
+	Include []string
+	// Exclude: these property keys are never used (in addition to built-in metadata skips).
+	Exclude []string
+	// IncludeLabels: if true, node labels are prepended to the embedding text.
+	IncludeLabels bool
+}
+
 // buildEmbeddingText creates text for embedding from node properties and labels.
-// Always returns a non-empty string - at minimum includes labels.
-// This ensures every node gets an embedding regardless of property names or types.
+// Always returns a non-empty string - at minimum includes labels when opts.IncludeLabels is true, else a fallback.
 //
 // The function:
-//   - Always includes labels (even if node has no properties)
-//   - Includes all non-metadata properties
+//   - Optionally includes labels first (when opts.IncludeLabels is true)
+//   - Includes properties according to opts: if Include is set, only those keys; Exclude is always applied; built-in skips always apply
 //   - Converts all property values to string representation
 //   - Handles arrays, booleans, numbers, and complex types (via JSON)
-func buildEmbeddingText(properties map[string]interface{}, labels []string) string {
+func buildEmbeddingText(properties map[string]interface{}, labels []string, opts *EmbedTextOptions) string {
+	if opts == nil {
+		opts = &EmbedTextOptions{IncludeLabels: true}
+	}
 	var parts []string
 
-	// Always include labels first - this ensures we always have embeddable content
-	if len(labels) > 0 {
+	if opts.IncludeLabels && len(labels) > 0 {
 		parts = append(parts, fmt.Sprintf("labels: %s", strings.Join(labels, ", ")))
 	}
 
-	// Skip these metadata/internal fields
+	// Built-in metadata/internal fields always skipped
 	skipFields := map[string]bool{
 		"embedding":            true,
 		"has_embedding":        true,
@@ -798,26 +824,42 @@ func buildEmbeddingText(properties map[string]interface{}, labels []string) stri
 		"id":                   true,
 	}
 
-	// Include all properties (even empty strings - they're part of the node representation)
+	// Build exclude set: built-in + user exclude
+	excludeSet := make(map[string]bool, len(skipFields)+16)
+	for k := range skipFields {
+		excludeSet[k] = true
+	}
+	for _, k := range opts.Exclude {
+		excludeSet[k] = true
+	}
+
+	// Include set: if opts.Include is non-empty, only those keys (still subject to excludeSet)
+	var includeSet map[string]bool
+	if len(opts.Include) > 0 {
+		includeSet = make(map[string]bool, len(opts.Include))
+		for _, k := range opts.Include {
+			includeSet[k] = true
+		}
+	}
+
 	for key, val := range properties {
-		if skipFields[key] {
+		if excludeSet[key] {
+			continue
+		}
+		if includeSet != nil && !includeSet[key] {
 			continue
 		}
 
-		// Convert value to string representation
 		var strVal string
 		switch v := val.(type) {
 		case string:
-			// Include even empty strings - they're part of the node
 			strVal = v
 		case []interface{}:
-			// Handle arrays (like tags, lists, etc.)
 			strs := make([]string, 0, len(v))
 			for _, item := range v {
 				if s, ok := item.(string); ok {
 					strs = append(strs, s)
 				} else {
-					// Convert non-string items to string
 					strs = append(strs, fmt.Sprintf("%v", item))
 				}
 			}
@@ -827,26 +869,19 @@ func buildEmbeddingText(properties map[string]interface{}, labels []string) stri
 		case int, int64, float64:
 			strVal = fmt.Sprintf("%v", v)
 		case nil:
-			// Include nil values as "null" - they're part of the node representation
 			strVal = "null"
 		default:
-			// For complex types (maps, nested objects), use JSON
 			if b, err := json.Marshal(v); err == nil {
 				strVal = string(b)
 			} else {
-				// Fallback to string representation
 				strVal = fmt.Sprintf("%v", v)
 			}
 		}
-
 		parts = append(parts, fmt.Sprintf("%s: %s", key, strVal))
 	}
 
-	// Always return at least labels, even if no properties
 	result := strings.Join(parts, "\n")
 	if result == "" {
-		// Fallback: if somehow we have no labels and no properties, use node ID
-		// This should never happen, but ensures we always return something
 		return "node"
 	}
 	return result
