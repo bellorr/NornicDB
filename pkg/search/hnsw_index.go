@@ -21,7 +21,6 @@ package search
 
 import (
 	"context"
-	"encoding/gob"
 	"errors"
 	"fmt"
 	"log"
@@ -30,9 +29,11 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 var errHNSWIndexFull = errors.New("hnsw index full")
@@ -458,8 +459,8 @@ type hnswIndexSnapshot struct {
 	MaxLevel           int
 }
 
-// Save writes the HNSW index to path (gob format) as graph-only: graph structure and IDs only, no vector data.
-// Vectors are always loaded from the vector index (vectors.gob) on load, so the file stays small.
+// Save writes the HNSW index to path (msgpack format) as graph-only: graph structure and IDs only, no vector data.
+// Vectors are always loaded from the vector index (vectors) on load, so the file stays small.
 // Dir is created if needed. Caller should not mutate the index concurrently during Save.
 func (h *HNSWIndex) Save(path string) error {
 	h.mu.RLock()
@@ -494,13 +495,13 @@ func (h *HNSWIndex) Save(path string) error {
 		HasEntryPoint:     h.hasEntryPoint,
 		MaxLevel:          h.maxLevel,
 	}
-	return gob.NewEncoder(file).Encode(&snap)
+	return msgpack.NewEncoder(file).Encode(&snap)
 }
 
 // VectorLookup returns a vector by ID (e.g. from the vector index). Used when loading a graph-only HNSW file.
 type VectorLookup func(id string) ([]float32, bool)
 
-// LoadHNSWIndex loads an HNSW index from path (gob format) and returns it.
+// LoadHNSWIndex loads an HNSW index from path (msgpack format) and returns it.
 // For graph-only format (1.1.0), vectorLookup must be non-nil so vectors can be populated from the vector index.
 // For legacy full format (1.0.0), vectorLookup is ignored. If the file does not exist or decode fails,
 // returns (nil, nil) so the caller can rebuild. Returns an error only for unexpected I/O (e.g. permission denied).
@@ -515,7 +516,7 @@ func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
 	defer file.Close()
 
 	var snap hnswIndexSnapshot
-	if err := gob.NewDecoder(file).Decode(&snap); err != nil {
+	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
 		return nil, nil
 	}
 	if snap.Dimensions <= 0 || snap.InternalToID == nil {
@@ -577,10 +578,9 @@ func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
 	return h, nil
 }
 
-// SaveIVFHNSW persists per-cluster HNSW indexes to disk under hnsw_ivf/ alongside hnsw.gob.
-// hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw.gob); per-cluster
-// files are written to the same directory in hnsw_ivf/0.gob, 1.gob, etc. Each cluster is saved as
-// graph-only. Call from the search service when IVF-HNSW is the strategy.
+// SaveIVFHNSW persists per-cluster HNSW indexes to disk under hnsw_ivf/ alongside hnsw.
+// hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw); per-cluster
+// files are written to hnsw_ivf/0, 1, 2, ... (no extension). Each cluster is saved as graph-only.
 func SaveIVFHNSW(hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
 	if hnswPath == "" || len(clusterHNSW) == 0 {
 		return nil
@@ -594,7 +594,7 @@ func SaveIVFHNSW(hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
 		if idx == nil {
 			continue
 		}
-		path := filepath.Join(ivfDir, fmt.Sprintf("%d.gob", cid))
+		path := filepath.Join(ivfDir, fmt.Sprintf("%d", cid))
 		if err := idx.Save(path); err != nil {
 			return fmt.Errorf("cluster %d: %w", cid, err)
 		}
@@ -602,32 +602,32 @@ func SaveIVFHNSW(hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
 	return nil
 }
 
-// LoadIVFHNSWCluster loads one cluster's HNSW index from hnsw_ivf/cid.gob and populates
+// LoadIVFHNSWCluster loads one cluster's HNSW index from hnsw_ivf/cid and populates
 // vectors from vectorLookup. Returns (nil, nil) if the file is missing or invalid (caller can build).
-// hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw.gob).
+// hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw).
 func LoadIVFHNSWCluster(hnswPath string, clusterID int, vectorLookup VectorLookup) (*HNSWIndex, error) {
 	if hnswPath == "" || vectorLookup == nil {
 		return nil, nil
 	}
 	baseDir := filepath.Dir(hnswPath)
-	path := filepath.Join(baseDir, "hnsw_ivf", fmt.Sprintf("%d.gob", clusterID))
+	path := filepath.Join(baseDir, "hnsw_ivf", fmt.Sprintf("%d", clusterID))
 	return LoadHNSWIndex(path, vectorLookup)
 }
 
-// loadIVFClusterMemberIDs decodes a cluster's gob file and returns the member IDs (InternalToID) without loading vectors.
+// loadIVFClusterMemberIDs decodes a cluster's msgpack file and returns the member IDs (InternalToID) without loading vectors.
 // ivfDir is the hnsw_ivf directory (prefer absolute path so cwd does not affect resolution).
 func loadIVFClusterMemberIDs(ivfDir string, clusterID int) ([]string, error) {
 	if ivfDir == "" {
 		return nil, nil
 	}
-	path := filepath.Join(ivfDir, fmt.Sprintf("%d.gob", clusterID))
+	path := filepath.Join(ivfDir, fmt.Sprintf("%d", clusterID))
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
 	defer file.Close()
 	var snap hnswIndexSnapshot
-	if err := gob.NewDecoder(file).Decode(&snap); err != nil {
+	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
 		return nil, err
 	}
 	if snap.InternalToID == nil {
@@ -636,8 +636,8 @@ func loadIVFClusterMemberIDs(ivfDir string, clusterID int) ([]string, error) {
 	return snap.InternalToID, nil
 }
 
-// DeriveIVFCentroidsFromClusters builds centroids and idToCluster from existing hnsw_ivf/*.gob cluster files
-// and vectors from the vector index (vectors.gob). No separate centroid file—consistent with graph-only IVF-HNSW.
+// DeriveIVFCentroidsFromClusters builds centroids and idToCluster from existing hnsw_ivf/ cluster files
+// (numeric names 0, 1, 2, ...) and vectors from the vector index. No separate centroid file.
 // Returns (nil, nil, nil) if no cluster files exist or derivation fails.
 func DeriveIVFCentroidsFromClusters(hnswPath string, vectorLookup VectorLookup) (centroids [][]float32, idToCluster map[string]int, err error) {
 	if hnswPath == "" || vectorLookup == nil {
@@ -663,19 +663,13 @@ func DeriveIVFCentroidsFromClusters(hnswPath string, vectorLookup VectorLookup) 
 		}
 		name := e.Name()
 		seenNames = append(seenNames, name)
-		// Ignore non-cluster files (e.g. legacy centroids.gob if present)
-		if name == "centroids.gob" {
-			continue
-		}
-		if len(name) > 4 && name[len(name)-4:] == ".gob" {
-			var cid int
-			if _, sErr := fmt.Sscanf(name, "%d.gob", &cid); sErr == nil {
-				clusterIDs = append(clusterIDs, cid)
-			}
+		// Cluster files are numeric names (0, 1, 2, ...); skip e.g. centroids.gob
+		if cid, sErr := strconv.Atoi(name); sErr == nil && cid >= 0 {
+			clusterIDs = append(clusterIDs, cid)
 		}
 	}
 	if len(clusterIDs) == 0 {
-		log.Printf("[IVF-HNSW] ⚠️ DeriveIVFCentroidsFromClusters: no cluster *.gob in %q (saw %d entries: %v); k-means will run", ivfDirAbs, len(seenNames), seenNames)
+		log.Printf("[IVF-HNSW] ⚠️ DeriveIVFCentroidsFromClusters: no cluster files in %q (saw %d entries: %v); k-means will run", ivfDirAbs, len(seenNames), seenNames)
 		return nil, nil, nil
 	}
 	sort.Ints(clusterIDs)
@@ -727,7 +721,7 @@ func DeriveIVFCentroidsFromClusters(hnswPath string, vectorLookup VectorLookup) 
 		log.Printf("[IVF-HNSW] ⚠️ DeriveIVFCentroidsFromClusters: no vectors found for any cluster in %q (vectorLookup returned nothing for cluster member IDs); k-means will run", ivfDirAbs)
 		return nil, nil, nil
 	}
-	// Dense slice so centroid index matches file names (0.gob, 1.gob, ...); RestoreClusteringState expects cid < len(centroids).
+	// Dense slice so centroid index matches cluster IDs (0, 1, 2, ...); RestoreClusteringState expects cid < len(centroids).
 	centroids = make([][]float32, maxCID+1)
 	for cid := 0; cid <= maxCID; cid++ {
 		centroids[cid] = make([]float32, dims)

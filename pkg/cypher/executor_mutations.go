@@ -1156,7 +1156,8 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 	}
 
 	if op == "" {
-		return true // No valid operator found, include all
+		// No comparison operator - may be a boolean expression (e.g. exists(n.prop))
+		return e.evaluateWhereAsBoolean(whereClause, variable, node)
 	}
 
 	left := strings.TrimSpace(whereClause[:opIdx])
@@ -1207,7 +1208,8 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 
 	// Extract property from left side (e.g., "n.name")
 	if !strings.HasPrefix(left, variable+".") {
-		return true // Not a property comparison we can handle
+		// Left is not variable.prop (e.g. size(n.content), id(n)) - evaluate full expression
+		return e.evaluateWhereAsBoolean(whereClause, variable, node)
 	}
 
 	propName := left[len(variable)+1:]
@@ -1239,6 +1241,29 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 		return e.compareRegex(actualVal, expectedVal)
 	default:
 		return true
+	}
+}
+
+// evaluateWhereAsBoolean evaluates a WHERE expression (e.g. size(n.content) > 10000, exists(n.prop))
+// using the expression evaluator and returns a boolean. Used when evaluateWhere does not handle
+// the condition as id(), elementId(), or variable.property.
+func (e *StorageExecutor) evaluateWhereAsBoolean(whereClause, variable string, node *storage.Node) bool {
+	nodes := map[string]*storage.Node{variable: node}
+	result := e.evaluateExpressionWithContext(whereClause, nodes, nil)
+	switch v := result.(type) {
+	case bool:
+		return v
+	case nil:
+		return false
+	case int64:
+		return v != 0
+	case float64:
+		return v != 0
+	case int:
+		return v != 0
+	default:
+		// Non-empty string, etc. - treat as true
+		return result != nil
 	}
 }
 

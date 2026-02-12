@@ -45,6 +45,7 @@ Implementation:
 
 - Core: `pkg/search/search.go`
 - Indexing: `(*search.Service).IndexNode()`
+- **Result cache:** `Search()` results are cached by query + options (LRU, TTL 5m); cache is invalidated on `IndexNode`/`RemoveNode`. All call paths (HTTP, Cypher, MCP) share this cache so repeated identical searches are fast.
 
 Index entry IDs:
 

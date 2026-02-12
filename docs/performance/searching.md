@@ -1127,10 +1127,23 @@ Technique              Impact        Implementation
 SIMD Acceleration      5-10x faster  Automatic in pkg/simd
 Batch Processing       2-3x faster   Process 100 at once
 GPU (optional)         10-100x       Available in pkg/gpu
-Query Caching          2-5x faster   pkg/cache
+Query Caching          2-5x faster   Cypher: pkg/cypher; Search: pkg/search
 Index Warming          2x faster     Pre-load hot shards
 Adaptive EF            1.5-2x        Tune efSearch per QPS
 ```
+
+### Search result caching
+
+Unified search (`pkg/search`) caches **search results** so that repeated identical requests are served from memory regardless of entry point (HTTP search API, Cypher, MCP, etc.).
+
+**Behavior:**
+
+- **Key:** Query string + options that affect the result: `Limit`, `Types` (labels), `RerankEnabled`, `RerankTopK`, `RerankMinScore`, `MMREnabled`, `MMRLambda`. Same (query, options) ⇒ same cache key.
+- **Capacity:** 1000 entries (LRU eviction).
+- **TTL:** 5 minutes (aligned with Cypher query cache).
+- **Invalidation:** Full cache clear on `IndexNode` and `RemoveNode`, so results stay correct after index changes.
+
+**Effect:** The first request for a given query+options runs the full pipeline (embedding, vector search, BM25, RRF, optional rerank). The second identical request returns the cached `SearchResponse` immediately (no embedding or index lookup). This is separate from the **Cypher query cache**, which caches Cypher execution results; search result caching is inside the search service and benefits every caller.
 
 ---
 

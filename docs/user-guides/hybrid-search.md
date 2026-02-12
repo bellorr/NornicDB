@@ -124,6 +124,16 @@ The search automatically falls back when needed:
 2. **Vector Only** (if BM25 returns no results)
 3. **Full-Text Only** (if no embedding or vector search fails)
 
+## Caching
+
+Search results are cached by the unified search service so that **repeated identical requests** (same query and options) return immediately from memory. The cache is shared by all entry points (HTTP `/nornicdb/search`, Cypher vector procedures, MCP, etc.).
+
+- **Key:** Query text + options (limit, types/labels, rerank, MMR settings). Same inputs ⇒ cache hit.
+- **Size:** Up to 1000 entries (LRU); entries expire after 5 minutes (TTL).
+- **Invalidation:** The cache is cleared whenever the index changes (`IndexNode` or `RemoveNode`), so results stay correct after updates.
+
+Use the same query and options for repeated calls to benefit from the cache (e.g. same search box query and limit).
+
 ## Performance (Apple M3 Max)
 
 | Operation | Scale | Time |

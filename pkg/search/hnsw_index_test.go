@@ -533,7 +533,7 @@ func BenchmarkHNSWIndex_vs_BruteForce(b *testing.B) {
 // Save writes graph-only (IDs + graph); load populates vectors from the provided lookup.
 func TestHNSWIndex_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "hnsw.gob")
+	path := filepath.Join(dir, "hnsw")
 
 	idx := NewHNSWIndex(4, DefaultHNSWConfig())
 	vecs := map[string][]float32{

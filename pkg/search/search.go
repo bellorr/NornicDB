@@ -82,6 +82,14 @@
 // files use semver format versioning (Qdrant-style): only indexes with the same format
 // version are loaded; older or newer versions are rejected so the caller can rebuild.
 // Persisted indexes are saved on a debounced schedule after mutations and on shutdown.
+//
+// Result caching:
+//
+// Search() results are cached in-process by query + options (limit, types, rerank, MMR, etc.),
+// with the same semantics as the Cypher query cache: LRU eviction (default 1000 entries),
+// TTL (default 5 minutes), and full invalidation on IndexNode/RemoveNode so results stay
+// correct after index changes. All call paths (HTTP search API, Cypher vector procedures,
+// MCP, etc.) share this cache, so repeated identical searches return immediately.
 package search
 
 import (
@@ -220,6 +228,104 @@ func (o *SearchOptions) GetMinSimilarity(fallback float64) float64 {
 	return fallback
 }
 
+// searchResultCacheEntry holds a cached SearchResponse and expiry (same semantics as Cypher query cache).
+type searchResultCacheEntry struct {
+	response *SearchResponse
+	expires  time.Time
+}
+
+// searchResultCache is an LRU cache for search results keyed by query + options.
+// Invalidated on IndexNode/RemoveNode so results stay correct after index changes.
+type searchResultCache struct {
+	mu      sync.RWMutex
+	entries map[string]*searchResultCacheEntry
+	lru     []string // key order, oldest first for eviction
+	maxSize int
+	ttl     time.Duration
+}
+
+func newSearchResultCache(maxSize int, ttl time.Duration) *searchResultCache {
+	if maxSize <= 0 {
+		maxSize = 1000
+	}
+	return &searchResultCache{
+		entries: make(map[string]*searchResultCacheEntry, maxSize),
+		lru:     make([]string, 0, maxSize),
+		maxSize: maxSize,
+		ttl:     ttl,
+	}
+}
+
+// searchCacheKey builds a deterministic key for query + options (same inputs => same key).
+func searchCacheKey(query string, opts *SearchOptions) string {
+	if opts == nil {
+		opts = DefaultSearchOptions()
+	}
+	typesCopy := make([]string, len(opts.Types))
+	copy(typesCopy, opts.Types)
+	sort.Strings(typesCopy)
+	return strings.Join([]string{
+		query,
+		strconv.Itoa(opts.Limit),
+		strings.Join(typesCopy, "|"),
+		strconv.FormatBool(opts.RerankEnabled),
+		strconv.Itoa(opts.RerankTopK),
+		strconv.FormatBool(opts.MMREnabled),
+		strconv.FormatFloat(opts.MMRLambda, 'g', -1, 64),
+		strconv.FormatFloat(opts.RerankMinScore, 'g', -1, 64),
+	}, "\x00")
+}
+
+func (c *searchResultCache) Get(key string) *SearchResponse {
+	c.mu.RLock()
+	ent, ok := c.entries[key]
+	c.mu.RUnlock()
+	if !ok || ent == nil {
+		return nil
+	}
+	if c.ttl > 0 && time.Now().After(ent.expires) {
+		c.mu.Lock()
+		delete(c.entries, key)
+		for i, k := range c.lru {
+			if k == key {
+				c.lru = append(c.lru[:i], c.lru[i+1:]...)
+				break
+			}
+		}
+		c.mu.Unlock()
+		return nil
+	}
+	return ent.response
+}
+
+func (c *searchResultCache) Put(key string, response *SearchResponse) {
+	if response == nil {
+		return
+	}
+	expires := time.Time{}
+	if c.ttl > 0 {
+		expires = time.Now().Add(c.ttl)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.entries[key]; !exists {
+		for len(c.lru) >= c.maxSize {
+			evict := c.lru[0]
+			c.lru = c.lru[1:]
+			delete(c.entries, evict)
+		}
+		c.lru = append(c.lru, key)
+	}
+	c.entries[key] = &searchResultCacheEntry{response: response, expires: expires}
+}
+
+func (c *searchResultCache) Invalidate() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.entries = make(map[string]*searchResultCacheEntry, c.maxSize)
+	c.lru = c.lru[:0]
+}
+
 // Service provides unified hybrid search with automatic index management.
 //
 // The Service maintains:
@@ -308,6 +414,10 @@ type Service struct {
 	persistMu        sync.Mutex
 	persistTimer     *time.Timer
 	buildInProgress  atomic.Bool
+
+	// resultCache caches Search() results by query+options (same semantics as Cypher query cache).
+	// All call paths (HTTP search, Cypher, etc.) benefit. Invalidated on IndexNode/RemoveNode.
+	resultCache *searchResultCache
 }
 
 // NewService creates a new search Service with empty indexes.
@@ -424,6 +534,7 @@ func NewServiceWithDimensions(engine storage.Engine, dimensions int) *Service {
 		nodeNamedVector:            make(map[string]map[string]string, 1024),
 		nodePropVector:             make(map[string]map[string]string, 1024),
 		nodeChunkVectors:           make(map[string][]string, 1024),
+		resultCache:                newSearchResultCache(1000, 5*time.Minute), // same order as Cypher query cache
 	}
 }
 
@@ -890,7 +1001,7 @@ func (s *Service) schedulePersist() {
 
 // runPersist writes the current in-memory BM25, vector, HNSW, and IVF-HNSW indexes to disk.
 // Used both by the debounced background timer and on shutdown (via PersistIndexesToDisk).
-// Persistence is strategy-based: vectors.gob is always written; hnsw.gob and/or hnsw_ivf/
+// Persistence is strategy-based: vectors is always written; hnsw and/or hnsw_ivf/
 // when the service uses global HNSW or IVF-HNSW. Does not hold s.mu across I/O.
 func (s *Service) runPersist() {
 	s.mu.RLock()
@@ -939,7 +1050,7 @@ func (s *Service) runPersist() {
 			}
 		}
 	}
-	// When IVF-HNSW is the strategy, persist per-cluster HNSW and centroids (same dir as hnsw.gob, in hnsw_ivf/).
+	// When IVF-HNSW is the strategy, persist per-cluster HNSW and centroids (same dir as hnsw, in hnsw_ivf/).
 	if hnswPath != "" {
 		s.clusterHNSWMu.RLock()
 		clusterHNSW := s.clusterHNSW
@@ -1139,6 +1250,9 @@ func (s *Service) ClearVectorIndex() {
 // All embeddings are stored in ChunkEmbeddings (even single chunk = array of 1).
 func (s *Service) IndexNode(node *storage.Node) error {
 	defer s.schedulePersist()
+	if s.resultCache != nil {
+		s.resultCache.Invalidate()
+	}
 	s.maybeAutoSetVectorDimensions(firstVectorDimensions(node))
 
 	s.mu.Lock()
@@ -1425,6 +1539,9 @@ func (s *Service) removeNodeLocked(nodeIDStr string) {
 // Also removes all chunk embeddings (for nodes with multiple chunks).
 func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	defer s.schedulePersist()
+	if s.resultCache != nil {
+		s.resultCache.Invalidate()
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -1702,7 +1819,7 @@ func (s *Service) warmupVectorPipeline(ctx context.Context) {
 			log.Printf("🔍 Backfilled cluster index with %d vectors for IVF-HNSW warmup", len(ids))
 		}
 		// Skip k-means only on initial load when we have persisted IVF-HNSW cluster files.
-		// Centroids and idToCluster are derived from hnsw_ivf/*.gob + vectors.gob (graph-only; no centroids.gob).
+		// Centroids and idToCluster are derived from hnsw_ivf/ cluster files + vectors (graph-only).
 		// The re-cluster timer still runs later and will re-run k-means when enabled.
 		restoredFromDisk := false
 		if clusterIndex != nil && hnswPath != "" && s.vectorIndex != nil {
@@ -1788,21 +1905,40 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 	// Set resolved value back for downstream use
 	opts.MinSimilarity = s.resolveMinSimilarity(opts)
 
+	// Cache key for result cache (same query+options => same key; used for Get and Put).
+	cacheKey := searchCacheKey(query, opts)
+	if s.resultCache != nil {
+		if cached := s.resultCache.Get(cacheKey); cached != nil {
+			return cached, nil
+		}
+	}
+
 	// If no embedding provided, fall back to full-text only
 	if len(embedding) == 0 {
-		return s.fullTextSearchOnly(ctx, query, opts)
+		resp, err := s.fullTextSearchOnly(ctx, query, opts)
+		if err == nil && s.resultCache != nil {
+			s.resultCache.Put(cacheKey, resp)
+		}
+		return resp, err
 	}
 
 	// For vector-only calls (no text query), skip hybrid and go straight to
 	// vector search. This avoids unnecessary BM25+RRF overhead and matches the
 	// intended semantics of "pure embedding" search.
 	if strings.TrimSpace(query) == "" {
-		return s.vectorSearchOnly(ctx, embedding, opts)
+		resp, err := s.vectorSearchOnly(ctx, embedding, opts)
+		if err == nil && s.resultCache != nil {
+			s.resultCache.Put(cacheKey, resp)
+		}
+		return resp, err
 	}
 
 	// Try RRF hybrid search
 	response, err := s.rrfHybridSearch(ctx, query, embedding, opts)
 	if err == nil && len(response.Results) > 0 {
+		if s.resultCache != nil {
+			s.resultCache.Put(cacheKey, response)
+		}
 		return response, nil
 	}
 
@@ -1811,11 +1947,18 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 	if err == nil && len(response.Results) > 0 {
 		response.FallbackTriggered = true
 		response.Message = "RRF search returned no results, fell back to vector search"
+		if s.resultCache != nil {
+			s.resultCache.Put(cacheKey, response)
+		}
 		return response, nil
 	}
 
 	// Final fallback to full-text
-	return s.fullTextSearchOnly(ctx, query, opts)
+	resp, err := s.fullTextSearchOnly(ctx, query, opts)
+	if err == nil && s.resultCache != nil {
+		s.resultCache.Put(cacheKey, resp)
+	}
+	return resp, err
 }
 
 // rrfHybridSearch performs Reciprocal Rank Fusion combining vector and BM25 results.

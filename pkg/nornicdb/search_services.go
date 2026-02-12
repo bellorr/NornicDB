@@ -104,9 +104,9 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	// HNSW is also persisted so the approximate nearest-neighbor index does not need rebuilding.
 	if db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes {
 		base := filepath.Join(db.config.DataDir, "search", dbName)
-		svc.SetFulltextIndexPath(filepath.Join(base, "bm25.gob"))
-		svc.SetVectorIndexPath(filepath.Join(base, "vectors.gob"))
-		svc.SetHNSWIndexPath(filepath.Join(base, "hnsw.gob"))
+		svc.SetFulltextIndexPath(filepath.Join(base, "bm25"))
+		svc.SetVectorIndexPath(filepath.Join(base, "vectors"))
+		svc.SetHNSWIndexPath(filepath.Join(base, "hnsw"))
 	}
 
 	// Enable GPU brute-force search if a GPU manager is configured.

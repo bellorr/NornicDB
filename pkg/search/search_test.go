@@ -3,7 +3,6 @@ package search
 
 import (
 	"context"
-	"encoding/gob"
 	"fmt"
 	"math"
 	"os"
@@ -14,6 +13,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 func newNamespacedEngine(tb testing.TB) storage.Engine {
@@ -686,7 +686,7 @@ func TestFulltextIndex_SaveLoad(t *testing.T) {
 // TestVectorIndex_SaveLoad tests vector index persistence (Save/Load round-trip).
 func TestVectorIndex_SaveLoad(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "vectors.gob")
+	path := filepath.Join(dir, "vectors")
 
 	idx := NewVectorIndex(4)
 	require.NoError(t, idx.Add("a", []float32{1, 0, 0, 0}))
@@ -731,7 +731,7 @@ func TestFulltextIndex_LoadMissingOrCorrupt(t *testing.T) {
 		// Write a snapshot with old semver "0.9.0"; Load should reject and leave index empty.
 		f, err := os.Create(oldPath)
 		require.NoError(t, err)
-		require.NoError(t, gob.NewEncoder(f).Encode(&fulltextIndexSnapshot{
+		require.NoError(t, msgpack.NewEncoder(f).Encode(&fulltextIndexSnapshot{
 			Version:       "0.9.0",
 			Documents:     map[string]string{"doc1": "hello world"},
 			InvertedIndex: map[string]map[string]int{"hello": {"doc1": 1}},
@@ -751,11 +751,11 @@ func TestFulltextIndex_LoadMissingOrCorrupt(t *testing.T) {
 // format version (semver) is not loaded (index stays empty so caller can rebuild).
 func TestVectorIndex_LoadOldVersion(t *testing.T) {
 	dir := t.TempDir()
-	oldPath := filepath.Join(dir, "old_vectors.gob")
+	oldPath := filepath.Join(dir, "old_vectors")
 	// Write a snapshot with old semver "0.9.0"; Load should reject and leave index empty.
 	f, err := os.Create(oldPath)
 	require.NoError(t, err)
-	require.NoError(t, gob.NewEncoder(f).Encode(&vectorIndexSnapshot{
+	require.NoError(t, msgpack.NewEncoder(f).Encode(&vectorIndexSnapshot{
 		Version:    "0.9.0",
 		Dimensions: 4,
 		Vectors:    map[string][]float32{"a": {1, 0, 0, 0}},

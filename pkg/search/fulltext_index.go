@@ -2,7 +2,6 @@
 package search
 
 import (
-	"encoding/gob"
 	"errors"
 	"math"
 	"os"
@@ -11,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	"github.com/vmihailenco/msgpack/v5"
 )
 
 // BM25 parameters (standard values)
@@ -64,7 +65,7 @@ type fulltextIndexSnapshot struct {
 	DocCount      int
 }
 
-// Save writes the fulltext index to path (gob format). Dir is created if needed.
+// Save writes the fulltext index to path (msgpack format). Dir is created if needed.
 // Caller should not mutate the index concurrently.
 func (f *FulltextIndex) Save(path string) error {
 	f.mu.RLock()
@@ -87,10 +88,10 @@ func (f *FulltextIndex) Save(path string) error {
 		AvgDocLength:  f.avgDocLength,
 		DocCount:      f.docCount,
 	}
-	return gob.NewEncoder(file).Encode(&snap)
+	return msgpack.NewEncoder(file).Encode(&snap)
 }
 
-// Load replaces the fulltext index with the one stored at path (gob format).
+// Load replaces the fulltext index with the one stored at path (msgpack format).
 // If the file does not exist or decode fails, the index is left empty (or unchanged on
 // missing file) and no error is returned, so the caller can proceed with a full rebuild.
 // Returns an error only for unexpected I/O (e.g. permission denied).
@@ -105,7 +106,7 @@ func (f *FulltextIndex) Load(path string) error {
 	defer file.Close()
 
 	var snap fulltextIndexSnapshot
-	if err := gob.NewDecoder(file).Decode(&snap); err != nil {
+	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
 		// Corrupt or wrong format; clear index so caller rebuilds
 		f.mu.Lock()
 		f.documents = make(map[string]string)
