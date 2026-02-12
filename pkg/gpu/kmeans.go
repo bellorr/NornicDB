@@ -29,6 +29,7 @@ package gpu
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"math/rand"
 	"sync"
@@ -830,6 +831,46 @@ func (ci *ClusterIndex) Clear() {
 	ci.centroidDrift = 0
 }
 
+// RestoreClusteringState sets clustering state from persisted centroids and id->cluster map
+// so that k-means can be skipped on load. Call after AddBatch has populated the index.
+// Any node ID not in idToCluster is assigned to cluster 0.
+func (ci *ClusterIndex) RestoreClusteringState(centroids [][]float32, idToCluster map[string]int) error {
+	if len(centroids) == 0 || idToCluster == nil {
+		return errors.New("centroids and idToCluster required")
+	}
+	ci.clusterMu.Lock()
+	ci.mu.Lock()
+	defer ci.mu.Unlock()
+	defer ci.clusterMu.Unlock()
+
+	n := len(ci.nodeIDs)
+	if n == 0 {
+		return errors.New("index has no embeddings; call AddBatch before RestoreClusteringState")
+	}
+	dims := ci.dimensions
+	for _, c := range centroids {
+		if len(c) != dims {
+			return fmt.Errorf("centroid dimensions %d != index dimensions %d", len(c), dims)
+		}
+	}
+
+	assignments := make([]int, n)
+	for i, id := range ci.nodeIDs {
+		if cid, ok := idToCluster[id]; ok && cid >= 0 && cid < len(centroids) {
+			assignments[i] = cid
+		} else {
+			assignments[i] = 0
+		}
+	}
+
+	ci.centroids = centroids
+	ci.assignments = assignments
+	ci.clusterMap = buildClusterMapFromAssignments(assignments)
+	ci.clustered = true
+	ci.updatesSinceCluster = 0
+	return nil
+}
+
 // IsClustered returns true if clustering has been performed.
 func (ci *ClusterIndex) IsClustered() bool {
 	ci.clusterMu.RLock()
@@ -842,6 +883,22 @@ func (ci *ClusterIndex) NumClusters() int {
 	ci.clusterMu.RLock()
 	defer ci.clusterMu.RUnlock()
 	return len(ci.centroids)
+}
+
+// GetCentroids returns a copy of the centroid vectors for persistence.
+// Returns nil if not clustered.
+func (ci *ClusterIndex) GetCentroids() [][]float32 {
+	ci.clusterMu.RLock()
+	defer ci.clusterMu.RUnlock()
+	if !ci.clustered || len(ci.centroids) == 0 {
+		return nil
+	}
+	out := make([][]float32, len(ci.centroids))
+	for c, vec := range ci.centroids {
+		out[c] = make([]float32, len(vec))
+		copy(out[c], vec)
+	}
+	return out
 }
 
 // ClusterStats returns clustering statistics.

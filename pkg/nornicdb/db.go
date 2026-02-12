@@ -299,7 +299,7 @@ type Config struct {
 	// Storage
 	DataDir string `yaml:"data_dir"`
 
-	// Search index persistence: when true, BM25 and vector indexes are saved under DataDir
+	// Search index persistence: when true, BM25, vector, and HNSW indexes are saved under DataDir
 	// and loaded on startup so BuildIndexes can skip the full storage iteration. Default false.
 	PersistSearchIndexes bool `yaml:"persist_search_indexes"`
 
@@ -1518,8 +1518,20 @@ func (db *DB) GetBaseStorageForManager() storage.Engine {
 	panic("nornicdb: GetBaseStorageForManager called but DB storage is not namespaced")
 }
 
-// Close closes the database.
+// StopEmbedQueue stops the embed queue and waits for workers to exit.
+// Call this as soon as shutdown is requested (e.g. on SIGINT) so embeddings stop
+// before the server is torn down. Safe to call if already stopped or never started.
+func (db *DB) StopEmbedQueue() {
+	db.mu.Lock()
+	q := db.embedQueue
+	db.embedQueue = nil
+	db.mu.Unlock()
+	if q != nil {
+		q.Close()
+	}
+}
 
+// Close closes the database.
 func (db *DB) Close() error {
 	db.mu.Lock()
 	if db.closed {
@@ -1543,6 +1555,12 @@ func (db *DB) closeInternal() error {
 		db.buildCancel()
 	}
 
+	// Close embed queue first so workers stop before we persist indexes.
+	// Otherwise embeddings keep running during the (slow) persist and after "Shutting down".
+	if db.embedQueue != nil {
+		db.embedQueue.Close()
+	}
+
 	// Wait for background goroutines to complete
 	db.bgWg.Wait()
 
@@ -1559,11 +1577,6 @@ func (db *DB) closeInternal() error {
 
 	if db.decay != nil {
 		db.decay.Stop()
-	}
-
-	// Close embed queue gracefully (processes remaining batch)
-	if db.embedQueue != nil {
-		db.embedQueue.Close()
 	}
 
 	// Stop replication before closing storage.

@@ -723,6 +723,9 @@ func runServe(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Stop embed workers first so they don't keep running during server shutdown.
+	db.StopEmbedQueue()
+
 	// Stop Bolt server
 	if err := boltServer.Close(); err != nil {
 		fmt.Printf("Warning: error stopping Bolt server: %v\n", err)

@@ -21,9 +21,14 @@ package search
 
 import (
 	"context"
+	"encoding/gob"
 	"errors"
+	"fmt"
+	"log"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"sort"
 	"sync"
 
@@ -400,6 +405,11 @@ func (h *HNSWIndex) Size() int {
 	return h.liveCount
 }
 
+// GetDimensions returns the vector dimension of the index.
+func (h *HNSWIndex) GetDimensions() int {
+	return h.dimensions
+}
+
 // TombstoneRatio returns the ratio of deleted vectors to total vectors.
 // Returns 0.0 if there are no vectors. A high ratio (>0.5) indicates
 // the index should be rebuilt to free memory.
@@ -419,6 +429,315 @@ func (h *HNSWIndex) TombstoneRatio() float64 {
 // and should be rebuilt to free memory. Threshold is 50% deleted vectors.
 func (h *HNSWIndex) ShouldRebuild() bool {
 	return h.TombstoneRatio() > 0.5
+}
+
+const (
+	hnswIndexFormatVersion         = "1.0.0" // full snapshot (vectors included), legacy
+	hnswIndexFormatVersionGraphOnly = "1.1.0" // graph + IDs only; vectors come from vector index on load
+)
+
+// hnswIndexSnapshot is the serializable form of the HNSW index for persistence.
+// For format 1.1.0 we save with Vectors and VecOff nil (graph-only); they are reconstructed on load from the vector index.
+type hnswIndexSnapshot struct {
+	Version            string
+	Config             HNSWConfig
+	Dimensions         int
+	NodeLevel          []uint16
+	VecOff             []int32
+	NeighborsArena     []uint32
+	NeighborsOff       []int32
+	NeighborCountsAr   []uint16
+	NeighborCountsOff  []int32
+	IDToInternal       map[string]uint32
+	InternalToID       []string
+	Deleted            []bool
+	LiveCount          int
+	Vectors            []float32
+	EntryPoint         uint32
+	HasEntryPoint      bool
+	MaxLevel           int
+}
+
+// Save writes the HNSW index to path (gob format) as graph-only: graph structure and IDs only, no vector data.
+// Vectors are always loaded from the vector index (vectors.gob) on load, so the file stays small.
+// Dir is created if needed. Caller should not mutate the index concurrently during Save.
+func (h *HNSWIndex) Save(path string) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	// Graph-only: do not persist Vectors or VecOff (recomputed on load from vector index).
+	snap := hnswIndexSnapshot{
+		Version:           hnswIndexFormatVersionGraphOnly,
+		Config:            h.config,
+		Dimensions:        h.dimensions,
+		NodeLevel:         h.nodeLevel,
+		VecOff:            nil,
+		NeighborsArena:    h.neighborsArena,
+		NeighborsOff:      h.neighborsOff,
+		NeighborCountsAr:   h.neighborCountsArena,
+		NeighborCountsOff: h.neighborCountsOff,
+		IDToInternal:      h.idToInternal,
+		InternalToID:      h.internalToID,
+		Deleted:           h.deleted,
+		LiveCount:         h.liveCount,
+		Vectors:           nil,
+		EntryPoint:        h.entryPoint,
+		HasEntryPoint:     h.hasEntryPoint,
+		MaxLevel:          h.maxLevel,
+	}
+	return gob.NewEncoder(file).Encode(&snap)
+}
+
+// VectorLookup returns a vector by ID (e.g. from the vector index). Used when loading a graph-only HNSW file.
+type VectorLookup func(id string) ([]float32, bool)
+
+// LoadHNSWIndex loads an HNSW index from path (gob format) and returns it.
+// For graph-only format (1.1.0), vectorLookup must be non-nil so vectors can be populated from the vector index.
+// For legacy full format (1.0.0), vectorLookup is ignored. If the file does not exist or decode fails,
+// returns (nil, nil) so the caller can rebuild. Returns an error only for unexpected I/O (e.g. permission denied).
+func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	var snap hnswIndexSnapshot
+	if err := gob.NewDecoder(file).Decode(&snap); err != nil {
+		return nil, nil
+	}
+	if snap.Dimensions <= 0 || snap.InternalToID == nil {
+		return nil, nil
+	}
+	// Accept only 1.0.0 (full, legacy) and 1.1.0 (graph-only).
+	if snap.Version != hnswIndexFormatVersion && snap.Version != hnswIndexFormatVersionGraphOnly {
+		return nil, nil
+	}
+
+	config := snap.Config
+	if config.M == 0 {
+		config = DefaultHNSWConfig()
+	}
+	h := NewHNSWIndex(snap.Dimensions, config)
+	h.mu.Lock()
+	h.nodeLevel = snap.NodeLevel
+	h.neighborsArena = snap.NeighborsArena
+	h.neighborsOff = snap.NeighborsOff
+	h.neighborCountsArena = snap.NeighborCountsAr
+	h.neighborCountsOff = snap.NeighborCountsOff
+	h.idToInternal = snap.IDToInternal
+	h.internalToID = snap.InternalToID
+	h.deleted = snap.Deleted
+	h.liveCount = snap.LiveCount
+	h.entryPoint = snap.EntryPoint
+	h.hasEntryPoint = snap.HasEntryPoint
+	h.maxLevel = snap.MaxLevel
+	if h.idToInternal == nil {
+		h.idToInternal = make(map[string]uint32)
+	}
+
+	if snap.Version == hnswIndexFormatVersionGraphOnly {
+		// Populate vectors and vecOff from the vector index (same order as internalToID).
+		if vectorLookup == nil {
+			h.mu.Unlock()
+			return nil, nil
+		}
+		dims := snap.Dimensions
+		vectors := make([]float32, 0, len(snap.InternalToID)*dims)
+		vecOff := make([]int32, len(snap.InternalToID))
+		for i, id := range snap.InternalToID {
+			vec, ok := vectorLookup(id)
+			if !ok || len(vec) != dims {
+				h.mu.Unlock()
+				return nil, nil
+			}
+			vecOff[i] = int32(len(vectors))
+			vectors = append(vectors, vec...)
+		}
+		h.vecOff = vecOff
+		h.vectors = vectors
+	} else {
+		// Legacy full snapshot.
+		h.vecOff = snap.VecOff
+		h.vectors = snap.Vectors
+	}
+	h.mu.Unlock()
+	return h, nil
+}
+
+// SaveIVFHNSW persists per-cluster HNSW indexes to disk under hnsw_ivf/ alongside hnsw.gob.
+// hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw.gob); per-cluster
+// files are written to the same directory in hnsw_ivf/0.gob, 1.gob, etc. Each cluster is saved as
+// graph-only. Call from the search service when IVF-HNSW is the strategy.
+func SaveIVFHNSW(hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
+	if hnswPath == "" || len(clusterHNSW) == 0 {
+		return nil
+	}
+	baseDir := filepath.Dir(hnswPath)
+	ivfDir := filepath.Join(baseDir, "hnsw_ivf")
+	if err := os.MkdirAll(ivfDir, 0755); err != nil {
+		return err
+	}
+	for cid, idx := range clusterHNSW {
+		if idx == nil {
+			continue
+		}
+		path := filepath.Join(ivfDir, fmt.Sprintf("%d.gob", cid))
+		if err := idx.Save(path); err != nil {
+			return fmt.Errorf("cluster %d: %w", cid, err)
+		}
+	}
+	return nil
+}
+
+// LoadIVFHNSWCluster loads one cluster's HNSW index from hnsw_ivf/cid.gob and populates
+// vectors from vectorLookup. Returns (nil, nil) if the file is missing or invalid (caller can build).
+// hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw.gob).
+func LoadIVFHNSWCluster(hnswPath string, clusterID int, vectorLookup VectorLookup) (*HNSWIndex, error) {
+	if hnswPath == "" || vectorLookup == nil {
+		return nil, nil
+	}
+	baseDir := filepath.Dir(hnswPath)
+	path := filepath.Join(baseDir, "hnsw_ivf", fmt.Sprintf("%d.gob", clusterID))
+	return LoadHNSWIndex(path, vectorLookup)
+}
+
+// loadIVFClusterMemberIDs decodes a cluster's gob file and returns the member IDs (InternalToID) without loading vectors.
+// ivfDir is the hnsw_ivf directory (prefer absolute path so cwd does not affect resolution).
+func loadIVFClusterMemberIDs(ivfDir string, clusterID int) ([]string, error) {
+	if ivfDir == "" {
+		return nil, nil
+	}
+	path := filepath.Join(ivfDir, fmt.Sprintf("%d.gob", clusterID))
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	var snap hnswIndexSnapshot
+	if err := gob.NewDecoder(file).Decode(&snap); err != nil {
+		return nil, err
+	}
+	if snap.InternalToID == nil {
+		return nil, nil
+	}
+	return snap.InternalToID, nil
+}
+
+// DeriveIVFCentroidsFromClusters builds centroids and idToCluster from existing hnsw_ivf/*.gob cluster files
+// and vectors from the vector index (vectors.gob). No separate centroid file—consistent with graph-only IVF-HNSW.
+// Returns (nil, nil, nil) if no cluster files exist or derivation fails.
+func DeriveIVFCentroidsFromClusters(hnswPath string, vectorLookup VectorLookup) (centroids [][]float32, idToCluster map[string]int, err error) {
+	if hnswPath == "" || vectorLookup == nil {
+		return nil, nil, nil
+	}
+	baseDir := filepath.Dir(hnswPath)
+	ivfDir := filepath.Join(baseDir, "hnsw_ivf")
+	ivfDirAbs, absErr := filepath.Abs(ivfDir)
+	if absErr != nil {
+		log.Printf("[IVF-HNSW] ⚠️ DeriveIVFCentroidsFromClusters: resolve path %q: %v", ivfDir, absErr)
+		return nil, nil, nil
+	}
+	entries, err := os.ReadDir(ivfDirAbs)
+	if err != nil {
+		log.Printf("[IVF-HNSW] ⚠️ DeriveIVFCentroidsFromClusters: ReadDir %q: %v (k-means will run)", ivfDirAbs, err)
+		return nil, nil, nil
+	}
+	var clusterIDs []int
+	var seenNames []string
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		name := e.Name()
+		seenNames = append(seenNames, name)
+		// Ignore non-cluster files (e.g. legacy centroids.gob if present)
+		if name == "centroids.gob" {
+			continue
+		}
+		if len(name) > 4 && name[len(name)-4:] == ".gob" {
+			var cid int
+			if _, sErr := fmt.Sscanf(name, "%d.gob", &cid); sErr == nil {
+				clusterIDs = append(clusterIDs, cid)
+			}
+		}
+	}
+	if len(clusterIDs) == 0 {
+		log.Printf("[IVF-HNSW] ⚠️ DeriveIVFCentroidsFromClusters: no cluster *.gob in %q (saw %d entries: %v); k-means will run", ivfDirAbs, len(seenNames), seenNames)
+		return nil, nil, nil
+	}
+	sort.Ints(clusterIDs)
+	maxCID := clusterIDs[len(clusterIDs)-1]
+
+	idToCluster = make(map[string]int)
+	dims := 0
+	centroidSums := make([][]float64, maxCID+1)
+	centroidCounts := make([]int, maxCID+1)
+
+	for _, cid := range clusterIDs {
+		memberIDs, err := loadIVFClusterMemberIDs(ivfDirAbs, cid)
+		if err != nil || len(memberIDs) == 0 {
+			continue
+		}
+		for _, id := range memberIDs {
+			idToCluster[id] = cid
+		}
+		vecs := make([][]float32, 0, len(memberIDs))
+		for _, id := range memberIDs {
+			vec, ok := vectorLookup(id)
+			if !ok || len(vec) == 0 {
+				continue
+			}
+			if dims == 0 {
+				dims = len(vec)
+			}
+			if len(vec) != dims {
+				continue
+			}
+			vecs = append(vecs, vec)
+		}
+		if len(vecs) == 0 {
+			continue
+		}
+		if dims == 0 {
+			dims = len(vecs[0])
+		}
+		centroidSums[cid] = make([]float64, dims)
+		for _, v := range vecs {
+			for d := 0; d < dims; d++ {
+				centroidSums[cid][d] += float64(v[d])
+			}
+		}
+		centroidCounts[cid] = len(vecs)
+	}
+
+	if dims == 0 {
+		log.Printf("[IVF-HNSW] ⚠️ DeriveIVFCentroidsFromClusters: no vectors found for any cluster in %q (vectorLookup returned nothing for cluster member IDs); k-means will run", ivfDirAbs)
+		return nil, nil, nil
+	}
+	// Dense slice so centroid index matches file names (0.gob, 1.gob, ...); RestoreClusteringState expects cid < len(centroids).
+	centroids = make([][]float32, maxCID+1)
+	for cid := 0; cid <= maxCID; cid++ {
+		centroids[cid] = make([]float32, dims)
+		if centroidCounts[cid] > 0 {
+			for d := 0; d < dims; d++ {
+				centroids[cid][d] = float32(centroidSums[cid][d] / float64(centroidCounts[cid]))
+			}
+		}
+	}
+	return centroids, idToCluster, nil
 }
 
 func (h *HNSWIndex) removeLocked(internalID uint32) {

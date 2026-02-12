@@ -13,6 +13,7 @@ package storage
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"strings"
@@ -271,7 +272,10 @@ func (ae *AsyncEngine) flushLoop() {
 				}
 			}
 			if err := ae.Flush(); err != nil {
-				log.Printf("async flush failed: %v", err)
+				// Don't log storage closed during shutdown (engine closed by teardown order or race with stopChan).
+				if !errors.Is(err, ErrStorageClosed) && !strings.Contains(err.Error(), ErrStorageClosed.Error()) {
+					log.Printf("async flush failed: %v", err)
+				}
 			}
 		case <-ae.stopChan:
 			// Final flush on shutdown
@@ -300,6 +304,22 @@ type FlushResult struct {
 // HasErrors returns true if any flush operations failed.
 func (r FlushResult) HasErrors() bool {
 	return r.NodesFailed > 0 || r.EdgesFailed > 0 || r.DeletesFailed > 0
+}
+
+// isStorageClosedOnly returns true if the flush failed only due to storage closed (expected during shutdown).
+func (r FlushResult) isStorageClosedOnly() bool {
+	if !r.HasErrors() {
+		return false
+	}
+	closed := ErrStorageClosed.Error()
+	first := r.FirstNodeError
+	if first == "" {
+		first = r.FirstEdgeError
+	}
+	if first == "" {
+		first = r.FirstDeleteError
+	}
+	return first == closed || strings.Contains(first, closed)
 }
 
 // Flush writes all pending changes to the underlying engine.
@@ -1638,6 +1658,11 @@ func (ae *AsyncEngine) Close() error {
 
 	// Close underlying engine
 	engineErr := ae.engine.Close()
+
+	// Treat "storage closed" as expected during shutdown (teardown closed engine before async, or ticker/stopChan race).
+	if result.HasErrors() && result.isStorageClosedOnly() {
+		result = FlushResult{}
+	}
 
 	// Build error message if there are issues
 	if result.HasErrors() || pendingNodes > 0 || pendingEdges > 0 {

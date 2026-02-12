@@ -272,9 +272,10 @@ type Service struct {
 	gpuEmbeddingIndex *gpu.EmbeddingIndex
 
 	// GPU k-means clustering for accelerated search (optional)
-	clusterIndex   *gpu.ClusterIndex
-	clusterEnabled bool
-	clusterUsesGPU bool
+	clusterIndex      *gpu.ClusterIndex
+	clusterEnabled    bool
+	clusterUsesGPU    bool
+	kmeansInProgress  atomic.Bool
 
 	// Optional IVF-HNSW acceleration: build one HNSW per cluster to use centroids
 	// as a routing layer for CPU-only large datasets.
@@ -298,8 +299,10 @@ type Service struct {
 
 	// Index persistence: when both paths are set, BuildIndexes tries to load BM25 and vector
 	// indexes from disk; if both load successfully with count > 0, the full iteration is skipped.
+	// When hnswIndexPath is set, the HNSW index is also saved/loaded so it does not need rebuilding.
 	fulltextIndexPath string
 	vectorIndexPath  string
+	hnswIndexPath   string
 
 	// Debounced persist: after IndexNode/RemoveNode we schedule a write to disk after an idle delay.
 	persistMu        sync.Mutex
@@ -513,9 +516,18 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 		numClusters = 100 // Default
 	}
 
+	// Max iterations is a cap; clustering stops when assignments stop changing (early convergence).
+	// Best practice: 20-30 is usually enough with k-means++; 50+ rarely needed. Override via NORNICDB_KMEANS_MAX_ITERATIONS.
+	maxIter := envInt("NORNICDB_KMEANS_MAX_ITERATIONS", 25)
+	if maxIter < 5 {
+		maxIter = 5
+	}
+	if maxIter > 500 {
+		maxIter = 500
+	}
 	kmeansConfig := &gpu.KMeansConfig{
 		NumClusters:   numClusters,
-		MaxIterations: 50,
+		MaxIterations: maxIter,
 		Tolerance:     0.001,
 		InitMethod:    "kmeans++",
 	}
@@ -583,6 +595,8 @@ const DefaultMinEmbeddingsForClustering = 1000
 
 // TriggerClustering runs k-means clustering on all indexed embeddings.
 // Stops promptly when ctx is cancelled (e.g. process shutdown).
+// Only one run executes at a time per service; if clustering is already in progress,
+// returns nil immediately (debounced).
 //
 // Trigger Policies:
 //   - After bulk loads: Automatically called after BuildIndexes() completes
@@ -600,6 +614,12 @@ func (s *Service) TriggerClustering(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if !s.kmeansInProgress.CompareAndSwap(false, true) {
+		log.Printf("[K-MEANS] ⏭️  SKIPPED | reason=already_running")
+		return nil
+	}
+	defer s.kmeansInProgress.Store(false)
+
 	s.mu.RLock()
 	clusterIndex := s.clusterIndex
 	threshold := s.minEmbeddingsForClustering
@@ -676,6 +696,7 @@ func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *g
 	if vi != nil {
 		dims = vi.GetDimensions()
 	}
+	hnswPath := s.hnswIndexPath
 	s.mu.RUnlock()
 	if vi == nil || dims <= 0 {
 		return fmt.Errorf("vector index unavailable")
@@ -693,9 +714,7 @@ func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *g
 
 	config := HNSWConfigFromEnv()
 	rebuilt := make(map[int]*HNSWIndex, numClusters)
-
-	vi.mu.RLock()
-	defer vi.mu.RUnlock()
+	vectorLookup := vi.GetVector
 
 	for cid := 0; cid < numClusters; cid++ {
 		if ctx.Err() != nil {
@@ -705,13 +724,25 @@ func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *g
 		if len(memberIDs) < minClusterSize {
 			continue
 		}
-		idx := NewHNSWIndex(dims, config)
-		for _, id := range memberIDs {
-			vec, ok := vi.vectors[id]
-			if !ok || len(vec) == 0 {
-				continue
+		// Try loading persisted IVF-HNSW cluster first (same path convention as SaveIVFHNSW).
+		var idx *HNSWIndex
+		if hnswPath != "" && vectorLookup != nil {
+			loaded, _ := LoadIVFHNSWCluster(hnswPath, cid, vectorLookup)
+			if loaded != nil && loaded.GetDimensions() == dims {
+				idx = loaded
 			}
-			_ = idx.Add(id, vec)
+		}
+		if idx == nil {
+			idx = NewHNSWIndex(dims, config)
+			vi.mu.RLock()
+			for _, id := range memberIDs {
+				vec, ok := vi.vectors[id]
+				if !ok || len(vec) == 0 {
+					continue
+				}
+				_ = idx.Add(id, vec)
+			}
+			vi.mu.RUnlock()
 		}
 		rebuilt[cid] = idx
 	}
@@ -724,6 +755,12 @@ func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *g
 	s.vectorPipeline = nil
 	s.pipelineMu.Unlock()
 	return nil
+}
+
+// ClusteringInProgress returns true if k-means is currently running for this service.
+// Used to debounce timer ticks and avoid starting a second run while one is in progress.
+func (s *Service) ClusteringInProgress() bool {
+	return s.kmeansInProgress.Load()
 }
 
 // IsClusteringEnabled returns true if GPU clustering is enabled.
@@ -807,6 +844,15 @@ func (s *Service) SetVectorIndexPath(path string) {
 	s.vectorIndexPath = path
 }
 
+// SetHNSWIndexPath sets the path for persisting the HNSW index.
+// When set with persist search indexes, the HNSW index is saved after build/warmup and
+// loaded on startup so the full graph does not need to be rebuilt from vectors.
+func (s *Service) SetHNSWIndexPath(path string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hnswIndexPath = path
+}
+
 // schedulePersist schedules a write of BM25 and vector indexes to disk after an idle delay.
 // Called after IndexNode/RemoveNode when paths are set; resets the timer on each mutation
 // so we only write after activity settles. No-ops during BuildIndexes (we save at end there).
@@ -842,15 +888,18 @@ func (s *Service) schedulePersist() {
 	})
 }
 
-// runPersist writes the current in-memory BM25 and vector indexes to disk.
-// Run in the background (from the debounce timer); does not hold s.mu across I/O.
+// runPersist writes the current in-memory BM25, vector, HNSW, and IVF-HNSW indexes to disk.
+// Used both by the debounced background timer and on shutdown (via PersistIndexesToDisk).
+// Persistence is strategy-based: vectors.gob is always written; hnsw.gob and/or hnsw_ivf/
+// when the service uses global HNSW or IVF-HNSW. Does not hold s.mu across I/O.
 func (s *Service) runPersist() {
 	s.mu.RLock()
 	ftPath := s.fulltextIndexPath
 	vPath := s.vectorIndexPath
+	hnswPath := s.hnswIndexPath
 	vi := s.vectorIndex
 	s.mu.RUnlock()
-	if ftPath == "" && vPath == "" {
+	if ftPath == "" && vPath == "" && hnswPath == "" {
 		return
 	}
 	if ftPath != "" {
@@ -867,12 +916,49 @@ func (s *Service) runPersist() {
 			log.Printf("📇 Background persist: vector index saved to %s", vPath)
 		}
 	}
+	// Only persist HNSW when we use HNSW strategy (N >= NSmallMax). Do not build on shutdown to avoid long hangs.
+	if hnswPath != "" {
+		vecCount := 0
+		if vi != nil {
+			vecCount = vi.Count()
+		}
+		if vi == nil || vecCount < NSmallMax {
+			log.Printf("📇 Background persist: HNSW skip (vector count %d < %d)", vecCount, NSmallMax)
+		} else {
+			s.hnswMu.RLock()
+			idx := s.hnswIndex
+			s.hnswMu.RUnlock()
+			if idx == nil {
+				log.Printf("📇 Background persist: HNSW skip (index not built; will rebuild on next search)")
+			} else {
+				if err := idx.Save(hnswPath); err != nil {
+					log.Printf("⚠️ Background persist: failed to save HNSW index to %s: %v", hnswPath, err)
+				} else {
+					log.Printf("📇 Background persist: HNSW index saved to %s", hnswPath)
+				}
+			}
+		}
+	}
+	// When IVF-HNSW is the strategy, persist per-cluster HNSW and centroids (same dir as hnsw.gob, in hnsw_ivf/).
+	if hnswPath != "" {
+		s.clusterHNSWMu.RLock()
+		clusterHNSW := s.clusterHNSW
+		s.clusterHNSWMu.RUnlock()
+		if len(clusterHNSW) > 0 {
+			if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
+				log.Printf("⚠️ Background persist: failed to save IVF-HNSW clusters to %s: %v", hnswPath, err)
+			} else {
+				log.Printf("📇 Background persist: IVF-HNSW clusters saved to %s (%d clusters)", hnswPath, len(clusterHNSW))
+			}
+		}
+	}
 }
 
-// PersistIndexesToDisk writes the current BM25 and vector indexes to disk immediately.
-// Call this on shutdown so the latest in-memory state is saved before exit.
+// PersistIndexesToDisk writes the current BM25, vector, HNSW, and IVF-HNSW (per-cluster) indexes to disk immediately.
+// Call this on shutdown so the latest in-memory state is saved before exit, same as every other persisted index.
 // Cancels any pending debounced persist so no write runs after shutdown.
 func (s *Service) PersistIndexesToDisk() {
+	log.Printf("📇 Persisting search indexes (BM25, vector, HNSW/IVF-HNSW)...")
 	s.persistMu.Lock()
 	if s.persistTimer != nil {
 		s.persistTimer.Stop()
@@ -1404,8 +1490,47 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			s.fulltextIndex.Count(), s.vectorIndex.Count())
 	}
 
+	// When skipping iteration and we use HNSW strategy (N >= NSmallMax), load HNSW from disk so warmup does not rebuild it.
+	s.mu.RLock()
+	hnswPath := s.hnswIndexPath
+	s.mu.RUnlock()
+	if skipIteration && hnswPath != "" && s.vectorIndex != nil && s.vectorIndex.Count() >= NSmallMax {
+		vi := s.vectorIndex
+		loaded, err := LoadHNSWIndex(hnswPath, vi.GetVector)
+		if err == nil && loaded != nil && loaded.GetDimensions() == vi.GetDimensions() {
+			s.hnswMu.Lock()
+			s.hnswIndex = loaded
+			s.hnswMu.Unlock()
+			log.Printf("📇 HNSW index loaded from disk: vectors=%d tombstone_ratio=%.2f", loaded.Size(), loaded.TombstoneRatio())
+		}
+	}
+
 	if skipIteration {
 		s.warmupVectorPipeline(ctx)
+		if hnswPath != "" && s.vectorIndex != nil && s.vectorIndex.Count() >= NSmallMax {
+			s.hnswMu.RLock()
+			idx := s.hnswIndex
+			s.hnswMu.RUnlock()
+			if idx != nil {
+				if err := idx.Save(hnswPath); err != nil {
+					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
+				} else {
+					log.Printf("📇 HNSW index saved to %s", hnswPath)
+				}
+			}
+		}
+		if hnswPath != "" {
+			s.clusterHNSWMu.RLock()
+			clusterHNSW := s.clusterHNSW
+			s.clusterHNSWMu.RUnlock()
+			if len(clusterHNSW) > 0 {
+				if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
+					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
+				} else {
+					log.Printf("📇 HNSW index saved to %s", hnswPath)
+				}
+			}
+		}
 		return nil
 	}
 
@@ -1447,6 +1572,30 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			}
 		}
 		s.warmupVectorPipeline(ctx)
+		if hnswPath != "" && s.vectorIndex != nil && s.vectorIndex.Count() >= NSmallMax {
+			s.hnswMu.RLock()
+			idx := s.hnswIndex
+			s.hnswMu.RUnlock()
+			if idx != nil {
+				if err := idx.Save(hnswPath); err != nil {
+					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
+				} else {
+					log.Printf("📇 HNSW index saved to %s", hnswPath)
+				}
+			}
+		}
+		if hnswPath != "" {
+			s.clusterHNSWMu.RLock()
+			clusterHNSW := s.clusterHNSW
+			s.clusterHNSWMu.RUnlock()
+			if len(clusterHNSW) > 0 {
+				if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
+					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
+				} else {
+					log.Printf("📇 HNSW index saved to %s", hnswPath)
+				}
+			}
+		}
 		return nil
 	}
 
@@ -1483,6 +1632,30 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		}
 	}
 	s.warmupVectorPipeline(ctx)
+	if hnswPath != "" && s.vectorIndex != nil && s.vectorIndex.Count() >= NSmallMax {
+		s.hnswMu.RLock()
+		idx := s.hnswIndex
+		s.hnswMu.RUnlock()
+		if idx != nil {
+			if err := idx.Save(hnswPath); err != nil {
+				log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
+			} else {
+				log.Printf("📇 HNSW index saved to %s", hnswPath)
+			}
+		}
+	}
+	if hnswPath != "" {
+		s.clusterHNSWMu.RLock()
+		clusterHNSW := s.clusterHNSW
+		s.clusterHNSWMu.RUnlock()
+		if len(clusterHNSW) > 0 {
+			if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
+				log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
+			} else {
+				log.Printf("📇 HNSW index saved to %s", hnswPath)
+			}
+		}
+	}
 	return nil
 }
 
@@ -1503,11 +1676,12 @@ func (s *Service) warmupVectorPipeline(ctx context.Context) {
 	log.Printf("🔍 Warming up vector search pipeline (%d vectors)...", n)
 	start := time.Now()
 
-	// When clustering is enabled and we have enough embeddings, run k-means and build IVF-HNSW first.
-	// That way the pipeline uses per-cluster HNSW instead of building a single global HNSW (faster search, better scaling).
+	// When clustering is enabled and we have enough embeddings, restore or run k-means and build IVF-HNSW.
+	// If centroids are persisted (from previous IVF-HNSW save), load them and skip k-means so warmup is fast.
 	if s.IsClusteringEnabled() && n >= s.GetMinEmbeddingsForClustering() {
 		s.mu.RLock()
 		clusterIndex := s.clusterIndex
+		hnswPath := s.hnswIndexPath
 		s.mu.RUnlock()
 		if clusterIndex != nil && clusterIndex.Count() < n {
 			// Backfill cluster index from vector index (e.g. after loading indexes from disk).
@@ -1527,11 +1701,34 @@ func (s *Service) warmupVectorPipeline(ctx context.Context) {
 			_ = clusterIndex.AddBatch(ids, embs)
 			log.Printf("🔍 Backfilled cluster index with %d vectors for IVF-HNSW warmup", len(ids))
 		}
-		if err := s.TriggerClustering(ctx); err != nil {
-			if ctx.Err() != nil {
-				return
+		// Skip k-means only on initial load when we have persisted IVF-HNSW cluster files.
+		// Centroids and idToCluster are derived from hnsw_ivf/*.gob + vectors.gob (graph-only; no centroids.gob).
+		// The re-cluster timer still runs later and will re-run k-means when enabled.
+		restoredFromDisk := false
+		if clusterIndex != nil && hnswPath != "" && s.vectorIndex != nil {
+			vectorLookup := s.vectorIndex.GetVector
+			if vectorLookup != nil {
+				centroids, idToCluster, deriveErr := DeriveIVFCentroidsFromClusters(hnswPath, vectorLookup)
+				if len(centroids) > 0 && len(idToCluster) > 0 {
+					if err := clusterIndex.RestoreClusteringState(centroids, idToCluster); err == nil {
+						if err := s.rebuildClusterHNSWIndexes(ctx, clusterIndex); err == nil {
+							log.Printf("🔍 IVF-HNSW restored from disk (%d clusters); skipping k-means", len(centroids))
+							restoredFromDisk = true
+						}
+					}
+				} else if !restoredFromDisk {
+					log.Printf("[IVF-HNSW] ⚠️ Could not restore from hnsw_ivf (path=%q); running k-means. deriveErr=%v centroids=%d idToCluster=%d",
+						hnswPath, deriveErr, len(centroids), len(idToCluster))
+				}
 			}
-			log.Printf("⚠️ Clustering during warmup failed (will use global HNSW): %v", err)
+		}
+		if !restoredFromDisk {
+			if err := s.TriggerClustering(ctx); err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				log.Printf("⚠️ Clustering during warmup failed (will use global HNSW): %v", err)
+			}
 		}
 	}
 
@@ -2020,13 +2217,13 @@ func (s *Service) getOrCreateHNSWIndex(dimensions int) (*HNSWIndex, error) {
 		return existing, nil
 	}
 
-	// Log configuration for observability
+	// Log configuration and stats for observability
 	quality := os.Getenv("NORNICDB_VECTOR_ANN_QUALITY")
 	if quality == "" {
 		quality = "balanced"
 	}
-	log.Printf("🔍 HNSW index created: quality=%s M=%d efConstruction=%d efSearch=%d",
-		quality, config.M, config.EfConstruction, config.EfSearch)
+	log.Printf("🔍 HNSW index created: quality=%s M=%d efConstruction=%d efSearch=%d vectors=%d tombstone_ratio=%.2f",
+		quality, config.M, config.EfConstruction, config.EfSearch, built.Size(), built.TombstoneRatio())
 
 	s.hnswIndex = built
 	s.hnswMu.Unlock()

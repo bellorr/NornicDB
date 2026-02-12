@@ -397,6 +397,20 @@ func (v *VectorIndex) HasVector(id string) bool {
 	return exists
 }
 
+// GetVector returns a copy of the normalized vector for id, or (nil, false) if not found.
+// Used when loading a graph-only HNSW index to populate vectors from the vector index.
+func (v *VectorIndex) GetVector(id string) ([]float32, bool) {
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	vec, exists := v.vectors[id]
+	if !exists || len(vec) == 0 {
+		return nil, false
+	}
+	out := make([]float32, len(vec))
+	copy(out, vec)
+	return out, true
+}
+
 // GetDimensions returns the vector dimensions.
 func (v *VectorIndex) GetDimensions() int {
 	return v.dimensions

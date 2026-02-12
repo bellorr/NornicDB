@@ -101,10 +101,12 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 
 	// When PersistSearchIndexes is true, set paths so BuildIndexes saves indexes after a
 	// build and loads them on startup (skipping the full iteration when both are present).
+	// HNSW is also persisted so the approximate nearest-neighbor index does not need rebuilding.
 	if db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes {
 		base := filepath.Join(db.config.DataDir, "search", dbName)
 		svc.SetFulltextIndexPath(filepath.Join(base, "bm25.gob"))
 		svc.SetVectorIndexPath(filepath.Join(base, "vectors.gob"))
+		svc.SetHNSWIndexPath(filepath.Join(base, "hnsw.gob"))
 	}
 
 	// Enable GPU brute-force search if a GPU manager is configured.
@@ -209,6 +211,13 @@ func (db *DB) ensureSearchIndexesBuilt(ctx context.Context, dbName string) error
 	// for a large database doesn't block for minutes. Callers can check IsSearchIndexReady.
 	entry.buildOnce.Do(func() {
 		entry.buildErr = entry.svc.BuildIndexes(ctx)
+		if entry.buildErr == nil {
+			// Mark clustering as current so runClusteringOnceAllDatabases skips this db
+			// (we either restored IVF-HNSW from disk or ran k-means in warmup).
+			entry.clusterMu.Lock()
+			entry.lastClusteredEmbedCount = entry.svc.EmbeddingCount()
+			entry.clusterMu.Unlock()
+		}
 	})
 	return entry.buildErr
 }
@@ -316,6 +325,9 @@ func (db *DB) runClusteringOnceAllDatabases(ctx context.Context) {
 			continue
 		}
 		if entry.svc == nil || !entry.svc.IsClusteringEnabled() {
+			continue
+		}
+		if entry.svc.ClusteringInProgress() {
 			continue
 		}
 

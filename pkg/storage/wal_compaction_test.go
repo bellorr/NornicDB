@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -565,13 +566,19 @@ func TestWALSnapshotRecovery(t *testing.T) {
 			walEngine.Close()
 		}()
 
-		// Find the latest snapshot
+		// Find the latest snapshot (by name; snapshot-YYYYMMDD-HHMMSS.json sorts chronologically)
 		files, err := os.ReadDir(snapshotDir)
 		require.NoError(t, err)
 		require.GreaterOrEqual(t, len(files), 2, "Should have multiple snapshots")
-
-		// Use the latest snapshot (sorted by time, last entry)
-		latestSnapshot := filepath.Join(snapshotDir, files[len(files)-1].Name())
+		names := make([]string, 0, len(files))
+		for _, f := range files {
+			if strings.HasSuffix(f.Name(), ".json") && !strings.HasSuffix(f.Name(), ".tmp") {
+				names = append(names, f.Name())
+			}
+		}
+		require.GreaterOrEqual(t, len(names), 2, "Should have multiple snapshot files")
+		sort.Strings(names)
+		latestSnapshot := filepath.Join(snapshotDir, names[len(names)-1])
 
 		// Session 2: Recover
 		recovered, err := RecoverFromWAL(walDir, latestSnapshot)

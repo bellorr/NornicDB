@@ -4,6 +4,8 @@ import (
 	"context"
 	"math"
 	"math/rand"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -524,5 +526,59 @@ func BenchmarkHNSWIndex_vs_BruteForce(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			bruteForce.Search(ctx, query, 10, 0.0)
 		}
+	})
+}
+
+// TestHNSWIndex_SaveLoad tests HNSW index persistence (Save/Load round-trip).
+// Save writes graph-only (IDs + graph); load populates vectors from the provided lookup.
+func TestHNSWIndex_SaveLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hnsw.gob")
+
+	idx := NewHNSWIndex(4, DefaultHNSWConfig())
+	vecs := map[string][]float32{
+		"a": {1, 0, 0, 0},
+		"b": {0, 1, 0, 0},
+		"c": {0, 0, 1, 0},
+	}
+	for id, vec := range vecs {
+		require.NoError(t, idx.Add(id, vec))
+	}
+
+	err := idx.Save(path)
+	require.NoError(t, err)
+
+	lookup := func(id string) ([]float32, bool) { v, ok := vecs[id]; return v, ok }
+	loaded, err := LoadHNSWIndex(path, lookup)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, idx.GetDimensions(), loaded.GetDimensions())
+	assert.Equal(t, idx.Size(), loaded.Size())
+
+	ctx := context.Background()
+	results, err := loaded.Search(ctx, []float32{1, 0, 0, 0}, 3, 0.0)
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	assert.Equal(t, "a", results[0].ID)
+}
+
+// TestHNSWIndex_LoadMissingOrCorrupt verifies that LoadHNSWIndex returns (nil, nil) for
+// missing file and (nil, nil) for corrupt/old format so the caller can rebuild.
+func TestHNSWIndex_LoadMissingOrCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	lookup := func(id string) ([]float32, bool) { return nil, false }
+
+	t.Run("missing file", func(t *testing.T) {
+		loaded, err := LoadHNSWIndex(filepath.Join(dir, "nonexistent.gob"), lookup)
+		require.NoError(t, err)
+		assert.Nil(t, loaded)
+	})
+
+	t.Run("corrupt file", func(t *testing.T) {
+		corruptPath := filepath.Join(dir, "corrupt.gob")
+		require.NoError(t, os.WriteFile(corruptPath, []byte("not valid gob"), 0644))
+		loaded, err := LoadHNSWIndex(corruptPath, lookup)
+		require.NoError(t, err)
+		assert.Nil(t, loaded)
 	})
 }
