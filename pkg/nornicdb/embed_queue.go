@@ -56,6 +56,9 @@ type EmbedWorker struct {
 
 	// claimMu serializes find+claim so only one worker can take a node at a time (prevents double-processing).
 	claimMu sync.Mutex
+
+	// workersStarted is true once StartWorkers() has been called (used when DeferWorkerStart is true).
+	workersStarted bool
 }
 
 // EmbedWorkerConfig holds configuration for the embedding worker.
@@ -81,6 +84,10 @@ type EmbedWorkerConfig struct {
 	PropertiesExclude []string
 	// IncludeLabels: if true (default), node labels are prepended to the embedding text.
 	IncludeLabels bool
+
+	// DeferWorkerStart, when true, creates the queue but does not start worker goroutines.
+	// Call StartWorkers() after the database has warmed up (e.g. after search index build).
+	DeferWorkerStart bool
 }
 
 // DefaultEmbedWorkerConfig returns sensible defaults.
@@ -128,18 +135,43 @@ func NewEmbedWorker(embedder embed.Embedder, storage storage.Engine, config *Emb
 		loggedSkip:        make(map[string]bool),
 	}
 
-	// Start N workers for parallel processing
-	numWorkers := config.NumWorkers
+	// Start N workers unless deferred until after DB warmup
+	if !config.DeferWorkerStart {
+		numWorkers := config.NumWorkers
+		for i := 0; i < numWorkers; i++ {
+			ew.wg.Add(1)
+			go ew.worker()
+		}
+		if numWorkers > 1 {
+			fmt.Printf("🧠 Started %d embedding workers for parallel processing\n", numWorkers)
+		}
+	}
+
+	return ew
+}
+
+// StartWorkers starts the embedding worker goroutines. It is used when the queue was
+// created with DeferWorkerStart=true (e.g. to avoid competing with DB warmup). Idempotent.
+func (ew *EmbedWorker) StartWorkers() {
+	ew.mu.Lock()
+	defer ew.mu.Unlock()
+	if ew.closed || ew.workersStarted {
+		return
+	}
+	ew.workersStarted = true
+	numWorkers := ew.config.NumWorkers
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
 	for i := 0; i < numWorkers; i++ {
 		ew.wg.Add(1)
 		go ew.worker()
 	}
-
 	if numWorkers > 1 {
 		fmt.Printf("🧠 Started %d embedding workers for parallel processing\n", numWorkers)
+	} else {
+		fmt.Println("🧠 Embed queue workers started (after DB warmup)")
 	}
-
-	return ew
 }
 
 // SetEmbedder sets or updates the embedder (for async initialization).

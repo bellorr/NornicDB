@@ -452,6 +452,10 @@ NORNICDB_EMBEDDING_CACHE_SIZE=10000
 NORNICDB_KMEANS_MIN_EMBEDDINGS=1000  # Minimum embeddings before K-means clustering
 ```
 
+**K-Means cluster count (auto by default):**
+- The number of clusters is chosen from the dataset size when clustering runs: **K ≈ √(n/2)** (min 10, max 8192). For ~900k embeddings this yields ~670 clusters (~1350 vectors per cluster) instead of a fixed 100.
+- Override with `NORNICDB_KMEANS_NUM_CLUSTERS=500` (or any positive value) to use a fixed K.
+
 **K-Means Clustering Threshold:**
 - `NORNICDB_KMEANS_MIN_EMBEDDINGS` (default: 1000): Minimum number of embeddings required before K-means clustering is triggered. Below this threshold, brute-force search is used as it's faster for small datasets.
   

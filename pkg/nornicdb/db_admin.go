@@ -65,7 +65,7 @@ func (db *DB) SetGPUManager(manager interface{}) {
 		entry.svc.SetGPUManager(gpuMgr)
 
 		if gpuMgr != nil && nornicConfig.IsGPUClusteringEnabled() && entry.svc.IsClusteringEnabled() {
-			entry.svc.EnableClustering(gpuMgr, 100)
+			entry.svc.EnableClustering(gpuMgr, db.kmeansNumClusters())
 		}
 	}
 	db.searchServicesMu.RUnlock()

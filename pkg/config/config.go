@@ -386,6 +386,9 @@ type MemoryConfig struct {
 	// KmeansClusterInterval is how often to run k-means clustering (0 = disabled)
 	// Env: NORNICDB_KMEANS_CLUSTER_INTERVAL (default: 5m)
 	KmeansClusterInterval time.Duration
+	// KmeansNumClusters is the number of k-means clusters (0 = auto from dataset size).
+	// Env: NORNICDB_KMEANS_NUM_CLUSTERS (0 or unset = auto)
+	KmeansNumClusters int
 
 	// === Runtime Memory Management (Go runtime tuning) ===
 
@@ -1613,6 +1616,9 @@ func applyEnvVars(config *Config) {
 	}
 	if v := getEnvDuration("NORNICDB_KMEANS_CLUSTER_INTERVAL", 0); v > 0 {
 		config.Memory.KmeansClusterInterval = v
+	}
+	if v := getEnvInt("NORNICDB_KMEANS_NUM_CLUSTERS", 0); v >= 0 {
+		config.Memory.KmeansNumClusters = v
 	}
 	if getEnv("NORNICDB_AUTO_LINKS_ENABLED", "") == "false" {
 		config.Memory.AutoLinksEnabled = false

@@ -484,6 +484,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	dbConfig.BadgerEdgeTypeCacheMaxTypes = cfg.Database.BadgerEdgeTypeCacheMaxTypes
 	dbConfig.StorageSerializer = cfg.Database.StorageSerializer
 	dbConfig.PersistSearchIndexes = cfg.Database.PersistSearchIndexes
+	dbConfig.KmeansNumClusters = cfg.Memory.KmeansNumClusters
 
 	// Open database
 	fmt.Println("📂 Opening database...")

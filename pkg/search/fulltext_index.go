@@ -66,10 +66,29 @@ type fulltextIndexSnapshot struct {
 }
 
 // Save writes the fulltext index to path (msgpack format). Dir is created if needed.
-// Caller should not mutate the index concurrently.
+// Copies index data under a short read lock so I/O does not block Search/IndexNode.
 func (f *FulltextIndex) Save(path string) error {
 	f.mu.RLock()
-	defer f.mu.RUnlock()
+	// Deep-copy so we can release the lock before slow I/O.
+	documents := make(map[string]string, len(f.documents))
+	for k, v := range f.documents {
+		documents[k] = v
+	}
+	invertedIndex := make(map[string]map[string]int, len(f.invertedIndex))
+	for term, docFreq := range f.invertedIndex {
+		inner := make(map[string]int, len(docFreq))
+		for d, cnt := range docFreq {
+			inner[d] = cnt
+		}
+		invertedIndex[term] = inner
+	}
+	docLengths := make(map[string]int, len(f.docLengths))
+	for k, v := range f.docLengths {
+		docLengths[k] = v
+	}
+	avgDocLength := f.avgDocLength
+	docCount := f.docCount
+	f.mu.RUnlock()
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -82,11 +101,11 @@ func (f *FulltextIndex) Save(path string) error {
 
 	snap := fulltextIndexSnapshot{
 		Version:       fulltextIndexFormatVersion,
-		Documents:     f.documents,
-		InvertedIndex: f.invertedIndex,
-		DocLengths:    f.docLengths,
-		AvgDocLength:  f.avgDocLength,
-		DocCount:      f.docCount,
+		Documents:     documents,
+		InvertedIndex: invertedIndex,
+		DocLengths:    docLengths,
+		AvgDocLength:  avgDocLength,
+		DocCount:      docCount,
 	}
 	return msgpack.NewEncoder(file).Encode(&snap)
 }

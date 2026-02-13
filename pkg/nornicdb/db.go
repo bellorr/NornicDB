@@ -380,6 +380,7 @@ type Config struct {
 
 	// K-means clustering
 	KmeansClusterInterval time.Duration `yaml:"kmeans_cluster_interval"` // How often to run k-means (0 = disabled, default 15m)
+	KmeansNumClusters     int           `yaml:"kmeans_num_clusters"`     // Number of clusters (0 = auto from dataset size at trigger time). Env: NORNICDB_KMEANS_NUM_CLUSTERS.
 }
 
 // DefaultConfig returns sensible default configuration for NornicDB.
@@ -446,6 +447,7 @@ func DefaultConfig() *Config {
 		BoltPort:                        7687,
 		HTTPPort:                        7474,
 		KmeansClusterInterval:           15 * time.Minute, // Run k-means every 15 min (skips if no changes)
+		KmeansNumClusters:              0,                 // 0 = auto from dataset size at trigger time
 		PersistSearchIndexes:            false,            // Rebuild indexes on startup by default
 	}
 }
@@ -1152,11 +1154,13 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	db.searchServices = make(map[string]*dbSearchService)
 	log.Printf("🔍 Search services enabled (per-database init, %d-dimension vector index)", embeddingDims)
 
-	// Start the embed queue early (with nil embedder) when auto-embed is enabled, so worker
-	// goroutines start immediately and log "Embed worker started". SetEmbedder(embedder) will
-	// be called by the server when the model loads and will activate the worker.
+	// Start the embed queue (with nil embedder) when auto-embed is enabled. Worker goroutines
+	// are deferred until after search index build + k-means warmup to avoid slowing startup.
+	// SetEmbedder(embedder) is called by the server when the model loads.
 	if config.AutoEmbedEnabled && db.baseStorage != nil && db.embedWorkerConfig != nil {
-		db.embedQueue = NewEmbedQueue(nil, db.baseStorage, db.embedWorkerConfig)
+		workerCfg := *db.embedWorkerConfig
+		workerCfg.DeferWorkerStart = true
+		db.embedQueue = NewEmbedQueue(nil, db.baseStorage, &workerCfg)
 		db.embedQueue.SetOnEmbedded(func(node *storage.Node) {
 			db.onNodeEmbedded(node)
 		})
@@ -1167,7 +1171,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 				}
 			})
 		}
-		log.Printf("🧠 Embed queue started (waiting for embedding model to load)")
+		log.Printf("🧠 Embed queue created (workers will start after DB warmup)")
 	}
 
 	// Wire Cypher vector procedures through the unified search service.
@@ -1295,6 +1299,11 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			if !timerActive {
 				db.runClusteringOnceAllDatabases(ctx)
 			}
+		}
+
+		// Start embed queue workers after warmup so they don't compete with index build on startup.
+		if db.embedQueue != nil {
+			db.embedQueue.StartWorkers()
 		}
 	}()
 

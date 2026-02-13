@@ -365,14 +365,15 @@ func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 	return nil
 }
 
-// optimalK calculates optimal cluster count using sqrt(n/2) heuristic.
+// optimalK calculates optimal cluster count using sqrt(n/2) heuristic so that
+// average cluster size is about sqrt(2n). Scales with dataset (e.g. 900k → ~670 clusters).
 func optimalK(n int) int {
 	k := int(math.Sqrt(float64(n) / 2))
 	if k < 10 {
 		k = 10 // Minimum clusters
 	}
-	if k > 1000 {
-		k = 1000 // Maximum clusters
+	if k > 8192 {
+		k = 8192 // Maximum clusters (e.g. 10M vectors → ~2236 clusters)
 	}
 	return k
 }

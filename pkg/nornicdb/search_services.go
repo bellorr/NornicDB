@@ -42,6 +42,15 @@ func (db *DB) defaultDatabaseName() string {
 	panic("nornicdb: DB storage is not namespaced")
 }
 
+// kmeansNumClusters returns the configured number of k-means clusters (0 = auto from dataset size).
+// Used when enabling clustering so EnableClustering receives the configured value.
+func (db *DB) kmeansNumClusters() int {
+	if db.config != nil {
+		return db.config.KmeansNumClusters
+	}
+	return 0
+}
+
 func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engine) (*search.Service, error) {
 	if dbName == "" {
 		dbName = db.defaultDatabaseName()
@@ -68,13 +77,13 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 
 		// If clustering is enabled globally, ensure cached services have clustering enabled too.
 		// Services may be created before the feature flag is turned on (e.g., early HTTP calls),
-		// in which case they need to be upgraded in place.
+		// in which case they need to be upgraded in place. Use configured cluster count.
 		if svc != nil && featureflags.IsGPUClusteringEnabled() && !svc.IsClusteringEnabled() {
 			var mgr *gpu.Manager
 			if gpuMgr != nil && gpuMgr.IsEnabled() {
 				mgr = gpuMgr
 			}
-			svc.EnableClustering(mgr, 100)
+			svc.EnableClustering(mgr, db.kmeansNumClusters())
 		}
 		// If a Stage-2 reranker is configured (e.g. Heimdall LLM), ensure it is applied.
 		// This keeps behavior consistent even if the reranker is configured after the
@@ -116,12 +125,14 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 
 	// Enable per-database clustering if the feature flag is enabled.
 	// Each Service maintains its own cluster index and must cluster independently.
+	// Cluster count comes from db.config.KmeansNumClusters (0 = auto from dataset size).
 	if featureflags.IsGPUClusteringEnabled() {
 		var mgr *gpu.Manager
 		if gpuMgr != nil && gpuMgr.IsEnabled() {
 			mgr = gpuMgr
 		}
-		svc.EnableClustering(mgr, 100)
+		numClusters := db.kmeansNumClusters()
+		svc.EnableClustering(mgr, numClusters)
 	}
 
 	// Apply configured Stage-2 reranker (if any).

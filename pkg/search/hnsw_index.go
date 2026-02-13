@@ -461,10 +461,27 @@ type hnswIndexSnapshot struct {
 
 // Save writes the HNSW index to path (msgpack format) as graph-only: graph structure and IDs only, no vector data.
 // Vectors are always loaded from the vector index (vectors) on load, so the file stays small.
-// Dir is created if needed. Caller should not mutate the index concurrently during Save.
+// Dir is created if needed. Copies index data under a short read lock so I/O does not block Search/Add/Remove.
 func (h *HNSWIndex) Save(path string) error {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	config := h.config
+	dimensions := h.dimensions
+	nodeLevel := append([]uint16(nil), h.nodeLevel...)
+	neighborsArena := append([]uint32(nil), h.neighborsArena...)
+	neighborsOff := append([]int32(nil), h.neighborsOff...)
+	neighborCountsArena := append([]uint16(nil), h.neighborCountsArena...)
+	neighborCountsOff := append([]int32(nil), h.neighborCountsOff...)
+	idToInternal := make(map[string]uint32, len(h.idToInternal))
+	for k, v := range h.idToInternal {
+		idToInternal[k] = v
+	}
+	internalToID := append([]string(nil), h.internalToID...)
+	deleted := append([]bool(nil), h.deleted...)
+	liveCount := h.liveCount
+	entryPoint := h.entryPoint
+	hasEntryPoint := h.hasEntryPoint
+	maxLevel := h.maxLevel
+	h.mu.RUnlock()
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -475,25 +492,24 @@ func (h *HNSWIndex) Save(path string) error {
 	}
 	defer file.Close()
 
-	// Graph-only: do not persist Vectors or VecOff (recomputed on load from vector index).
 	snap := hnswIndexSnapshot{
 		Version:           hnswIndexFormatVersionGraphOnly,
-		Config:            h.config,
-		Dimensions:        h.dimensions,
-		NodeLevel:         h.nodeLevel,
+		Config:            config,
+		Dimensions:        dimensions,
+		NodeLevel:         nodeLevel,
 		VecOff:            nil,
-		NeighborsArena:    h.neighborsArena,
-		NeighborsOff:      h.neighborsOff,
-		NeighborCountsAr:   h.neighborCountsArena,
-		NeighborCountsOff: h.neighborCountsOff,
-		IDToInternal:      h.idToInternal,
-		InternalToID:      h.internalToID,
-		Deleted:           h.deleted,
-		LiveCount:         h.liveCount,
+		NeighborsArena:    neighborsArena,
+		NeighborsOff:      neighborsOff,
+		NeighborCountsAr:  neighborCountsArena,
+		NeighborCountsOff: neighborCountsOff,
+		IDToInternal:      idToInternal,
+		InternalToID:      internalToID,
+		Deleted:           deleted,
+		LiveCount:         liveCount,
 		Vectors:           nil,
-		EntryPoint:        h.entryPoint,
-		HasEntryPoint:     h.hasEntryPoint,
-		MaxLevel:          h.maxLevel,
+		EntryPoint:        entryPoint,
+		HasEntryPoint:     hasEntryPoint,
+		MaxLevel:          maxLevel,
 	}
 	return msgpack.NewEncoder(file).Encode(&snap)
 }

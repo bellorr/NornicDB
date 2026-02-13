@@ -429,10 +429,23 @@ type vectorIndexSnapshot struct {
 }
 
 // Save writes the vector index to path (msgpack format). Dir is created if needed.
-// Caller should not mutate the index concurrently.
+// Copies index data under a short read lock so I/O does not block Search/IndexNode.
 func (v *VectorIndex) Save(path string) error {
 	v.mu.RLock()
-	defer v.mu.RUnlock()
+	dimensions := v.dimensions
+	vectors := make(map[string][]float32, len(v.vectors))
+	for id, vec := range v.vectors {
+		if len(vec) > 0 {
+			vectors[id] = append([]float32(nil), vec...)
+		}
+	}
+	rawVectors := make(map[string][]float32, len(v.rawVectors))
+	for id, vec := range v.rawVectors {
+		if len(vec) > 0 {
+			rawVectors[id] = append([]float32(nil), vec...)
+		}
+	}
+	v.mu.RUnlock()
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
@@ -445,9 +458,9 @@ func (v *VectorIndex) Save(path string) error {
 
 	snap := vectorIndexSnapshot{
 		Version:    vectorIndexFormatVersion,
-		Dimensions: v.dimensions,
-		Vectors:    v.vectors,
-		RawVectors: v.rawVectors,
+		Dimensions: dimensions,
+		Vectors:    vectors,
+		RawVectors: rawVectors,
 	}
 	return msgpack.NewEncoder(file).Encode(&snap)
 }

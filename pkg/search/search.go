@@ -623,9 +623,14 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 		}
 	}
 
-	if numClusters <= 0 {
-		numClusters = 100 // Default
+	// Cluster count: env override, else 0 = auto from dataset size at trigger time (sqrt(n/2), clamped).
+	envK := envInt("NORNICDB_KMEANS_NUM_CLUSTERS", 0)
+	if envK > 0 {
+		numClusters = envK
+	} else if numClusters <= 0 {
+		numClusters = 0 // Auto: gpu.optimalK(n) when TriggerClustering runs
 	}
+	autoK := numClusters <= 0
 
 	// Max iterations is a cap; clustering stops when assignments stop changing (early convergence).
 	// Best practice: 20-30 is usually enough with k-means++; 50+ rarely needed. Override via NORNICDB_KMEANS_MAX_ITERATIONS.
@@ -638,6 +643,7 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 	}
 	kmeansConfig := &gpu.KMeansConfig{
 		NumClusters:   numClusters,
+		AutoK:         autoK,
 		MaxIterations: maxIter,
 		Tolerance:     0.001,
 		InitMethod:    "kmeans++",
@@ -679,8 +685,12 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 	if gpuManager != nil {
 		mode = "GPU"
 	}
-	log.Printf("[K-MEANS] ✅ Clustering ENABLED | mode=%s clusters=%d max_iter=%d init=%s",
-		mode, numClusters, kmeansConfig.MaxIterations, kmeansConfig.InitMethod)
+	clusterDesc := fmt.Sprintf("%d", numClusters)
+	if autoK {
+		clusterDesc = "auto"
+	}
+	log.Printf("[K-MEANS] ✅ Clustering ENABLED | mode=%s clusters=%s max_iter=%d init=%s",
+		mode, clusterDesc, kmeansConfig.MaxIterations, kmeansConfig.InitMethod)
 }
 
 // DefaultMinEmbeddingsForClustering is the default minimum number of embeddings
@@ -1003,6 +1013,8 @@ func (s *Service) schedulePersist() {
 // Used both by the debounced background timer and on shutdown (via PersistIndexesToDisk).
 // Persistence is strategy-based: vectors is always written; hnsw and/or hnsw_ivf/
 // when the service uses global HNSW or IVF-HNSW. Does not hold s.mu across I/O.
+// Each index Save() copies data under a short read lock then writes without holding the lock,
+// so Search and IndexNode remain responsive during persist.
 func (s *Service) runPersist() {
 	s.mu.RLock()
 	ftPath := s.fulltextIndexPath
