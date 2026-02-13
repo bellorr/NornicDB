@@ -378,10 +378,10 @@ type Service struct {
 	gpuEmbeddingIndex *gpu.EmbeddingIndex
 
 	// GPU k-means clustering for accelerated search (optional)
-	clusterIndex      *gpu.ClusterIndex
-	clusterEnabled    bool
-	clusterUsesGPU    bool
-	kmeansInProgress  atomic.Bool
+	clusterIndex     *gpu.ClusterIndex
+	clusterEnabled   bool
+	clusterUsesGPU   bool
+	kmeansInProgress atomic.Bool
 
 	// Optional IVF-HNSW acceleration: build one HNSW per cluster to use centroids
 	// as a routing layer for CPU-only large datasets.
@@ -407,13 +407,13 @@ type Service struct {
 	// indexes from disk; if both load successfully with count > 0, the full iteration is skipped.
 	// When hnswIndexPath is set, the HNSW index is also saved/loaded so it does not need rebuilding.
 	fulltextIndexPath string
-	vectorIndexPath  string
-	hnswIndexPath   string
+	vectorIndexPath   string
+	hnswIndexPath     string
 
 	// Debounced persist: after IndexNode/RemoveNode we schedule a write to disk after an idle delay.
-	persistMu        sync.Mutex
-	persistTimer     *time.Timer
-	buildInProgress  atomic.Bool
+	persistMu       sync.Mutex
+	persistTimer    *time.Timer
+	buildInProgress atomic.Bool
 
 	// resultCache caches Search() results by query+options (same semantics as Cypher query cache).
 	// All call paths (HTTP search, Cypher, etc.) benefit. Invalidated on IndexNode/RemoveNode.
@@ -1016,8 +1016,10 @@ func (s *Service) schedulePersist() {
 // Used both by the debounced background timer and on shutdown (via PersistIndexesToDisk).
 // Persistence is strategy-based: vectors is always written; hnsw and/or hnsw_ivf/
 // when the service uses global HNSW or IVF-HNSW. Does not hold s.mu across I/O.
-// Each index Save() copies data under a short read lock then writes without holding the lock,
-// so Search and IndexNode remain responsive during persist.
+//
+// All index Save() implementations (BM25, vector, HNSW, SaveIVFHNSW per-cluster) copy index
+// data under a short read lock and then perform file I/O without holding any lock, so Search
+// and IndexNode are not blocked while writing to disk.
 func (s *Service) runPersist() {
 	s.mu.RLock()
 	ftPath := s.fulltextIndexPath
@@ -1656,30 +1658,8 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 
 	if skipIteration {
 		s.warmupVectorPipeline(ctx)
-		if hnswPath != "" && s.vectorIndex != nil && s.vectorIndex.Count() >= NSmallMax {
-			s.hnswMu.RLock()
-			idx := s.hnswIndex
-			s.hnswMu.RUnlock()
-			if idx != nil {
-				if err := idx.Save(hnswPath); err != nil {
-					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
-				} else {
-					log.Printf("📇 HNSW index saved to %s", hnswPath)
-				}
-			}
-		}
-		if hnswPath != "" {
-			s.clusterHNSWMu.RLock()
-			clusterHNSW := s.clusterHNSW
-			s.clusterHNSWMu.RUnlock()
-			if len(clusterHNSW) > 0 {
-				if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
-					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
-				} else {
-					log.Printf("📇 HNSW index saved to %s", hnswPath)
-				}
-			}
-		}
+		// Persist in background so search is not blocked (same as post-full-build path).
+		go s.runPersist()
 		return nil
 	}
 
@@ -1729,45 +1709,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		flushFulltextBatch(fulltextBatch)
 		count += len(fulltextBatch)
 		fmt.Printf("📊 Indexed %d total nodes\n", count)
-		if fulltextPath != "" {
-			if err := s.fulltextIndex.Save(fulltextPath); err != nil {
-				log.Printf("⚠️ Failed to save BM25 index to %s: %v", fulltextPath, err)
-			} else {
-				log.Printf("📇 BM25 index saved to %s", fulltextPath)
-			}
-		}
-		if vectorPath != "" && s.vectorIndex != nil {
-			if err := s.vectorIndex.Save(vectorPath); err != nil {
-				log.Printf("⚠️ Failed to save vector index to %s: %v", vectorPath, err)
-			} else {
-				log.Printf("📇 Vector index saved to %s", vectorPath)
-			}
-		}
 		s.warmupVectorPipeline(ctx)
-		if hnswPath != "" && s.vectorIndex != nil && s.vectorIndex.Count() >= NSmallMax {
-			s.hnswMu.RLock()
-			idx := s.hnswIndex
-			s.hnswMu.RUnlock()
-			if idx != nil {
-				if err := idx.Save(hnswPath); err != nil {
-					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
-				} else {
-					log.Printf("📇 HNSW index saved to %s", hnswPath)
-				}
-			}
-		}
-		if hnswPath != "" {
-			s.clusterHNSWMu.RLock()
-			clusterHNSW := s.clusterHNSW
-			s.clusterHNSWMu.RUnlock()
-			if len(clusterHNSW) > 0 {
-				if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
-					log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
-				} else {
-					log.Printf("📇 HNSW index saved to %s", hnswPath)
-				}
-			}
-		}
+		// Persist indexes in the background so search is not blocked; index is already in memory.
+		go s.runPersist()
 		return nil
 	}
 
@@ -1810,45 +1754,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	flushFulltextBatch(fulltextBatch)
 	count += len(fulltextBatch)
 	fmt.Printf("📊 Indexed %d total nodes\n", count)
-	if fulltextPath != "" {
-		if err := s.fulltextIndex.Save(fulltextPath); err != nil {
-			log.Printf("⚠️ Failed to save BM25 index to %s: %v", fulltextPath, err)
-		} else {
-			log.Printf("📇 BM25 index saved to %s", fulltextPath)
-		}
-	}
-	if vectorPath != "" && s.vectorIndex != nil {
-		if err := s.vectorIndex.Save(vectorPath); err != nil {
-			log.Printf("⚠️ Failed to save vector index to %s: %v", vectorPath, err)
-		} else {
-			log.Printf("📇 Vector index saved to %s", vectorPath)
-		}
-	}
 	s.warmupVectorPipeline(ctx)
-	if hnswPath != "" && s.vectorIndex != nil && s.vectorIndex.Count() >= NSmallMax {
-		s.hnswMu.RLock()
-		idx := s.hnswIndex
-		s.hnswMu.RUnlock()
-		if idx != nil {
-			if err := idx.Save(hnswPath); err != nil {
-				log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
-			} else {
-				log.Printf("📇 HNSW index saved to %s", hnswPath)
-			}
-		}
-	}
-	if hnswPath != "" {
-		s.clusterHNSWMu.RLock()
-		clusterHNSW := s.clusterHNSW
-		s.clusterHNSWMu.RUnlock()
-		if len(clusterHNSW) > 0 {
-			if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
-				log.Printf("⚠️ Failed to save HNSW index to %s: %v", hnswPath, err)
-			} else {
-				log.Printf("📇 HNSW index saved to %s", hnswPath)
-			}
-		}
-	}
+	// Persist indexes in the background so search is not blocked; index is already in memory.
+	go s.runPersist()
 	return nil
 }
 
