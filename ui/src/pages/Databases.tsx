@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { Database, Info, Plus, Trash2 } from 'lucide-react';
+import { useCallback, useEffect, useState } from 'react';
+import { Database, Info, Plus, Settings, Trash2 } from 'lucide-react';
 import { api, DatabaseInfo } from '../utils/api';
 import { Alert } from '../components/common/Alert';
 import { Button } from '../components/common/Button';
@@ -29,11 +29,20 @@ export function Databases() {
   const [selectedDatabase, setSelectedDatabase] = useState<DatabaseInfo | null>(null);
   const [showDetailsModal, setShowDetailsModal] = useState(false);
 
-  useEffect(() => {
-    loadDatabases();
-  }, []);
+  // Admin check (for showing config cog)
+  const [isAdmin, setIsAdmin] = useState(false);
 
-  const loadDatabases = async () => {
+  // Database config modal (admin only)
+  const [configDbName, setConfigDbName] = useState<string | null>(null);
+  const [configKeys, setConfigKeys] = useState<Array<{ key: string; type: string; category: string }>>([]);
+  const [configEffective, setConfigEffective] = useState<Record<string, string>>({});
+  const [configUseDefault, setConfigUseDefault] = useState<Record<string, boolean>>({});
+  const [configFormValues, setConfigFormValues] = useState<Record<string, string>>({});
+  const [configLoading, setConfigLoading] = useState(false);
+  const [configSaving, setConfigSaving] = useState(false);
+  const [configError, setConfigError] = useState('');
+
+  const loadDatabases = useCallback(async () => {
     try {
       setError('');
       const data = await api.listDatabases();
@@ -44,7 +53,20 @@ export function Databases() {
       setLoading(false);
       setRefreshing(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    loadDatabases();
+  }, [loadDatabases]);
+
+  useEffect(() => {
+    fetch(`${import.meta.env.VITE_BASE_PATH || ''}/auth/me`, { credentials: 'include' })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((me: { roles?: string[] } | null) => {
+        setIsAdmin(Array.isArray(me?.roles) && me.roles.includes('admin'));
+      })
+      .catch(() => setIsAdmin(false));
+  }, []);
 
   const handleRefresh = () => {
     setRefreshing(true);
@@ -91,6 +113,64 @@ export function Databases() {
       setShowDetailsModal(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load database details');
+    }
+  };
+
+  const handleOpenConfig = useCallback(async (dbName: string) => {
+    setConfigDbName(dbName);
+    setConfigError('');
+    setConfigLoading(true);
+    try {
+      const [configRes, keysRes] = await Promise.all([
+        api.getDatabaseConfig(dbName),
+        api.getDatabaseConfigKeys(),
+      ]);
+      setConfigEffective(configRes.effective ?? {});
+      setConfigKeys(keysRes);
+      const overrides = configRes.overrides ?? {};
+      const useDefault: Record<string, boolean> = {};
+      const formValues: Record<string, string> = {};
+      for (const k of keysRes) {
+        const hasOverride = overrides[k.key] !== undefined && overrides[k.key] !== '';
+        useDefault[k.key] = !hasOverride;
+        formValues[k.key] = hasOverride ? (overrides[k.key] ?? '') : (configRes.effective?.[k.key] ?? '');
+      }
+      setConfigUseDefault(useDefault);
+      setConfigFormValues(formValues);
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : 'Failed to load config');
+    } finally {
+      setConfigLoading(false);
+    }
+  }, []);
+
+  const handleConfigSave = async () => {
+    if (!configDbName) return;
+    setConfigError('');
+    setConfigSaving(true);
+    try {
+      const overrides: Record<string, string> = {};
+      for (const k of configKeys) {
+        if (configUseDefault[k.key]) continue;
+        const v = (configFormValues[k.key] ?? '').trim();
+        if (v !== '') overrides[k.key] = v;
+      }
+      await api.putDatabaseConfig(configDbName, overrides);
+      setConfigDbName(null);
+    } catch (err) {
+      setConfigError(err instanceof Error ? err.message : 'Failed to save config');
+    } finally {
+      setConfigSaving(false);
+    }
+  };
+
+  const setConfigFormValue = (key: string, value: string) => {
+    setConfigFormValues((prev) => ({ ...prev, [key]: value }));
+  };
+  const setConfigUseDefaultForKey = (key: string, useDefault: boolean) => {
+    setConfigUseDefault((prev) => ({ ...prev, [key]: useDefault }));
+    if (useDefault && configEffective[key] !== undefined) {
+      setConfigFormValues((prev) => ({ ...prev, [key]: configEffective[key] ?? '' }));
     }
   };
 
@@ -169,6 +249,13 @@ export function Databases() {
                     </div>
                   </div>
                   <div className="flex items-center gap-1">
+                    {isAdmin && (
+                      <div title="Configure database">
+                        <Button variant="ghost" size="sm" onClick={() => handleOpenConfig(db.name)} icon={Settings}>
+                          <span className="sr-only">Configure</span>
+                        </Button>
+                      </div>
+                    )}
                     <div title="View details">
                       <Button variant="ghost" size="sm" onClick={() => handleViewDetails(db)} icon={Info}>
                         <span className="sr-only">View details</span>
@@ -280,6 +367,95 @@ export function Databases() {
           </div>
         ) : (
           <div className="text-norse-silver">No database selected.</div>
+        )}
+      </Modal>
+
+      <Modal
+        isOpen={configDbName !== null}
+        onClose={() => setConfigDbName(null)}
+        title={configDbName ? `Configure ${configDbName}` : 'Database configuration'}
+        size="lg"
+      >
+        {configLoading ? (
+          <div className="text-norse-silver py-8 text-center">Loading...</div>
+        ) : (
+          <div className="space-y-4 max-h-[70vh] overflow-y-auto">
+            {configError && (
+              <Alert type="error" message={configError} dismissible onDismiss={() => setConfigError('')} />
+            )}
+            {(() => {
+              const byCategory = configKeys.reduce<Record<string, typeof configKeys>>((acc, k) => {
+                const c = k.category || 'Other';
+                if (!acc[c]) acc[c] = [];
+                acc[c].push(k);
+                return acc;
+              }, {});
+              const categories = Object.keys(byCategory).sort();
+              return (
+                <>
+                  {categories.map((cat) => (
+                    <div key={cat} className="space-y-2">
+                      <h4 className="text-sm font-medium text-norse-silver border-b border-norse-rune pb-1">{cat}</h4>
+                      <div className="space-y-3 pl-2">
+                        {byCategory[cat].map((meta) => (
+                          <div key={meta.key} className="flex flex-wrap items-center gap-2 text-sm">
+                            <label htmlFor={`config-input-${meta.key}`} className="w-full sm:w-64 shrink-0 text-norse-silver truncate" title={meta.key}>
+                              {meta.key.replace(/^NORNICDB_/, '')}
+                            </label>
+                            <div className="flex items-center gap-2 flex-1 min-w-0">
+                              {meta.type === 'boolean' ? (
+                                <input
+                                  id={`config-input-${meta.key}`}
+                                  type="checkbox"
+                                  checked={(configFormValues[meta.key] ?? 'false') === 'true'}
+                                  onChange={(e) => setConfigFormValue(meta.key, e.target.checked ? 'true' : 'false')}
+                                  disabled={configUseDefault[meta.key]}
+                                  className="rounded border-norse-rune bg-norse-stone text-nornic-primary"
+                                />
+                              ) : (
+                                <input
+                                  id={`config-input-${meta.key}`}
+                                  type={meta.type === 'number' ? 'number' : 'text'}
+                                  value={configFormValues[meta.key] ?? ''}
+                                  onChange={(e) => setConfigFormValue(meta.key, e.target.value)}
+                                  disabled={configUseDefault[meta.key]}
+                                  placeholder={configUseDefault[meta.key] ? `Default: ${configEffective[meta.key] ?? ''}` : ''}
+                                  className="flex-1 min-w-0 px-2 py-1 rounded border border-norse-rune bg-norse-stone text-white text-sm"
+                                />
+                              )}
+                              <label htmlFor={`config-use-default-${meta.key}`} className="flex items-center gap-1 shrink-0 text-norse-silver text-xs whitespace-nowrap">
+                                <input
+                                  id={`config-use-default-${meta.key}`}
+                                  type="checkbox"
+                                  checked={configUseDefault[meta.key]}
+                                  onChange={(e) => setConfigUseDefaultForKey(meta.key, e.target.checked)}
+                                  className="rounded border-norse-rune bg-norse-stone text-nornic-primary"
+                                />
+                                Use default
+                              </label>
+                            </div>
+                            {configUseDefault[meta.key] && configEffective[meta.key] !== undefined && configEffective[meta.key] !== '' && (
+                              <span className="text-xs text-norse-silver block w-full">
+                                Using default: {String(configEffective[meta.key])}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </>
+              );
+            })()}
+            <div className="flex justify-end gap-2 pt-4 border-t border-norse-rune">
+              <Button type="button" variant="secondary" onClick={() => setConfigDbName(null)} disabled={configSaving}>
+                Cancel
+              </Button>
+              <Button type="button" variant="primary" onClick={handleConfigSave} disabled={configSaving}>
+                {configSaving ? 'Saving...' : 'Save'}
+              </Button>
+            </div>
+          </div>
         )}
       </Modal>
     </PageLayout>

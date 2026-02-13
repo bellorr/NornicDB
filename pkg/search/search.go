@@ -509,8 +509,13 @@ type Service struct {
 // Thread Safety:
 //
 //	Safe for concurrent searches from multiple goroutines.
+
+// DefaultVectorDimensions is the embedding size used by NewService (e.g. bge-m3).
+// Use NewServiceWithDimensions or schema/query-derived dimensions when your model differs.
+const DefaultVectorDimensions = 1024
+
 func NewService(engine storage.Engine) *Service {
-	return NewServiceWithDimensions(engine, 1024)
+	return NewServiceWithDimensions(engine, DefaultVectorDimensions)
 }
 
 // NewServiceWithDimensions creates a search Service with the specified embedding dimensions.
@@ -1640,6 +1645,13 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		log.Printf("📇 Search indexes loaded from disk (BM25: %d docs, vector: %d); skipping rebuild",
 			s.fulltextIndex.Count(), s.vectorIndex.Count())
 	}
+	// When only BM25 loaded with content but vector is empty, we still iterate to build vectors
+	// but skip re-indexing fulltext so we don't throw away the on-disk BM25.
+	skipFulltextRebuild := fulltextPath != "" && s.fulltextIndex.Count() > 0 && (s.vectorIndex == nil || s.vectorIndex.Count() == 0)
+	if skipFulltextRebuild {
+		log.Printf("📇 Search indexes loaded from disk (BM25: %d docs); rebuilding vector index only",
+			s.fulltextIndex.Count())
+	}
 
 	// When skipping iteration and we use HNSW strategy (N >= NSmallMax), load HNSW from disk so warmup does not rebuild it.
 	s.mu.RLock()
@@ -1671,12 +1683,14 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			if len(batch) == 0 {
 				return
 			}
-			entries := make([]FulltextBatchEntry, 0, len(batch))
-			for _, n := range batch {
-				text := s.extractSearchableText(n)
-				entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
+			if !skipFulltextRebuild {
+				entries := make([]FulltextBatchEntry, 0, len(batch))
+				for _, n := range batch {
+					text := s.extractSearchableText(n)
+					entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
+				}
+				s.fulltextIndex.IndexBatch(entries)
 			}
-			s.fulltextIndex.IndexBatch(entries)
 			s.mu.Lock()
 			for _, n := range batch {
 				_ = s.indexNodeLocked(n, true)
@@ -1717,16 +1731,18 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 
 	count := 0
 	var fulltextBatch []*storage.Node
-	flushFulltextBatch := func(batch []*storage.Node) {
+	flushFulltextBatchFallback := func(batch []*storage.Node) {
 		if len(batch) == 0 {
 			return
 		}
-		entries := make([]FulltextBatchEntry, 0, len(batch))
-		for _, n := range batch {
-			text := s.extractSearchableText(n)
-			entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
+		if !skipFulltextRebuild {
+			entries := make([]FulltextBatchEntry, 0, len(batch))
+			for _, n := range batch {
+				text := s.extractSearchableText(n)
+				entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
+			}
+			s.fulltextIndex.IndexBatch(entries)
 		}
-		s.fulltextIndex.IndexBatch(entries)
 		s.mu.Lock()
 		for _, n := range batch {
 			_ = s.indexNodeLocked(n, true)
@@ -1739,7 +1755,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		}
 		fulltextBatch = append(fulltextBatch, node)
 		if len(fulltextBatch) >= fulltextBuildBatchSize {
-			flushFulltextBatch(fulltextBatch)
+			flushFulltextBatchFallback(fulltextBatch)
 			count += len(fulltextBatch)
 			fulltextBatch = nil
 			if count%5000 == 0 {
@@ -1751,7 +1767,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	flushFulltextBatch(fulltextBatch)
+	flushFulltextBatchFallback(fulltextBatch)
 	count += len(fulltextBatch)
 	fmt.Printf("📊 Indexed %d total nodes\n", count)
 	s.warmupVectorPipeline(ctx)

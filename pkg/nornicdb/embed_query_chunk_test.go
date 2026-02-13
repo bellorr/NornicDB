@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -105,4 +106,44 @@ func TestDB_EmbedQuery_LongQuery_UsesEmbedBatchOnChunks(t *testing.T) {
 	require.Equal(t, 0, embedCalls, "expected long query path to avoid single-text embedding")
 	require.Equal(t, 1, batchCalls, "expected long query path to batch-embed chunks once")
 	require.LessOrEqual(t, maxLen, 512, "expected all embedded chunks to be <= 512 characters")
+}
+
+func TestDB_EmbedQueryForDB_NoResolver_ReturnsSameAsEmbedQuery(t *testing.T) {
+	emb := &chunkingTestEmbedder{dims: 8}
+	db := &DB{embedQueue: &EmbedQueue{embedder: emb}}
+
+	vec, err := db.EmbedQueryForDB(context.Background(), "mydb", "hello")
+	require.NoError(t, err)
+	require.Len(t, vec, 8)
+}
+
+func TestDB_EmbedQueryForDB_ResolverMatchesDims_Success(t *testing.T) {
+	emb := &chunkingTestEmbedder{dims: 8}
+	db := &DB{
+		embedQueue: &EmbedQueue{embedder: emb},
+		dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64) {
+			return 8, 0.5
+		},
+	}
+
+	vec, err := db.EmbedQueryForDB(context.Background(), "mydb", "hello")
+	require.NoError(t, err)
+	require.Len(t, vec, 8)
+}
+
+func TestDB_EmbedQueryForDB_ResolverMismatchDims_ReturnsErrQueryEmbeddingDimensionMismatch(t *testing.T) {
+	emb := &chunkingTestEmbedder{dims: 8}
+	db := &DB{
+		embedQueue: &EmbedQueue{embedder: emb},
+		dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64) {
+			return 768, 0.5 // index is 768-d, query will be 8-d from global embedder
+		},
+	}
+
+	vec, err := db.EmbedQueryForDB(context.Background(), "mydb", "hello")
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrQueryEmbeddingDimensionMismatch))
+	require.Nil(t, vec)
+	require.Contains(t, err.Error(), "index dims 768")
+	require.Contains(t, err.Error(), "query dims 8")
 }

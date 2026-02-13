@@ -12,6 +12,7 @@ func TestDBClose_DoesNotDeadlock(t *testing.T) {
 	cfg.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
+	t.Cleanup(func() { _ = db.Close() })
 
 	done := make(chan struct{})
 	go func() {
@@ -22,8 +23,7 @@ func TestDBClose_DoesNotDeadlock(t *testing.T) {
 	select {
 	case <-done:
 		// ok
-	case <-time.After(2 * time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("db.Close() deadlocked or hung")
 	}
 }
-

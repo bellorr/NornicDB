@@ -179,6 +179,10 @@ func (s *Server) registerAdminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/admin/gpu/enable", s.withAuth(s.handleGPUEnable, auth.PermAdmin))
 	mux.HandleFunc("/admin/gpu/disable", s.withAuth(s.handleGPUDisable, auth.PermAdmin))
 	mux.HandleFunc("/admin/gpu/test", s.withAuth(s.handleGPUTest, auth.PermAdmin))
+
+	// Per-database config overrides (admin only)
+	mux.HandleFunc("/admin/databases/config/keys", s.withAuth(s.handleDbConfigKeys, auth.PermAdmin))
+	mux.HandleFunc("/admin/databases/", s.withAuth(s.handleDbConfigPrefix, auth.PermAdmin))
 }
 
 func (s *Server) registerGDPRRoutes(mux *http.ServeMux) {

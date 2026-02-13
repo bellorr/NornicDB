@@ -355,6 +355,8 @@ type MemoryConfig struct {
 	EmbeddingModel string
 	// EmbeddingAPIURL endpoint
 	EmbeddingAPIURL string
+	// EmbeddingAPIKey for authenticated providers (OpenAI, etc.). Env: NORNICDB_EMBEDDING_API_KEY
+	EmbeddingAPIKey string
 	// EmbeddingDimensions size
 	EmbeddingDimensions int
 	// EmbeddingCacheSize is max embeddings to cache (0 = disabled, default: 10000)
@@ -968,26 +970,26 @@ type YAMLConfig struct {
 
 	// Database/Storage configuration
 	Database struct {
-		DataDir                     string `yaml:"data_dir"`
-		DefaultDatabase             string `yaml:"default_database"`
-		ReadOnly                    bool   `yaml:"read_only"`
-		TransactionTimeout          string `yaml:"transaction_timeout"`
-		MaxConcurrentTransactions   int    `yaml:"max_concurrent_transactions"`
-		StrictDurability            bool   `yaml:"strict_durability"`
-		WALSyncMode                 string `yaml:"wal_sync_mode"`
-		WALSyncInterval             string `yaml:"wal_sync_interval"`
-		WALAutoCompactionEnabled    *bool  `yaml:"wal_auto_compaction_enabled"`
-		WALRetentionMaxSegments     int    `yaml:"wal_retention_max_segments"`
-		WALRetentionMaxAge          string `yaml:"wal_retention_max_age"`
-		WALRetentionLedgerDefaults  bool   `yaml:"wal_ledger_retention_defaults"`
-		WALSnapshotRetentionMaxCount int   `yaml:"wal_snapshot_retention_max_count"`
-		WALSnapshotRetentionMaxAge  string `yaml:"wal_snapshot_retention_max_age"`
-		EncryptionEnabled           bool   `yaml:"encryption_enabled"`
-		EncryptionPassword          string `yaml:"encryption_password"`
-		BadgerNodeCacheMaxEntries   int    `yaml:"badger_node_cache_max_entries"`
-		BadgerEdgeTypeCacheMaxTypes int    `yaml:"badger_edge_type_cache_max_types"`
-		StorageSerializer           string `yaml:"storage_serializer"`
-		PersistSearchIndexes        bool   `yaml:"persist_search_indexes"`
+		DataDir                      string `yaml:"data_dir"`
+		DefaultDatabase              string `yaml:"default_database"`
+		ReadOnly                     bool   `yaml:"read_only"`
+		TransactionTimeout           string `yaml:"transaction_timeout"`
+		MaxConcurrentTransactions    int    `yaml:"max_concurrent_transactions"`
+		StrictDurability             bool   `yaml:"strict_durability"`
+		WALSyncMode                  string `yaml:"wal_sync_mode"`
+		WALSyncInterval              string `yaml:"wal_sync_interval"`
+		WALAutoCompactionEnabled     *bool  `yaml:"wal_auto_compaction_enabled"`
+		WALRetentionMaxSegments      int    `yaml:"wal_retention_max_segments"`
+		WALRetentionMaxAge           string `yaml:"wal_retention_max_age"`
+		WALRetentionLedgerDefaults   bool   `yaml:"wal_ledger_retention_defaults"`
+		WALSnapshotRetentionMaxCount int    `yaml:"wal_snapshot_retention_max_count"`
+		WALSnapshotRetentionMaxAge   string `yaml:"wal_snapshot_retention_max_age"`
+		EncryptionEnabled            bool   `yaml:"encryption_enabled"`
+		EncryptionPassword           string `yaml:"encryption_password"`
+		BadgerNodeCacheMaxEntries    int    `yaml:"badger_node_cache_max_entries"`
+		BadgerEdgeTypeCacheMaxTypes  int    `yaml:"badger_edge_type_cache_max_types"`
+		StorageSerializer            string `yaml:"storage_serializer"`
+		PersistSearchIndexes         bool   `yaml:"persist_search_indexes"`
 	} `yaml:"database"`
 
 	// Storage alias for database
@@ -1067,7 +1069,7 @@ type YAMLConfig struct {
 		Enabled          bool     `yaml:"enabled"`
 		Model            string   `yaml:"model"`
 		Provider         string   `yaml:"provider"` // local, ollama, openai
-		APIURL           string   `yaml:"api_url"`   // for ollama/openai
+		APIURL           string   `yaml:"api_url"`  // for ollama/openai
 		APIKey           string   `yaml:"api_key"`  // for openai
 		GPULayers        *int     `yaml:"gpu_layers"`
 		ContextSize      int      `yaml:"context_size"`
@@ -1205,9 +1207,9 @@ func LoadDefaults() *Config {
 	config.Database.WALRetentionMaxSegments = 0 // Unlimited by default
 	config.Database.WALRetentionMaxAge = 0      // Unlimited by default
 	config.Database.WALRetentionLedgerDefaults = false
-	config.Database.WALSnapshotRetentionMaxCount = 0  // 0 = use storage default (3)
+	config.Database.WALSnapshotRetentionMaxCount = 0 // 0 = use storage default (3)
 	config.Database.WALSnapshotRetentionMaxAge = 0   // Unlimited by default
-	config.Database.EncryptionPassword = "" // disabled by default
+	config.Database.EncryptionPassword = ""          // disabled by default
 	config.Database.AsyncWritesEnabled = true
 	config.Database.AsyncFlushInterval = 50 * time.Millisecond
 	config.Database.AsyncMaxNodeCacheSize = 50000  // ~35MB assuming 700 bytes/node
@@ -1592,6 +1594,9 @@ func applyEnvVars(config *Config) {
 	}
 	if v := getEnv("NORNICDB_EMBEDDING_API_URL", ""); v != "" {
 		config.Memory.EmbeddingAPIURL = v
+	}
+	if v := getEnv("NORNICDB_EMBEDDING_API_KEY", ""); v != "" {
+		config.Memory.EmbeddingAPIKey = v
 	}
 	if v := getEnvInt("NORNICDB_EMBEDDING_DIMENSIONS", 0); v > 0 {
 		config.Memory.EmbeddingDimensions = v
@@ -2138,6 +2143,9 @@ func LoadFromFile(configPath string) (*Config, error) {
 	}
 	if yamlCfg.Embedding.URL != "" {
 		config.Memory.EmbeddingAPIURL = yamlCfg.Embedding.URL
+	}
+	if yamlCfg.Embedding.APIKey != "" {
+		config.Memory.EmbeddingAPIKey = yamlCfg.Embedding.APIKey
 	}
 	if yamlCfg.Embedding.Dimensions > 0 {
 		config.Memory.EmbeddingDimensions = yamlCfg.Embedding.Dimensions

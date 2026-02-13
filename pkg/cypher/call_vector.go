@@ -148,22 +148,33 @@ func (e *StorageExecutor) callDbIndexVectorQueryNodes(ctx context.Context, cyphe
 		Rows:    [][]interface{}{},
 	}
 
-	// Get vector index configuration (if it exists)
+	// Get vector index configuration (if it exists) and decide service dimensions.
+	// Prefer: 1) schema index dimensions, 2) query vector length, 3) search package default.
 	var targetLabel, targetProperty string
 	var similarityFunc string = "cosine"
 
 	schema := e.storage.GetSchema()
+	wantDims := 0
 	if schema != nil {
 		if vectorIdx, exists := schema.GetVectorIndex(indexName); exists {
 			targetLabel = vectorIdx.Label
 			targetProperty = vectorIdx.Property
 			similarityFunc = vectorIdx.SimilarityFunc
+			if vectorIdx.Dimensions > 0 {
+				wantDims = vectorIdx.Dimensions
+			}
 		}
+	}
+	if wantDims <= 0 && len(queryVector) > 0 {
+		wantDims = len(queryVector)
+	}
+	if wantDims <= 0 {
+		wantDims = search.DefaultVectorDimensions
 	}
 
 	svc := e.searchService
-	if svc == nil {
-		svc = search.NewService(e.storage)
+	if svc == nil || svc.VectorIndexDimensions() != wantDims {
+		svc = search.NewServiceWithDimensions(e.storage, wantDims)
 		e.searchService = svc
 	}
 

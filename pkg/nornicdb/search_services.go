@@ -61,6 +61,16 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 
 	dims := db.embeddingDims
 	minSim := db.searchMinSimilarity
+	db.dbConfigResolverMu.RLock()
+	resolver := db.dbConfigResolver
+	db.dbConfigResolverMu.RUnlock()
+	if resolver != nil {
+		rd, rs := resolver(dbName)
+		if rd > 0 {
+			dims = rd
+		}
+		minSim = rs
+	}
 
 	var gpuMgr *gpu.Manager
 	db.gpuManagerMu.RLock()
@@ -73,7 +83,11 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	if entry, ok := db.searchServices[dbName]; ok {
 		svc := entry.svc
 		reranker := db.searchReranker
+		rr := db.rerankerResolver
 		db.searchServicesMu.RUnlock()
+		if rr != nil {
+			reranker = rr(dbName)
+		}
 
 		// If clustering is enabled globally, ensure cached services have clustering enabled too.
 		// Services may be created before the feature flag is turned on (e.g., early HTTP calls),
@@ -91,6 +105,20 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 		if svc != nil {
 			svc.SetReranker(reranker)
 		}
+		return svc, nil
+	}
+	db.searchServicesMu.RUnlock()
+
+	// Serialize creation so only one goroutine is in the create+insert path at a time,
+	// avoiding RWMutex deadlock when background build, flush indexNodeFromEvent, and CreateNode contend.
+	db.searchServiceCreationMu.Lock()
+	defer db.searchServiceCreationMu.Unlock()
+
+	// Re-check after acquiring creation lock; another goroutine may have created it.
+	db.searchServicesMu.RLock()
+	if entry, ok := db.searchServices[dbName]; ok {
+		svc := entry.svc
+		db.searchServicesMu.RUnlock()
 		return svc, nil
 	}
 	db.searchServicesMu.RUnlock()
@@ -135,10 +163,14 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 		svc.EnableClustering(mgr, numClusters)
 	}
 
-	// Apply configured Stage-2 reranker (if any).
+	// Apply configured Stage-2 reranker (if any). Use per-DB resolver when set.
 	db.searchServicesMu.RLock()
 	reranker := db.searchReranker
+	rr := db.rerankerResolver
 	db.searchServicesMu.RUnlock()
+	if rr != nil {
+		reranker = rr(dbName)
+	}
 	svc.SetReranker(reranker)
 
 	entry := &dbSearchService{
@@ -148,7 +180,7 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	}
 
 	db.searchServicesMu.Lock()
-	// Double-check in case someone else created it.
+	// Double-check in case another goroutine created it while we were building.
 	if existing, ok := db.searchServices[dbName]; ok {
 		db.searchServicesMu.Unlock()
 		return existing.svc, nil
@@ -178,6 +210,14 @@ func (db *DB) SetSearchReranker(r search.Reranker) {
 		}
 		entry.svc.SetReranker(r)
 	}
+}
+
+// SetRerankerResolver sets an optional function that returns the reranker for a given database.
+// When set, getOrCreateSearchService uses it instead of the single global searchReranker (enables per-DB rerankers).
+func (db *DB) SetRerankerResolver(fn func(dbName string) search.Reranker) {
+	db.searchServicesMu.Lock()
+	db.rerankerResolver = fn
+	db.searchServicesMu.Unlock()
 }
 
 // GetOrCreateSearchService returns the per-database search service for dbName.
@@ -344,15 +384,19 @@ func (db *DB) runClusteringOnceAllDatabases(ctx context.Context) {
 
 		// Serialize clustering per database to avoid duplicate work when multiple
 		// triggers fire concurrently (startup hooks, manual triggers, timer ticks).
+		// Hold clusterMu only for the check and the count update; do not hold it across
+		// TriggerClustering (k-means + rebuildClusterHNSW can take a long time and would
+		// block other code that needs clusterMu or that triggers IndexNode while rebuild
+		// holds vector index read lock).
 		entry.clusterMu.Lock()
 		currentCount := entry.svc.EmbeddingCount()
-		if currentCount == entry.lastClusteredEmbedCount && entry.lastClusteredEmbedCount > 0 {
-			entry.clusterMu.Unlock()
+		shouldRun := currentCount != entry.lastClusteredEmbedCount || entry.lastClusteredEmbedCount == 0
+		entry.clusterMu.Unlock()
+		if !shouldRun {
 			continue
 		}
 
 		if err := entry.svc.TriggerClustering(ctx); err != nil {
-			entry.clusterMu.Unlock()
 			if ctx.Err() != nil {
 				return
 			}
@@ -360,8 +404,10 @@ func (db *DB) runClusteringOnceAllDatabases(ctx context.Context) {
 			continue
 		}
 
-		entry.lastClusteredEmbedCount = currentCount
+		entry.clusterMu.Lock()
+		entry.lastClusteredEmbedCount = entry.svc.EmbeddingCount()
+		doneCount := entry.lastClusteredEmbedCount
 		entry.clusterMu.Unlock()
-		log.Printf("🔬 K-means clustering completed for db %s (%d embeddings)", entry.dbName, currentCount)
+		log.Printf("🔬 K-means clustering completed for db %s (%d embeddings)", entry.dbName, doneCount)
 	}
 }

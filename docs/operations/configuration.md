@@ -60,6 +60,20 @@ database:
 - `NEO4J_dbms_default__database` - Neo4j-compatible env var (backwards compat)
 - `NORNICDB_STORAGE_SERIALIZER` - Storage serializer (`gob` or `msgpack`)
 
+### Per-database configuration overrides
+
+Instance-level configuration (env, config file) is the **default** for every database. You can override specific settings **per database** so that embedding, search, HNSW, k-means, and related options can differ by database.
+
+- **Precedence:** For a given database, effective config = global defaults (env + config file) **overlaid by** per-database overrides. Any key not set in overrides uses the global value.
+- **Storage:** Overrides are stored in the **system database** (same pattern as RBAC allowlist/privileges). They are loaded at startup and on every `PUT` so all nodes see the same view.
+- **Management:**
+  - **Admin API:** `GET /admin/databases/{dbName}/config` returns `overrides` and `effective`; `PUT /admin/databases/{dbName}/config` with body `{ "overrides": { "NORNICDB_EMBEDDING_MODEL": "bge-m3", ... } }` saves overrides. `GET /admin/databases/config/keys` returns the list of allowed keys and their types/categories. All require admin authentication.
+  - **UI:** On the **Databases** page, users with the admin role see a settings (cog) button on each database card. Clicking it opens a configuration modal where you can set or clear overrides per key; "Use default" means that key is not overridden.
+- **Allowed keys:** Embedding (`NORNICDB_EMBEDDING_*`, including `NORNICDB_EMBEDDING_API_KEY`), search (`NORNICDB_SEARCH_*`, including `NORNICDB_SEARCH_RERANK_API_KEY`), HNSW (`NORNICDB_VECTOR_*`), k-means (`NORNICDB_KMEANS_*`), auto-links (`NORNICDB_AUTO_LINKS_*`), Auto-TLP (`NORNICDB_AUTO_TLP_*`), and embed worker (`NORNICDB_EMBED_*`). All listed keys can be set per database.
+- **Effect:** Search service creation (vector dimensions, min similarity) and, where implemented, other per-DB behaviour use the resolved config for that database. Changing overrides takes effect for new operations; existing search service caches may need a restart or index rebuild for index-related settings to apply fully.
+- **Search pipeline and query embedding:** The search pipeline must embed the **query** using the same effective config (and thus dimensions) as the **index** for that database to avoid vector dimension mismatches. The HTTP search handler uses per-database resolved config when embedding the query: it validates that the global embedder's output dimensions match the database's resolved embedding dimensions. If they differ (e.g. you set a per-DB override for embedding dimensions that does not match the global embedder), the API returns `400 Bad Request` with a clear message instead of returning empty vector results. Align global embedding dimensions with per-DB overrides, or leave per-DB embedding dimensions unset so they match global.
+- **Remote embedding providers (OpenAI, Ollama) per database:** You can set per-DB overrides for `NORNICDB_EMBEDDING_PROVIDER`, `NORNICDB_EMBEDDING_MODEL`, `NORNICDB_EMBEDDING_API_URL`, `NORNICDB_EMBEDDING_API_KEY`, and `NORNICDB_EMBEDDING_DIMENSIONS` so different databases use different models, endpoints, or API keys. When a database uses provider `openai` (or another provider that requires a key), the **resolved** API key for that database (global default or per-DB override) is used. Ensure the effective API key is set and valid for any database that uses a provider requiring it. Ollama typically does not require an API key; per-DB URL and model work without change.
+
 ### Server Settings
 
 ```yaml

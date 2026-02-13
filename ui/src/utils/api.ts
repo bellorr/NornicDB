@@ -509,6 +509,37 @@ class NornicDBClient {
     }
   }
 
+  /** Per-database config: overrides and effective (admin only). */
+  async getDatabaseConfig(dbName: string): Promise<{ overrides: Record<string, string>; effective: Record<string, string> }> {
+    const res = await fetch(`${BASE_PATH}/admin/databases/${encodeURIComponent(dbName)}/config`, { credentials: 'include' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message ?? `Failed to load config: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  /** Save per-database config overrides (admin only). */
+  async putDatabaseConfig(dbName: string, overrides: Record<string, string>): Promise<{ overrides: Record<string, string> }> {
+    const res = await fetch(`${BASE_PATH}/admin/databases/${encodeURIComponent(dbName)}/config`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      credentials: 'include',
+      body: JSON.stringify({ overrides }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.message ?? `Failed to save config: ${res.status}`);
+    }
+    return res.json();
+  }
+
+  /** Allowed per-DB config keys with type and category (admin only). */
+  async getDatabaseConfigKeys(): Promise<Array<{ key: string; type: string; category: string }>> {
+    const res = await fetch(`${BASE_PATH}/admin/databases/config/keys`, { credentials: 'include' });
+    if (!res.ok) throw new Error('Failed to load config keys');
+    return res.json();
+  }
 }
 
 export const api = new NornicDBClient();

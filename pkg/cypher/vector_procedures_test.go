@@ -470,6 +470,10 @@ func TestVectorSearchQueryModes(t *testing.T) {
 	_, err = exec.Execute(ctx, `MATCH (n:Document {id: 'doc3'}) SET n.embedding = [0.0, 0.0, 0.9, 0.1]`, nil)
 	require.NoError(t, err)
 
+	// Create vector index so queryNodes uses 4-dim service and BuildIndexes indexes the 4-dim embeddings
+	_, err = exec.Execute(ctx, "CALL db.index.vector.createNodeIndex('doc_idx', 'Document', 'embedding', 4, 'cosine')", nil)
+	require.NoError(t, err)
+
 	t.Run("query_with_direct_vector_array", func(t *testing.T) {
 		// Query for ML-related documents using direct vector (Neo4j style)
 		mlQuery := [4]float32{0.85, 0.15, 0.0, 0.0} // Similar to doc1
@@ -682,6 +686,10 @@ func TestVectorSearchEndToEnd(t *testing.T) {
 
 	// Additional properties
 	_, err = exec.Execute(ctx, `MATCH (n:Node {id: 'node-abc123'}) SET n.has_embedding = true`, nil)
+	require.NoError(t, err)
+
+	// Create vector index (4 dims) so queryNodes uses matching service and can find the node
+	_, err = exec.Execute(ctx, "CALL db.index.vector.createNodeIndex('node_embedding_index', 'Node', 'embedding', 4, 'cosine')", nil)
 	require.NoError(t, err)
 
 	// Verify embedding was stored

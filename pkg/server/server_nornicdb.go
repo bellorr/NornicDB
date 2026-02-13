@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -337,9 +338,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fast path: short query (single chunk). Try hybrid; fall back to BM25.
+	// Use per-DB query embedding so vector dims match the index for this database.
 	if len(queryChunks) <= 1 {
-		emb, embedErr := s.db.EmbedQuery(ctx, req.Query)
+		emb, embedErr := s.db.EmbedQueryForDB(ctx, dbName, req.Query)
 		if embedErr != nil {
+			if errors.Is(embedErr, nornicdb.ErrQueryEmbeddingDimensionMismatch) {
+				s.writeError(w, http.StatusBadRequest, embedErr.Error(), ErrBadRequest)
+				return
+			}
 			log.Printf("⚠️ Query embedding failed: %v", embedErr)
 		}
 		if len(emb) > 0 {
@@ -370,8 +376,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 		var usedVectorChunks int
 		for _, chunkQuery := range queryChunks {
-			emb, embedErr := s.db.EmbedQuery(ctx, chunkQuery)
+			emb, embedErr := s.db.EmbedQueryForDB(ctx, dbName, chunkQuery)
 			if embedErr != nil {
+				if errors.Is(embedErr, nornicdb.ErrQueryEmbeddingDimensionMismatch) {
+					s.writeError(w, http.StatusBadRequest, embedErr.Error(), ErrBadRequest)
+					return
+				}
 				log.Printf("⚠️ Query embedding failed (chunked): %v", embedErr)
 				continue
 			}

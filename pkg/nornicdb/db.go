@@ -130,6 +130,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -154,6 +155,13 @@ var (
 	ErrInvalidID    = errors.New("invalid memory ID")
 	ErrClosed       = errors.New("database is closed")
 	ErrInvalidInput = errors.New("invalid input")
+
+	// ErrQueryEmbeddingDimensionMismatch is returned when the query is embedded
+	// with global embedder dimensions that do not match the database's resolved
+	// embedding dimensions (e.g. per-DB override), which would cause vector
+	// search to return no results. Use EmbedQueryForDB and align config or use
+	// the same dimensions for the index and query.
+	ErrQueryEmbeddingDimensionMismatch = errors.New("query embedding dimension mismatch")
 )
 
 // MemoryTier represents the decay tier of a memory.
@@ -304,17 +312,17 @@ type Config struct {
 	PersistSearchIndexes bool `yaml:"persist_search_indexes"`
 
 	// Embeddings
-	EmbeddingProvider     string  `yaml:"embedding_provider"` // ollama, openai
-	EmbeddingAPIURL       string  `yaml:"embedding_api_url"`
-	EmbeddingAPIKey       string  `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
-	EmbeddingModel        string  `yaml:"embedding_model"`
-	EmbeddingDimensions   int     `yaml:"embedding_dimensions"`
-	AutoEmbedEnabled           bool     `yaml:"auto_embed_enabled"`            // Auto-generate embeddings on node create/update
-	EmbedWorkerNumWorkers      int      `yaml:"embed_worker_num_workers"`   // Number of concurrent embedding workers (default: 1)
+	EmbeddingProvider          string   `yaml:"embedding_provider"` // ollama, openai
+	EmbeddingAPIURL            string   `yaml:"embedding_api_url"`
+	EmbeddingAPIKey            string   `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
+	EmbeddingModel             string   `yaml:"embedding_model"`
+	EmbeddingDimensions        int      `yaml:"embedding_dimensions"`
+	AutoEmbedEnabled           bool     `yaml:"auto_embed_enabled"`           // Auto-generate embeddings on node create/update
+	EmbedWorkerNumWorkers      int      `yaml:"embed_worker_num_workers"`     // Number of concurrent embedding workers (default: 1)
 	EmbeddingPropertiesInclude []string `yaml:"embedding_properties_include"` // If non-empty, only these property keys used for embedding text
 	EmbeddingPropertiesExclude []string `yaml:"embedding_properties_exclude"` // Property keys to exclude from embedding text (in addition to built-in)
-	EmbeddingIncludeLabels     bool     `yaml:"embedding_include_labels"`    // Whether to prepend node labels to embedding text (default: true)
-	SearchMinSimilarity        float64  `yaml:"search_min_similarity"`       // Min cosine similarity for vector search (0.0 = no filter)
+	EmbeddingIncludeLabels     bool     `yaml:"embedding_include_labels"`     // Whether to prepend node labels to embedding text (default: true)
+	SearchMinSimilarity        float64  `yaml:"search_min_similarity"`        // Min cosine similarity for vector search (0.0 = no filter)
 
 	// Decay
 	DecayEnabled                    bool          `yaml:"decay_enabled"`
@@ -409,7 +417,7 @@ func DefaultConfig() *Config {
 		EmbeddingDimensions:             1024,
 		AutoEmbedEnabled:                true, // Auto-generate embeddings on node creation
 		EmbedWorkerNumWorkers:           1,    // Single worker by default, increase for network-based embedders or multiple GPUs
-		EmbeddingPropertiesInclude:      nil,   // Empty = use all properties (subject to exclude)
+		EmbeddingPropertiesInclude:      nil,  // Empty = use all properties (subject to exclude)
 		EmbeddingPropertiesExclude:      nil,
 		EmbeddingIncludeLabels:          true,
 		DecayEnabled:                    true,
@@ -438,7 +446,7 @@ func DefaultConfig() *Config {
 		WALAutoCompactionEnabled:        true,                  // Auto-compaction enabled by default
 		WALRetentionLedgerDefaults:      false,                 // Ledger defaults disabled by default
 		WALSnapshotRetentionMaxCount:    0,                     // 0 = use storage default (3)
-		WALSnapshotRetentionMaxAge:     0,                     // Unlimited by default
+		WALSnapshotRetentionMaxAge:      0,                     // Unlimited by default
 		BadgerNodeCacheMaxEntries:       10000,                 // Cache up to 10K hot nodes
 		BadgerEdgeTypeCacheMaxTypes:     50,                    // Cache up to 50 distinct edge types
 		StorageSerializer:               "msgpack",
@@ -447,7 +455,7 @@ func DefaultConfig() *Config {
 		BoltPort:                        7687,
 		HTTPPort:                        7474,
 		KmeansClusterInterval:           15 * time.Minute, // Run k-means every 15 min (skips if no changes)
-		KmeansNumClusters:              0,                 // 0 = auto from dataset size at trigger time
+		KmeansNumClusters:               0,                // 0 = auto from dataset size at trigger time
 		PersistSearchIndexes:            false,            // Rebuild indexes on startup by default
 	}
 }
@@ -502,7 +510,10 @@ type DB struct {
 	searchMinSimilarity float64 // Default MinSimilarity threshold for search
 	searchServicesMu    sync.RWMutex
 	searchServices      map[string]*dbSearchService
-	searchReranker      search.Reranker // Optional Stage-2 reranker for hybrid search
+	// searchServiceCreationMu serializes the "create and insert" path in getOrCreateSearchService
+	// so only one goroutine creates a service per dbName at a time, avoiding RWMutex contention deadlock.
+	searchServiceCreationMu sync.Mutex
+	searchReranker          search.Reranker // Optional Stage-2 reranker for hybrid search
 
 	// Per-database inference engines (topology, Kalman, etc.).
 	inferenceServicesMu sync.RWMutex
@@ -524,7 +535,7 @@ type DB struct {
 	bgWg sync.WaitGroup
 
 	// buildCtx is cancelled when the DB closes so startup index build stops promptly.
-	buildCtx   context.Context
+	buildCtx    context.Context
 	buildCancel context.CancelFunc
 
 	// Replication / HA (optional; enabled when NORNICDB_CLUSTER_MODE != standalone)
@@ -534,6 +545,36 @@ type DB struct {
 
 	// Optional: when set, EmbeddingCount() aggregates across all DBs returned by this provider (used by server with multi-db).
 	allDatabasesProvider func() []DatabaseAndStorage
+
+	// Optional: when set, per-database config overrides are applied for search/embed (dims, minSimilarity).
+	// Server wires this when system DB and DbConfigStore are available.
+	// Use dbConfigResolverMu (not db.mu) so getOrCreateSearchService does not contend with other db.mu users and avoid deadlock.
+	dbConfigResolverMu sync.RWMutex
+	dbConfigResolver   DbConfigResolver
+
+	// Per-DB embedder registry: keyed by embedConfigKey(cfg). Used by EmbedQueryForDB when embedConfigForDB is set.
+	embedderRegistryMu sync.RWMutex
+	embedderRegistry   map[string]embed.Embedder
+	defaultEmbedKey    string // key for the embedder set via SetEmbedder (global default)
+	// embedConfigForDB returns resolved embed config for a database; when set, EmbedQueryForDB uses the registry.
+	embedConfigForDB func(dbName string) (*embed.Config, error)
+
+	// Optional: when set, getOrCreateSearchService uses this to get the reranker for a database (enables per-DB reranker).
+	rerankerResolver func(dbName string) search.Reranker
+}
+
+// DbConfigResolver returns effective embedding dimensions and search min similarity for a database.
+// When set, getOrCreateSearchService uses these instead of the global db.config values.
+// Return (0, 0) to use global defaults for that DB.
+type DbConfigResolver func(dbName string) (embeddingDims int, searchMinSimilarity float64)
+
+// embedConfigKey returns a stable key for the embedder registry from an embed config.
+func embedConfigKey(cfg *embed.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	return cfg.Provider + "|" + cfg.Model + "|" + strconv.Itoa(cfg.Dimensions) + "|" +
+		cfg.APIURL + "|" + cfg.APIKey + "|" + cfg.ModelsDir + "|" + strconv.Itoa(cfg.GPULayers)
 }
 
 // DatabaseAndStorage pairs a database name with its storage engine.
@@ -1140,7 +1181,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		ClusterDebounceDelay: 30 * time.Second, // Wait 30s after last embedding before k-means
 		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
 		PropertiesInclude:    config.EmbeddingPropertiesInclude,
-		PropertiesExclude:     config.EmbeddingPropertiesExclude,
+		PropertiesExclude:    config.EmbeddingPropertiesExclude,
 		IncludeLabels:        config.EmbeddingIncludeLabels,
 	}
 
@@ -1450,6 +1491,89 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	}
 }
 
+// SetDefaultEmbedConfig registers the current global embedder (must have been set via SetEmbedder first)
+// under the given config key so the per-DB embedder registry can use it as the default when a database
+// has no overrides. Call this after SetEmbedder when per-DB config is available (e.g. server with dbConfigStore).
+func (db *DB) SetDefaultEmbedConfig(defaultConfig *embed.Config) {
+	if defaultConfig == nil {
+		return
+	}
+	db.mu.Lock()
+	eq := db.embedQueue
+	db.mu.Unlock()
+	if eq == nil || eq.embedder == nil {
+		return
+	}
+	key := embedConfigKey(defaultConfig)
+	db.embedderRegistryMu.Lock()
+	if db.embedderRegistry == nil {
+		db.embedderRegistry = make(map[string]embed.Embedder)
+	}
+	db.embedderRegistry[key] = eq.embedder
+	db.defaultEmbedKey = key
+	db.embedderRegistryMu.Unlock()
+}
+
+// SetEmbedConfigForDB sets the optional resolver that returns resolved embed config for a database.
+// When set, EmbedQueryForDB uses the embedder registry (get or create by config key) instead of the global embedder.
+func (db *DB) SetEmbedConfigForDB(fn func(dbName string) (*embed.Config, error)) {
+	db.mu.Lock()
+	db.embedConfigForDB = fn
+	db.mu.Unlock()
+}
+
+// getOrCreateEmbedderForDB returns the embedder for the given database, using the registry when embedConfigForDB is set.
+func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
+	db.mu.RLock()
+	fn := db.embedConfigForDB
+	defaultKey := db.defaultEmbedKey
+	embedQueue := db.embedQueue
+	db.mu.RUnlock()
+
+	if fn == nil || embedQueue == nil || embedQueue.embedder == nil {
+		return embedQueue.embedder, nil
+	}
+	cfg, err := fn(dbName)
+	if err != nil || cfg == nil {
+		return embedQueue.embedder, nil
+	}
+	key := embedConfigKey(cfg)
+	db.embedderRegistryMu.RLock()
+	if db.embedderRegistry != nil {
+		if e, ok := db.embedderRegistry[key]; ok {
+			db.embedderRegistryMu.RUnlock()
+			return e, nil
+		}
+		if key == defaultKey && defaultKey != "" {
+			if e, ok := db.embedderRegistry[defaultKey]; ok {
+				db.embedderRegistryMu.RUnlock()
+				return e, nil
+			}
+		}
+	}
+	db.embedderRegistryMu.RUnlock()
+
+	db.embedderRegistryMu.Lock()
+	defer db.embedderRegistryMu.Unlock()
+	if db.embedderRegistry == nil {
+		db.embedderRegistry = make(map[string]embed.Embedder)
+	}
+	if e, ok := db.embedderRegistry[key]; ok {
+		return e, nil
+	}
+	if key == defaultKey && defaultKey != "" {
+		if e, ok := db.embedderRegistry[defaultKey]; ok {
+			return e, nil
+		}
+	}
+	newEmbedder, createErr := embed.NewEmbedder(cfg)
+	if createErr != nil {
+		return embedQueue.embedder, nil
+	}
+	db.embedderRegistry[key] = newEmbedder
+	return newEmbedder, nil
+}
+
 // LoadFromExport loads data from a Mimir JSON export directory.
 // This loads nodes, relationships, and embeddings from the exported files.
 func (db *DB) LoadFromExport(ctx context.Context, exportDir string) (*LoadResult, error) {
@@ -1664,6 +1788,15 @@ func (db *DB) SetAllDatabasesProvider(provider func() []DatabaseAndStorage) {
 	db.allDatabasesProvider = provider
 }
 
+// SetDbConfigResolver sets an optional resolver for per-database config (embedding dims, search min similarity).
+// When set, getOrCreateSearchService uses the resolver for the given dbName instead of global db.config.
+// Call with nil to use global config only.
+func (db *DB) SetDbConfigResolver(resolver DbConfigResolver) {
+	db.dbConfigResolverMu.Lock()
+	defer db.dbConfigResolverMu.Unlock()
+	db.dbConfigResolver = resolver
+}
+
 // VectorIndexDimensions returns the actual dimensions of the search service's vector index.
 // This is useful for debugging dimension mismatches between config and runtime.
 func (db *DB) VectorIndexDimensions() int {
@@ -1737,46 +1870,32 @@ func (db *DB) ClearAllEmbeddings() (int, error) {
 	return 0, fmt.Errorf("storage engine does not support ClearAllEmbeddings")
 }
 
-// EmbedQuery generates an embedding for a search query.
-// Returns nil if embeddings are not enabled or embedder is not yet set (e.g. still loading).
-func (db *DB) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
-	if db.embedQueue == nil || db.embedQueue.embedder == nil {
-		return nil, nil // Not an error - just no embedding available
+// embedQueryWithEmbedder runs the shared query-embedding logic (chunking + average) with the given embedder.
+func (db *DB) embedQueryWithEmbedder(ctx context.Context, emb embed.Embedder, query string) ([]float32, error) {
+	if emb == nil {
+		return nil, nil
 	}
-
-	// Proactively chunk long queries by length to keep embedding generation safe
-	// across providers (especially local tokenizers with fixed buffers).
-	//
-	// For long queries, we embed each chunk and return the normalized average.
-	// This provides a single vector suitable for APIs that accept only one query vector
-	// (e.g., Qdrant-compatible endpoints), while higher-level search surfaces may still
-	// do per-chunk search + fusion for best recall.
 	const (
 		queryChunkSize    = 512
 		queryChunkOverlap = 50
 		maxQueryChunks    = 32
 	)
-
 	chunks := util.ChunkText(query, queryChunkSize, queryChunkOverlap)
 	if len(chunks) > maxQueryChunks {
 		chunks = chunks[:maxQueryChunks]
 	}
 	if len(chunks) <= 1 {
-		return db.embedQueue.embedder.Embed(ctx, query)
+		return emb.Embed(ctx, query)
 	}
-
-	embs, err := db.embedQueue.embedder.EmbedBatch(ctx, chunks)
+	embs, err := emb.EmbedBatch(ctx, chunks)
 	if len(embs) == 0 {
 		if err != nil {
 			return nil, err
 		}
 		return nil, nil
 	}
-
-	var (
-		sum   []float32
-		count int
-	)
+	var sum []float32
+	var count int
 	for _, v := range embs {
 		if len(v) == 0 {
 			continue
@@ -1798,17 +1917,60 @@ func (db *DB) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
 		}
 		return nil, nil
 	}
-
 	inv := float32(1.0 / float32(count))
 	for i := range sum {
 		sum[i] *= inv
 	}
 	vector.NormalizeInPlace(sum)
-
-	// Best effort: many callers treat a non-nil error as "no embeddings available"
-	// and will fall back to keyword search. If we produced a vector, prefer returning
-	// it and letting callers proceed with semantic search.
 	return sum, nil
+}
+
+// EmbedQuery generates an embedding for a search query.
+// Returns nil if embeddings are not enabled or embedder is not yet set (e.g. still loading).
+func (db *DB) EmbedQuery(ctx context.Context, query string) ([]float32, error) {
+	if db.embedQueue == nil || db.embedQueue.embedder == nil {
+		return nil, nil // Not an error - just no embedding available
+	}
+	return db.embedQueryWithEmbedder(ctx, db.embedQueue.embedder, query)
+}
+
+// EmbedQueryForDB generates an embedding for a search query using the embedder for the given database.
+// When SetEmbedConfigForDB is set, the per-DB embedder registry is used so the query vector matches
+// the index for that database. Otherwise it uses the global embedder and validates dimensions match
+// (returns ErrQueryEmbeddingDimensionMismatch if not).
+func (db *DB) EmbedQueryForDB(ctx context.Context, dbName string, query string) ([]float32, error) {
+	db.mu.RLock()
+	useRegistry := db.embedConfigForDB != nil
+	db.mu.RUnlock()
+	if useRegistry {
+		emb, err := db.getOrCreateEmbedderForDB(dbName)
+		if err != nil {
+			return nil, err
+		}
+		if emb != nil {
+			return db.embedQueryWithEmbedder(ctx, emb, query)
+		}
+	}
+	// No registry or fallback: use global embedder and dimension check (legacy behavior).
+	vec, err := db.EmbedQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	db.dbConfigResolverMu.RLock()
+	resolver := db.dbConfigResolver
+	db.dbConfigResolverMu.RUnlock()
+	if resolver == nil || len(vec) == 0 {
+		return vec, nil
+	}
+	resolvedDims, _ := resolver(dbName)
+	if resolvedDims <= 0 {
+		return vec, nil
+	}
+	if len(vec) != resolvedDims {
+		return nil, fmt.Errorf("database %q: %w (index dims %d, query dims %d)",
+			dbName, ErrQueryEmbeddingDimensionMismatch, resolvedDims, len(vec))
+	}
+	return vec, nil
 }
 
 // Store creates a new memory with automatic relationship inference.

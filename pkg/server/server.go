@@ -169,6 +169,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -180,6 +181,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
 	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/config/dbconfig"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/orneryd/nornicdb/pkg/graphql"
@@ -208,6 +210,61 @@ var (
 // Each cached embedding uses: cacheSize * dimensions * 4 bytes (float32).
 func embeddingCacheMemoryMB(cacheSize, dimensions int) int {
 	return cacheSize * dimensions * 4 / 1024 / 1024
+}
+
+// buildEmbedConfigFromResolved builds an embed.Config from per-DB effective map and server config fallbacks.
+// Used by the per-DB embedder registry when EmbedConfigForDB is set.
+func buildEmbedConfigFromResolved(effective map[string]string, fallback *Config) *embed.Config {
+	if fallback == nil {
+		return nil
+	}
+	get := func(key, def string) string {
+		if v := effective[key]; v != "" {
+			return strings.TrimSpace(v)
+		}
+		return def
+	}
+	getInt := func(key string, def int) int {
+		if v := effective[key]; v != "" {
+			if i, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+				return i
+			}
+		}
+		return def
+	}
+	provider := get("NORNICDB_EMBEDDING_PROVIDER", fallback.EmbeddingProvider)
+	if provider == "" {
+		provider = "openai"
+	}
+	model := get("NORNICDB_EMBEDDING_MODEL", fallback.EmbeddingModel)
+	apiURL := get("NORNICDB_EMBEDDING_API_URL", fallback.EmbeddingAPIURL)
+	apiKey := get("NORNICDB_EMBEDDING_API_KEY", fallback.EmbeddingAPIKey)
+	dimensions := getInt("NORNICDB_EMBEDDING_DIMENSIONS", fallback.EmbeddingDimensions)
+	if dimensions <= 0 {
+		dimensions = 1024
+	}
+	gpuLayers := getInt("NORNICDB_EMBEDDING_GPU_LAYERS", 0)
+	cfg := &embed.Config{
+		Provider:   provider,
+		APIURL:     apiURL,
+		APIKey:     apiKey,
+		Model:      model,
+		Dimensions: dimensions,
+		ModelsDir:  fallback.ModelsDir,
+		Timeout:    30 * time.Second,
+		GPULayers:  gpuLayers,
+	}
+	switch provider {
+	case "ollama":
+		cfg.APIPath = "/api/embeddings"
+	case "openai":
+		cfg.APIPath = "/v1/embeddings"
+	case "local":
+		// no APIPath
+	default:
+		cfg.APIPath = "/api/embeddings"
+	}
+	return cfg
 }
 
 // Config holds HTTP server configuration options.
@@ -555,6 +612,7 @@ type Server struct {
 	roleStore             *auth.RoleStore             // user-defined roles when auth enabled
 	privilegesStore       *auth.PrivilegesStore       // per-DB read/write (Phase 4) when auth enabled
 	roleEntitlementsStore *auth.RoleEntitlementsStore // per-role global entitlements when auth enabled
+	dbConfigStore         *dbconfig.Store             // per-DB config overrides (embedding, search, etc.)
 }
 
 // mcpToolRunnerAdapter adapts pkg/mcp.Server to heimdall.InMemoryToolRunner so the agentic loop
@@ -993,6 +1051,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 				cfg.Enabled = true
 				r := search.NewLocalReranker(rerankerModel, cfg)
 				db.SetSearchReranker(r)
+				db.SetRerankerResolver(func(string) search.Reranker { return r })
 				log.Printf("✅ Search reranker ready: %s (Stage-2 reranking enabled)", modelName)
 			}()
 		} else {
@@ -1020,6 +1079,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 				}
 				ce := search.NewCrossEncoder(ceConfig)
 				db.SetSearchReranker(ce)
+				db.SetRerankerResolver(func(string) search.Reranker { return ce })
 				log.Printf("✅ Search reranker ready: provider=%s, url=%s (Stage-2 reranking enabled)", provider, apiURL)
 			}
 		}
@@ -1109,6 +1169,8 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			// Share embedder with DB for auto-embed queue
 			// The embed worker will wait for this to be set before processing
 			db.SetEmbedder(embedder)
+			// Register as default for per-DB embedder registry (no-op if SetEmbedConfigForDB was not set)
+			db.SetDefaultEmbedConfig(embedConfig)
 		}()
 	}
 
@@ -1208,6 +1270,30 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			log.Printf("⚠️  Failed to load RBAC role entitlements: %v", loadErr)
 		} else {
 			s.roleEntitlementsStore = roleEntitlementsStore
+		}
+		dbConfigStore := dbconfig.NewStore(systemStorage)
+		if loadErr := dbConfigStore.Load(ctx); loadErr != nil {
+			log.Printf("⚠️  Failed to load per-DB config store: %v", loadErr)
+		} else {
+			s.dbConfigStore = dbConfigStore
+			globalConfig := nornicConfig.LoadFromEnv()
+			db.SetDbConfigResolver(func(dbName string) (int, float64) {
+				overrides := dbConfigStore.GetOverrides(dbName)
+				r := dbconfig.Resolve(globalConfig, overrides)
+				if r == nil {
+					return 0, 0
+				}
+				return r.EmbeddingDimensions, r.SearchMinSimilarity
+			})
+			// Per-DB embedder registry: resolve embed config per database for EmbedQueryForDB.
+			db.SetEmbedConfigForDB(func(dbName string) (*embed.Config, error) {
+				overrides := dbConfigStore.GetOverrides(dbName)
+				r := dbconfig.Resolve(globalConfig, overrides)
+				if r == nil || r.Effective == nil {
+					return nil, nil
+				}
+				return buildEmbedConfigFromResolved(r.Effective, config), nil
+			})
 		}
 	}
 
