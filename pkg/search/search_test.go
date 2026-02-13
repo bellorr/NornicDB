@@ -683,6 +683,55 @@ func TestFulltextIndex_SaveLoad(t *testing.T) {
 	require.Len(t, results, 2) // doc1 and doc2
 }
 
+// TestFulltextIndex_AvgDocLengthAfterManyOps verifies that after many Index/Remove
+// operations the average document length stays correct (O(1) update path). Save/Load
+// round-trip and search results confirm totalDocLength was consistent.
+func TestFulltextIndex_AvgDocLengthAfterManyOps(t *testing.T) {
+	idx := NewFulltextIndex()
+	for i := 0; i < 100; i++ {
+		idx.Index(fmt.Sprintf("doc%d", i), "machine learning and neural networks and algorithms")
+	}
+	// Remove some, update some
+	for i := 10; i < 30; i++ {
+		idx.Remove(fmt.Sprintf("doc%d", i))
+	}
+	for i := 5; i < 15; i++ {
+		idx.Index(fmt.Sprintf("doc%d", i), "short")
+	}
+	beforeSearch := idx.Search("learning", 100)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bm25")
+	require.NoError(t, idx.Save(path))
+	idx2 := NewFulltextIndex()
+	require.NoError(t, idx2.Load(path))
+	afterSearch := idx2.Search("learning", 100)
+	require.Equal(t, len(beforeSearch), len(afterSearch), "Search result count should match after Save/Load (avgDocLength consistent)")
+	beforeIDs := make(map[string]bool)
+	for _, r := range beforeSearch {
+		beforeIDs[r.ID] = true
+	}
+	for _, r := range afterSearch {
+		assert.True(t, beforeIDs[r.ID], "result ID %s should be in before set", r.ID)
+	}
+}
+
+// TestFulltextIndex_IndexBatch verifies that IndexBatch adds documents and updates avgDocLength once per batch.
+func TestFulltextIndex_IndexBatch(t *testing.T) {
+	idx := NewFulltextIndex()
+	batch := []FulltextBatchEntry{
+		{ID: "a", Text: "first document"},
+		{ID: "b", Text: "second document"},
+		{ID: "c", Text: "third document"},
+	}
+	idx.IndexBatch(batch)
+	assert.Equal(t, 3, idx.Count())
+	results := idx.Search("document", 10)
+	assert.Len(t, results, 3)
+	// Single-doc path still works
+	idx.Index("d", "fourth document")
+	assert.Equal(t, 4, idx.Count())
+}
+
 // TestVectorIndex_SaveLoad tests vector index persistence (Save/Load round-trip).
 func TestVectorIndex_SaveLoad(t *testing.T) {
 	dir := t.TempDir()

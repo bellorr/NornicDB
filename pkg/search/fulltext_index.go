@@ -39,6 +39,9 @@ type FulltextIndex struct {
 
 	// Total document count
 	docCount int
+
+	// Running sum of document lengths; avgDocLength = totalDocLength/docCount (O(1) update).
+	totalDocLength int64
 }
 
 // NewFulltextIndex creates a new full-text search index.
@@ -133,6 +136,7 @@ func (f *FulltextIndex) Load(path string) error {
 		f.docLengths = make(map[string]int)
 		f.avgDocLength = 0
 		f.docCount = 0
+		f.totalDocLength = 0
 		f.mu.Unlock()
 		return nil
 	}
@@ -143,6 +147,7 @@ func (f *FulltextIndex) Load(path string) error {
 		f.docLengths = make(map[string]int)
 		f.avgDocLength = 0
 		f.docCount = 0
+		f.totalDocLength = 0
 		f.mu.Unlock()
 		return nil
 	}
@@ -163,6 +168,11 @@ func (f *FulltextIndex) Load(path string) error {
 	f.docLengths = snap.DocLengths
 	f.avgDocLength = snap.AvgDocLength
 	f.docCount = snap.DocCount
+	// totalDocLength is not persisted; recompute from docLengths (one-time O(N) on load).
+	f.totalDocLength = 0
+	for _, L := range f.docLengths {
+		f.totalDocLength += int64(L)
+	}
 	return nil
 }
 
@@ -184,6 +194,7 @@ func (f *FulltextIndex) Index(id string, text string) {
 	f.documents[id] = text
 	f.docLengths[id] = len(tokens)
 	f.docCount++
+	f.totalDocLength += int64(len(tokens))
 
 	// Update inverted index
 	termFreq := make(map[string]int)
@@ -198,7 +209,48 @@ func (f *FulltextIndex) Index(id string, text string) {
 		f.invertedIndex[term][id] = freq
 	}
 
-	// Update average document length
+	f.updateAvgDocLength()
+}
+
+// FulltextBatchEntry is one (id, text) pair for IndexBatch.
+type FulltextBatchEntry struct {
+	ID   string
+	Text string
+}
+
+// IndexBatch adds or updates many documents under one lock and updates avgDocLength once at the end.
+// Use this during bulk build to reduce lock contention and avoid O(N) avg updates.
+func (f *FulltextIndex) IndexBatch(entries []FulltextBatchEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	for _, e := range entries {
+		if e.ID == "" {
+			continue
+		}
+		f.removeInternal(e.ID)
+		tokens := tokenize(e.Text)
+		if len(tokens) == 0 {
+			continue
+		}
+		f.documents[e.ID] = e.Text
+		f.docLengths[e.ID] = len(tokens)
+		f.docCount++
+		f.totalDocLength += int64(len(tokens))
+		termFreq := make(map[string]int)
+		for _, token := range tokens {
+			termFreq[token]++
+		}
+		for term, freq := range termFreq {
+			if f.invertedIndex[term] == nil {
+				f.invertedIndex[term] = make(map[string]int)
+			}
+			f.invertedIndex[term][e.ID] = freq
+		}
+	}
 	f.updateAvgDocLength()
 }
 
@@ -214,6 +266,8 @@ func (f *FulltextIndex) removeInternal(id string) {
 	if _, exists := f.documents[id]; !exists {
 		return
 	}
+
+	oldLen := f.docLengths[id]
 
 	// Get the document's terms
 	text := f.documents[id]
@@ -238,6 +292,7 @@ func (f *FulltextIndex) removeInternal(id string) {
 	delete(f.documents, id)
 	delete(f.docLengths, id)
 	f.docCount--
+	f.totalDocLength -= int64(oldLen)
 	f.updateAvgDocLength()
 }
 
@@ -336,18 +391,15 @@ func (f *FulltextIndex) calculateIDF(term string) float64 {
 	return idf
 }
 
-// updateAvgDocLength recalculates average document length.
+// updateAvgDocLength sets avgDocLength from totalDocLength and docCount (O(1)).
+// Caller must hold f.mu and ensure totalDocLength is correct.
 func (f *FulltextIndex) updateAvgDocLength() {
 	if f.docCount == 0 {
 		f.avgDocLength = 0
+		f.totalDocLength = 0
 		return
 	}
-
-	var total int
-	for _, length := range f.docLengths {
-		total += length
-	}
-	f.avgDocLength = float64(total) / float64(f.docCount)
+	f.avgDocLength = float64(f.totalDocLength) / float64(f.docCount)
 }
 
 // Count returns the number of indexed documents.

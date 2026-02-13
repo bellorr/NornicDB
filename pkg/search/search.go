@@ -714,6 +714,9 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 // Environment Variable: NORNICDB_KMEANS_MIN_EMBEDDINGS (overrides default)
 const DefaultMinEmbeddingsForClustering = 1000
 
+// fulltextBuildBatchSize is the number of nodes to index in one fulltext IndexBatch during BuildIndexes.
+const fulltextBuildBatchSize = 5000
+
 // TriggerClustering runs k-means clustering on all indexed embeddings.
 // Stops promptly when ctx is cancelled (e.g. process shutdown).
 // Only one run executes at a time per service; if clustering is already in progress,
@@ -1261,17 +1264,25 @@ func (s *Service) ClearVectorIndex() {
 // IndexNode adds a node to all search indexes.
 // All embeddings are stored in ChunkEmbeddings (even single chunk = array of 1).
 func (s *Service) IndexNode(node *storage.Node) error {
-	defer s.schedulePersist()
-	if s.resultCache != nil {
-		s.resultCache.Invalidate()
+	if !s.buildInProgress.Load() {
+		defer s.schedulePersist()
+		if s.resultCache != nil {
+			s.resultCache.Invalidate()
+		}
 	}
 	s.maybeAutoSetVectorDimensions(firstVectorDimensions(node))
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.indexNodeLocked(node, false)
+}
 
+// indexNodeLocked does the work of IndexNode. Caller must hold s.mu.
+// When skipFulltext is true, the fulltext index block is skipped (used when BuildIndexes batches fulltext).
+// When skipFulltext is true, removeNodeLocked is also skipped so we don't remove the doc just added by IndexBatch.
+func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	nodeIDStr := string(node.ID)
-	if nodeIDStr != "" {
+	if nodeIDStr != "" && !skipFulltext {
 		// CRITICAL: IndexNode is called for both creates and updates.
 		// When a node is re-indexed with fewer chunks or fewer named vectors,
 		// we must remove the old vector IDs first, otherwise they become orphaned
@@ -1433,10 +1444,12 @@ func (s *Service) IndexNode(node *storage.Node) error {
 		}
 	}
 
-	// Add to fulltext index
-	text := s.extractSearchableText(node)
-	if text != "" {
-		s.fulltextIndex.Index(string(node.ID), text)
+	// Add to fulltext index (skipped when BuildIndexes batches fulltext via IndexBatch)
+	if !skipFulltext {
+		text := s.extractSearchableText(node)
+		if text != "" {
+			s.fulltextIndex.Index(string(node.ID), text)
+		}
 	}
 
 	return nil
@@ -1550,9 +1563,11 @@ func (s *Service) removeNodeLocked(nodeIDStr string) {
 // RemoveNode removes a node from all search indexes.
 // Also removes all chunk embeddings (for nodes with multiple chunks).
 func (s *Service) RemoveNode(nodeID storage.NodeID) error {
-	defer s.schedulePersist()
-	if s.resultCache != nil {
-		s.resultCache.Invalidate()
+	if !s.buildInProgress.Load() {
+		defer s.schedulePersist()
+		if s.resultCache != nil {
+			s.resultCache.Invalidate()
+		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -1598,6 +1613,11 @@ type NodeIterator interface {
 func (s *Service) BuildIndexes(ctx context.Context) error {
 	s.buildInProgress.Store(true)
 	defer s.buildInProgress.Store(false)
+
+	// Clear cache once for the whole build so IndexNode/RemoveNode don't clear per node.
+	if s.resultCache != nil {
+		s.resultCache.Invalidate()
+	}
 
 	s.mu.RLock()
 	fulltextPath := s.fulltextIndexPath
@@ -1666,15 +1686,36 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	// Build indexes by iterating over storage.
 	if iterator, ok := s.engine.(NodeIterator); ok {
 		count := 0
+		var fulltextBatch []*storage.Node
+		flushFulltextBatch := func(batch []*storage.Node) {
+			if len(batch) == 0 {
+				return
+			}
+			entries := make([]FulltextBatchEntry, 0, len(batch))
+			for _, n := range batch {
+				text := s.extractSearchableText(n)
+				entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
+			}
+			s.fulltextIndex.IndexBatch(entries)
+			s.mu.Lock()
+			for _, n := range batch {
+				_ = s.indexNodeLocked(n, true)
+			}
+			s.mu.Unlock()
+		}
 		err := iterator.IterateNodes(func(node *storage.Node) bool {
 			select {
 			case <-ctx.Done():
 				return false
 			default:
-				_ = s.IndexNode(node)
-				count++
-				if count%1000 == 0 {
-					fmt.Printf("📊 Indexed %d nodes...\n", count)
+				fulltextBatch = append(fulltextBatch, node)
+				if len(fulltextBatch) >= fulltextBuildBatchSize {
+					flushFulltextBatch(fulltextBatch)
+					count += len(fulltextBatch)
+					fulltextBatch = nil
+					if count%5000 == 0 {
+						fmt.Printf("📊 Indexed %d nodes...\n", count)
+					}
 				}
 				return true
 			}
@@ -1685,6 +1726,8 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		flushFulltextBatch(fulltextBatch)
+		count += len(fulltextBatch)
 		fmt.Printf("📊 Indexed %d total nodes\n", count)
 		if fulltextPath != "" {
 			if err := s.fulltextIndex.Save(fulltextPath); err != nil {
@@ -1729,22 +1772,43 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	}
 
 	count := 0
+	var fulltextBatch []*storage.Node
+	flushFulltextBatch := func(batch []*storage.Node) {
+		if len(batch) == 0 {
+			return
+		}
+		entries := make([]FulltextBatchEntry, 0, len(batch))
+		for _, n := range batch {
+			text := s.extractSearchableText(n)
+			entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
+		}
+		s.fulltextIndex.IndexBatch(entries)
+		s.mu.Lock()
+		for _, n := range batch {
+			_ = s.indexNodeLocked(n, true)
+		}
+		s.mu.Unlock()
+	}
 	err := storage.StreamNodesWithFallback(ctx, s.engine, 1000, func(node *storage.Node) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := s.IndexNode(node); err != nil {
-			return nil
-		}
-		count++
-		if count%1000 == 0 {
-			fmt.Printf("📊 Indexed %d nodes...\n", count)
+		fulltextBatch = append(fulltextBatch, node)
+		if len(fulltextBatch) >= fulltextBuildBatchSize {
+			flushFulltextBatch(fulltextBatch)
+			count += len(fulltextBatch)
+			fulltextBatch = nil
+			if count%5000 == 0 {
+				fmt.Printf("📊 Indexed %d nodes...\n", count)
+			}
 		}
 		return nil
 	})
 	if err != nil {
 		return err
 	}
+	flushFulltextBatch(fulltextBatch)
+	count += len(fulltextBatch)
 	fmt.Printf("📊 Indexed %d total nodes\n", count)
 	if fulltextPath != "" {
 		if err := s.fulltextIndex.Save(fulltextPath); err != nil {
