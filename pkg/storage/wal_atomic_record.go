@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bufio"
 	"encoding/binary"
 	"io"
 )
@@ -84,5 +85,27 @@ func writeAtomicRecordV2(w io.Writer, payload []byte) (int64, error) {
 		}
 	}
 
+	return alignedRecordLen, nil
+}
+
+// writeAtomicRecordV2Bufio writes a single WAL record to w, using a single Write
+// when w is a *bufio.Writer so that a record is never split across buffer flushes.
+// This prevents recovery from seeing a partial last record after a clean close.
+func writeAtomicRecordV2Bufio(w io.Writer, payload []byte) (int64, error) {
+	record, alignedRecordLen := buildAtomicRecordV2(payload)
+	if bw, ok := w.(*bufio.Writer); ok {
+		if bw.Available() < len(record) {
+			if err := bw.Flush(); err != nil {
+				return 0, err
+			}
+		}
+	}
+	n, err := w.Write(record)
+	if err != nil {
+		return 0, err
+	}
+	if n != len(record) {
+		return 0, io.ErrShortWrite
+	}
 	return alignedRecordLen, nil
 }

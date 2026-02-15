@@ -124,6 +124,65 @@ func (b *BruteForceCandidateGen) SearchCandidates(ctx context.Context, query []f
 	return candidates, nil
 }
 
+// FileStoreBruteForceCandidateGen implements CandidateGenerator using brute-force search
+// directly over the file-backed vector store. This is used for small datasets when
+// vectors are not held in-memory.
+type FileStoreBruteForceCandidateGen struct {
+	vectorStore *VectorFileStore
+}
+
+// NewFileStoreBruteForceCandidateGen creates a brute-force candidate generator over VectorFileStore.
+func NewFileStoreBruteForceCandidateGen(vectorStore *VectorFileStore) *FileStoreBruteForceCandidateGen {
+	return &FileStoreBruteForceCandidateGen{vectorStore: vectorStore}
+}
+
+// SearchCandidates scans all vectors from the file store and returns top candidates by exact cosine score.
+func (b *FileStoreBruteForceCandidateGen) SearchCandidates(ctx context.Context, query []float32, k int, minSimilarity float64) ([]Candidate, error) {
+	if b == nil || b.vectorStore == nil {
+		return nil, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+
+	candidateLimit := calculateCandidateLimit(k)
+	normalizedQuery := vector.Normalize(query)
+	initialCap := candidateLimit
+	if initialCap > 1024 {
+		initialCap = 1024
+	}
+	candidates := make([]Candidate, 0, initialCap)
+
+	// Small datasets only (N < NSmallMax), so a full scan is acceptable and avoids building HNSW.
+	if err := b.vectorStore.IterateChunked(4096, func(ids []string, vecs [][]float32) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		for i := range ids {
+			score := float64(vector.DotProduct(normalizedQuery, vecs[i]))
+			if score < minSimilarity {
+				continue
+			}
+			candidates = append(candidates, Candidate{ID: ids[i], Score: score})
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Score > candidates[j].Score
+	})
+	if len(candidates) > candidateLimit {
+		candidates = candidates[:candidateLimit]
+	}
+	return candidates, nil
+}
+
 // HNSWCandidateGen implements CandidateGenerator using HNSW approximate search.
 //
 // This is optimal for large datasets (N >= NSmallMax) where ANN provides
@@ -160,25 +219,31 @@ func (h *HNSWCandidateGen) SearchCandidates(ctx context.Context, query []float32
 	return candidates, nil
 }
 
+// VectorGetter is implemented by *VectorIndex and by adapters for VectorLookup (e.g. file-backed store).
+type VectorGetter interface {
+	GetVector(id string) ([]float32, bool)
+}
+
 // CPUExactScorer implements ExactScorer using CPU-based exact scoring.
 //
 // Uses SIMD-optimized dot product for cosine similarity computation.
 type CPUExactScorer struct {
-	vectorIndex *VectorIndex
+	getter VectorGetter
 }
 
 // NewCPUExactScorer creates a new CPU-based exact scorer.
-func NewCPUExactScorer(vectorIndex *VectorIndex) *CPUExactScorer {
+// getter can be *VectorIndex or any type that implements GetVector (e.g. file-store lookup adapter).
+func NewCPUExactScorer(getter VectorGetter) *CPUExactScorer {
 	return &CPUExactScorer{
-		vectorIndex: vectorIndex,
+		getter: getter,
 	}
 }
 
 // ScoreCandidates computes exact scores for candidates using CPU.
 func (c *CPUExactScorer) ScoreCandidates(ctx context.Context, query []float32, candidates []Candidate) ([]ScoredCandidate, error) {
-	c.vectorIndex.mu.RLock()
-	defer c.vectorIndex.mu.RUnlock()
-
+	if c.getter == nil {
+		return nil, nil
+	}
 	normalizedQuery := vector.Normalize(query)
 	scored := make([]ScoredCandidate, 0, len(candidates))
 
@@ -189,7 +254,7 @@ func (c *CPUExactScorer) ScoreCandidates(ctx context.Context, query []float32, c
 		default:
 		}
 
-		vec, exists := c.vectorIndex.vectors[cand.ID]
+		vec, exists := c.getter.GetVector(cand.ID)
 		if !exists {
 			continue // Skip candidates that no longer exist
 		}

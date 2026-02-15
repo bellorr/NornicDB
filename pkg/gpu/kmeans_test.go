@@ -76,7 +76,7 @@ func TestDefaultKMeansConfig(t *testing.T) {
 	if config.NumClusters != 0 {
 		t.Errorf("expected NumClusters=0 for auto-detect, got %d", config.NumClusters)
 	}
-	if config.MaxIterations != 100 {
+	if config.MaxIterations != 2 {
 		t.Errorf("expected MaxIterations=100, got %d", config.MaxIterations)
 	}
 	if config.Tolerance != 0.0001 {

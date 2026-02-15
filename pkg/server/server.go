@@ -197,13 +197,14 @@ import (
 
 // Errors for HTTP operations.
 var (
-	ErrServerClosed     = fmt.Errorf("server closed")
-	ErrUnauthorized     = fmt.Errorf("unauthorized")
-	ErrForbidden        = fmt.Errorf("forbidden")
-	ErrBadRequest       = fmt.Errorf("bad request")
-	ErrNotFound         = fmt.Errorf("not found")
-	ErrMethodNotAllowed = fmt.Errorf("method not allowed")
-	ErrInternalError    = fmt.Errorf("internal server error")
+	ErrServerClosed       = fmt.Errorf("server closed")
+	ErrUnauthorized       = fmt.Errorf("unauthorized")
+	ErrForbidden          = fmt.Errorf("forbidden")
+	ErrBadRequest         = fmt.Errorf("bad request")
+	ErrNotFound           = fmt.Errorf("not found")
+	ErrMethodNotAllowed   = fmt.Errorf("method not allowed")
+	ErrInternalError      = fmt.Errorf("internal server error")
+	ErrServiceUnavailable = fmt.Errorf("service unavailable")
 )
 
 // embeddingCacheMemoryMB calculates approximate memory usage for embedding cache.

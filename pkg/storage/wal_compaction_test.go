@@ -325,8 +325,15 @@ func TestWALAutoCompactionEnabled(t *testing.T) {
 		err = walEngine.EnableAutoCompaction(snapshotDir)
 		require.NoError(t, err)
 
-		// Wait for at least 1 compaction cycle (be more lenient with timing)
-		time.Sleep(200 * time.Millisecond)
+		// Wait for at least 1 compaction cycle (poll to reduce flakiness on slow CI)
+		deadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(deadline) {
+			totalSnapshots, lastSnapshot := walEngine.GetSnapshotStats()
+			if totalSnapshots >= 1 && !lastSnapshot.IsZero() {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
 
 		// Check snapshot stats - at least 1 snapshot should have been created
 		totalSnapshots, lastSnapshot := walEngine.GetSnapshotStats()
@@ -334,8 +341,16 @@ func TestWALAutoCompactionEnabled(t *testing.T) {
 		assert.False(t, lastSnapshot.IsZero(), "Last snapshot time should be set")
 
 		// Check snapshot files were created - at least 1
-		files, err := os.ReadDir(snapshotDir)
-		require.NoError(t, err)
+		deadline = time.Now().Add(2 * time.Second)
+		var files []os.DirEntry
+		for time.Now().Before(deadline) {
+			files, err = os.ReadDir(snapshotDir)
+			require.NoError(t, err)
+			if len(files) >= 1 {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
 		assert.GreaterOrEqual(t, len(files), 1, "Should have at least 1 snapshot file")
 
 		walEngine.DisableAutoCompaction()

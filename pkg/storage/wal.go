@@ -525,9 +525,9 @@ func (w *WAL) AppendWithDatabaseReturningSeq(op OperationType, data interface{},
 		return 0, fmt.Errorf("wal: failed to serialize entry: %w", err)
 	}
 
-	// Write atomically: magic + version + length + payload + crc + trailer + padding
-	// Format v2 adds trailer canary and 8-byte alignment for corruption-proof writes.
-	alignedRecordLen, err := writeAtomicRecordV2(w.writer, entryBytes)
+	// Write atomically: full record in one Write when using bufio so the last record
+	// is never split across a buffer flush (avoids partial-write on recovery after close).
+	alignedRecordLen, err := writeAtomicRecordV2Bufio(w.writer, entryBytes)
 	if err != nil {
 		return 0, fmt.Errorf("wal: failed to write entry: %w", err)
 	}
@@ -1292,7 +1292,7 @@ func (w *WAL) TruncateAfterSnapshot(snapshotSeq uint64) error {
 			w.reopenWAL()
 			return fmt.Errorf("wal: failed to serialize entry seq %d: %w", entry.Sequence, err)
 		}
-		alignedRecordLen, err := writeAtomicRecordV2(tmpWriter, entryBytes)
+		alignedRecordLen, err := writeAtomicRecordV2Bufio(tmpWriter, entryBytes)
 		if err != nil {
 			tmpFile.Close()
 			os.Remove(tmpPath)

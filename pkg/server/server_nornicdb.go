@@ -391,7 +391,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			usedVectorChunks++
 
 			resp, searchErr := searchSvc.Search(ctx, chunkQuery, emb, buildOpts(chunkQuery, perChunkLimit))
-			if searchErr != nil || resp == nil {
+			if searchErr != nil {
+				if errors.Is(searchErr, search.ErrSearchIndexBuilding) {
+					err = searchErr
+					break
+				}
+				continue
+			}
+			if resp == nil {
 				continue
 			}
 
@@ -418,45 +425,51 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if usedVectorChunks == 0 || len(fusedByID) == 0 {
-			// Embeddings not available (or all failed): fall back to BM25.
-			searchResponse, err = searchSvc.Search(ctx, req.Query, nil, buildOpts(req.Query, req.Limit))
-		} else {
-			// Materialize fused response.
-			fusedList := make([]*fused, 0, len(fusedByID))
-			for _, f := range fusedByID {
-				fusedList = append(fusedList, f)
-			}
-			sort.Slice(fusedList, func(i, j int) bool {
-				return fusedList[i].scoreRRF > fusedList[j].scoreRRF
-			})
-			if len(fusedList) > req.Limit {
-				fusedList = fusedList[:req.Limit]
-			}
-
-			// Build a SearchResponse-like structure to reuse existing conversion code.
-			searchResponse = &search.SearchResponse{
-				SearchMethod:      "chunked_rrf_hybrid",
-				FallbackTriggered: false,
-				Results:           make([]search.SearchResult, 0, len(fusedList)),
-			}
-			for _, f := range fusedList {
-				// Preserve vector_rank and bm25_rank from the first chunk where the node appeared.
-				searchResponse.Results = append(searchResponse.Results, search.SearchResult{
-					ID:         f.node.ID,
-					NodeID:     storage.NodeID(f.node.ID),
-					Labels:     f.node.Labels,
-					Properties: f.node.Properties,
-					Score:      f.scoreRRF,
-					RRFScore:   f.scoreRRF,
-					VectorRank: f.vectorRank,
-					BM25Rank:   f.bm25Rank,
+		if err == nil {
+			if usedVectorChunks == 0 || len(fusedByID) == 0 {
+				// Embeddings not available (or all failed): fall back to BM25.
+				searchResponse, err = searchSvc.Search(ctx, req.Query, nil, buildOpts(req.Query, req.Limit))
+			} else {
+				// Materialize fused response.
+				fusedList := make([]*fused, 0, len(fusedByID))
+				for _, f := range fusedByID {
+					fusedList = append(fusedList, f)
+				}
+				sort.Slice(fusedList, func(i, j int) bool {
+					return fusedList[i].scoreRRF > fusedList[j].scoreRRF
 				})
+				if len(fusedList) > req.Limit {
+					fusedList = fusedList[:req.Limit]
+				}
+
+				// Build a SearchResponse-like structure to reuse existing conversion code.
+				searchResponse = &search.SearchResponse{
+					SearchMethod:      "chunked_rrf_hybrid",
+					FallbackTriggered: false,
+					Results:           make([]search.SearchResult, 0, len(fusedList)),
+				}
+				for _, f := range fusedList {
+					// Preserve vector_rank and bm25_rank from the first chunk where the node appeared.
+					searchResponse.Results = append(searchResponse.Results, search.SearchResult{
+						ID:         f.node.ID,
+						NodeID:     storage.NodeID(f.node.ID),
+						Labels:     f.node.Labels,
+						Properties: f.node.Properties,
+						Score:      f.scoreRRF,
+						RRFScore:   f.scoreRRF,
+						VectorRank: f.vectorRank,
+						BM25Rank:   f.bm25Rank,
+					})
+				}
 			}
 		}
 	}
 
 	if err != nil {
+		if errors.Is(err, search.ErrSearchIndexBuilding) {
+			s.writeError(w, http.StatusServiceUnavailable, err.Error(), ErrServiceUnavailable)
+			return
+		}
 		s.writeError(w, http.StatusInternalServerError, err.Error(), ErrInternalError)
 		return
 	}

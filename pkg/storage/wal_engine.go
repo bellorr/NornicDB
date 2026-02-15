@@ -203,6 +203,15 @@ func (w *WALEngine) GetSnapshotStats() (totalSnapshots int64, lastSnapshotTime t
 	return total, lastTime
 }
 
+// LastWriteTime returns the last WAL entry timestamp (best-effort).
+func (w *WALEngine) LastWriteTime() time.Time {
+	if w == nil || w.wal == nil {
+		return time.Time{}
+	}
+	stats := w.wal.Stats()
+	return stats.LastEntryTime
+}
+
 // getDatabaseName extracts the database name from the wrapped engine if it's a NamespacedEngine.
 func (w *WALEngine) getDatabaseName() string {
 	if namespacedEngine, ok := w.engine.(*NamespacedEngine); ok {

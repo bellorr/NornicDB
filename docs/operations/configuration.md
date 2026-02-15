@@ -280,7 +280,7 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | `NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS` | `1024` | Max number of clusters for IVF-HNSW. |
 | **K-means clustering** | | |
 | `NORNICDB_KMEANS_NUM_CLUSTERS` | (auto) | Number of clusters. Unset or 0 = **auto** from dataset size at run time (√(n/2), clamped 10–8192). Set to a positive value to fix K (e.g. `500`). |
-| `NORNICDB_KMEANS_MAX_ITERATIONS` | `25` | Max k-means iterations (early stop when stable). |
+| `NORNICDB_KMEANS_MAX_ITERATIONS` | `15` | Max k-means iterations (early stop when stable). |
 | **HNSW index (quality preset)** | | |
 | `NORNICDB_VECTOR_ANN_QUALITY` | `balanced` | Preset: `fast` \| `balanced` \| `accurate`. See table below. |
 | `NORNICDB_VECTOR_HNSW_M` | (preset) | Max connections per node (e.g. 16 or 32). Overrides preset. |

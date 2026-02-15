@@ -562,6 +562,41 @@ func TestHNSWIndex_SaveLoad(t *testing.T) {
 	assert.Equal(t, "a", results[0].ID)
 }
 
+// TestHNSWIndex_VectorLookupOnly verifies that HNSW can be built and loaded without storing
+// vectors in the index (vecOff = -1, resolve via VectorLookup at search time).
+func TestHNSWIndex_VectorLookupOnly(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "hnsw")
+
+	vecs := map[string][]float32{
+		"a": {1, 0, 0, 0},
+		"b": {0, 1, 0, 0},
+		"c": {0, 0, 1, 0},
+	}
+	lookup := func(id string) ([]float32, bool) { v, ok := vecs[id]; return v, ok }
+
+	// Build with lookup: Add does not store vectors (saves RAM).
+	idx := NewHNSWIndex(4, DefaultHNSWConfig())
+	idx.SetVectorLookup(lookup)
+	for id, vec := range vecs {
+		require.NoError(t, idx.Add(id, vec))
+	}
+	require.NoError(t, idx.Save(path))
+
+	// Load with lookup-only: no vector copy in RAM.
+	loaded, err := LoadHNSWIndexWithLookupOnly(path, lookup)
+	require.NoError(t, err)
+	require.NotNil(t, loaded)
+	assert.Equal(t, 4, loaded.GetDimensions())
+	assert.Equal(t, 3, loaded.Size())
+
+	ctx := context.Background()
+	results, err := loaded.Search(ctx, []float32{1, 0, 0, 0}, 3, 0.0)
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+	assert.Equal(t, "a", results[0].ID)
+}
+
 // TestHNSWIndex_LoadMissingOrCorrupt verifies that LoadHNSWIndex returns (nil, nil) for
 // missing file and (nil, nil) for corrupt/old format so the caller can rebuild.
 func TestHNSWIndex_LoadMissingOrCorrupt(t *testing.T) {

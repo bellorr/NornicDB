@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -1441,7 +1442,8 @@ func TestWALEngine_AutoCompaction(t *testing.T) {
 		}
 		require.GreaterOrEqual(t, len(jsonFiles), 1, "Should have at least one snapshot")
 
-		// Use the most recent snapshot
+		// Use the chronologically most recent snapshot (names are snapshot-20060102-150405.json)
+		sort.Slice(jsonFiles, func(i, j int) bool { return jsonFiles[i].Name() < jsonFiles[j].Name() })
 		latestSnapshot := filepath.Join(snapshotDir, jsonFiles[len(jsonFiles)-1].Name())
 
 		// Second session: recover from snapshot + WAL

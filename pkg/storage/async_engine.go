@@ -2430,6 +2430,17 @@ func (ae *AsyncEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesD
 	return ae.engine.DeleteByPrefix(prefix)
 }
 
+// LastWriteTime returns the last known write time from the underlying engine, if available.
+func (ae *AsyncEngine) LastWriteTime() time.Time {
+	if ae == nil {
+		return time.Time{}
+	}
+	if p, ok := ae.engine.(interface{ LastWriteTime() time.Time }); ok {
+		return p.LastWriteTime()
+	}
+	return time.Time{}
+}
+
 // Verify AsyncEngine implements Engine interface
 var _ Engine = (*AsyncEngine)(nil)
 

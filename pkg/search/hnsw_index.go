@@ -95,6 +95,10 @@ type HNSWIndex struct {
 	liveCount    int
 	vectors      []float32
 
+	// When set, vectors are resolved by ID at search/build time instead of from h.vectors.
+	// vecOff will be -1 for nodes that use the lookup (saves one full vector copy in RAM).
+	vectorLookup VectorLookup
+
 	entryPoint    uint32
 	hasEntryPoint bool
 	maxLevel      int
@@ -150,6 +154,15 @@ func NewHNSWIndex(dimensions int, config HNSWConfig) *HNSWIndex {
 	return h
 }
 
+// SetVectorLookup sets an optional lookup so vectors are resolved by ID at search time
+// instead of from the in-memory slice. When set, Add does not store vectors (vecOff = -1);
+// Load can leave vectors empty and use the lookup. Saves one full vector copy in RAM.
+func (h *HNSWIndex) SetVectorLookup(lookup VectorLookup) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.vectorLookup = lookup
+}
+
 // Add inserts a vector into the index.
 func (h *HNSWIndex) Add(id string, vec []float32) error {
 	if len(vec) != h.dimensions {
@@ -165,19 +178,16 @@ func (h *HNSWIndex) Add(id string, vec []float32) error {
 	if internalID, ok := h.idToInternal[id]; ok && int(internalID) < len(h.deleted) && !h.deleted[internalID] {
 		// In-place update: overwrite the stored vector without changing the graph
 		// topology. This avoids tombstone growth from hot upsert workloads.
-		//
-		// Note: Neighbor links were created for the old vector, so large vector
-		// changes can reduce recall until a rebuild. This is the same tradeoff
-		// most production systems make to keep updates cheap.
+		// When vectorLookup is set we don't store vectors; fall back to remove+add.
 		off := int(h.vecOff[internalID])
-		if off >= 0 && off+h.dimensions <= len(h.vectors) {
+		if h.vectorLookup == nil && off >= 0 && off+h.dimensions <= len(h.vectors) {
 			dst := h.vectors[off : off+h.dimensions]
 			copy(dst, vec)
 			vector.NormalizeInPlace(dst)
 			return nil
 		}
 
-		// Fallback: inconsistent internal state; degrade to remove+add.
+		// Fallback: inconsistent internal state or lookup mode; degrade to remove+add.
 		h.removeLocked(internalID)
 	}
 
@@ -192,13 +202,21 @@ func (h *HNSWIndex) Add(id string, vec []float32) error {
 		return nil
 	}
 
-	vecOff := len(h.vectors)
-	h.vectors = append(h.vectors, vec...)
-	normalized := h.vectors[vecOff : vecOff+h.dimensions]
-	vector.NormalizeInPlace(normalized)
+	var normalized []float32
+	if h.vectorLookup != nil {
+		normalized = make([]float32, h.dimensions)
+		copy(normalized, vec)
+		vector.NormalizeInPlace(normalized)
+		h.vecOff = append(h.vecOff, -1) // resolve via vectorLookup at search time
+	} else {
+		vecOff := len(h.vectors)
+		h.vectors = append(h.vectors, vec...)
+		normalized = h.vectors[vecOff : vecOff+h.dimensions]
+		vector.NormalizeInPlace(normalized)
+		h.vecOff = append(h.vecOff, int32(vecOff))
+	}
 
 	h.nodeLevel = append(h.nodeLevel, uint16(level))
-	h.vecOff = append(h.vecOff, int32(vecOff))
 
 	neighborsOff := len(h.neighborsArena)
 	h.neighborsArena = append(h.neighborsArena, make([]uint32, (level+1)*m)...)
@@ -433,30 +451,30 @@ func (h *HNSWIndex) ShouldRebuild() bool {
 }
 
 const (
-	hnswIndexFormatVersion         = "1.0.0" // full snapshot (vectors included), legacy
+	hnswIndexFormatVersion          = "1.0.0" // full snapshot (vectors included), legacy
 	hnswIndexFormatVersionGraphOnly = "1.1.0" // graph + IDs only; vectors come from vector index on load
 )
 
 // hnswIndexSnapshot is the serializable form of the HNSW index for persistence.
 // For format 1.1.0 we save with Vectors and VecOff nil (graph-only); they are reconstructed on load from the vector index.
 type hnswIndexSnapshot struct {
-	Version            string
-	Config             HNSWConfig
-	Dimensions         int
-	NodeLevel          []uint16
-	VecOff             []int32
-	NeighborsArena     []uint32
-	NeighborsOff       []int32
-	NeighborCountsAr   []uint16
-	NeighborCountsOff  []int32
-	IDToInternal       map[string]uint32
-	InternalToID       []string
-	Deleted            []bool
-	LiveCount          int
-	Vectors            []float32
-	EntryPoint         uint32
-	HasEntryPoint      bool
-	MaxLevel           int
+	Version           string
+	Config            HNSWConfig
+	Dimensions        int
+	NodeLevel         []uint16
+	VecOff            []int32
+	NeighborsArena    []uint32
+	NeighborsOff      []int32
+	NeighborCountsAr  []uint16
+	NeighborCountsOff []int32
+	IDToInternal      map[string]uint32
+	InternalToID      []string
+	Deleted           []bool
+	LiveCount         int
+	Vectors           []float32
+	EntryPoint        uint32
+	HasEntryPoint     bool
+	MaxLevel          int
 }
 
 // Save writes the HNSW index to path (msgpack format) as graph-only: graph structure and IDs only, no vector data.
@@ -590,6 +608,65 @@ func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
 		h.vecOff = snap.VecOff
 		h.vectors = snap.Vectors
 	}
+	h.mu.Unlock()
+	return h, nil
+}
+
+// LoadHNSWIndexWithLookupOnly loads a graph-only HNSW file and sets the vector lookup
+// without populating h.vectors (vecOff = -1 for all nodes). Saves one full vector copy in RAM;
+// use when the canonical store is file-backed. For legacy full format, falls back to LoadHNSWIndex.
+func LoadHNSWIndexWithLookupOnly(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
+	if vectorLookup == nil {
+		return LoadHNSWIndex(path, vectorLookup)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	var snap hnswIndexSnapshot
+	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
+		return nil, nil
+	}
+	if snap.Dimensions <= 0 || snap.InternalToID == nil {
+		return nil, nil
+	}
+	if snap.Version != hnswIndexFormatVersionGraphOnly {
+		// Legacy format: fall back to normal load (vectors come from file).
+		return LoadHNSWIndex(path, vectorLookup)
+	}
+
+	config := snap.Config
+	if config.M == 0 {
+		config = DefaultHNSWConfig()
+	}
+	h := NewHNSWIndex(snap.Dimensions, config)
+	h.mu.Lock()
+	h.nodeLevel = snap.NodeLevel
+	h.neighborsArena = snap.NeighborsArena
+	h.neighborsOff = snap.NeighborsOff
+	h.neighborCountsArena = snap.NeighborCountsAr
+	h.neighborCountsOff = snap.NeighborCountsOff
+	h.idToInternal = snap.IDToInternal
+	h.internalToID = snap.InternalToID
+	h.deleted = snap.Deleted
+	h.liveCount = snap.LiveCount
+	h.entryPoint = snap.EntryPoint
+	h.hasEntryPoint = snap.HasEntryPoint
+	h.maxLevel = snap.MaxLevel
+	if h.idToInternal == nil {
+		h.idToInternal = make(map[string]uint32)
+	}
+	h.vectorLookup = vectorLookup
+	vecOff := make([]int32, len(snap.InternalToID))
+	for i := range vecOff {
+		vecOff[i] = -1
+	}
+	h.vecOff = vecOff
 	h.mu.Unlock()
 	return h, nil
 }
@@ -1071,10 +1148,17 @@ func (h *HNSWIndex) randomLevel() int {
 }
 
 func (h *HNSWIndex) vectorAtLocked(internalID uint32) []float32 {
-	if int(internalID) >= len(h.vecOff) {
+	if int(internalID) >= len(h.vecOff) || int(internalID) >= len(h.internalToID) {
 		return nil
 	}
 	off := int(h.vecOff[internalID])
+	if h.vectorLookup != nil && off < 0 {
+		vec, ok := h.vectorLookup(h.internalToID[internalID])
+		if !ok || len(vec) != h.dimensions {
+			return nil
+		}
+		return vec
+	}
 	if off < 0 || off+h.dimensions > len(h.vectors) {
 		return nil
 	}

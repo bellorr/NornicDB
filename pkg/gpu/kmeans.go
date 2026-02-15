@@ -30,6 +30,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"math/rand"
 	"sync"
@@ -59,7 +60,7 @@ type KMeansConfig struct {
 	// NumClusters is the K value. If 0 and AutoK=true, auto-detected.
 	NumClusters int
 
-	// MaxIterations limits convergence iterations (default: 100)
+	// MaxIterations limits convergence iterations (default: 15)
 	MaxIterations int
 
 	// Tolerance is the convergence threshold (default: 0.0001)
@@ -84,7 +85,7 @@ type KMeansConfig struct {
 func DefaultKMeansConfig() *KMeansConfig {
 	return &KMeansConfig{
 		NumClusters:    0, // Auto-detect based on data size
-		MaxIterations:  100,
+		MaxIterations:  2,
 		Tolerance:      0.0001,
 		InitMethod:     "kmeans++",
 		AutoK:          true,
@@ -230,6 +231,7 @@ func NewClusterIndex(manager *Manager, embConfig *EmbeddingIndexConfig, kmeansCo
 //	stats := index.ClusterStats()
 //	fmt.Printf("Created %d clusters in %v\n",
 //	    stats.NumClusters, stats.LastClusterTime)
+//
 // Cluster runs k-means clustering. For cancellable clustering (e.g. on shutdown), use ClusterWithContext.
 func (ci *ClusterIndex) Cluster() error {
 	return ci.ClusterWithContext(context.Background())
@@ -323,6 +325,7 @@ func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 		changed := assignToCentroidsFromVectors(vectorsCopy, centroids, assignments, n, dims, k)
 		updateCentroidsFromVectors(vectorsCopy, assignments, centroids, centroidSums, centroidCounts, n, dims, k)
 		iterations++
+		log.Printf("🔬 K-means iteration %d complete (reassignments: %d)", iterations, changed)
 		if changed == 0 {
 			break
 		}

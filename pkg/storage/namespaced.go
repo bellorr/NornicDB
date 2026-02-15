@@ -29,6 +29,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // NamespacedEngine wraps a storage engine with database namespace isolation.
@@ -917,6 +918,17 @@ func (n *NamespacedEngine) AddToPendingEmbeddings(nodeID NodeID) {
 		prefixedID := n.prefixNodeID(nodeID)
 		mgr.AddToPendingEmbeddings(prefixedID)
 	}
+}
+
+// LastWriteTime returns the last known write time from the underlying engine, if available.
+func (n *NamespacedEngine) LastWriteTime() time.Time {
+	if n == nil {
+		return time.Time{}
+	}
+	if p, ok := n.inner.(interface{ LastWriteTime() time.Time }); ok {
+		return p.LastWriteTime()
+	}
+	return time.Time{}
 }
 
 // Ensure NamespacedEngine implements Engine interface

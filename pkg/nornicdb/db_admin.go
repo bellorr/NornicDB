@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -942,6 +943,15 @@ func (db *DB) Search(ctx context.Context, query string, labels []string, limit i
 	// For hybrid search, Mimir should call VectorSearch with pre-computed embedding
 	response, err := svc.Search(ctx, query, nil, opts)
 	if err != nil {
+		// DB API is expected to be usable right after Open() in tests and local usage.
+		// If background BuildIndexes is still running, wait once for it and retry.
+		if errors.Is(err, search.ErrSearchIndexBuilding) {
+			if waitErr := db.ensureSearchIndexesBuilt(ctx, db.defaultDatabaseName()); waitErr == nil {
+				response, err = svc.Search(ctx, query, nil, opts)
+			}
+		}
+	}
+	if err != nil {
 		return nil, err
 	}
 
@@ -989,6 +999,14 @@ func (db *DB) HybridSearch(ctx context.Context, query string, queryEmbedding []f
 
 	// Execute RRF hybrid search with Mimir's pre-computed embedding
 	response, err := svc.Search(ctx, query, queryEmbedding, opts)
+	if err != nil {
+		// If startup background indexing is still running, wait once and retry.
+		if errors.Is(err, search.ErrSearchIndexBuilding) {
+			if waitErr := db.ensureSearchIndexesBuilt(ctx, db.defaultDatabaseName()); waitErr == nil {
+				response, err = svc.Search(ctx, query, queryEmbedding, opts)
+			}
+		}
+	}
 	if err != nil {
 		return nil, err
 	}

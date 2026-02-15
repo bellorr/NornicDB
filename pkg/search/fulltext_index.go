@@ -42,6 +42,10 @@ type FulltextIndex struct {
 
 	// Running sum of document lengths; avgDocLength = totalDocLength/docCount (O(1) update).
 	totalDocLength int64
+
+	// Versioning for dirty tracking (version != persistedVersion => needs save).
+	version          uint64
+	persistedVersion uint64
 }
 
 // NewFulltextIndex creates a new full-text search index.
@@ -91,6 +95,7 @@ func (f *FulltextIndex) Save(path string) error {
 	}
 	avgDocLength := f.avgDocLength
 	docCount := f.docCount
+	version := f.version
 	f.mu.RUnlock()
 
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
@@ -110,7 +115,46 @@ func (f *FulltextIndex) Save(path string) error {
 		AvgDocLength:  avgDocLength,
 		DocCount:      docCount,
 	}
-	return msgpack.NewEncoder(file).Encode(&snap)
+	if err := msgpack.NewEncoder(file).Encode(&snap); err != nil {
+		return err
+	}
+	f.markPersisted(version)
+	return nil
+}
+
+// SaveNoCopy writes the fulltext index to path without deep-copying the maps.
+// This avoids doubling memory during large builds, but holds the read lock during I/O.
+// Use during BuildIndexes when search is not serving live traffic.
+func (f *FulltextIndex) SaveNoCopy(path string) error {
+	f.mu.RLock()
+	version := f.version
+
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		f.mu.RUnlock()
+		return err
+	}
+	file, err := os.Create(path)
+	if err != nil {
+		f.mu.RUnlock()
+		return err
+	}
+	defer file.Close()
+
+	snap := fulltextIndexSnapshot{
+		Version:       fulltextIndexFormatVersion,
+		Documents:     f.documents,
+		InvertedIndex: f.invertedIndex,
+		DocLengths:    f.docLengths,
+		AvgDocLength:  f.avgDocLength,
+		DocCount:      f.docCount,
+	}
+	err = msgpack.NewEncoder(file).Encode(&snap)
+	f.mu.RUnlock()
+	if err != nil {
+		return err
+	}
+	f.markPersisted(version)
+	return nil
 }
 
 // Load replaces the fulltext index with the one stored at path (msgpack format).
@@ -173,7 +217,47 @@ func (f *FulltextIndex) Load(path string) error {
 	for _, L := range f.docLengths {
 		f.totalDocLength += int64(L)
 	}
+	f.version = 1
+	f.persistedVersion = 1
 	return nil
+}
+
+// IsDirty reports whether the index has changes not yet persisted to disk.
+func (f *FulltextIndex) IsDirty() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.version != f.persistedVersion
+}
+
+// markDirtyLocked increments the in-memory version; caller holds f.mu (write).
+func (f *FulltextIndex) markDirtyLocked() {
+	f.version++
+}
+
+// markPersisted marks the index as persisted if no changes occurred since the snapshot.
+func (f *FulltextIndex) markPersisted(version uint64) {
+	f.mu.Lock()
+	if f.version == version {
+		f.persistedVersion = version
+	}
+	f.mu.Unlock()
+}
+
+// Clear removes all indexed documents and terms.
+// This is used to free RAM after persisting during bulk builds.
+func (f *FulltextIndex) Clear() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.docCount == 0 && len(f.documents) == 0 && len(f.invertedIndex) == 0 && len(f.docLengths) == 0 {
+		return
+	}
+	f.documents = make(map[string]string)
+	f.invertedIndex = make(map[string]map[string]int)
+	f.docLengths = make(map[string]int)
+	f.avgDocLength = 0
+	f.docCount = 0
+	f.totalDocLength = 0
+	f.markDirtyLocked()
 }
 
 // Index adds or updates a document in the index.
@@ -182,11 +266,14 @@ func (f *FulltextIndex) Index(id string, text string) {
 	defer f.mu.Unlock()
 
 	// Remove old entry if exists
-	f.removeInternal(id)
+	removed := f.removeInternal(id)
 
 	// Tokenize and normalize
 	tokens := tokenize(text)
 	if len(tokens) == 0 {
+		if removed {
+			f.markDirtyLocked()
+		}
 		return
 	}
 
@@ -210,6 +297,7 @@ func (f *FulltextIndex) Index(id string, text string) {
 	}
 
 	f.updateAvgDocLength()
+	f.markDirtyLocked()
 }
 
 // FulltextBatchEntry is one (id, text) pair for IndexBatch.
@@ -226,12 +314,15 @@ func (f *FulltextIndex) IndexBatch(entries []FulltextBatchEntry) {
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	dirty := false
 
 	for _, e := range entries {
 		if e.ID == "" {
 			continue
 		}
-		f.removeInternal(e.ID)
+		if f.removeInternal(e.ID) {
+			dirty = true
+		}
 		tokens := tokenize(e.Text)
 		if len(tokens) == 0 {
 			continue
@@ -250,21 +341,28 @@ func (f *FulltextIndex) IndexBatch(entries []FulltextBatchEntry) {
 			}
 			f.invertedIndex[term][e.ID] = freq
 		}
+		dirty = true
 	}
 	f.updateAvgDocLength()
+	if dirty {
+		f.markDirtyLocked()
+	}
 }
 
 // Remove removes a document from the index.
 func (f *FulltextIndex) Remove(id string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.removeInternal(id)
+	if f.removeInternal(id) {
+		f.markDirtyLocked()
+	}
 }
 
 // removeInternal removes a document without locking.
-func (f *FulltextIndex) removeInternal(id string) {
+// Returns true if a document was removed.
+func (f *FulltextIndex) removeInternal(id string) bool {
 	if _, exists := f.documents[id]; !exists {
-		return
+		return false
 	}
 
 	oldLen := f.docLengths[id]
@@ -294,6 +392,7 @@ func (f *FulltextIndex) removeInternal(id string) {
 	f.docCount--
 	f.totalDocLength -= int64(oldLen)
 	f.updateAvgDocLength()
+	return true
 }
 
 // Search performs BM25 keyword search.
