@@ -130,8 +130,34 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	searchReadyDatabases := 0
+	searchBuildingDatabases := 0
+	if s.dbManager != nil {
+		for _, info := range s.dbManager.ListDatabases() {
+			if info.Name == "" || info.Name == "system" {
+				continue
+			}
+			st := s.db.GetDatabaseSearchStatus(info.Name)
+			if st.Ready {
+				searchReadyDatabases++
+			}
+			if st.Building {
+				searchBuildingDatabases++
+			}
+		}
+	}
+	startupPhase := "ready"
+	if searchBuildingDatabases > 0 {
+		startupPhase = "search_warming"
+	}
+
 	response := map[string]interface{}{
 		"status": "running",
+		"startup": map[string]interface{}{
+			"phase":                    startupPhase,
+			"search_ready_databases":   searchReadyDatabases,
+			"search_building_databases": searchBuildingDatabases,
+		},
 		"server": map[string]interface{}{
 			"uptime_seconds": stats.Uptime.Seconds(),
 			"requests":       stats.RequestCount,

@@ -60,6 +60,14 @@ export interface DatabaseInfo {
   default: boolean;
   nodeCount: number;
   edgeCount: number;
+  searchReady?: boolean;
+  searchBuilding?: boolean;
+  searchInitialized?: boolean;
+  searchPhase?: string;
+  searchProcessed?: number;
+  searchTotal?: number;
+  searchRate?: number;
+  searchEtaSeconds?: number;
 }
 
 export interface DatabaseRow {

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Database, Info, Plus, Settings, Trash2 } from 'lucide-react';
-import { api, DatabaseInfo } from '../utils/api';
+import { api } from '../utils/api';
+import type { DatabaseInfo } from '../utils/api';
 import { Alert } from '../components/common/Alert';
 import { Button } from '../components/common/Button';
 import { FormInput } from '../components/common/FormInput';
@@ -41,6 +42,14 @@ export function Databases() {
   const [configLoading, setConfigLoading] = useState(false);
   const [configSaving, setConfigSaving] = useState(false);
   const [configError, setConfigError] = useState('');
+
+  const formatEta = (etaSeconds?: number): string => {
+    if (etaSeconds == null || etaSeconds < 0) return 'estimating...';
+    if (etaSeconds < 60) return `${etaSeconds}s`;
+    const m = Math.floor(etaSeconds / 60);
+    const s = etaSeconds % 60;
+    return `${m}m ${s}s`;
+  };
 
   const loadDatabases = useCallback(async () => {
     try {
@@ -226,6 +235,10 @@ export function Databases() {
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {databases.map((db) => (
+              (() => {
+                const ready = db.searchReady === true;
+                const searchLabel = ready ? 'ready' : (db.searchBuilding ? 'warming' : 'pending');
+                return (
               <div
                 key={db.name}
                 className="bg-norse-shadow border border-norse-rune rounded-lg p-4 hover:border-nornic-primary transition-colors"
@@ -240,6 +253,20 @@ export function Databases() {
                         }`}
                       >
                         {db.status}
+                      </span>
+                      <span className={`inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs border ${
+                        ready
+                          ? 'bg-green-900/20 text-green-300 border-green-700/50'
+                          : 'bg-yellow-900/20 text-yellow-300 border-yellow-700/50'
+                      }`}>
+                        <span
+                          className={`inline-block w-2 h-2 rounded-full ${
+                            ready
+                              ? 'bg-green-400 shadow-[0_0_8px_rgba(74,222,128,0.9)]'
+                              : 'bg-yellow-400 shadow-[0_0_8px_rgba(250,204,21,0.9)] animate-pulse'
+                          }`}
+                        />
+                        search {searchLabel}
                       </span>
                       {db.default && (
                         <span className="px-2 py-1 rounded text-xs bg-valhalla-gold/20 text-valhalla-gold">
@@ -277,6 +304,12 @@ export function Databases() {
                 </div>
 
                 <div className="space-y-2 text-sm">
+                  {!ready && (
+                    <div className="flex justify-between">
+                      <span className="text-norse-silver">Search ETA:</span>
+                      <span className="text-yellow-300 font-medium">{formatEta(db.searchEtaSeconds)}</span>
+                    </div>
+                  )}
                   <div className="flex justify-between">
                     <span className="text-norse-silver">Nodes:</span>
                     <span className="text-white font-medium">{db.nodeCount.toLocaleString()}</span>
@@ -287,6 +320,8 @@ export function Databases() {
                   </div>
                 </div>
               </div>
+              );
+              })()
             ))}
           </div>
         )}
@@ -356,6 +391,18 @@ export function Databases() {
               <span className="text-norse-silver">Status:</span>
               <span className="text-white font-medium">{selectedDatabase.status}</span>
             </div>
+            <div className="flex justify-between">
+              <span className="text-norse-silver">Search:</span>
+              <span className={`font-medium ${selectedDatabase.searchReady ? 'text-green-300' : 'text-yellow-300'}`}>
+                {selectedDatabase.searchReady ? 'ready' : (selectedDatabase.searchBuilding ? 'warming' : 'pending')}
+              </span>
+            </div>
+            {!selectedDatabase.searchReady && (
+              <div className="flex justify-between">
+                <span className="text-norse-silver">Search ETA:</span>
+                <span className="text-yellow-300 font-medium">{formatEta(selectedDatabase.searchEtaSeconds)}</span>
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-norse-silver">Nodes:</span>
               <span className="text-white font-medium">{selectedDatabase.nodeCount.toLocaleString()}</span>

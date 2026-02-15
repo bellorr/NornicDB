@@ -226,29 +226,31 @@ func (s *Server) registerHeimdallRoutes(mux *http.ServeMux) {
 	// ==========================================================================
 	// Routes: /api/bifrost/status, /api/bifrost/chat/completions, /api/bifrost/autocomplete, /api/bifrost/events
 	// All Bifrost endpoints require authentication (PermRead minimum)
-	if s.heimdallHandler == nil {
-		return
+	serveHeimdall := func(w http.ResponseWriter, r *http.Request) {
+		handler := s.getHeimdallHandler()
+		if handler == nil {
+			s.writeError(w, http.StatusServiceUnavailable, "Heimdall is initializing, please try again shortly", nil)
+			return
+		}
+		r = s.withBifrostRBAC(r)
+		handler.ServeHTTP(w, r)
 	}
 
 	// Status endpoint - read access required
 	mux.HandleFunc("/api/bifrost/status", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
-		r = s.withBifrostRBAC(r)
-		s.heimdallHandler.ServeHTTP(w, r)
+		serveHeimdall(w, r)
 	}, auth.PermRead))
 	// Chat completions - write access required (modifies state/generates content)
 	mux.HandleFunc("/api/bifrost/chat/completions", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
-		r = s.withBifrostRBAC(r)
-		s.heimdallHandler.ServeHTTP(w, r)
+		serveHeimdall(w, r)
 	}, auth.PermWrite))
 	// Autocomplete - read access required (queries schema, generates suggestions)
 	mux.HandleFunc("/api/bifrost/autocomplete", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
-		r = s.withBifrostRBAC(r)
-		s.heimdallHandler.ServeHTTP(w, r)
+		serveHeimdall(w, r)
 	}, auth.PermRead))
 	// SSE events - read access required
 	mux.HandleFunc("/api/bifrost/events", s.withAuth(func(w http.ResponseWriter, r *http.Request) {
-		r = s.withBifrostRBAC(r)
-		s.heimdallHandler.ServeHTTP(w, r)
+		serveHeimdall(w, r)
 	}, auth.PermRead))
 }
 

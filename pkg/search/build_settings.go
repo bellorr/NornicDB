@@ -1,0 +1,113 @@
+package search
+
+import (
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/vmihailenco/msgpack/v5"
+)
+
+const (
+	searchBuildSettingsFormatVersion = 1
+	bm25SettingsSchemaVersion        = "1"
+	vectorSettingsSchemaVersion      = "1"
+	hnswSettingsSchemaVersion        = "1"
+)
+
+// searchBuildSettingsSnapshot tracks the index-build settings that influence
+// persisted index compatibility beyond file format versions.
+type searchBuildSettingsSnapshot struct {
+	FormatVersion int    `msgpack:"format_version"`
+	SavedAtUnix   int64  `msgpack:"saved_at_unix"`
+	BM25          string `msgpack:"bm25"`
+	Vector        string `msgpack:"vector"`
+	HNSW          string `msgpack:"hnsw"`
+}
+
+func searchBuildSettingsPath(fulltextPath, vectorPath, hnswPath string) string {
+	basePath := ""
+	switch {
+	case fulltextPath != "":
+		basePath = fulltextPath
+	case vectorPath != "":
+		basePath = vectorPath
+	case hnswPath != "":
+		basePath = hnswPath
+	default:
+		return ""
+	}
+	return filepath.Join(filepath.Dir(basePath), "build_settings")
+}
+
+func loadSearchBuildSettings(path string) (*searchBuildSettingsSnapshot, error) {
+	if path == "" {
+		return nil, nil
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer file.Close()
+
+	var snap searchBuildSettingsSnapshot
+	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
+		return nil, nil
+	}
+	if snap.FormatVersion != searchBuildSettingsFormatVersion {
+		return nil, nil
+	}
+	return &snap, nil
+}
+
+func saveSearchBuildSettings(path string, snap searchBuildSettingsSnapshot) error {
+	if path == "" {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return msgpack.NewEncoder(f).Encode(&snap)
+}
+
+func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
+	dimensions := s.VectorIndexDimensions()
+	hcfg := HNSWConfigFromEnv()
+	return searchBuildSettingsSnapshot{
+		FormatVersion: searchBuildSettingsFormatVersion,
+		SavedAtUnix:   time.Now().Unix(),
+		BM25: fmt.Sprintf("schema=%s;format=%s;props=%s",
+			bm25SettingsSchemaVersion,
+			fulltextIndexFormatVersion,
+			strings.Join(SearchableProperties, ",")),
+		Vector: fmt.Sprintf("schema=%s;format=%s;dimensions=%d",
+			vectorSettingsSchemaVersion,
+			vectorIndexFormatVersion,
+			dimensions),
+		HNSW: fmt.Sprintf("schema=%s;format=%s;m=%d;efc=%d;efs=%d",
+			hnswSettingsSchemaVersion,
+			hnswIndexFormatVersionGraphOnly,
+			hcfg.M, hcfg.EfConstruction, hcfg.EfSearch),
+	}
+}
+
+func (s *Service) persistSearchBuildSettings(fulltextPath, vectorPath, hnswPath string) {
+	path := searchBuildSettingsPath(fulltextPath, vectorPath, hnswPath)
+	if path == "" {
+		return
+	}
+	if err := saveSearchBuildSettings(path, s.currentSearchBuildSettings()); err != nil {
+		log.Printf("⚠️ Background persist: failed to save build settings metadata to %s: %v", path, err)
+	}
+}

@@ -440,13 +440,22 @@ func (s *Server) handleDatabaseInfo(w http.ResponseWriter, r *http.Request, dbNa
 	// Check if this is the default database
 	// The default database is configured at startup and cannot be dropped
 	defaultDB := s.dbManager.DefaultDatabaseName()
+	searchStatus := s.db.GetDatabaseSearchStatus(dbName)
 
 	response := map[string]interface{}{
-		"name":      dbName,
-		"status":    "online",
-		"default":   dbName == defaultDB,
-		"nodeCount": nodeCount,
-		"edgeCount": edgeCount,
+		"name":              dbName,
+		"status":            "online",
+		"default":           dbName == defaultDB,
+		"nodeCount":         nodeCount,
+		"edgeCount":         edgeCount,
+		"searchReady":       searchStatus.Ready,
+		"searchBuilding":    searchStatus.Building,
+		"searchInitialized": searchStatus.Initialized,
+		"searchPhase":       searchStatus.Phase,
+		"searchProcessed":   searchStatus.ProcessedNodes,
+		"searchTotal":       searchStatus.TotalNodes,
+		"searchRate":        searchStatus.RateNodesPerSec,
+		"searchEtaSeconds":  searchStatus.ETASeconds,
 	}
 	s.writeJSON(w, http.StatusOK, response)
 }

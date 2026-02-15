@@ -26,6 +26,18 @@ type dbSearchService struct {
 	lastClusteredEmbedCount int
 }
 
+// DatabaseSearchStatus exposes per-database search service readiness/progress.
+type DatabaseSearchStatus struct {
+	Ready            bool    `json:"ready"`
+	Building         bool    `json:"building"`
+	Initialized      bool    `json:"initialized"`
+	Phase            string  `json:"phase,omitempty"`
+	ProcessedNodes   int64   `json:"processed_nodes,omitempty"`
+	TotalNodes       int64   `json:"total_nodes,omitempty"`
+	RateNodesPerSec  float64 `json:"rate_nodes_per_sec,omitempty"`
+	ETASeconds       int64   `json:"eta_seconds,omitempty"`
+}
+
 func splitQualifiedID(id string) (dbName string, local string, ok bool) {
 	dbName, local, ok = strings.Cut(id, ":")
 	if !ok || dbName == "" || local == "" {
@@ -244,6 +256,31 @@ func (db *DB) ResetSearchService(dbName string) {
 	db.searchServicesMu.Lock()
 	delete(db.searchServices, dbName)
 	db.searchServicesMu.Unlock()
+}
+
+// GetDatabaseSearchStatus returns readiness and progress for the database search service.
+// It does not create a new service; it reports status for existing cached services only.
+func (db *DB) GetDatabaseSearchStatus(dbName string) DatabaseSearchStatus {
+	if dbName == "" {
+		dbName = db.defaultDatabaseName()
+	}
+	db.searchServicesMu.RLock()
+	entry, ok := db.searchServices[dbName]
+	db.searchServicesMu.RUnlock()
+	if !ok || entry == nil || entry.svc == nil {
+		return DatabaseSearchStatus{Ready: false, Building: false, Initialized: false, Phase: "not_initialized", ETASeconds: -1}
+	}
+	p := entry.svc.GetBuildProgress()
+	return DatabaseSearchStatus{
+		Ready:           p.Ready,
+		Building:        p.Building,
+		Initialized:     true,
+		Phase:           p.Phase,
+		ProcessedNodes:  p.ProcessedNodes,
+		TotalNodes:      p.TotalNodes,
+		RateNodesPerSec: p.RateNodesPerSec,
+		ETASeconds:      p.ETASeconds,
+	}
 }
 
 func (db *DB) ensureSearchIndexesBuilt(ctx context.Context, dbName string) error {

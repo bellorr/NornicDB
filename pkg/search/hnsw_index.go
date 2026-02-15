@@ -163,6 +163,13 @@ func (h *HNSWIndex) SetVectorLookup(lookup VectorLookup) {
 	h.vectorLookup = lookup
 }
 
+// Config returns a copy of the index configuration.
+func (h *HNSWIndex) Config() HNSWConfig {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.config
+}
+
 // Add inserts a vector into the index.
 func (h *HNSWIndex) Add(id string, vec []float32) error {
 	if len(vec) != h.dimensions {

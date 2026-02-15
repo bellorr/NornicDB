@@ -10,14 +10,14 @@ import (
 )
 
 func TestHNSWConfigFromEnv(t *testing.T) {
-	t.Run("default balanced preset", func(t *testing.T) {
+	t.Run("default fast preset", func(t *testing.T) {
 		os.Unsetenv("NORNICDB_VECTOR_ANN_QUALITY")
 		config := HNSWConfigFromEnv()
 
-		// Balanced defaults
+		// Fast defaults
 		assert.Equal(t, 16, config.M)
-		assert.Equal(t, 200, config.EfConstruction)
-		assert.Equal(t, 100, config.EfSearch)
+		assert.Equal(t, 100, config.EfConstruction)
+		assert.Equal(t, 50, config.EfSearch)
 	})
 
 	t.Run("fast preset", func(t *testing.T) {
@@ -56,15 +56,15 @@ func TestHNSWConfigFromEnv(t *testing.T) {
 		assert.Equal(t, 150, config.EfSearch)      // Overridden
 	})
 
-	t.Run("invalid preset defaults to balanced", func(t *testing.T) {
+	t.Run("invalid preset defaults to fast", func(t *testing.T) {
 		os.Setenv("NORNICDB_VECTOR_ANN_QUALITY", "invalid")
 		defer os.Unsetenv("NORNICDB_VECTOR_ANN_QUALITY")
 
 		config := HNSWConfigFromEnv()
-		// Should default to balanced
+		// Should default to fast
 		assert.Equal(t, 16, config.M)
-		assert.Equal(t, 200, config.EfConstruction)
-		assert.Equal(t, 100, config.EfSearch)
+		assert.Equal(t, 100, config.EfConstruction)
+		assert.Equal(t, 50, config.EfSearch)
 	})
 }
 

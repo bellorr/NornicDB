@@ -898,10 +898,21 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		return nil, fmt.Errorf("failed to initialize database manager: %w", err)
 	}
 
+	s := &Server{
+		config:          config,
+		db:              db,
+		dbManager:       dbManager,
+		auth:            authenticator,
+		mcpServer:       mcpServer,
+		graphqlHandler:  graphql.NewHandler(db, dbManager),
+		basicAuthCache:  auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
+		searchServices:  make(map[string]*search.Service),
+		executors:       make(map[string]*cypher.StorageExecutor),
+	}
+
 	// ==========================================================================
 	// Heimdall - AI Assistant for Database Management
 	// ==========================================================================
-	var heimdallHandler *heimdall.Handler
 	// Use features config passed from main.go (which loads from YAML + env)
 	// Fall back to LoadFromEnv() if not provided (for backwards compatibility)
 	var featuresConfig *nornicConfig.FeatureFlagsConfig
@@ -911,29 +922,32 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		featuresConfig = &globalConfig.Features
 	}
 	if featuresConfig.HeimdallEnabled {
-		log.Println("🛡️  Heimdall AI Assistant initializing...")
-		// Configure token budget from environment variables
-		heimdall.SetTokenBudget(featuresConfig)
-		heimdallCfg := heimdall.ConfigFromFeatureFlags(featuresConfig)
-		// Log resolved provider so users can verify env overrides (openai/ollama/local)
-		provider := strings.TrimSpace(strings.ToLower(heimdallCfg.Provider))
-		if provider == "" {
-			provider = "local"
-		}
-		log.Printf("   → Provider: %s (set NORNICDB_HEIMDALL_PROVIDER=openai|ollama|local to override config file)", provider)
-		manager, err := heimdall.NewManager(heimdallCfg)
-		if err != nil {
-			log.Printf("⚠️  Heimdall initialization failed: %v", err)
-			log.Println("   → AI Assistant will not be available")
-			log.Println("   → Check NORNICDB_HEIMDALL_MODEL and NORNICDB_MODELS_DIR")
-		} else {
+		log.Println("🛡️  Heimdall AI Assistant initializing asynchronously...")
+		go func() {
+			// Configure token budget from environment variables
+			heimdall.SetTokenBudget(featuresConfig)
+			heimdallCfg := heimdall.ConfigFromFeatureFlags(featuresConfig)
+			// Log resolved provider so users can verify env overrides (openai/ollama/local)
+			provider := strings.TrimSpace(strings.ToLower(heimdallCfg.Provider))
+			if provider == "" {
+				provider = "local"
+			}
+			log.Printf("   → Provider: %s (set NORNICDB_HEIMDALL_PROVIDER=openai|ollama|local to override config file)", provider)
+			manager, err := heimdall.NewManager(heimdallCfg)
+			if err != nil {
+				log.Printf("⚠️  Heimdall initialization failed: %v", err)
+				log.Println("   → AI Assistant will not be available")
+				log.Println("   → Check NORNICDB_HEIMDALL_MODEL and NORNICDB_MODELS_DIR")
+				return
+			}
+
 			// Create database router wrapper for Heimdall (multi-db aware)
 			dbRouter := newHeimdallDBRouter(db, dbManager, featuresConfig)
 			metricsReader := &heimdallMetricsReader{}
-			heimdallHandler = heimdall.NewHandler(manager, heimdallCfg, dbRouter, metricsReader)
+			handler := heimdall.NewHandler(manager, heimdallCfg, dbRouter, metricsReader)
 			// Expose MCP tools to the agentic loop only when enabled (default off to avoid context bloat)
 			if mcpServer != nil && featuresConfig.HeimdallMCPEnable {
-				heimdallHandler.SetInMemoryToolRunner(&mcpToolRunnerAdapter{
+				handler.SetInMemoryToolRunner(&mcpToolRunnerAdapter{
 					s:         mcpServer,
 					allowlist: featuresConfig.HeimdallMCPTools,
 				})
@@ -943,27 +957,24 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			subsystemMgr := heimdall.GetSubsystemManager()
 
 			// Create the Heimdall invoker so plugins can call the LLM
-			// This enables plugins to use SendPrompt() for synthesis, autonomous actions, etc.
 			heimdallInvoker := heimdall.NewLiveHeimdallInvoker(
 				subsystemMgr,
 				manager, // Manager implements Generator interface
-				heimdallHandler.Bifrost(),
+				handler.Bifrost(),
 				dbRouter,
 				metricsReader,
 			)
 
 			subsystemCtx := heimdall.SubsystemContext{
 				Config:   heimdallCfg,
-				Bifrost:  heimdallHandler.Bifrost(),
+				Bifrost:  handler.Bifrost(),
 				Database: dbRouter,
 				Metrics:  metricsReader,
 				Heimdall: heimdallInvoker, // Now plugins can call p.ctx.Heimdall.SendPrompt()
 			}
 			subsystemMgr.SetContext(subsystemCtx)
 
-			// Load plugins from configured directories (all actions come from plugins)
-			// Auto-detects plugin types: function plugins (APOC) and Heimdall plugins
-			// APOC plugins provide Cypher functions, Heimdall plugins provide AI actions
+			// Load plugins from configured directories.
 			if config.PluginsDir != "" {
 				log.Printf("   [Debug] Loading APOC plugins from: %s", config.PluginsDir)
 				if err := nornicdb.LoadPluginsFromDir(config.PluginsDir, &subsystemCtx); err != nil {
@@ -981,7 +992,8 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 				log.Printf("   [Debug] HeimdallPluginsDir (%s) same as PluginsDir (%s), skipping", config.HeimdallPluginsDir, config.PluginsDir)
 			}
 
-			// Log loaded plugins
+			s.setHeimdallHandler(handler)
+
 			plugins := heimdall.ListHeimdallPlugins()
 			actions := heimdall.ListHeimdallActions()
 			log.Printf("✅ Heimdall AI Assistant ready")
@@ -992,12 +1004,10 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 			if len(plugins) == 0 {
 				log.Printf("   ⚠️  No Heimdall plugins loaded (Watcher logs will be absent). Ensure a .so exists in HeimdallPluginsDir.")
 			}
-
-			// Log available actions
 			for _, actionName := range actions {
 				log.Printf("   → Action: %s", actionName)
 			}
-		}
+		}()
 	} else {
 		log.Println("ℹ️  Heimdall AI Assistant disabled (set NORNICDB_HEIMDALL_ENABLED=true to enable)")
 	}
@@ -1186,20 +1196,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		rateLimiter = NewIPRateLimiter(config.RateLimitPerMinute, config.RateLimitPerHour, config.RateLimitBurst)
 		log.Printf("✓ Rate limiting enabled: %d/min, %d/hour per IP", config.RateLimitPerMinute, config.RateLimitPerHour)
 	}
-
-	s := &Server{
-		config:          config,
-		db:              db,
-		dbManager:       dbManager,
-		auth:            authenticator,
-		mcpServer:       mcpServer,
-		heimdallHandler: heimdallHandler,
-		graphqlHandler:  graphql.NewHandler(db, dbManager),
-		rateLimiter:     rateLimiter,
-		basicAuthCache:  auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
-		searchServices:  make(map[string]*search.Service),
-		executors:       make(map[string]*cypher.StorageExecutor),
-	}
+	s.rateLimiter = rateLimiter
 
 	// So EmbeddingCount() aggregates across all databases (not just default)
 	s.db.SetAllDatabasesProvider(func() []nornicdb.DatabaseAndStorage {
@@ -1319,6 +1316,18 @@ func (s *Server) SetAuditLogger(logger *audit.Logger) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.audit = logger
+}
+
+func (s *Server) setHeimdallHandler(handler *heimdall.Handler) {
+	s.mu.Lock()
+	s.heimdallHandler = handler
+	s.mu.Unlock()
+}
+
+func (s *Server) getHeimdallHandler() *heimdall.Handler {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.heimdallHandler
 }
 
 // Start begins listening for HTTP connections on the configured address and port.

@@ -28,14 +28,14 @@ const (
 // HNSWConfigFromEnv loads HNSW configuration from environment variables.
 //
 // Environment Variables:
-//   - NORNICDB_VECTOR_ANN_QUALITY: Quality preset (fast|balanced|accurate, default: balanced)
+//   - NORNICDB_VECTOR_ANN_QUALITY: Quality preset (fast|balanced|accurate, default: fast)
 //   - NORNICDB_VECTOR_HNSW_M: Max connections per node (default: based on preset)
 //   - NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION: Candidate list size during construction (default: based on preset)
 //   - NORNICDB_VECTOR_HNSW_EF_SEARCH: Candidate list size during search (default: based on preset)
 //
 // Quality Presets:
 //   - fast: M=16, efConstruction=100, efSearch=50 (faster, lower recall)
-//   - balanced: M=16, efConstruction=200, efSearch=100 (default, good balance)
+//   - balanced: M=16, efConstruction=200, efSearch=100 (good balance)
 //   - accurate: M=32, efConstruction=400, efSearch=200 (slower, higher recall)
 //
 // Example:
@@ -79,11 +79,13 @@ func getQualityPreset() HNSWQualityPreset {
 		return QualityFast
 	case "accurate":
 		return QualityAccurate
-	case "balanced", "":
+	case "balanced":
 		return QualityBalanced
+	case "":
+		return QualityFast
 	default:
-		// Unknown preset, default to balanced
-		return QualityBalanced
+		// Unknown preset, default to fast
+		return QualityFast
 	}
 }
 
