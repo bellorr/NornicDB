@@ -283,6 +283,7 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 				continue
 			}
 
+			log.Printf("🧪 pending-embed dequeue: node=%s reason=existing_pending_entry", nodeID)
 			found = node
 			break
 		}
@@ -308,6 +309,7 @@ func (b *BadgerEngine) MarkNodeEmbedded(nodeID NodeID) {
 // AddToPendingEmbeddings adds a node to the pending embeddings index.
 // Call this when creating a node that needs embedding.
 func (b *BadgerEngine) AddToPendingEmbeddings(nodeID NodeID) {
+	log.Printf("🧪 pending-embed add: node=%s reason=explicit_requeue", nodeID)
 	_ = b.withUpdate(func(txn *badger.Txn) error {
 		return txn.Set(pendingEmbedKey(nodeID), []byte{})
 	})
@@ -451,6 +453,7 @@ func (b *BadgerEngine) RefreshPendingEmbeddingsIndex() int {
 					// Check if already in pending index
 					_, err := txn.Get(pendingEmbedKey(node.ID))
 					if err == badger.ErrKeyNotFound {
+						log.Printf("🧪 pending-embed add: node=%s reason=refresh_index_missing_entry", node.ID)
 						txn.Set(pendingEmbedKey(node.ID), []byte{})
 						added++
 					}

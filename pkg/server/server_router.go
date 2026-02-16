@@ -321,6 +321,7 @@ func (s *Server) wrapWithMiddleware(next http.Handler) http.Handler {
 	handler := securityMiddleware.ValidateRequest(next)
 	handler = s.corsMiddleware(handler)
 	handler = s.rateLimitMiddleware(handler) // Rate limit after CORS preflight
+	handler = s.requestTimeoutMiddleware(handler)
 	handler = s.loggingMiddleware(handler)
 	handler = s.recoveryMiddleware(handler)
 	handler = s.metricsMiddleware(handler)

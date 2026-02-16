@@ -1385,8 +1385,8 @@ func (ae *AsyncEngine) NodeCount() (int64, error) {
 	ae.flushMu.RLock()
 	defer ae.flushMu.RUnlock()
 
-	// Hold lock during entire operation to get consistent count
-	// This prevents race with flush which clears cache before writing to engine
+	// Snapshot cache state under lock, then release before engine I/O to avoid
+	// blocking writers/readers on potentially slow storage calls.
 	ae.mu.RLock()
 
 	// Count pending creates, excluding:
@@ -1411,9 +1411,9 @@ func (ae *AsyncEngine) NodeCount() (int64, error) {
 	}
 	// Also count nodes that are in-flight but NOT updates (they're being created)
 	pendingDeletes := int64(len(ae.deleteNodes))
+	ae.mu.RUnlock()
 
 	engineCount, err := ae.engine.NodeCount()
-	ae.mu.RUnlock()
 
 	if err != nil {
 		return 0, err
@@ -1437,8 +1437,8 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 	ae.flushMu.RLock()
 	defer ae.flushMu.RUnlock()
 
-	// Hold lock during entire operation to get consistent count
-	// This prevents race with flush which clears cache before writing to engine
+	// Snapshot cache state under lock, then release before engine I/O to avoid
+	// blocking writers/readers on potentially slow storage calls.
 	ae.mu.RLock()
 
 	// Count pending creates, excluding:
@@ -1458,9 +1458,9 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 		pendingCreates++
 	}
 	pendingDeletes := int64(len(ae.deleteEdges))
+	ae.mu.RUnlock()
 
 	engineCount, err := ae.engine.EdgeCount()
-	ae.mu.RUnlock()
 
 	if err != nil {
 		return 0, err
@@ -1481,10 +1481,12 @@ func (ae *AsyncEngine) EdgeCount() (int64, error) {
 }
 
 func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
-	ae.flushMu.RLock()
-	defer ae.flushMu.RUnlock()
+	locked := ae.flushMu.TryRLock()
+	if locked {
+		defer ae.flushMu.RUnlock()
+	}
 
-	// Keep same consistency semantics as NodeCount(): hold lock across engine read.
+	// Snapshot cache state under lock, then release before engine I/O.
 	ae.mu.RLock()
 
 	pendingCreates := int64(0)
@@ -1511,6 +1513,7 @@ func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
 			pendingDeletes++
 		}
 	}
+	ae.mu.RUnlock()
 
 	var engineCount int64
 	var err error
@@ -1521,7 +1524,6 @@ func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
 		engineCount, err = countNodesInEngineByPrefix(ae.engine, prefix)
 	}
 
-	ae.mu.RUnlock()
 	if err != nil {
 		return 0, err
 	}
@@ -1537,8 +1539,10 @@ func (ae *AsyncEngine) NodeCountByPrefix(prefix string) (int64, error) {
 }
 
 func (ae *AsyncEngine) EdgeCountByPrefix(prefix string) (int64, error) {
-	ae.flushMu.RLock()
-	defer ae.flushMu.RUnlock()
+	locked := ae.flushMu.TryRLock()
+	if locked {
+		defer ae.flushMu.RUnlock()
+	}
 
 	ae.mu.RLock()
 
@@ -1564,6 +1568,7 @@ func (ae *AsyncEngine) EdgeCountByPrefix(prefix string) (int64, error) {
 			pendingDeletes++
 		}
 	}
+	ae.mu.RUnlock()
 
 	var engineCount int64
 	var err error
@@ -1573,7 +1578,6 @@ func (ae *AsyncEngine) EdgeCountByPrefix(prefix string) (int64, error) {
 		engineCount, err = countEdgesInEngineByPrefix(ae.engine, prefix)
 	}
 
-	ae.mu.RUnlock()
 	if err != nil {
 		return 0, err
 	}
@@ -2206,6 +2210,14 @@ func (ae *AsyncEngine) AddToPendingEmbeddings(nodeID NodeID) {
 	if mgr, ok := ae.engine.(interface{ AddToPendingEmbeddings(NodeID) }); ok {
 		mgr.AddToPendingEmbeddings(nodeID)
 	}
+}
+
+// PendingEmbeddingsCount delegates to the underlying engine, if supported.
+func (ae *AsyncEngine) PendingEmbeddingsCount() int {
+	if mgr, ok := ae.engine.(interface{ PendingEmbeddingsCount() int }); ok {
+		return mgr.PendingEmbeddingsCount()
+	}
+	return 0
 }
 
 // IterateNodes iterates through all nodes, checking cache first.

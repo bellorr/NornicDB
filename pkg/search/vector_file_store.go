@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
@@ -39,9 +40,13 @@ type VectorFileStore struct {
 	metaPath   string
 
 	mu                sync.RWMutex
+	appendMu          sync.Mutex
 	file              *os.File
+	syncFile          func(*os.File) error
+	writeRecord       func(*os.File, string, []float32) error
 	idToOff           map[string]int64
 	buildIndexedCount int64 // last checkpoint count; persisted in .meta for resume
+	obsoleteCount     int64 // approximate number of stale records in .vec from updates/deletes
 	closed            bool
 }
 
@@ -76,6 +81,10 @@ func NewVectorFileStore(vecBasePath string, dimensions int) (*VectorFileStore, e
 		vecPath:    vecPath,
 		metaPath:   metaPath,
 		idToOff:    make(map[string]int64),
+		syncFile: func(f *os.File) error {
+			return f.Sync()
+		},
+		writeRecord: writeVectorRecord,
 	}
 
 	// Open or create .vec file
@@ -143,36 +152,57 @@ func (v *VectorFileStore) Add(id string, vec []float32) error {
 	if len(vec) != v.dimensions {
 		return ErrDimensionMismatch
 	}
+	normalized := vector.Normalize(vec)
+	v.appendMu.Lock()
+	defer v.appendMu.Unlock()
+
+	v.mu.RLock()
+	if v.closed || v.file == nil {
+		v.mu.RUnlock()
+		return errVecFileClosed
+	}
+	file := v.file
+	writeFn := v.writeRecord
+	v.mu.RUnlock()
+
+	offset, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		return err
+	}
+	if writeFn == nil {
+		writeFn = writeVectorRecord
+	}
+	if err := writeFn(file, id, normalized); err != nil {
+		return err
+	}
+
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {
 		return errVecFileClosed
 	}
-
-	normalized := vector.Normalize(vec)
-	idBytes := []byte(id)
-	idLen := uint32(len(idBytes))
-	if int(idLen) != len(idBytes) {
-		return fmt.Errorf("id too long")
-	}
-
-	offset, err := v.file.Seek(0, io.SeekEnd)
-	if err != nil {
-		return err
-	}
-
-	// Record: idLen (4), id (idLen), vector (dim*4)
-	buf := make([]byte, 4+len(idBytes)+v.dimensions*4)
-	binary.LittleEndian.PutUint32(buf[0:4], idLen)
-	copy(buf[4:4+idLen], idBytes)
-	for i := 0; i < v.dimensions; i++ {
-		binary.LittleEndian.PutUint32(buf[4+int(idLen)+i*4:], math.Float32bits(normalized[i]))
-	}
-	if _, err := v.file.Write(buf); err != nil {
-		return err
-	}
+	_, existed := v.idToOff[id]
 	v.idToOff[id] = offset
+	if existed {
+		v.obsoleteCount++
+	}
 	return nil
+}
+
+// Remove deletes id from the live id→offset map.
+// The old .vec record is left in-place and reclaimed by compaction.
+func (v *VectorFileStore) Remove(id string) bool {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.closed {
+		return false
+	}
+	if _, ok := v.idToOff[id]; !ok {
+		return false
+	}
+	delete(v.idToOff, id)
+	v.obsoleteCount++
+	return true
 }
 
 // GetVector returns a copy of the stored (normalized) vector for id, or (nil, false) if not found.
@@ -362,6 +392,7 @@ func (v *VectorFileStore) rebuildIndexFromVecLocked() error {
 		return err
 	}
 	idToOff := make(map[string]int64)
+	totalRecords := int64(0)
 	buf := make([]byte, 4+256+v.dimensions*4)
 	for {
 		offset, err := v.file.Seek(0, io.SeekCurrent)
@@ -389,9 +420,11 @@ func (v *VectorFileStore) rebuildIndexFromVecLocked() error {
 		}
 		id := string(buf[4 : 4+idLen])
 		idToOff[id] = offset
+		totalRecords++
 	}
 	v.idToOff = idToOff
 	v.buildIndexedCount = int64(len(idToOff))
+	v.obsoleteCount = totalRecords - int64(len(idToOff))
 	return nil
 }
 
@@ -414,15 +447,189 @@ func (v *VectorFileStore) GetBuildIndexedCount() int64 {
 // Sync flushes the .vec file to disk so progress is visible and durable.
 func (v *VectorFileStore) Sync() error {
 	v.mu.RLock()
-	defer v.mu.RUnlock()
-	if v.closed || v.file == nil {
+	closed := v.closed
+	file := v.file
+	syncFn := v.syncFile
+	v.mu.RUnlock()
+	if closed || file == nil {
 		return nil
 	}
-	return v.file.Sync()
+	if syncFn == nil {
+		return file.Sync()
+	}
+	return syncFn(file)
+}
+
+// CompactIfNeeded rewrites .vec with only live records when stale entries accumulate.
+// The rewrite is atomic: write temp file, fsync, rename.
+// Returns true when compaction actually ran.
+func (v *VectorFileStore) CompactIfNeeded() (bool, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.compactIfNeededLocked()
+}
+
+func (v *VectorFileStore) compactIfNeededLocked() (bool, error) {
+	if v.closed || v.file == nil {
+		return false, nil
+	}
+	minObsolete := int64(envInt("NORNICDB_VECTOR_VFS_COMPACT_MIN_OBSOLETE", 50000))
+	minSizeMB := int64(envInt("NORNICDB_VECTOR_VFS_COMPACT_MIN_SIZE_MB", 256))
+	deadRatioThreshold := envFloat("NORNICDB_VECTOR_VFS_COMPACT_DEAD_RATIO", 0.30)
+	if minObsolete < 1 {
+		minObsolete = 1
+	}
+	if minSizeMB < 0 {
+		minSizeMB = 0
+	}
+	if deadRatioThreshold < 0 {
+		deadRatioThreshold = 0
+	}
+
+	live := int64(len(v.idToOff))
+	if live == 0 {
+		// If everything was deleted, shrink back to a header-only file.
+		if v.obsoleteCount == 0 {
+			return false, nil
+		}
+		if err := v.rewriteVecLocked(nil); err != nil {
+			return false, err
+		}
+		v.obsoleteCount = 0
+		v.buildIndexedCount = 0
+		return true, nil
+	}
+	if v.obsoleteCount < minObsolete {
+		return false, nil
+	}
+	stat, err := v.file.Stat()
+	if err != nil {
+		return false, err
+	}
+	if stat.Size() < minSizeMB*1024*1024 {
+		return false, nil
+	}
+	deadRatio := float64(v.obsoleteCount) / float64(live+v.obsoleteCount)
+	if deadRatio < deadRatioThreshold {
+		return false, nil
+	}
+
+	ids := make([]string, 0, len(v.idToOff))
+	for id := range v.idToOff {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if err := v.rewriteVecLocked(ids); err != nil {
+		return false, err
+	}
+	v.obsoleteCount = 0
+	v.buildIndexedCount = int64(len(v.idToOff))
+	return true, nil
+}
+
+func (v *VectorFileStore) rewriteVecLocked(ids []string) error {
+	tmpPath := v.vecPath + ".tmp-compact"
+	tmp, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	defer cleanup()
+
+	header := make([]byte, vecHeaderSize)
+	copy(header, vecFileMagic)
+	header[4] = vecFileVersion
+	binary.LittleEndian.PutUint32(header[5:9], uint32(v.dimensions))
+	if _, err := tmp.Write(header); err != nil {
+		return err
+	}
+
+	newOffsets := make(map[string]int64, len(ids))
+	for _, id := range ids {
+		oldOffset, ok := v.idToOff[id]
+		if !ok {
+			continue
+		}
+		vec, err := v.readVectorAtLocked(oldOffset)
+		if err != nil {
+			return fmt.Errorf("compact read id %q at offset %d: %w", id, oldOffset, err)
+		}
+		newOffset, err := tmp.Seek(0, io.SeekEnd)
+		if err != nil {
+			return err
+		}
+		if err := writeVectorRecord(tmp, id, vec); err != nil {
+			return err
+		}
+		newOffsets[id] = newOffset
+	}
+
+	if err := tmp.Sync(); err != nil {
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := v.file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, v.vecPath); err != nil {
+		return err
+	}
+	reopened, err := os.OpenFile(v.vecPath, os.O_RDWR|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	v.file = reopened
+	v.idToOff = newOffsets
+	return nil
+}
+
+func (v *VectorFileStore) readVectorAtLocked(offset int64) ([]float32, error) {
+	if v.file == nil {
+		return nil, errVecFileClosed
+	}
+	head := make([]byte, 4)
+	if _, err := v.file.ReadAt(head, offset); err != nil {
+		return nil, err
+	}
+	idLen := int(binary.LittleEndian.Uint32(head))
+	recLen := 4 + idLen + v.dimensions*4
+	buf := make([]byte, recLen)
+	if _, err := v.file.ReadAt(buf, offset); err != nil {
+		return nil, err
+	}
+	vec := make([]float32, v.dimensions)
+	base := 4 + idLen
+	for i := 0; i < v.dimensions; i++ {
+		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[base+i*4:]))
+	}
+	return vec, nil
+}
+
+func writeVectorRecord(f *os.File, id string, vec []float32) error {
+	idBytes := []byte(id)
+	idLen := uint32(len(idBytes))
+	if int(idLen) != len(idBytes) {
+		return fmt.Errorf("id too long")
+	}
+	buf := make([]byte, 4+len(idBytes)+len(vec)*4)
+	binary.LittleEndian.PutUint32(buf[0:4], idLen)
+	copy(buf[4:4+idLen], idBytes)
+	for i := range vec {
+		binary.LittleEndian.PutUint32(buf[4+int(idLen)+i*4:], math.Float32bits(vec[i]))
+	}
+	_, err := f.Write(buf)
+	return err
 }
 
 // Close closes the underlying file. The store must not be used after Close.
 func (v *VectorFileStore) Close() error {
+	v.appendMu.Lock()
+	defer v.appendMu.Unlock()
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.closed {

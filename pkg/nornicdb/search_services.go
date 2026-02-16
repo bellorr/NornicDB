@@ -19,8 +19,10 @@ type dbSearchService struct {
 	engine storage.Engine
 	svc    *search.Service
 
-	buildOnce sync.Once
-	buildErr  error
+	buildOnce  sync.Once
+	buildDone  chan struct{}
+	buildErr   error
+	buildErrMu sync.RWMutex
 
 	clusterMu               sync.Mutex
 	lastClusteredEmbedCount int
@@ -28,14 +30,14 @@ type dbSearchService struct {
 
 // DatabaseSearchStatus exposes per-database search service readiness/progress.
 type DatabaseSearchStatus struct {
-	Ready            bool    `json:"ready"`
-	Building         bool    `json:"building"`
-	Initialized      bool    `json:"initialized"`
-	Phase            string  `json:"phase,omitempty"`
-	ProcessedNodes   int64   `json:"processed_nodes,omitempty"`
-	TotalNodes       int64   `json:"total_nodes,omitempty"`
-	RateNodesPerSec  float64 `json:"rate_nodes_per_sec,omitempty"`
-	ETASeconds       int64   `json:"eta_seconds,omitempty"`
+	Ready           bool    `json:"ready"`
+	Building        bool    `json:"building"`
+	Initialized     bool    `json:"initialized"`
+	Phase           string  `json:"phase,omitempty"`
+	ProcessedNodes  int64   `json:"processed_nodes,omitempty"`
+	TotalNodes      int64   `json:"total_nodes,omitempty"`
+	RateNodesPerSec float64 `json:"rate_nodes_per_sec,omitempty"`
+	ETASeconds      int64   `json:"eta_seconds,omitempty"`
 }
 
 func splitQualifiedID(id string) (dbName string, local string, ok bool) {
@@ -186,9 +188,10 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	svc.SetReranker(reranker)
 
 	entry := &dbSearchService{
-		dbName: dbName,
-		engine: storageEngine,
-		svc:    svc,
+		dbName:    dbName,
+		engine:    storageEngine,
+		svc:       svc,
+		buildDone: make(chan struct{}),
 	}
 
 	db.searchServicesMu.Lock()
@@ -283,6 +286,33 @@ func (db *DB) GetDatabaseSearchStatus(dbName string) DatabaseSearchStatus {
 	}
 }
 
+func (db *DB) startSearchIndexBuild(entry *dbSearchService, ctx context.Context) {
+	if entry == nil || entry.svc == nil {
+		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	entry.buildOnce.Do(func() {
+		db.bgWg.Add(1)
+		go func() {
+			defer db.bgWg.Done()
+			err := entry.svc.BuildIndexes(ctx)
+			entry.buildErrMu.Lock()
+			entry.buildErr = err
+			if err == nil {
+				// Mark clustering as current so runClusteringOnceAllDatabases skips this db
+				// (we either restored IVF-HNSW from disk or ran k-means in warmup).
+				entry.clusterMu.Lock()
+				entry.lastClusteredEmbedCount = entry.svc.EmbeddingCount()
+				entry.clusterMu.Unlock()
+			}
+			entry.buildErrMu.Unlock()
+			close(entry.buildDone)
+		}()
+	})
+}
+
 func (db *DB) ensureSearchIndexesBuilt(ctx context.Context, dbName string) error {
 	if dbName == "" {
 		dbName = db.defaultDatabaseName()
@@ -294,20 +324,19 @@ func (db *DB) ensureSearchIndexesBuilt(ctx context.Context, dbName string) error
 	if !ok || entry == nil {
 		return fmt.Errorf("search service not initialized for database %q", dbName)
 	}
-
-	// Run BuildIndexes (and warmup/IVF-HNSW) in the background so the first HTTP request
-	// for a large database doesn't block for minutes. Callers can check IsSearchIndexReady.
-	entry.buildOnce.Do(func() {
-		entry.buildErr = entry.svc.BuildIndexes(ctx)
-		if entry.buildErr == nil {
-			// Mark clustering as current so runClusteringOnceAllDatabases skips this db
-			// (we either restored IVF-HNSW from disk or ran k-means in warmup).
-			entry.clusterMu.Lock()
-			entry.lastClusteredEmbedCount = entry.svc.EmbeddingCount()
-			entry.clusterMu.Unlock()
-		}
-	})
-	return entry.buildErr
+	db.startSearchIndexBuild(entry, ctx)
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-entry.buildDone:
+		entry.buildErrMu.RLock()
+		err := entry.buildErr
+		entry.buildErrMu.RUnlock()
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // EnsureSearchIndexesBuilt ensures the per-database search indexes are built exactly once.
@@ -320,6 +349,30 @@ func (db *DB) EnsureSearchIndexesBuilt(ctx context.Context, dbName string, stora
 	if err := db.ensureSearchIndexesBuilt(ctx, dbName); err != nil {
 		return svc, err
 	}
+	return svc, nil
+}
+
+// EnsureSearchIndexesBuildStarted starts per-database search indexing if not already started
+// and returns immediately without waiting for completion.
+func (db *DB) EnsureSearchIndexesBuildStarted(dbName string, storageEngine storage.Engine) (*search.Service, error) {
+	if dbName == "" {
+		dbName = db.defaultDatabaseName()
+	}
+	svc, err := db.getOrCreateSearchService(dbName, storageEngine)
+	if err != nil {
+		return nil, err
+	}
+	db.searchServicesMu.RLock()
+	entry := db.searchServices[dbName]
+	db.searchServicesMu.RUnlock()
+	if entry == nil {
+		return svc, nil
+	}
+	ctx := db.buildCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	db.startSearchIndexBuild(entry, ctx)
 	return svc, nil
 }
 

@@ -511,11 +511,17 @@ func (h *HNSWIndex) Save(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
-	file, err := os.Create(path)
+	// Write atomically so interruptions do not leave a truncated/corrupt visible file.
+	// Use a stable temp filename so we overwrite the same tmp path each save.
+	tmpPath := path + ".tmp"
+	tmpFile, err := os.OpenFile(tmpPath, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0644)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() {
+		_ = tmpFile.Close()
+		_ = os.Remove(tmpPath)
+	}()
 
 	snap := hnswIndexSnapshot{
 		Version:           hnswIndexFormatVersionGraphOnly,
@@ -536,7 +542,19 @@ func (h *HNSWIndex) Save(path string) error {
 		HasEntryPoint:     hasEntryPoint,
 		MaxLevel:          maxLevel,
 	}
-	return msgpack.NewEncoder(file).Encode(&snap)
+	if err := msgpack.NewEncoder(tmpFile).Encode(&snap); err != nil {
+		return err
+	}
+	if err := tmpFile.Sync(); err != nil {
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return err
+	}
+	return nil
 }
 
 // VectorLookup returns a vector by ID (e.g. from the vector index). Used when loading a graph-only HNSW file.

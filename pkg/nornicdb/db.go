@@ -556,6 +556,13 @@ type DB struct {
 	embedderRegistryMu sync.RWMutex
 	embedderRegistry   map[string]embed.Embedder
 	defaultEmbedKey    string // key for the embedder set via SetEmbedder (global default)
+	// embedderFactory allows tests to inject deterministic embedder creation behavior.
+	// Production uses embed.NewEmbedder.
+	embedderFactory func(cfg *embed.Config) (embed.Embedder, error)
+	// in-flight embedder creations keyed by embedConfigKey(cfg), used to avoid duplicate
+	// expensive model loads under concurrent query traffic.
+	embedderCreateMu sync.Mutex
+	embedderCreate   map[string]chan struct{}
 	// embedConfigForDB returns resolved embed config for a database; when set, EmbedQueryForDB uses the registry.
 	embedConfigForDB func(dbName string) (*embed.Config, error)
 
@@ -573,8 +580,14 @@ func embedConfigKey(cfg *embed.Config) string {
 	if cfg == nil {
 		return ""
 	}
+	gpuLayers := cfg.GPULayers
+	// For local GGUF, GPULayers=0 means "use library default" which is currently
+	// equivalent to auto/all offload (-1). Normalize to keep registry keys stable.
+	if strings.EqualFold(strings.TrimSpace(cfg.Provider), "local") && gpuLayers == 0 {
+		gpuLayers = -1
+	}
 	return cfg.Provider + "|" + cfg.Model + "|" + strconv.Itoa(cfg.Dimensions) + "|" +
-		cfg.APIURL + "|" + cfg.APIKey + "|" + cfg.ModelsDir + "|" + strconv.Itoa(cfg.GPULayers)
+		cfg.APIURL + "|" + cfg.APIKey + "|" + cfg.ModelsDir + "|" + strconv.Itoa(gpuLayers)
 }
 
 // DatabaseAndStorage pairs a database name with its storage engine.
@@ -1256,16 +1269,34 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	if notifier, ok := underlyingEngine.(storage.StorageEventNotifier); ok {
 		// When a node is created/updated/deleted, route the event to the correct
 		// per-database search service based on the namespace prefix (<db>:<id>).
-		notifier.OnNodeCreated(func(node *storage.Node) { db.indexNodeFromEvent(node) })
-		notifier.OnNodeUpdated(func(node *storage.Node) { db.indexNodeFromEvent(node) })
-		notifier.OnNodeDeleted(func(nodeID storage.NodeID) { db.removeNodeFromEvent(nodeID) })
+		// IMPORTANT: dispatch asynchronously so storage writes/flushes are never
+		// blocked by search indexing work (prevents commit/status stalls under load).
+		notifier.OnNodeCreated(func(node *storage.Node) {
+			if node == nil {
+				return
+			}
+			nodeCopy := storage.CopyNode(node)
+			go db.indexNodeFromEvent(nodeCopy)
+		})
+		notifier.OnNodeUpdated(func(node *storage.Node) {
+			if node == nil {
+				return
+			}
+			nodeCopy := storage.CopyNode(node)
+			go db.indexNodeFromEvent(nodeCopy)
+		})
+		notifier.OnNodeDeleted(func(nodeID storage.NodeID) {
+			go db.removeNodeFromEvent(nodeID)
+		})
 	}
 
 	// Also register for async-cache delete notifications if the async layer exists.
 	// This handles the case where a node is created and then deleted while still
 	// buffered in AsyncEngine (so the inner engine never emits a delete event).
 	if asyncNotifier != nil {
-		asyncNotifier.OnNodeDeleted(func(nodeID storage.NodeID) { db.removeNodeFromEvent(nodeID) })
+		asyncNotifier.OnNodeDeleted(func(nodeID storage.NodeID) {
+			go db.removeNodeFromEvent(nodeID)
+		})
 	}
 
 	// Enable k-means clustering if feature flag is set (applied lazily per database).
@@ -1298,29 +1329,49 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			}
 		}
 
-		// Build search indexes (BM25 + vector) for each database before k-means.
-		var built, failed int
+		// Build search indexes (BM25 + vector) for each database in parallel so a large
+		// database warmup doesn't block smaller databases from becoming ready.
+		type buildResult struct {
+			dbName string
+			err    error
+		}
+		results := make(chan buildResult, len(dbNames))
+		var buildWg sync.WaitGroup
 		for dbName := range dbNames {
-			if ctx.Err() != nil {
-				break // Shutdown requested
-			}
-			var storageEngine storage.Engine
-			if dbName == defaultDBName {
-				storageEngine = db.storage
-			}
-			log.Printf("🔍 Building BM25 + vector indexes for database %s...", dbName)
-			if _, err := db.EnsureSearchIndexesBuilt(ctx, dbName, storageEngine); err != nil {
+			buildWg.Add(1)
+			go func(dbName string) {
+				defer buildWg.Done()
 				if ctx.Err() != nil {
-					log.Printf("🔍 Search index build cancelled for db %s (shutdown)", dbName)
-					break
+					results <- buildResult{dbName: dbName, err: ctx.Err()}
+					return
 				}
-				log.Printf("⚠️  Failed to build search indexes for db %s: %v", dbName, err)
+				var storageEngine storage.Engine
+				if dbName == defaultDBName {
+					storageEngine = db.storage
+				}
+				log.Printf("🔍 Building BM25 + vector indexes for database %s...", dbName)
+				_, err := db.EnsureSearchIndexesBuilt(ctx, dbName, storageEngine)
+				results <- buildResult{dbName: dbName, err: err}
+			}(dbName)
+		}
+		go func() {
+			buildWg.Wait()
+			close(results)
+		}()
+		var built, failed int
+		for res := range results {
+			if res.err != nil {
+				if ctx.Err() != nil {
+					log.Printf("🔍 Search index build cancelled for db %s (shutdown)", res.dbName)
+					continue
+				}
+				log.Printf("⚠️  Failed to build search indexes for db %s: %v", res.dbName, res.err)
 				failed++
-			} else {
-				built++
-				if len(dbNames) > 1 {
-					log.Printf("✅ BM25 + vector indexes built for db %s", dbName)
-				}
+				continue
+			}
+			built++
+			if len(dbNames) > 1 {
+				log.Printf("✅ BM25 + vector indexes built for db %s", res.dbName)
 			}
 		}
 		if built > 0 && len(dbNames) == 1 {
@@ -1531,7 +1582,10 @@ func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 	db.mu.RUnlock()
 
 	if fn == nil || embedQueue == nil || embedQueue.embedder == nil {
-		return embedQueue.embedder, nil
+		if embedQueue != nil {
+			return embedQueue.embedder, nil
+		}
+		return nil, nil
 	}
 	cfg, err := fn(dbName)
 	if err != nil || cfg == nil {
@@ -1554,23 +1608,77 @@ func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 	db.embedderRegistryMu.RUnlock()
 
 	db.embedderRegistryMu.Lock()
-	defer db.embedderRegistryMu.Unlock()
 	if db.embedderRegistry == nil {
 		db.embedderRegistry = make(map[string]embed.Embedder)
 	}
 	if e, ok := db.embedderRegistry[key]; ok {
+		db.embedderRegistryMu.Unlock()
 		return e, nil
 	}
 	if key == defaultKey && defaultKey != "" {
 		if e, ok := db.embedderRegistry[defaultKey]; ok {
+			db.embedderRegistryMu.Unlock()
 			return e, nil
 		}
 	}
-	newEmbedder, createErr := embed.NewEmbedder(cfg)
-	if createErr != nil {
+	// Reuse the active default local embedder when resolved config is equivalent.
+	// This avoids expensive re-initialization on the query path due key drift
+	// from equivalent local defaults (e.g. GPULayers 0 vs -1).
+	if strings.EqualFold(strings.TrimSpace(cfg.Provider), "local") &&
+		embedQueue.embedder.Dimensions() == cfg.Dimensions &&
+		strings.EqualFold(strings.TrimSpace(embedQueue.embedder.Model()), strings.TrimSpace(cfg.Model)) {
+		db.embedderRegistry[key] = embedQueue.embedder
+		db.embedderRegistryMu.Unlock()
 		return embedQueue.embedder, nil
 	}
-	db.embedderRegistry[key] = newEmbedder
+	db.embedderRegistryMu.Unlock()
+
+	create := db.embedderFactory
+	if create == nil {
+		create = embed.NewEmbedder
+	}
+
+	// Single-flight per embedder key: do not hold embedderRegistryMu while creating.
+	db.embedderCreateMu.Lock()
+	if db.embedderCreate == nil {
+		db.embedderCreate = make(map[string]chan struct{})
+	}
+	if ch, ok := db.embedderCreate[key]; ok {
+		db.embedderCreateMu.Unlock()
+		<-ch
+		db.embedderRegistryMu.RLock()
+		if e, ok := db.embedderRegistry[key]; ok {
+			db.embedderRegistryMu.RUnlock()
+			return e, nil
+		}
+		db.embedderRegistryMu.RUnlock()
+		// Creation completed but no registry entry (likely create failed). Fall back.
+		return embedQueue.embedder, nil
+	}
+	ch := make(chan struct{})
+	db.embedderCreate[key] = ch
+	db.embedderCreateMu.Unlock()
+
+	newEmbedder, createErr := create(cfg)
+
+	db.embedderRegistryMu.Lock()
+	if createErr == nil && newEmbedder != nil {
+		if existing, ok := db.embedderRegistry[key]; ok {
+			newEmbedder = existing
+		} else {
+			db.embedderRegistry[key] = newEmbedder
+		}
+	}
+	db.embedderRegistryMu.Unlock()
+
+	db.embedderCreateMu.Lock()
+	close(ch)
+	delete(db.embedderCreate, key)
+	db.embedderCreateMu.Unlock()
+
+	if createErr != nil || newEmbedder == nil {
+		return embedQueue.embedder, nil
+	}
 	return newEmbedder, nil
 }
 
@@ -1700,10 +1808,21 @@ func (db *DB) closeInternal() error {
 	var errs []error
 
 	// Persist search indexes to disk so the latest state is saved on next startup.
+	// Bound shutdown time: do not let a slow persist block graceful exit indefinitely.
+	persistTimeout := 20 * time.Second
 	db.searchServicesMu.RLock()
 	for _, entry := range db.searchServices {
 		if entry != nil && entry.svc != nil {
-			entry.svc.PersistIndexesToDisk()
+			done := make(chan struct{}, 1)
+			go func(svc *search.Service) {
+				svc.PersistIndexesToDisk()
+				done <- struct{}{}
+			}(entry.svc)
+			select {
+			case <-done:
+			case <-time.After(persistTimeout):
+				log.Printf("⚠️ shutdown: search index persist timed out after %v (continuing shutdown)", persistTimeout)
+			}
 		}
 	}
 	db.searchServicesMu.RUnlock()
@@ -1752,6 +1871,47 @@ func (db *DB) EmbedQueueStats() *QueueStats {
 	}
 	stats := db.embedQueue.Stats()
 	return &stats
+}
+
+// PendingEmbeddingsCount returns the current size of the pending-embeddings index.
+// This is a fast, storage-backed counter path used by embed/stats.
+func (db *DB) PendingEmbeddingsCount() int {
+	if db.baseStorage != nil {
+		if counter, ok := db.baseStorage.(interface{ PendingEmbeddingsCount() int }); ok {
+			return counter.PendingEmbeddingsCount()
+		}
+	}
+	return 0
+}
+
+// EmbeddingCountCached returns total embeddings from already-initialized search services only.
+// Unlike EmbeddingCount(), this does not create services and therefore avoids startup/path contention.
+func (db *DB) EmbeddingCountCached() int {
+	db.searchServicesMu.RLock()
+	defer db.searchServicesMu.RUnlock()
+	total := 0
+	for _, entry := range db.searchServices {
+		if entry != nil && entry.svc != nil {
+			total += entry.svc.EmbeddingCount()
+		}
+	}
+	return total
+}
+
+// VectorIndexDimensionsCached returns dimensions from an existing default-db search service,
+// or configured embedding dimensions when the service is not initialized yet.
+func (db *DB) VectorIndexDimensionsCached() int {
+	defaultDB := db.defaultDatabaseName()
+	db.searchServicesMu.RLock()
+	entry := db.searchServices[defaultDB]
+	db.searchServicesMu.RUnlock()
+	if entry != nil && entry.svc != nil {
+		return entry.svc.VectorIndexDimensions()
+	}
+	if db.embeddingDims > 0 {
+		return db.embeddingDims
+	}
+	return 0
 }
 
 // EmbeddingCount returns the total number of nodes with embeddings.

@@ -3,6 +3,7 @@ package storage
 
 import (
 	"fmt"
+	"log"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -113,6 +114,7 @@ func (b *BadgerEngine) CreateNode(node *Node) (NodeID, error) {
 	if !isSystemNamespaceID(string(node.ID)) &&
 		(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
 		NodeNeedsEmbedding(node) {
+		log.Printf("🧪 pending-embed add: node=%s reason=create_node_needs_embedding", node.ID)
 		if err := wb.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 			return "", fmt.Errorf("failed to write pending embed index: %w", err)
 		}
@@ -253,6 +255,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			if !isSystemNamespaceID(string(node.ID)) &&
 				(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
 				NodeNeedsEmbedding(node) {
+				log.Printf("🧪 pending-embed add: node=%s reason=update_node_insert_path_needs_embedding", node.ID)
 				if err := txn.Set(pendingEmbedKey(node.ID), []byte{}); err != nil {
 					return err
 				}
@@ -345,6 +348,7 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			txn.Delete(pendingEmbedKey(node.ID))
 		} else if !isSystemNamespaceID(string(node.ID)) && NodeNeedsEmbedding(node) {
 			// Node needs embedding - ensure it's in pending index
+			log.Printf("🧪 pending-embed add: node=%s reason=update_node_still_needs_embedding", node.ID)
 			txn.Set(pendingEmbedKey(node.ID), []byte{})
 		} else {
 			// Never embed system database nodes.

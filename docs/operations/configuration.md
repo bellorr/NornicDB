@@ -278,11 +278,19 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | `NORNICDB_VECTOR_IVF_HNSW_ENABLED` | `true` | When clustered, use IVF-HNSW (per-cluster HNSW) when available. |
 | `NORNICDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE` | `200` | Min cluster size to build a cluster HNSW index. |
 | `NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS` | `1024` | Max number of clusters for IVF-HNSW. |
+| **Hybrid lexical-semantic routing** | | |
+| `NORNICDB_VECTOR_ROUTING_MODE` | `hybrid` | Cluster routing mode: `hybrid` (lexical+semantic) or `semantic` (centroid-only). |
+| `NORNICDB_VECTOR_HYBRID_ROUTING_W_SEM` | `0.7` | Weight for semantic (centroid) routing score. |
+| `NORNICDB_VECTOR_HYBRID_ROUTING_W_LEX` | `0.3` | Weight for lexical (BM25-term profile) routing score. |
+| `NORNICDB_VECTOR_HYBRID_ROUTING_LEX_TOP_TERMS` | `64` | Number of high-value terms kept per cluster lexical profile. |
 | **K-means clustering** | | |
 | `NORNICDB_KMEANS_NUM_CLUSTERS` | (auto) | Number of clusters. Unset or 0 = **auto** from dataset size at run time (√(n/2), clamped 10–8192). Set to a positive value to fix K (e.g. `500`). |
-| `NORNICDB_KMEANS_MAX_ITERATIONS` | `15` | Max k-means iterations (early stop when stable). |
+| `NORNICDB_KMEANS_MAX_ITERATIONS` | `5` | Max k-means iterations (early stop when stable). Minimum is clamped to 5. |
+| `NORNICDB_KMEANS_SEED_MODE` | `bm25+kmeans++` | K-means seed strategy: `bm25+kmeans++` (BM25-informed first seed, then k-means++) or `none` (plain k-means++). |
+| `NORNICDB_KMEANS_SEED_MAX_TERMS` | `256` | Max BM25 high-IDF terms used to build seed candidates. |
+| `NORNICDB_KMEANS_SEED_DOCS_PER_TERM` | `1` | Max seed docs selected per term. |
 | **HNSW index (quality preset)** | | |
-| `NORNICDB_VECTOR_ANN_QUALITY` | `balanced` | Preset: `fast` \| `balanced` \| `accurate`. See table below. |
+| `NORNICDB_VECTOR_ANN_QUALITY` | `fast` | Preset: `fast` \| `balanced` \| `accurate`. See table below. |
 | `NORNICDB_VECTOR_HNSW_M` | (preset) | Max connections per node (e.g. 16 or 32). Overrides preset. |
 | `NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION` | (preset) | Candidate list size during index build. Overrides preset. |
 | `NORNICDB_VECTOR_HNSW_EF_SEARCH` | (preset) | Candidate list size during search; higher = better recall, slower. Overrides preset. |
@@ -302,10 +310,41 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | Preset | M | efConstruction | efSearch | Use case |
 |--------|---|----------------|----------|----------|
 | `fast` | 16 | 100 | 50 | Faster queries, lower recall. |
-| `balanced` | 16 | 200 | 100 | Default; good balance. |
+| `balanced` | 16 | 200 | 100 | Good balance. |
 | `accurate` | 32 | 400 | 200 | Higher recall, slower search. |
 
 To reduce latency (e.g. if search is ~4s), try `NORNICDB_VECTOR_ANN_QUALITY=fast` or lower `NORNICDB_VECTOR_HNSW_EF_SEARCH` (e.g. `50`). Ensure you have ≥ 5000 vectors so the pipeline uses HNSW instead of CPU brute-force.
+
+### A/B testing hybrid routing on/off
+
+Use the same data directory and run two profiles to compare startup/build time and query latency.
+
+**Profile A: hybrid routing ON (default)**
+
+```bash
+export NORNICDB_PERSIST_SEARCH_INDEXES=true
+export NORNICDB_VECTOR_ANN_QUALITY=fast
+export NORNICDB_KMEANS_MAX_ITERATIONS=5
+export NORNICDB_VECTOR_ROUTING_MODE=hybrid
+export NORNICDB_VECTOR_HYBRID_ROUTING_W_SEM=0.7
+export NORNICDB_VECTOR_HYBRID_ROUTING_W_LEX=0.3
+./bin/nornicdb serve
+```
+
+**Profile B: hybrid routing OFF (semantic-only routing)**
+
+```bash
+export NORNICDB_PERSIST_SEARCH_INDEXES=true
+export NORNICDB_VECTOR_ANN_QUALITY=fast
+export NORNICDB_KMEANS_MAX_ITERATIONS=5
+export NORNICDB_VECTOR_ROUTING_MODE=semantic
+./bin/nornicdb serve
+```
+
+Watch logs for:
+- `Vector search strategy: IVF-HNSW` or `k-means` routing mode
+- k-means completion and `iterations=...`
+- first query latency and p95 latency under representative load
 
 ## Heimdall AI Assistant
 

@@ -34,13 +34,14 @@ type DBStats struct {
 
 // Stats returns current database statistics.
 func (db *DB) Stats() DBStats {
-	db.mu.RLock()
-	defer db.mu.RUnlock()
-
 	stats := DBStats{}
-	if db.storage != nil {
-		nodeCount, _ := db.storage.NodeCount()
-		edgeCount, _ := db.storage.EdgeCount()
+	db.mu.RLock()
+	st := db.storage
+	db.mu.RUnlock()
+
+	if st != nil {
+		nodeCount, _ := st.NodeCount()
+		edgeCount, _ := st.EdgeCount()
 		stats.NodeCount = nodeCount
 		stats.EdgeCount = edgeCount
 	}

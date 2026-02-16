@@ -255,6 +255,10 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
+		traceStart := os.Getenv("NORNICDB_TRACE_REQUEST_START") != ""
+		if traceStart || r.URL.Path == "/status" || r.URL.Path == "/nornicdb/search" || r.URL.Path == "/nornicdb/embed/stats" || strings.HasPrefix(r.URL.Path, "/db/") {
+			log.Printf("[HTTP] START %s %s", r.Method, r.URL.Path)
+		}
 
 		// Wrap response writer to capture status
 		wrapped := &responseWriter{ResponseWriter: w, status: http.StatusOK}
@@ -265,6 +269,35 @@ func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 		if r.URL.Path != "/health" {
 			duration := time.Since(start)
 			s.logRequest(r, wrapped.status, duration)
+		}
+	})
+}
+
+// requestTimeoutMiddleware bounds handler latency for critical API paths that
+// otherwise may appear to hang under lock contention.
+func (s *Server) requestTimeoutMiddleware(next http.Handler) http.Handler {
+	statusTimeout := 5 * time.Second
+	embedStatsTimeout := 2 * time.Second
+	searchTimeout := 20 * time.Second
+	txTimeout := 30 * time.Second
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case path == "/status":
+			http.TimeoutHandler(next, statusTimeout, "request timeout: status busy").ServeHTTP(w, r)
+			return
+		case path == "/nornicdb/embed/stats":
+			http.TimeoutHandler(next, embedStatsTimeout, "request timeout: embed stats busy").ServeHTTP(w, r)
+			return
+		case path == "/nornicdb/search":
+			http.TimeoutHandler(next, searchTimeout, "request timeout: search busy").ServeHTTP(w, r)
+			return
+		case strings.HasPrefix(path, "/db/") && strings.Contains(path, "/tx"):
+			http.TimeoutHandler(next, txTimeout, "request timeout: transaction busy").ServeHTTP(w, r)
+			return
+		default:
+			next.ServeHTTP(w, r)
 		}
 	})
 }

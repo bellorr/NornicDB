@@ -16,8 +16,15 @@ import (
 // relationship inference (Auto-TLP / auto-links) also runs for server-side
 // embeddings (i.e., when a node was stored without embeddings initially).
 func (db *DB) onNodeEmbedded(node *storage.Node) {
-	db.indexNodeFromEvent(node)
-	db.runInferenceForEmbeddedNode(node)
+	if node == nil {
+		return
+	}
+	// Keep embed worker hot: index/inference can be expensive, so run asynchronously.
+	nodeCopy := storage.CopyNode(node)
+	go func(n *storage.Node) {
+		db.indexNodeFromEvent(n)
+		db.runInferenceForEmbeddedNode(n)
+	}(nodeCopy)
 }
 
 func (db *DB) runInferenceForEmbeddedNode(node *storage.Node) {

@@ -616,6 +616,32 @@ type Server struct {
 	dbConfigStore         *dbconfig.Store             // per-DB config overrides (embedding, search, etc.)
 }
 
+// ensureSearchBuildStartedForKnownDatabases reconciles search-service startup for
+// databases known to DatabaseManager, including metadata-only empty databases.
+// It is safe to call repeatedly; per-db build start is idempotent.
+func (s *Server) ensureSearchBuildStartedForKnownDatabases() {
+	if s == nil || s.db == nil || s.dbManager == nil {
+		return
+	}
+	for _, info := range s.dbManager.ListDatabases() {
+		if info == nil || info.Name == "" || info.Name == "system" {
+			continue
+		}
+		status := s.db.GetDatabaseSearchStatus(info.Name)
+		if status.Initialized {
+			continue
+		}
+		storageEngine, err := s.dbManager.GetStorage(info.Name)
+		if err != nil {
+			log.Printf("⚠️ startup search reconcile: storage for db %s unavailable: %v", info.Name, err)
+			continue
+		}
+		if _, err := s.db.EnsureSearchIndexesBuildStarted(info.Name, storageEngine); err != nil {
+			log.Printf("⚠️ startup search reconcile: failed for db %s: %v", info.Name, err)
+		}
+	}
+}
+
 // mcpToolRunnerAdapter adapts pkg/mcp.Server to heimdall.InMemoryToolRunner so the agentic loop
 // can expose store, recall, discover, link, task, tasks to the LLM and execute them in process.
 // allowlist: nil = all tools, empty = no tools, non-empty = only those names.
@@ -899,15 +925,15 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 	}
 
 	s := &Server{
-		config:          config,
-		db:              db,
-		dbManager:       dbManager,
-		auth:            authenticator,
-		mcpServer:       mcpServer,
-		graphqlHandler:  graphql.NewHandler(db, dbManager),
-		basicAuthCache:  auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
-		searchServices:  make(map[string]*search.Service),
-		executors:       make(map[string]*cypher.StorageExecutor),
+		config:         config,
+		db:             db,
+		dbManager:      dbManager,
+		auth:           authenticator,
+		mcpServer:      mcpServer,
+		graphqlHandler: graphql.NewHandler(db, dbManager),
+		basicAuthCache: auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
+		searchServices: make(map[string]*search.Service),
+		executors:      make(map[string]*cypher.StorageExecutor),
 	}
 
 	// ==========================================================================
@@ -1213,6 +1239,22 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		}
 		return out
 	})
+
+	// Reconcile search-service startup for metadata-only or late-created databases.
+	// DB.Open() warms namespaces present in storage; this loop ensures known DB metadata
+	// also gets initialized, and keeps doing so without requiring first-search triggers.
+	s.ensureSearchBuildStartedForKnownDatabases()
+	go func() {
+		ticker := time.NewTicker(2 * time.Second)
+		defer ticker.Stop()
+		for {
+			if s.closed.Load() {
+				return
+			}
+			s.ensureSearchBuildStartedForKnownDatabases()
+			<-ticker.C
+		}
+	}()
 
 	// Wire MCP to use per-database executors when invoked from the agentic loop (so link/store/recall use the request's database)
 	if mcpServer != nil && dbManager != nil {

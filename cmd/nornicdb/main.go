@@ -23,10 +23,10 @@ import (
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/decay"
 	"github.com/orneryd/nornicdb/pkg/gpu"
-	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/pool"
 	"github.com/orneryd/nornicdb/pkg/server"
+	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/orneryd/nornicdb/ui"
 )
 
@@ -557,20 +557,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 		fmt.Println("   ✅ Search indexes ready")
 	}
 
-	// Initialize DatabaseManager for multi-database support (needed for user storage)
+	// Use system namespace storage directly for auth bootstrap.
+	// Server.New() initializes the shared DatabaseManager once for runtime usage.
 	storageEngine := db.GetBaseStorageForManager()
-	globalConfig := config.LoadFromEnv()
-	multiDBConfig := &multidb.Config{
-		DefaultDatabase:  globalConfig.Database.DefaultDatabase,
-		SystemDatabase:   "system",
-		MaxDatabases:     0, // Unlimited
-		AllowDropDefault: false,
-	}
-
-	dbManager, err := multidb.NewDatabaseManager(storageEngine, multiDBConfig)
-	if err != nil {
-		return fmt.Errorf("failed to initialize database manager: %w", err)
-	}
+	systemStorage := storage.NewNamespacedEngine(storageEngine, "system")
 
 	// Setup authentication
 	var authenticator *auth.Authenticator
@@ -590,12 +580,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 		// Use configured default admin username (from env/config, default: "admin")
 		if cfg.Auth.InitialUsername != "" {
 			authConfig.DefaultAdminUsername = cfg.Auth.InitialUsername
-		}
-
-		// Get system database storage for user persistence
-		systemStorage, storageErr := dbManager.GetStorage("system")
-		if storageErr != nil {
-			return fmt.Errorf("failed to get system database storage: %w", storageErr)
 		}
 
 		var authErr error
@@ -650,8 +634,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 		server.SetUIAssets(ui.Assets)
 	}
 
-	// Pass dbManager to server (it will use it if authenticator needs it)
-	// Note: dbManager is created earlier for authenticator initialization
 	httpServer, err := server.New(db, authenticator, serverConfig)
 	if err != nil {
 		return fmt.Errorf("creating server: %w", err)

@@ -168,6 +168,11 @@ type ClusterIndex struct {
 	centroidDrift     float32
 
 	clusterMu sync.RWMutex // Separate mutex for cluster operations
+
+	// Optional preferred seed embedding indices for k-means++ first centroid selection.
+	// When set, ClusterWithContext uses one of these as the first centroid, then
+	// proceeds with standard k-means++ distance-weighted selection.
+	preferredSeedIndices []int
 }
 
 // nodeUpdate tracks pending node reassignments for Tier 2 updates.
@@ -210,6 +215,16 @@ func NewClusterIndex(manager *Manager, embConfig *EmbeddingIndexConfig, kmeansCo
 		clusterMap:     make(map[int][]int),
 		pendingUpdates: make([]nodeUpdate, 0, 1000),
 	}
+}
+
+// Config returns a copy of the k-means configuration.
+func (ci *ClusterIndex) Config() KMeansConfig {
+	ci.clusterMu.RLock()
+	defer ci.clusterMu.RUnlock()
+	if ci.config == nil {
+		return *DefaultKMeansConfig()
+	}
+	return *ci.config
 }
 
 // Cluster performs k-means clustering on current embeddings.
@@ -288,6 +303,8 @@ func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 	copy(vectorsCopy, ci.cpuVectors)
 	initMethod := ci.config.InitMethod
 	maxIter := ci.config.MaxIterations
+	preferredSeeds := append([]int(nil), ci.preferredSeedIndices...)
+	ci.preferredSeedIndices = nil
 
 	ci.mu.Unlock()
 	ci.clusterMu.Unlock()
@@ -298,7 +315,7 @@ func (ci *ClusterIndex) ClusterWithContext(ctx context.Context) error {
 	var centroids [][]float32
 	var err error
 	if initMethod == "kmeans++" {
-		centroids, err = initCentroidsKMeansPlusPlusFromVectors(vectorsCopy, n, dims, k)
+		centroids, err = initCentroidsKMeansPlusPlusSeededFromVectors(vectorsCopy, n, dims, k, preferredSeeds)
 	} else {
 		centroids, err = initCentroidsRandomFromVectors(vectorsCopy, n, dims, k)
 	}
@@ -384,8 +401,25 @@ func optimalK(n int) int {
 // initCentroidsKMeansPlusPlusFromVectors initializes centroids using k-means++ on a vector slice.
 // Used by ClusterWithContext when running on a copy so clusterMu can be released during iteration.
 func initCentroidsKMeansPlusPlusFromVectors(vectors []float32, n, dims, k int) ([][]float32, error) {
+	return initCentroidsKMeansPlusPlusSeededFromVectors(vectors, n, dims, k, nil)
+}
+
+// initCentroidsKMeansPlusPlusSeededFromVectors initializes centroids using k-means++.
+// If preferredSeeds is non-empty, the first centroid is chosen from that subset.
+func initCentroidsKMeansPlusPlusSeededFromVectors(vectors []float32, n, dims, k int, preferredSeeds []int) ([][]float32, error) {
 	centroids := make([][]float32, k)
 	firstIdx := rand.Intn(n)
+	if len(preferredSeeds) > 0 {
+		valid := make([]int, 0, len(preferredSeeds))
+		for _, idx := range preferredSeeds {
+			if idx >= 0 && idx < n {
+				valid = append(valid, idx)
+			}
+		}
+		if len(valid) > 0 {
+			firstIdx = valid[rand.Intn(len(valid))]
+		}
+	}
 	centroids[0] = make([]float32, dims)
 	start := firstIdx * dims
 	copy(centroids[0], vectors[start:start+dims])
@@ -423,6 +457,36 @@ func initCentroidsKMeansPlusPlusFromVectors(vectors []float32, n, dims, k int) (
 		}
 	}
 	return centroids, nil
+}
+
+// SetPreferredSeedIndices sets optional preferred indices for the next Cluster/ClusterWithContext call.
+// Indices outside the current embedding range are ignored during clustering.
+func (ci *ClusterIndex) SetPreferredSeedIndices(indices []int) {
+	ci.clusterMu.Lock()
+	ci.mu.Lock()
+	defer ci.mu.Unlock()
+	defer ci.clusterMu.Unlock()
+	if len(indices) == 0 {
+		ci.preferredSeedIndices = nil
+		return
+	}
+	ci.preferredSeedIndices = append(ci.preferredSeedIndices[:0], indices...)
+}
+
+// GetIndicesForNodeIDs returns embedding indices for the provided node IDs.
+func (ci *ClusterIndex) GetIndicesForNodeIDs(nodeIDs []string) []int {
+	if len(nodeIDs) == 0 {
+		return nil
+	}
+	ci.mu.RLock()
+	defer ci.mu.RUnlock()
+	out := make([]int, 0, len(nodeIDs))
+	for _, id := range nodeIDs {
+		if idx, ok := ci.idToIndex[id]; ok {
+			out = append(out, idx)
+		}
+	}
+	return out
 }
 
 // initCentroidsRandomFromVectors initializes centroids by random selection from a vector slice.

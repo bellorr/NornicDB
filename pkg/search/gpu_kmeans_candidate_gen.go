@@ -20,6 +20,7 @@ import (
 type GPUKMeansCandidateGen struct {
 	clusterIndex        *gpu.ClusterIndex
 	numClustersToSearch int
+	clusterSelector     func(ctx context.Context, query []float32, defaultN int) []int
 }
 
 func NewGPUKMeansCandidateGen(clusterIndex *gpu.ClusterIndex, numClustersToSearch int) *GPUKMeansCandidateGen {
@@ -32,12 +33,24 @@ func NewGPUKMeansCandidateGen(clusterIndex *gpu.ClusterIndex, numClustersToSearc
 	}
 }
 
+// SetClusterSelector sets an optional custom cluster selector used for routing.
+func (g *GPUKMeansCandidateGen) SetClusterSelector(fn func(ctx context.Context, query []float32, defaultN int) []int) *GPUKMeansCandidateGen {
+	g.clusterSelector = fn
+	return g
+}
+
 func (g *GPUKMeansCandidateGen) SearchCandidates(ctx context.Context, query []float32, k int, minSimilarity float64) ([]Candidate, error) {
 	if g.clusterIndex == nil || !g.clusterIndex.IsClustered() {
 		return nil, fmt.Errorf("gpu k-means candidate gen requires clustered index")
 	}
 
-	clusterIDs := g.clusterIndex.FindNearestClusters(query, g.numClustersToSearch)
+	clusterIDs := []int(nil)
+	if g.clusterSelector != nil {
+		clusterIDs = g.clusterSelector(ctx, query, g.numClustersToSearch)
+	}
+	if len(clusterIDs) == 0 {
+		clusterIDs = g.clusterIndex.FindNearestClusters(query, g.numClustersToSearch)
+	}
 	if len(clusterIDs) == 0 {
 		return []Candidate{}, nil
 	}
@@ -76,4 +89,3 @@ func (g *GPUKMeansCandidateGen) SearchCandidates(ctx context.Context, query []fl
 
 	return out, nil
 }
-

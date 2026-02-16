@@ -35,4 +35,5 @@ func TestSearchBuildSettingsRoundTrip(t *testing.T) {
 	require.Equal(t, snap.BM25, got.BM25)
 	require.Equal(t, snap.Vector, got.Vector)
 	require.Equal(t, snap.HNSW, got.HNSW)
+	require.Equal(t, snap.Routing, got.Routing)
 }

@@ -6,8 +6,11 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/orneryd/nornicdb/pkg/embed"
 	"github.com/stretchr/testify/require"
 )
 
@@ -146,4 +149,152 @@ func TestDB_EmbedQueryForDB_ResolverMismatchDims_ReturnsErrQueryEmbeddingDimensi
 	require.Nil(t, vec)
 	require.Contains(t, err.Error(), "index dims 768")
 	require.Contains(t, err.Error(), "query dims 8")
+}
+
+func TestEmbedConfigKey_LocalZeroAndAutoLayers_AreEquivalent(t *testing.T) {
+	cfgZero := &embed.Config{
+		Provider:   "local",
+		Model:      "bge-m3",
+		Dimensions: 1024,
+		ModelsDir:  "models",
+		GPULayers:  0,
+	}
+	cfgAuto := &embed.Config{
+		Provider:   "local",
+		Model:      "bge-m3",
+		Dimensions: 1024,
+		ModelsDir:  "models",
+		GPULayers:  -1,
+	}
+	require.Equal(t, embedConfigKey(cfgZero), embedConfigKey(cfgAuto))
+}
+
+func TestDB_GetOrCreateEmbedderForDB_LocalEquivalentConfig_AliasesDefaultEmbedder(t *testing.T) {
+	defaultEmbedder := &chunkingTestEmbedder{dims: 1024}
+	defaultCfg := &embed.Config{
+		Provider:   "local",
+		Model:      "bge-m3",
+		Dimensions: 1024,
+		ModelsDir:  "models",
+		GPULayers:  0,
+	}
+	db := &DB{
+		embedQueue: &EmbedQueue{embedder: defaultEmbedder},
+		embedderRegistry: map[string]embed.Embedder{
+			embedConfigKey(defaultCfg): defaultEmbedder,
+		},
+		defaultEmbedKey: embedConfigKey(defaultCfg),
+	}
+	db.embedConfigForDB = func(dbName string) (*embed.Config, error) {
+		return &embed.Config{
+			Provider:   "local",
+			Model:      "bge-m3",
+			Dimensions: 1024,
+			ModelsDir:  "models",
+			// Equivalent local default expressed as -1 instead of 0.
+			GPULayers: -1,
+		}, nil
+	}
+
+	got, err := db.getOrCreateEmbedderForDB("translations")
+	require.NoError(t, err)
+	require.Same(t, defaultEmbedder, got)
+
+	aliasKey := embedConfigKey(&embed.Config{
+		Provider:   "local",
+		Model:      "bge-m3",
+		Dimensions: 1024,
+		ModelsDir:  "models",
+		GPULayers:  -1,
+	})
+
+	db.embedderRegistryMu.RLock()
+	aliased := db.embedderRegistry[aliasKey]
+	db.embedderRegistryMu.RUnlock()
+	require.Same(t, defaultEmbedder, aliased)
+}
+
+type factoryTestEmbedder struct {
+	dims int
+}
+
+func (e *factoryTestEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	vec := make([]float32, e.dims)
+	if e.dims > 0 {
+		vec[0] = 1
+	}
+	return vec, nil
+}
+func (e *factoryTestEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i], _ = e.Embed(ctx, texts[i])
+	}
+	return out, nil
+}
+func (e *factoryTestEmbedder) Dimensions() int { return e.dims }
+func (e *factoryTestEmbedder) Model() string   { return "factory-test" }
+
+func TestDB_GetOrCreateEmbedderForDB_SingleFlightAndNoStatsBlocking(t *testing.T) {
+	fallback := &chunkingTestEmbedder{dims: 8}
+	db := &DB{
+		embedQueue: &EmbedQueue{embedder: fallback},
+	}
+	db.embedConfigForDB = func(dbName string) (*embed.Config, error) {
+		return &embed.Config{
+			Provider:   "openai",
+			Model:      "test-model",
+			Dimensions: 8,
+			APIURL:     "https://example.invalid",
+			APIKey:     "k",
+		}, nil
+	}
+
+	var createCalls atomic.Int64
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	db.embedderFactory = func(cfg *embed.Config) (embed.Embedder, error) {
+		createCalls.Add(1)
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+		<-release
+		return &factoryTestEmbedder{dims: cfg.Dimensions}, nil
+	}
+
+	const workers = 6
+	errCh := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		go func() {
+			_, err := db.getOrCreateEmbedderForDB("translations")
+			errCh <- err
+		}()
+	}
+
+	select {
+	case <-started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("embedder factory did not start")
+	}
+
+	// While embedder creation is in-flight, stats paths should remain responsive.
+	statsDone := make(chan struct{}, 1)
+	go func() {
+		_ = db.EmbeddingCountCached()
+		_ = db.PendingEmbeddingsCount()
+		statsDone <- struct{}{}
+	}()
+	select {
+	case <-statsDone:
+	case <-time.After(300 * time.Millisecond):
+		t.Fatal("stats calls blocked while embedder creation in-flight")
+	}
+
+	close(release)
+
+	for i := 0; i < workers; i++ {
+		require.NoError(t, <-errCh)
+	}
+	require.Equal(t, int64(1), createCalls.Load(), "expected single-flight embedder creation")
 }

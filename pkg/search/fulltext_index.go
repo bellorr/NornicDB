@@ -516,6 +516,68 @@ func (f *FulltextIndex) GetDocument(id string) (string, bool) {
 	return text, exists
 }
 
+// LexicalSeedDocIDs returns document IDs selected from high-IDF terms to provide
+// lexical priors for clustering seed selection.
+func (f *FulltextIndex) LexicalSeedDocIDs(maxTerms, docsPerTerm int) []string {
+	if maxTerms <= 0 || docsPerTerm <= 0 {
+		return nil
+	}
+	f.mu.RLock()
+	type termEntry struct {
+		term string
+		idf  float64
+		df   int
+	}
+	terms := make([]termEntry, 0, len(f.invertedIndex))
+	for term, postings := range f.invertedIndex {
+		df := len(postings)
+		if df < 2 {
+			continue
+		}
+		idf := f.calculateIDF(term)
+		if idf > 0 {
+			terms = append(terms, termEntry{term: term, idf: idf, df: df})
+		}
+	}
+	sort.Slice(terms, func(i, j int) bool {
+		if terms[i].idf == terms[j].idf {
+			return terms[i].df < terms[j].df
+		}
+		return terms[i].idf > terms[j].idf
+	})
+	if len(terms) > maxTerms {
+		terms = terms[:maxTerms]
+	}
+	seen := make(map[string]struct{}, maxTerms*docsPerTerm)
+	out := make([]string, 0, maxTerms*docsPerTerm)
+	for _, t := range terms {
+		postings := f.invertedIndex[t.term]
+		type docTF struct {
+			id string
+			tf int
+		}
+		docs := make([]docTF, 0, len(postings))
+		for id, tf := range postings {
+			docs = append(docs, docTF{id: id, tf: tf})
+		}
+		sort.Slice(docs, func(i, j int) bool { return docs[i].tf > docs[j].tf })
+		limit := docsPerTerm
+		if limit > len(docs) {
+			limit = len(docs)
+		}
+		for i := 0; i < limit; i++ {
+			id := docs[i].id
+			if _, ok := seen[id]; ok {
+				continue
+			}
+			seen[id] = struct{}{}
+			out = append(out, id)
+		}
+	}
+	f.mu.RUnlock()
+	return out
+}
+
 // tokenize splits text into lowercase tokens.
 // Removes punctuation and common stop words.
 func tokenize(text string) []string {

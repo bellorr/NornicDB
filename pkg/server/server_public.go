@@ -54,19 +54,20 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	stats := s.Stats()
 
 	// Calculate stats across all user databases (excluding system).
-	// Prefer the base storage cached per-namespace counters for O(1) lookups,
-	// and fall back to dbManager-based aggregation if needed.
+	// Primary source: storage-maintained cached per-namespace counters
+	// (NodeCountByPrefix/EdgeCountByPrefix), which are incrementally updated.
+	// Fallback: DatabaseManager metadata (may be stale).
 	var totalNodeCount, totalEdgeCount int64
 	databaseCount := 0
 
+	usedCachedPrefixCounts := false
 	if base := s.db.GetBaseStorageForManager(); base != nil {
 		if lister, ok := base.(interface{ ListNamespaces() []string }); ok {
 			if statsEngine, ok := base.(interface {
 				NodeCountByPrefix(prefix string) (int64, error)
 				EdgeCountByPrefix(prefix string) (int64, error)
 			}); ok {
-				namespaces := lister.ListNamespaces()
-				for _, ns := range namespaces {
+				for _, ns := range lister.ListNamespaces() {
 					select {
 					case <-r.Context().Done():
 						return
@@ -79,17 +80,19 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 					prefix := ns + ":"
 					if n, err := statsEngine.NodeCountByPrefix(prefix); err == nil {
 						totalNodeCount += n
+						usedCachedPrefixCounts = true
 					}
 					if e, err := statsEngine.EdgeCountByPrefix(prefix); err == nil {
 						totalEdgeCount += e
+						usedCachedPrefixCounts = true
 					}
 				}
 			}
 		}
 	}
 
-	// Fallback: use dbManager to aggregate.
-	if databaseCount == 0 && s.dbManager != nil {
+	// Fallback when cached prefix counters are not available.
+	if !usedCachedPrefixCounts && s.dbManager != nil {
 		databases := s.dbManager.ListDatabases()
 		for _, dbInfo := range databases {
 			select {
@@ -101,15 +104,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 			if dbName == "system" {
 				continue
 			}
-			engine, err := s.dbManager.GetStorage(dbName)
-			if err != nil {
-				continue
-			}
 			databaseCount++
-			nodeCount, _ := engine.NodeCount()
-			edgeCount, _ := engine.EdgeCount()
-			totalNodeCount += nodeCount
-			totalEdgeCount += edgeCount
+			totalNodeCount += dbInfo.NodeCount
 		}
 	}
 
@@ -154,8 +150,8 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"status": "running",
 		"startup": map[string]interface{}{
-			"phase":                    startupPhase,
-			"search_ready_databases":   searchReadyDatabases,
+			"phase":                     startupPhase,
+			"search_ready_databases":    searchReadyDatabases,
 			"search_building_databases": searchBuildingDatabases,
 		},
 		"server": map[string]interface{}{

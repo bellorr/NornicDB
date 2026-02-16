@@ -922,12 +922,9 @@ func (n *NamespacedEngine) AddToPendingEmbeddings(nodeID NodeID) {
 
 // LastWriteTime returns the last known write time from the underlying engine, if available.
 func (n *NamespacedEngine) LastWriteTime() time.Time {
-	if n == nil {
-		return time.Time{}
-	}
-	if p, ok := n.inner.(interface{ LastWriteTime() time.Time }); ok {
-		return p.LastWriteTime()
-	}
+	// Intentionally return zero here because a global LastWriteTime from the
+	// underlying engine is not namespace-scoped and can cause false rebuilds
+	// across databases.
 	return time.Time{}
 }
 

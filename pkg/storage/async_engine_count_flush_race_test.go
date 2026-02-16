@@ -30,9 +30,9 @@ func TestAsyncEngine_NodeCount_BlocksDuringFlush(t *testing.T) {
 	t.Cleanup(func() { _ = base.Close() })
 
 	inner := &blockingBulkCreateEngine{
-		Engine:                base,
-		updateNodeStarted:      make(chan struct{}),
-		allowUpdateNode:        make(chan struct{}),
+		Engine:            base,
+		updateNodeStarted: make(chan struct{}),
+		allowUpdateNode:   make(chan struct{}),
 	}
 
 	ae := NewAsyncEngine(inner, &AsyncEngineConfig{

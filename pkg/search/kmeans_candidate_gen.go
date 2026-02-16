@@ -42,6 +42,7 @@ type KMeansCandidateGen struct {
 	clusterIndex        *gpu.ClusterIndex
 	vectorIndex         *VectorIndex // For fallback and ID mapping
 	numClustersToSearch int           // Number of clusters to search (default: 3)
+	clusterSelector     func(ctx context.Context, query []float32, defaultN int) []int
 }
 
 // NewKMeansCandidateGen creates a new k-means candidate generator.
@@ -61,6 +62,13 @@ func NewKMeansCandidateGen(clusterIndex *gpu.ClusterIndex, vectorIndex *VectorIn
 	}
 }
 
+// SetClusterSelector sets an optional custom cluster selector used for routing.
+// When nil, the generator uses the default nearest-centroid routing.
+func (k *KMeansCandidateGen) SetClusterSelector(fn func(ctx context.Context, query []float32, defaultN int) []int) *KMeansCandidateGen {
+	k.clusterSelector = fn
+	return k
+}
+
 // SearchCandidates generates candidates using k-means cluster routing.
 //
 // Algorithm:
@@ -77,11 +85,20 @@ func (k *KMeansCandidateGen) SearchCandidates(ctx context.Context, query []float
 		return bruteGen.SearchCandidates(ctx, query, limit, minSimilarity)
 	}
 
-	// Use SearchWithClusters to get candidates from clusters
-	// This already handles: finding nearest clusters, getting members, and exact scoring
-	// We'll use it to get a larger candidate pool, then extract IDs for approximate scoring
 	candidateLimit := calculateCandidateLimit(limit)
-	results, err := k.clusterIndex.SearchWithClusters(query, candidateLimit, k.numClustersToSearch)
+	clusterIDs := []int(nil)
+	if k.clusterSelector != nil {
+		clusterIDs = k.clusterSelector(ctx, query, k.numClustersToSearch)
+	}
+	var results []gpu.SearchResult
+	var err error
+	if len(clusterIDs) > 0 {
+		ids := k.clusterIndex.GetClusterMemberIDs(clusterIDs)
+		results, err = k.clusterIndex.ScoreSubset(query, ids)
+	} else {
+		// Default nearest-centroid routing.
+		results, err = k.clusterIndex.SearchWithClusters(query, candidateLimit, k.numClustersToSearch)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cluster search failed: %w", err)
 	}
@@ -90,13 +107,9 @@ func (k *KMeansCandidateGen) SearchCandidates(ctx context.Context, query []float
 		return []Candidate{}, nil
 	}
 
-	// Convert SearchResult to Candidate with approximate scores
-	// For k-means routing, we use the exact scores from SearchWithClusters as approximate
-	// (they're already computed, so no extra cost)
-	// In a true two-stage pipeline, we'd compute centroid similarity here instead
+	// Convert SearchResult to Candidate with approximate scores.
 	candidates := make([]Candidate, 0, len(results))
 
-	// Use the exact scores from SearchWithClusters (they're already computed)
 	for _, result := range results {
 		select {
 		case <-ctx.Done():
@@ -112,6 +125,9 @@ func (k *KMeansCandidateGen) SearchCandidates(ctx context.Context, query []float
 		}
 	}
 
+	if len(candidates) > candidateLimit {
+		candidates = candidates[:candidateLimit]
+	}
 	return candidates, nil
 }
 

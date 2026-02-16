@@ -37,7 +37,7 @@ func TestIVFHNSW_UsedAfterClustering_CPUOnly(t *testing.T) {
 
 	require.NoError(t, svc.TriggerClustering(context.Background()))
 
-	pipeline, err := svc.getOrCreateVectorPipeline()
+	pipeline, err := svc.getOrCreateVectorPipeline(context.Background())
 	require.NoError(t, err)
 
 	// In CPU-only mode, centroid routing should select IVF-HNSW once per-cluster

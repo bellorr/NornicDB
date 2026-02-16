@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/embed"
@@ -35,11 +37,12 @@ type EmbedWorker struct {
 	onQueueEmpty func(processedCount int)
 
 	// Stats
-	mu        sync.Mutex
-	processed int
-	failed    int
-	running   bool
-	closed    bool // Set to true when Close() is called
+	mu sync.Mutex
+	// Atomic stats fields so /embed/stats never waits on worker map locks.
+	processed atomic.Int64
+	failed    atomic.Int64
+	running   atomic.Bool
+	closed    atomic.Bool // Set to true when Close() is called
 
 	// Recently processed node IDs to prevent re-processing before DB commit is visible
 	// This prevents the same node being processed multiple times in quick succession
@@ -59,6 +62,10 @@ type EmbedWorker struct {
 
 	// workersStarted is true once StartWorkers() has been called (used when DeferWorkerStart is true).
 	workersStarted bool
+
+	// initialScanDone ensures startup refresh/index scan runs once for the whole worker pool,
+	// not once per worker goroutine.
+	initialScanDone bool
 }
 
 // EmbedWorkerConfig holds configuration for the embedding worker.
@@ -155,7 +162,7 @@ func NewEmbedWorker(embedder embed.Embedder, storage storage.Engine, config *Emb
 func (ew *EmbedWorker) StartWorkers() {
 	ew.mu.Lock()
 	defer ew.mu.Unlock()
-	if ew.closed || ew.workersStarted {
+	if ew.closed.Load() || ew.workersStarted {
 		return
 	}
 	ew.workersStarted = true
@@ -200,12 +207,9 @@ func (ew *EmbedWorker) SetOnQueueEmpty(fn func(processedCount int)) {
 // Trigger wakes up the worker to check for nodes without embeddings.
 // Call this after creating a new node.
 func (ew *EmbedWorker) Trigger() {
-	ew.mu.Lock()
-	if ew.closed {
-		ew.mu.Unlock()
+	if ew.closed.Load() {
 		return
 	}
-	ew.mu.Unlock()
 
 	select {
 	case ew.trigger <- struct{}{}:
@@ -223,12 +227,10 @@ type WorkerStats struct {
 
 // Stats returns current worker statistics.
 func (ew *EmbedWorker) Stats() WorkerStats {
-	ew.mu.Lock()
-	defer ew.mu.Unlock()
 	return WorkerStats{
-		Running:   ew.running,
-		Processed: ew.processed,
-		Failed:    ew.failed,
+		Running:   ew.running.Load(),
+		Processed: int(ew.processed.Load()),
+		Failed:    int(ew.failed.Load()),
 	}
 }
 
@@ -237,12 +239,12 @@ func (ew *EmbedWorker) Stats() WorkerStats {
 // which is necessary when regenerating all embeddings.
 func (ew *EmbedWorker) Reset() {
 	ew.mu.Lock()
-	if ew.closed {
+	if ew.closed.Load() {
 		ew.mu.Unlock()
 		return
 	}
 	// Mark as resetting to prevent Trigger() from sending during reset
-	wasRunning := ew.running
+	wasRunning := ew.running.Load()
 	ew.mu.Unlock()
 
 	fmt.Println("🔄 Resetting embed worker for regeneration...")
@@ -250,17 +252,27 @@ func (ew *EmbedWorker) Reset() {
 	// Cancel context to stop current processing
 	ew.cancel()
 
-	// Wait for worker to exit (it will exit when context is cancelled)
-	ew.wg.Wait()
+	// Wait for worker to exit, but do not block forever if embedder backend is stuck.
+	waitDone := make(chan struct{}, 1)
+	go func() {
+		ew.wg.Wait()
+		waitDone <- struct{}{}
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(10 * time.Second):
+		log.Printf("⚠️ embed worker reset: timeout waiting for worker exit; continuing with fresh worker")
+	}
 
 	// Reset state under lock
 	ew.mu.Lock()
-	ew.processed = 0
-	ew.failed = 0
-	ew.running = false
+	ew.initialScanDone = false
 	ew.recentlyProcessed = make(map[string]time.Time)
 	ew.loggedSkip = make(map[string]bool)
 	ew.mu.Unlock()
+	ew.processed.Store(0)
+	ew.failed.Store(0)
+	ew.running.Store(false)
 
 	// Create new context (don't recreate trigger channel - just drain it)
 	ew.ctx, ew.cancel = context.WithCancel(context.Background())
@@ -281,9 +293,7 @@ func (ew *EmbedWorker) Reset() {
 
 // Close gracefully shuts down the worker.
 func (ew *EmbedWorker) Close() {
-	ew.mu.Lock()
-	ew.closed = true
-	ew.mu.Unlock()
+	ew.closed.Store(true)
 
 	// Stop any pending debounce timer
 	ew.clusterDebounceMu.Lock()
@@ -294,8 +304,18 @@ func (ew *EmbedWorker) Close() {
 	ew.clusterDebounceMu.Unlock()
 
 	ew.cancel()
-	close(ew.trigger)
-	ew.wg.Wait()
+	// Do NOT close trigger channel: Trigger() can still race and send, which would panic.
+	// Context cancellation is enough to stop workers.
+	waitDone := make(chan struct{}, 1)
+	go func() {
+		ew.wg.Wait()
+		waitDone <- struct{}{}
+	}()
+	select {
+	case <-waitDone:
+	case <-time.After(10 * time.Second):
+		log.Printf("⚠️ embed worker close: timeout waiting for worker exit; forcing shutdown continuation")
+	}
 }
 
 // scheduleClusteringDebounced accumulates embedding counts and debounces the k-means trigger.
@@ -360,14 +380,13 @@ func (ew *EmbedWorker) worker() {
 		for {
 			ew.mu.Lock()
 			hasEmbedder := ew.embedder != nil
-			closed := ew.closed
 			ew.mu.Unlock()
 
 			if hasEmbedder {
 				fmt.Println("✅ Embedding model loaded, worker active")
 				break
 			}
-			if closed {
+			if ew.closed.Load() {
 				return
 			}
 
@@ -384,10 +403,19 @@ func (ew *EmbedWorker) worker() {
 	time.Sleep(500 * time.Millisecond)
 
 	// Refresh the pending embeddings index on startup to catch any nodes
-	// that need embedding (e.g., after restart, bulk import, or cleared embeddings)
-	fmt.Println("🔍 Initial scan for nodes needing embeddings...")
-	// Refresh index to clean up stale entries from deleted nodes
-	ew.refreshEmbeddingIndex()
+	// that need embedding (e.g., after restart, bulk import, or cleared embeddings).
+	// Run this once for the whole worker pool to avoid duplicate startup scans/logs.
+	ew.mu.Lock()
+	doInitialScan := !ew.initialScanDone
+	if doInitialScan {
+		ew.initialScanDone = true
+	}
+	ew.mu.Unlock()
+	if doInitialScan {
+		fmt.Println("🔍 Initial scan for nodes needing embeddings...")
+		// Refresh index to clean up stale entries from deleted nodes
+		ew.refreshEmbeddingIndex()
+	}
 
 	ew.processUntilEmpty()
 
@@ -469,14 +497,10 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	default:
 	}
 
-	ew.mu.Lock()
-	ew.running = true
-	ew.mu.Unlock()
+	ew.running.Store(true)
 
 	defer func() {
-		ew.mu.Lock()
-		ew.running = false
-		ew.mu.Unlock()
+		ew.running.Store(false)
 	}()
 
 	// Serialize find+claim so only one worker can take a node at a time (prevents double-processing).
@@ -571,9 +595,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	if err != nil {
 		fmt.Printf("⚠️  Failed to embed node %s: %v\n", node.ID, err)
 		ew.addNodeToPendingEmbeddings(node.ID) // Re-queue so another worker can retry
-		ew.mu.Lock()
-		ew.failed++
-		ew.mu.Unlock()
+		ew.failed.Add(1)
 		return true
 	}
 
@@ -581,9 +603,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	if len(embeddings) == 0 || embeddings[0] == nil || len(embeddings[0]) == 0 {
 		fmt.Printf("⚠️  Failed to generate embedding for node %s: empty embedding\n", node.ID)
 		ew.addNodeToPendingEmbeddings(node.ID) // Re-queue so another worker can retry
-		ew.mu.Lock()
-		ew.failed++
-		ew.mu.Unlock()
+		ew.failed.Add(1)
 		return true // Failed but we tried - continue to next node
 	}
 
@@ -687,9 +707,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		}
 		fmt.Printf("⚠️  Failed to update node %s: %v\n", node.ID, updateErr)
 		ew.addNodeToPendingEmbeddings(node.ID) // Re-queue so another worker can retry
-		ew.mu.Lock()
-		ew.failed++
-		ew.mu.Unlock()
+		ew.failed.Add(1)
 		return true // Failed but we tried - continue to next node
 	}
 
@@ -701,9 +719,9 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// Remove from pending embeddings index (O(1) operation)
 	ew.markNodeEmbedded(node.ID)
 
-	ew.mu.Lock()
-	ew.processed++
+	ew.processed.Add(1)
 	// Track this node as recently processed to prevent re-processing before DB commit is visible
+	ew.mu.Lock()
 	ew.recentlyProcessed[string(node.ID)] = time.Now()
 	ew.mu.Unlock()
 

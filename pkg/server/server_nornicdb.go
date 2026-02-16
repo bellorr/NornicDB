@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"sort"
+	"time"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
@@ -127,14 +128,37 @@ func (s *Server) handleEmbedTrigger(w http.ResponseWriter, r *http.Request) {
 // handleEmbedStats returns embedding worker statistics.
 func (s *Server) handleEmbedStats(w http.ResponseWriter, r *http.Request) {
 	stats := s.db.EmbedQueueStats()
+	// Keep contended stats reads bounded. total_embeddings uses authoritative
+	// aggregate count to avoid false zeros.
+	readIntWithTimeout := func(timeout time.Duration, fallback int, fn func() int) int {
+		done := make(chan int, 1)
+		go func() {
+			done <- fn()
+		}()
+		select {
+		case v := <-done:
+			return v
+		case <-time.After(timeout):
+			return fallback
+		}
+	}
+
+	// Use authoritative aggregate count so we never report a false zero.
+	// This may be a bit slower than cached-only reads, but correctness is required.
 	totalEmbeddings := s.db.EmbeddingCount()
-	vectorIndexDims := s.db.VectorIndexDimensions()
+	vectorIndexDims := readIntWithTimeout(100*time.Millisecond, s.config.EmbeddingDimensions, func() int {
+		return s.db.VectorIndexDimensionsCached()
+	})
+	pendingEmbeddings := readIntWithTimeout(100*time.Millisecond, -1, func() int {
+		return s.db.PendingEmbeddingsCount()
+	})
 
 	if stats == nil {
 		response := map[string]interface{}{
 			"enabled":                 false,
 			"message":                 "Auto-embed not enabled",
 			"total_embeddings":        totalEmbeddings,
+			"pending_embeddings":      pendingEmbeddings,
 			"configured_model":        s.config.EmbeddingModel,
 			"configured_dimensions":   s.config.EmbeddingDimensions,
 			"configured_provider":     s.config.EmbeddingProvider,
@@ -147,6 +171,7 @@ func (s *Server) handleEmbedStats(w http.ResponseWriter, r *http.Request) {
 		"enabled":                 true,
 		"stats":                   stats,
 		"total_embeddings":        totalEmbeddings,
+		"pending_embeddings":      pendingEmbeddings,
 		"configured_model":        s.config.EmbeddingModel,
 		"configured_dimensions":   s.config.EmbeddingDimensions,
 		"configured_provider":     s.config.EmbeddingProvider,
@@ -293,15 +318,25 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Get or create search service for this database
-	// Search services are cached per database since indexes are namespace-aware
-	// (the storage engine already filters to the correct namespace)
-	ctx := r.Context()
-	searchSvc, err := s.db.EnsureSearchIndexesBuilt(ctx, dbName, storageEngine)
-	if err != nil {
-		log.Printf("⚠️ Failed to build search indexes for db %s: %v", dbName, err)
+	// Do not warm/build search on first request. Search readiness is a startup concern.
+	// If not ready yet, return 503 immediately (before query embedding work).
+	searchStatus := s.db.GetDatabaseSearchStatus(dbName)
+	if !searchStatus.Ready {
+		s.writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{
+			"error":          search.ErrSearchIndexBuilding.Error(),
+			"database":       dbName,
+			"search_status":  searchStatus,
+			"retryable":      true,
+			"http_code":      http.StatusServiceUnavailable,
+			"request_status": "search_not_ready",
+		})
+		return
 	}
-	if searchSvc == nil {
+
+	// Search service should already be initialized at startup once status is ready.
+	ctx := r.Context()
+	searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine)
+	if err != nil {
 		s.writeError(w, http.StatusServiceUnavailable, "search service unavailable", ErrInternalError)
 		return
 	}
@@ -316,6 +351,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		queryChunkOverlap = 50
 		maxQueryChunks    = 32
 		outerRRFK         = 60
+		embedTimeout      = 8 * time.Second
 	)
 
 	queryChunks := util.ChunkText(req.Query, queryChunkSize, queryChunkOverlap)
@@ -336,11 +372,33 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		return opts
 	}
+	// Bound embedding latency even if the embedder ignores context cancellation.
+	embedQuery := func(parent context.Context, q string) ([]float32, error) {
+		type embedResult struct {
+			emb []float32
+			err error
+		}
+		resultCh := make(chan embedResult, 1)
+		go func() {
+			embedCtx, cancelEmbed := context.WithTimeout(parent, embedTimeout)
+			emb, embedErr := s.db.EmbedQueryForDB(embedCtx, dbName, q)
+			cancelEmbed()
+			resultCh <- embedResult{emb: emb, err: embedErr}
+		}()
+		select {
+		case out := <-resultCh:
+			return out.emb, out.err
+		case <-parent.Done():
+			return nil, parent.Err()
+		case <-time.After(embedTimeout):
+			return nil, context.DeadlineExceeded
+		}
+	}
 
 	// Fast path: short query (single chunk). Try hybrid; fall back to BM25.
 	// Use per-DB query embedding so vector dims match the index for this database.
 	if len(queryChunks) <= 1 {
-		emb, embedErr := s.db.EmbedQueryForDB(ctx, dbName, req.Query)
+		emb, embedErr := embedQuery(ctx, req.Query)
 		if embedErr != nil {
 			if errors.Is(embedErr, nornicdb.ErrQueryEmbeddingDimensionMismatch) {
 				s.writeError(w, http.StatusBadRequest, embedErr.Error(), ErrBadRequest)
@@ -376,7 +434,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 		var usedVectorChunks int
 		for _, chunkQuery := range queryChunks {
-			emb, embedErr := s.db.EmbedQueryForDB(ctx, dbName, chunkQuery)
+			emb, embedErr := embedQuery(ctx, chunkQuery)
 			if embedErr != nil {
 				if errors.Is(embedErr, nornicdb.ErrQueryEmbeddingDimensionMismatch) {
 					s.writeError(w, http.StatusBadRequest, embedErr.Error(), ErrBadRequest)

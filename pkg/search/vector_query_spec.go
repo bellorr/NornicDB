@@ -104,7 +104,7 @@ func (s *Service) vectorQueryNodesIndexed(ctx context.Context, queryEmbedding []
 		return nil, nil
 	}
 
-	pipeline, err := s.getOrCreateVectorPipeline()
+	pipeline, err := s.getOrCreateVectorPipeline(ctx)
 	if err != nil {
 		return nil, err
 	}

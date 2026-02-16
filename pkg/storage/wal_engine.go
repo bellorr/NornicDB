@@ -696,6 +696,14 @@ func (w *WALEngine) AddToPendingEmbeddings(nodeID NodeID) {
 	}
 }
 
+// PendingEmbeddingsCount delegates to underlying engine if it supports it.
+func (w *WALEngine) PendingEmbeddingsCount() int {
+	if mgr, ok := w.engine.(interface{ PendingEmbeddingsCount() int }); ok {
+		return mgr.PendingEmbeddingsCount()
+	}
+	return 0
+}
+
 // IterateNodes delegates to underlying engine if it supports streaming iteration.
 func (w *WALEngine) IterateNodes(fn func(*Node) bool) error {
 	if iterator, ok := w.engine.(interface{ IterateNodes(func(*Node) bool) error }); ok {

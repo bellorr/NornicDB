@@ -16,6 +16,7 @@ const (
 	bm25SettingsSchemaVersion        = "1"
 	vectorSettingsSchemaVersion      = "1"
 	hnswSettingsSchemaVersion        = "1"
+	routingSettingsSchemaVersion     = "1"
 )
 
 // searchBuildSettingsSnapshot tracks the index-build settings that influence
@@ -26,6 +27,7 @@ type searchBuildSettingsSnapshot struct {
 	BM25          string `msgpack:"bm25"`
 	Vector        string `msgpack:"vector"`
 	HNSW          string `msgpack:"hnsw"`
+	Routing       string `msgpack:"routing,omitempty"`
 }
 
 func searchBuildSettingsPath(fulltextPath, vectorPath, hnswPath string) string {
@@ -84,6 +86,23 @@ func saveSearchBuildSettings(path string, snap searchBuildSettingsSnapshot) erro
 func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
 	dimensions := s.VectorIndexDimensions()
 	hcfg := HNSWConfigFromEnv()
+	maxIter := envInt("NORNICDB_KMEANS_MAX_ITERATIONS", 5)
+	if maxIter < 5 {
+		maxIter = 5
+	}
+	if maxIter > 500 {
+		maxIter = 500
+	}
+	routingMode := strings.TrimSpace(strings.ToLower(os.Getenv("NORNICDB_VECTOR_ROUTING_MODE")))
+	if routingMode == "" {
+		routingMode = "hybrid"
+	}
+	seedMode := strings.TrimSpace(strings.ToLower(os.Getenv("NORNICDB_KMEANS_SEED_MODE")))
+	if seedMode == "" {
+		seedMode = "bm25+kmeans++"
+	}
+	wSem := envFloat("NORNICDB_VECTOR_HYBRID_ROUTING_W_SEM", 0.7)
+	wLex := envFloat("NORNICDB_VECTOR_HYBRID_ROUTING_W_LEX", 0.3)
 	return searchBuildSettingsSnapshot{
 		FormatVersion: searchBuildSettingsFormatVersion,
 		SavedAtUnix:   time.Now().Unix(),
@@ -99,6 +118,9 @@ func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
 			hnswSettingsSchemaVersion,
 			hnswIndexFormatVersionGraphOnly,
 			hcfg.M, hcfg.EfConstruction, hcfg.EfSearch),
+		Routing: fmt.Sprintf("schema=%s;mode=%s;w_sem=%.4f;w_lex=%.4f;lex_profile=%s;kmeans_max_iter=%d;kmeans_seed=%s",
+			routingSettingsSchemaVersion,
+			routingMode, wSem, wLex, routingSettingsSchemaVersion, maxIter, seedMode),
 	}
 }
 

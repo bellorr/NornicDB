@@ -21,6 +21,7 @@ type IVFHNSWCandidateGen struct {
 	clusterIndex        *gpu.ClusterIndex
 	getClusterHNSW      clusterHNSWLookup
 	numClustersToSearch int
+	clusterSelector     func(ctx context.Context, query []float32, defaultN int) []int
 }
 
 func NewIVFHNSWCandidateGen(clusterIndex *gpu.ClusterIndex, getClusterHNSW clusterHNSWLookup, numClustersToSearch int) *IVFHNSWCandidateGen {
@@ -34,6 +35,12 @@ func NewIVFHNSWCandidateGen(clusterIndex *gpu.ClusterIndex, getClusterHNSW clust
 	}
 }
 
+// SetClusterSelector sets an optional custom cluster selector used for routing.
+func (g *IVFHNSWCandidateGen) SetClusterSelector(fn func(ctx context.Context, query []float32, defaultN int) []int) *IVFHNSWCandidateGen {
+	g.clusterSelector = fn
+	return g
+}
+
 func (g *IVFHNSWCandidateGen) SearchCandidates(ctx context.Context, query []float32, k int, minSimilarity float64) ([]Candidate, error) {
 	if g.clusterIndex == nil || !g.clusterIndex.IsClustered() {
 		return nil, fmt.Errorf("cluster index not clustered")
@@ -45,7 +52,13 @@ func (g *IVFHNSWCandidateGen) SearchCandidates(ctx context.Context, query []floa
 		ctx = context.Background()
 	}
 
-	clusterIDs := g.clusterIndex.FindNearestClusters(query, g.numClustersToSearch)
+	clusterIDs := []int(nil)
+	if g.clusterSelector != nil {
+		clusterIDs = g.clusterSelector(ctx, query, g.numClustersToSearch)
+	}
+	if len(clusterIDs) == 0 {
+		clusterIDs = g.clusterIndex.FindNearestClusters(query, g.numClustersToSearch)
+	}
 	if len(clusterIDs) == 0 {
 		return []Candidate{}, nil
 	}

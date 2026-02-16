@@ -960,6 +960,20 @@ func TestHandleSearch(t *testing.T) {
 	}
 }
 
+func TestStartupSearchReconcile_InitializesMetadataOnlyDatabase(t *testing.T) {
+	server, _ := setupTestServer(t)
+
+	require.NoError(t, server.dbManager.CreateDatabase("animals"))
+
+	// Deterministically run the reconcile pass (the background ticker does this too).
+	server.ensureSearchBuildStartedForKnownDatabases()
+
+	require.Eventually(t, func() bool {
+		st := server.db.GetDatabaseSearchStatus("animals")
+		return st.Initialized && st.Ready && !st.Building
+	}, 3*time.Second, 50*time.Millisecond)
+}
+
 func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")
