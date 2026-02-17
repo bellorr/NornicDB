@@ -255,10 +255,6 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 func (s *Server) loggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		traceStart := os.Getenv("NORNICDB_TRACE_REQUEST_START") != ""
-		if traceStart || r.URL.Path == "/status" || r.URL.Path == "/nornicdb/search" || r.URL.Path == "/nornicdb/embed/stats" || strings.HasPrefix(r.URL.Path, "/db/") {
-			log.Printf("[HTTP] START %s %s", r.Method, r.URL.Path)
-		}
 
 		// Wrap response writer to capture status
 		wrapped := &responseWriter{ResponseWriter: w, status: http.StatusOK}
