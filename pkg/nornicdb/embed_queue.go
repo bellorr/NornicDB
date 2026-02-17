@@ -759,13 +759,9 @@ type EmbeddingIndexManager interface {
 // findNodeWithoutEmbedding finds a single node that needs embedding.
 // Uses efficient streaming iteration if available, falls back to AllNodes.
 func (ew *EmbedWorker) findNodeWithoutEmbedding() *storage.Node {
-	// Try efficient streaming method first (BadgerEngine, WALEngine)
-	if finder, ok := ew.storage.(EmbeddingFinder); ok {
-		return finder.FindNodeNeedingEmbedding()
-	}
-
-	// Fallback: use storage helper
-	return storage.FindNodeNeedingEmbedding(ew.storage)
+	// TEMPORARY: Embed queue is globally disabled for now.
+	// Always return nil so workers do not pick up pending embedding jobs.
+	return nil
 }
 
 // refreshEmbeddingIndex refreshes the pending embeddings index

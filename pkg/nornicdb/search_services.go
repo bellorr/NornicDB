@@ -156,9 +156,11 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	persistSearchIndexesEnabled := db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes
 	svc.SetPersistenceEnabled(persistSearchIndexesEnabled)
 
-	// When PersistSearchIndexes is true, set paths so BuildIndexes saves indexes after a
+	// EXPERIMENTAL: when PersistSearchIndexes is true, set paths so BuildIndexes saves indexes after a
 	// build and loads them on startup (skipping the full iteration when both are present).
 	// HNSW is also persisted so the approximate nearest-neighbor index does not need rebuilding.
+	// If a rebuild is required (e.g., missing/incompatible artifacts), IVF-HNSW rebuild at startup
+	// can be long on large datasets (~30 minutes for ~1M embeddings on observed hardware).
 	if persistSearchIndexesEnabled {
 		base := filepath.Join(db.config.DataDir, "search", dbName)
 		fulltextFilename := "bm25"

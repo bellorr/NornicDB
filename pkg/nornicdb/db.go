@@ -307,8 +307,10 @@ type Config struct {
 	// Storage
 	DataDir string `yaml:"data_dir"`
 
-	// Search index persistence: when true, BM25, vector, and HNSW indexes are saved under DataDir
+	// Search index persistence (EXPERIMENTAL): when true, BM25, vector, and HNSW indexes are saved under DataDir
 	// and loaded on startup so BuildIndexes can skip the full storage iteration. Default false.
+	// If indexes must be rebuilt, startup can be long for large datasets; rebuilding IVF-HNSW for
+	// ~1M embeddings can take ~30 minutes on startup (hardware dependent).
 	PersistSearchIndexes bool `yaml:"persist_search_indexes"`
 
 	// Embeddings
@@ -456,7 +458,7 @@ func DefaultConfig() *Config {
 		HTTPPort:                        7474,
 		KmeansClusterInterval:           15 * time.Minute, // Run k-means every 15 min (skips if no changes)
 		KmeansNumClusters:               0,                // 0 = auto from dataset size at trigger time
-		PersistSearchIndexes:            false,            // Rebuild indexes on startup by default
+		PersistSearchIndexes:            false,            // EXPERIMENTAL opt-in; rebuild on startup by default
 	}
 }
 

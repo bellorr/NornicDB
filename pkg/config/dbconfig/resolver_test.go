@@ -17,7 +17,7 @@ func TestResolve_GlobalOnly(t *testing.T) {
 	require.NotNil(t, r)
 	assert.Equal(t, 1536, r.EmbeddingDimensions)
 	assert.Equal(t, 0.6, r.SearchMinSimilarity)
-	assert.Equal(t, "v1", r.BM25Engine)
+	assert.Equal(t, "v2", r.BM25Engine)
 	assert.NotEmpty(t, r.Effective["NORNICDB_EMBEDDING_DIMENSIONS"])
 }
 

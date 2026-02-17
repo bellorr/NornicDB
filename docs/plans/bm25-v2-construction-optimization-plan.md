@@ -248,7 +248,7 @@ Default rollout:
 ### Rollback
 
 - Flip `NORNICDB_BM25_V2_BUILD_MODE=legacy`
-- or switch BM25 engine to V1 (`NORNICDB_SEARCH_BM25_ENGINE=v1`)
+- or switch BM25 engine to V1 (`NORNICDB_SEARCH_BM25_ENGINE=v2`)
 - no data migration rollback required.
 
 ---

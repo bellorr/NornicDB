@@ -234,6 +234,10 @@ search:
 
 By default, BM25 (full-text) and vector (HNSW) search indexes are built in memory on startup by scanning storage. When **persist search indexes** is enabled, NornicDB saves these indexes to disk under the data directory and loads them on startup when present, skipping the full scan and speeding up startup for large graphs.
 
+> **Experimental:** Search index persistence is currently experimental.
+> If persisted artifacts are missing/incompatible and a rebuild is required, startup can still be long on large datasets.
+> Observed reference point: rebuilding IVF-HNSW for ~1M embeddings can take ~30 minutes on startup (hardware dependent).
+
 **When to use:**
 - Large databases where rebuilding indexes on every startup is slow.
 - Restarts or deployments where you want search to be ready immediately after storage recovery.
@@ -242,14 +246,14 @@ By default, BM25 (full-text) and vector (HNSW) search indexes are built in memor
 
 ```yaml
 database:
-  persist_search_indexes: true   # Default: false. Requires data_dir to be set.
+  persist_search_indexes: true   # EXPERIMENTAL. Default: false. Requires data_dir to be set.
 ```
 
 **Environment variable:**
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `NORNICDB_PERSIST_SEARCH_INDEXES` | `false` | When `true`, save and load BM25, vector, and HNSW indexes under `DataDir/search/<dbname>/` (e.g. `bm25.gob`, `vectors`, `hnsw`). Has no effect if `NORNICDB_DATA_DIR` (or config `data_dir`) is not set. |
+| `NORNICDB_PERSIST_SEARCH_INDEXES` | `false` | **EXPERIMENTAL.** When `true`, save and load BM25, vector, and HNSW indexes under `DataDir/search/<dbname>/` (e.g. `bm25.gob`, `vectors`, `hnsw`). Has no effect if `NORNICDB_DATA_DIR` (or config `data_dir`) is not set. |
 
 **Behavior:**
 - Indexes are written under `data_dir/search/<database_name>/` (e.g. `bm25.gob`, `vectors`, `hnsw`).

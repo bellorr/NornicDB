@@ -239,6 +239,10 @@ Term          Documents with frequency
 
 By default, both the vector (HNSW) and BM25 indexes are built in memory on startup. For large graphs, you can **persist search indexes** to disk so they are saved after updates and loaded on the next startup, avoiding a full storage scan. Enable with `NORNICDB_PERSIST_SEARCH_INDEXES=true` or `database.persist_search_indexes: true` in YAML (requires `data_dir` to be set). See [Search index persistence](../operations/configuration.md#search-index-persistence) in the Configuration Guide.
 
+> **Experimental:** Search index persistence is currently experimental.
+> If startup must rebuild IVF-HNSW (for example due to missing/incompatible persisted artifacts), large datasets can still take a long time to become ready.
+> Observed reference point: ~30 minutes to rebuild IVF-HNSW for ~1M embeddings on startup (hardware dependent).
+
 ---
 
 ## 3️⃣ Reciprocal Rank Fusion (RRF)

@@ -130,7 +130,7 @@ var SearchableProperties = []string{
 
 const (
 	// EnvSearchBM25Engine selects the BM25 engine implementation.
-	// Supported values: "v1", "v2". Default: "v1".
+	// Supported values: "v1", "v2". Default: "v2".
 	EnvSearchBM25Engine = "NORNICDB_SEARCH_BM25_ENGINE"
 	// EnvSearchLogTimings enables per-query timing logs for search stages.
 	// When true, logs vector/BM25/fusion/total timing to help identify bottlenecks.
@@ -157,15 +157,17 @@ type bm25Index interface {
 
 func normalizeBM25Engine(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case BM25EngineV1:
+		return BM25EngineV1
 	case BM25EngineV2:
 		return BM25EngineV2
 	default:
-		return BM25EngineV1
+		return BM25EngineV2
 	}
 }
 
 // DefaultBM25Engine returns the configured BM25 engine from environment.
-// Valid values: "v1", "v2". Invalid/empty values fall back to "v1".
+// Valid values: "v1", "v2". Invalid/empty values fall back to "v2".
 func DefaultBM25Engine() string {
 	return normalizeBM25Engine(os.Getenv(EnvSearchBM25Engine))
 }
@@ -1039,6 +1041,13 @@ func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *g
 	}
 	if clusterIndex == nil || !clusterIndex.IsClustered() {
 		return fmt.Errorf("cluster index not clustered")
+	}
+	s.mu.RLock()
+	clusterUsesGPU := s.clusterUsesGPU
+	s.mu.RUnlock()
+	if clusterUsesGPU {
+		log.Printf("[IVF-HNSW] ⏭️  SKIPPED | reason=gpu_cluster_routing_enabled")
+		return nil
 	}
 
 	s.mu.RLock()
@@ -3185,7 +3194,12 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 	s.mu.RLock()
 	vfs := s.vectorFileStore
 	vi := s.vectorIndex
+	ft := s.fulltextIndex
 	s.mu.RUnlock()
+	seedNodeIDs := s.hnswLexicalSeedNodeSet(ft)
+	if len(seedNodeIDs) > 0 {
+		log.Printf("[HNSW] 🧭 Lexical seeding enabled: %d seed node IDs", len(seedNodeIDs))
+	}
 
 	const hnswProgressInterval = 50000 // log progress every N vectors
 	if vfs != nil && vfs.Count() > 0 {
@@ -3194,7 +3208,7 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 		built.SetVectorLookup(s.getVectorLookup())
 		chunkSize := 10000
 		var added int
-		if err := vfs.IterateChunked(chunkSize, func(ids []string, vecs [][]float32) error {
+		addChunkVectors := func(ids []string, vecs [][]float32, seedOnly bool) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
@@ -3202,15 +3216,38 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 				if ctx.Err() != nil {
 					return ctx.Err()
 				}
+				isSeed := vectorIDInSeedNodeSet(ids[i], seedNodeIDs)
+				if seedOnly && !isSeed {
+					continue
+				}
+				if !seedOnly && isSeed {
+					continue
+				}
 				if err := built.Add(ids[i], vecs[i]); err != nil {
 					return fmt.Errorf("failed to add vector to HNSW: %w", err)
 				}
+				added++
 			}
-			added += len(ids)
 			if added%hnswProgressInterval == 0 || added == total {
 				log.Printf("[HNSW] 🔨 Progress: %d / %d vectors", added, total)
 			}
 			return nil
+		}
+		if len(seedNodeIDs) > 0 {
+			// Seed-first pass: add vectors belonging to BM25 lexical seed docs first.
+			if err := vfs.IterateChunked(chunkSize, func(ids []string, vecs [][]float32) error {
+				return addChunkVectors(ids, vecs, true)
+			}); err != nil {
+				return nil, err
+			}
+			// Follow-up pass: add the remaining vectors.
+			if err := vfs.IterateChunked(chunkSize, func(ids []string, vecs [][]float32) error {
+				return addChunkVectors(ids, vecs, false)
+			}); err != nil {
+				return nil, err
+			}
+		} else if err := vfs.IterateChunked(chunkSize, func(ids []string, vecs [][]float32) error {
+			return addChunkVectors(ids, vecs, false)
 		}); err != nil {
 			return nil, err
 		}
@@ -3228,6 +3265,25 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 			}{id: id, vec: vec})
 		}
 		vi.mu.RUnlock()
+		if len(seedNodeIDs) > 0 && len(pairs) > 0 {
+			seedPairs := make([]struct {
+				id  string
+				vec []float32
+			}, 0, len(pairs)/8)
+			otherPairs := make([]struct {
+				id  string
+				vec []float32
+			}, 0, len(pairs))
+			for _, p := range pairs {
+				if vectorIDInSeedNodeSet(p.id, seedNodeIDs) {
+					seedPairs = append(seedPairs, p)
+					continue
+				}
+				otherPairs = append(otherPairs, p)
+			}
+			pairs = append(seedPairs, otherPairs...)
+			log.Printf("[HNSW] 🧭 Lexical-seeded build order: %d seeded vectors prioritized", len(seedPairs))
+		}
 		total := len(pairs)
 		log.Printf("[HNSW] 🔨 Building from in-memory index: %d vectors", total)
 		for i, p := range pairs {
@@ -3267,6 +3323,45 @@ func (s *Service) getOrCreateHNSWIndex(ctx context.Context, dimensions int) (*HN
 
 	s.ensureHNSWMaintenance()
 	return built, nil
+}
+
+func (s *Service) hnswLexicalSeedNodeSet(ft bm25Index) map[string]struct{} {
+	if ft == nil {
+		return nil
+	}
+	maxTerms := envInt("NORNICDB_HNSW_LEXICAL_SEED_MAX_TERMS", 256)
+	if maxTerms <= 0 {
+		maxTerms = 256
+	}
+	perTerm := envInt("NORNICDB_HNSW_LEXICAL_SEED_PER_TERM", 8)
+	if perTerm <= 0 {
+		perTerm = 8
+	}
+	seedIDs := ft.LexicalSeedDocIDs(maxTerms, perTerm)
+	if len(seedIDs) == 0 {
+		return nil
+	}
+	out := make(map[string]struct{}, len(seedIDs))
+	for _, id := range seedIDs {
+		id = strings.TrimSpace(id)
+		if id == "" {
+			continue
+		}
+		out[id] = struct{}{}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func vectorIDInSeedNodeSet(vectorID string, seedNodeIDs map[string]struct{}) bool {
+	if len(seedNodeIDs) == 0 || vectorID == "" {
+		return false
+	}
+	nodeID := normalizeVectorResultIDToNodeID(vectorID)
+	_, ok := seedNodeIDs[nodeID]
+	return ok
 }
 
 func (s *Service) ensureHNSWMaintenance() {

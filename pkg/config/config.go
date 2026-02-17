@@ -245,8 +245,10 @@ type DatabaseConfig struct {
 	// Env: NORNICDB_STORAGE_SERIALIZER (default: gob)
 	StorageSerializer string
 
-	// PersistSearchIndexes when true saves BM25, vector, and HNSW indexes under DataDir and loads
+	// PersistSearchIndexes (EXPERIMENTAL) when true saves BM25, vector, and HNSW indexes under DataDir and loads
 	// them on startup so BuildIndexes can skip the full storage iteration. Default: false.
+	// Note: if indexes are incompatible/missing and must be rebuilt, startup can be long for large datasets.
+	// For example, rebuilding IVF-HNSW for ~1M embeddings can take ~30 minutes on startup (hardware dependent).
 	// Env: NORNICDB_PERSIST_SEARCH_INDEXES
 	PersistSearchIndexes bool
 }
