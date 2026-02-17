@@ -1023,7 +1023,7 @@ func (s *Service) TriggerClustering(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", true) {
+	if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) {
 		if err := s.rebuildClusterHNSWIndexes(ctx, clusterIndex); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -3096,7 +3096,7 @@ func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchP
 
 	gpuEnabled := s.gpuManager != nil && s.gpuManager.IsEnabled() && s.gpuEmbeddingIndex != nil
 	gpuMinN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 5000)
-	gpuMaxN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 100000)
+	gpuMaxN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 15000)
 
 	// Prefer GPU brute-force (exact) when enabled and within configured thresholds.
 	// This path is exact and typically highest-throughput within its tuned N range.
@@ -3127,7 +3127,7 @@ func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchP
 				SetClusterSelector(s.selectHybridClusters)
 			strategyName = "GPU k-means (cluster routing)"
 		} else {
-			if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", true) && !gpuEnabled {
+			if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) && !gpuEnabled {
 				s.clusterHNSWMu.RLock()
 				hasClusterHNSW := len(s.clusterHNSW) > 0
 				s.clusterHNSWMu.RUnlock()

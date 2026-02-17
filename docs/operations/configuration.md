@@ -277,9 +277,9 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | Variable | Default | Description |
 |----------|---------|-------------|
 | **Strategy thresholds** | | |
-| `NORNICDB_VECTOR_GPU_BRUTE_MIN_N` | `20000` | Min vector count to use GPU brute-force (exact search). |
-| `NORNICDB_VECTOR_GPU_BRUTE_MAX_N` | `250000` | Max vector count for GPU brute-force; above this, cluster or HNSW is used when applicable. |
-| `NORNICDB_VECTOR_IVF_HNSW_ENABLED` | `true` | When clustered, use IVF-HNSW (per-cluster HNSW) when available. |
+| `NORNICDB_VECTOR_GPU_BRUTE_MIN_N` | `5000` | Min vector count to use GPU brute-force (exact search). |
+| `NORNICDB_VECTOR_GPU_BRUTE_MAX_N` | `15000` | Max vector count for GPU brute-force; above this, HNSW is preferred by default. |
+| `NORNICDB_VECTOR_IVF_HNSW_ENABLED` | `false` | When clustered, use IVF-HNSW (per-cluster HNSW) when available. Disabled by default. |
 | `NORNICDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE` | `200` | Min cluster size to build a cluster HNSW index. |
 | `NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS` | `1024` | Max number of clusters for IVF-HNSW. |
 | **Hybrid lexical-semantic routing** | | |
