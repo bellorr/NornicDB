@@ -154,10 +154,10 @@ func applyOverride(r *ResolvedDbConfig, key, value string) {
 
 func normalizeBM25Engine(raw string) string {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "v2":
-		return "v2"
-	default:
+	case "v1":
 		return "v1"
+	default:
+		return "v2"
 	}
 }
 
