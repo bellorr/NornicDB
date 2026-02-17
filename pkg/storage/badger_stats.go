@@ -283,7 +283,6 @@ func (b *BadgerEngine) FindNodeNeedingEmbedding() *Node {
 				continue
 			}
 
-			log.Printf("🧪 pending-embed dequeue: node=%s reason=existing_pending_entry", nodeID)
 			found = node
 			break
 		}

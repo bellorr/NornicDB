@@ -108,7 +108,7 @@ func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
 		SavedAtUnix:   time.Now().Unix(),
 		BM25: fmt.Sprintf("schema=%s;format=%s;props=%s",
 			bm25SettingsSchemaVersion,
-			fulltextIndexFormatVersion,
+			s.currentBM25FormatVersion(),
 			strings.Join(SearchableProperties, ",")),
 		Vector: fmt.Sprintf("schema=%s;format=%s;dimensions=%d",
 			vectorSettingsSchemaVersion,
@@ -122,6 +122,13 @@ func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
 			routingSettingsSchemaVersion,
 			routingMode, wSem, wLex, routingSettingsSchemaVersion, maxIter, seedMode),
 	}
+}
+
+func (s *Service) currentBM25FormatVersion() string {
+	if normalizeBM25Engine(s.bm25Engine) == BM25EngineV2 {
+		return bm25V2FormatVersion
+	}
+	return fulltextIndexFormatVersion
 }
 
 func (s *Service) persistSearchBuildSettings(fulltextPath, vectorPath, hnswPath string) {

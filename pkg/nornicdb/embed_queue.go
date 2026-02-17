@@ -511,9 +511,6 @@ func (ew *EmbedWorker) processNextBatch() bool {
 		return false // Nothing to process
 	}
 
-	// DEBUG: Log where this node came from
-	fmt.Printf("🔍 Found node %s from pending embeddings index\n", node.ID)
-
 	// Check for cancellation before processing
 	select {
 	case <-ew.ctx.Done():

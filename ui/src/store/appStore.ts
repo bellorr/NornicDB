@@ -1,5 +1,6 @@
 import { create } from 'zustand';
-import { api, DatabaseStats, SearchResult, CypherResponse } from '../utils/api';
+import { api } from '../utils/api';
+import type { DatabaseStats, SearchResult, CypherResponse } from '../utils/api';
 
 // Similar results for inline expansion
 interface SimilarExpansion {
@@ -35,6 +36,7 @@ interface AppState {
   searchQuery: string;
   searchResults: SearchResult[];
   searchLoading: boolean;
+  searchError: string | null;
   
   // Selected
   selectedNode: SearchResult | null;
@@ -77,6 +79,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   searchQuery: '',
   searchResults: [],
   searchLoading: false,
+  searchError: null,
   selectedNode: null,
   selectedNodeIds: new Set<string>(),
   expandedSimilar: null,
@@ -170,11 +173,11 @@ export const useAppStore = create<AppState>((set, get) => ({
   executeSearch: async () => {
     const { searchQuery, selectedDatabase } = get();
     if (!searchQuery.trim()) {
-      set({ searchResults: [] });
+      set({ searchResults: [], searchError: null });
       return;
     }
 
-    set({ searchLoading: true });
+    set({ searchLoading: true, searchError: null });
     try {
       const results = await api.search(
         searchQuery,
@@ -182,9 +185,13 @@ export const useAppStore = create<AppState>((set, get) => ({
         undefined,
         selectedDatabase ?? undefined
       );
-      set({ searchResults: results, searchLoading: false });
-    } catch {
-      set({ searchResults: [], searchLoading: false });
+      set({ searchResults: results, searchLoading: false, searchError: null });
+    } catch (err) {
+      set({
+        searchResults: [],
+        searchLoading: false,
+        searchError: err instanceof Error ? err.message : 'Search failed',
+      });
     }
   },
 

@@ -91,6 +91,10 @@ interface DiscoveryResponse {
 
 class NornicDBClient {
   private defaultDatabase: string | null = null;
+  private async parseErrorMessage(res: Response, fallback: string): Promise<string> {
+    const payload = await res.json().catch(() => null) as { message?: string; error?: string } | null;
+    return payload?.message || payload?.error || fallback;
+  }
 
   // Get default database name from discovery endpoint
   private async getDefaultDatabase(): Promise<string> {
@@ -208,6 +212,13 @@ class NornicDBClient {
       credentials: 'include',
       body: JSON.stringify(body),
     });
+    if (!res.ok) {
+      if (res.status === 503) {
+        throw new Error('Search is warming up. Please try again in a moment.');
+      }
+      const message = await this.parseErrorMessage(res, `Search failed (${res.status})`);
+      throw new Error(message);
+    }
     return await res.json();
   }
 

@@ -75,15 +75,19 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 
 	dims := db.embeddingDims
 	minSim := db.searchMinSimilarity
+	bm25Engine := search.DefaultBM25Engine()
 	db.dbConfigResolverMu.RLock()
 	resolver := db.dbConfigResolver
 	db.dbConfigResolverMu.RUnlock()
 	if resolver != nil {
-		rd, rs := resolver(dbName)
+		rd, rs, re := resolver(dbName)
 		if rd > 0 {
 			dims = rd
 		}
 		minSim = rs
+		if re != "" {
+			bm25Engine = re
+		}
 	}
 
 	var gpuMgr *gpu.Manager
@@ -147,7 +151,7 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	if dims <= 0 {
 		dims = 1024
 	}
-	svc := search.NewServiceWithDimensions(storageEngine, dims)
+	svc := search.NewServiceWithDimensionsAndBM25Engine(storageEngine, dims, bm25Engine)
 	svc.SetDefaultMinSimilarity(minSim)
 
 	// When PersistSearchIndexes is true, set paths so BuildIndexes saves indexes after a
@@ -155,7 +159,11 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	// HNSW is also persisted so the approximate nearest-neighbor index does not need rebuilding.
 	if db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes {
 		base := filepath.Join(db.config.DataDir, "search", dbName)
-		svc.SetFulltextIndexPath(filepath.Join(base, "bm25"))
+		fulltextFilename := "bm25"
+		if strings.EqualFold(strings.TrimSpace(bm25Engine), search.BM25EngineV2) {
+			fulltextFilename = "bm25.v2"
+		}
+		svc.SetFulltextIndexPath(filepath.Join(base, fulltextFilename))
 		svc.SetVectorIndexPath(filepath.Join(base, "vectors"))
 		svc.SetHNSWIndexPath(filepath.Join(base, "hnsw"))
 	}
@@ -466,6 +474,18 @@ func (db *DB) runClusteringOnceAllDatabases(ctx context.Context) {
 			continue
 		}
 		if entry.svc == nil || !entry.svc.IsClusteringEnabled() {
+			continue
+		}
+		progress := entry.svc.GetBuildProgress()
+		// Do not run timer/manual clustering while initial search build is still in progress.
+		// BuildIndexes warmup already runs BM25-seeded k-means + IVF-HNSW when enabled.
+		if progress.Building {
+			log.Printf("🔬 K-means clustering deferred for db %s: search build in progress (phase=%s)", entry.dbName, progress.Phase)
+			continue
+		}
+		// Also skip until initial build reaches ready; otherwise we'd cluster partial indexes.
+		if !progress.Ready {
+			log.Printf("🔬 K-means clustering deferred for db %s: search not ready yet (phase=%s)", entry.dbName, progress.Phase)
 			continue
 		}
 		if entry.svc.ClusteringInProgress() {

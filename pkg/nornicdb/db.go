@@ -570,10 +570,10 @@ type DB struct {
 	rerankerResolver func(dbName string) search.Reranker
 }
 
-// DbConfigResolver returns effective embedding dimensions and search min similarity for a database.
+// DbConfigResolver returns effective embedding dimensions, search min similarity, and BM25 engine for a database.
 // When set, getOrCreateSearchService uses these instead of the global db.config values.
-// Return (0, 0) to use global defaults for that DB.
-type DbConfigResolver func(dbName string) (embeddingDims int, searchMinSimilarity float64)
+// Return ("", 0, 0) values to use global defaults for that DB.
+type DbConfigResolver func(dbName string) (embeddingDims int, searchMinSimilarity float64, bm25Engine string)
 
 // embedConfigKey returns a stable key for the embedder registry from an embed config.
 func embedConfigKey(cfg *embed.Config) string {
@@ -1808,21 +1808,10 @@ func (db *DB) closeInternal() error {
 	var errs []error
 
 	// Persist search indexes to disk so the latest state is saved on next startup.
-	// Bound shutdown time: do not let a slow persist block graceful exit indefinitely.
-	persistTimeout := 20 * time.Second
 	db.searchServicesMu.RLock()
 	for _, entry := range db.searchServices {
 		if entry != nil && entry.svc != nil {
-			done := make(chan struct{}, 1)
-			go func(svc *search.Service) {
-				svc.PersistIndexesToDisk()
-				done <- struct{}{}
-			}(entry.svc)
-			select {
-			case <-done:
-			case <-time.After(persistTimeout):
-				log.Printf("⚠️ shutdown: search index persist timed out after %v (continuing shutdown)", persistTimeout)
-			}
+			entry.svc.PersistIndexesToDisk()
 		}
 	}
 	db.searchServicesMu.RUnlock()
@@ -1948,7 +1937,8 @@ func (db *DB) SetAllDatabasesProvider(provider func() []DatabaseAndStorage) {
 	db.allDatabasesProvider = provider
 }
 
-// SetDbConfigResolver sets an optional resolver for per-database config (embedding dims, search min similarity).
+// SetDbConfigResolver sets an optional resolver for per-database config
+// (embedding dims, search min similarity, BM25 engine).
 // When set, getOrCreateSearchService uses the resolver for the given dbName instead of global db.config.
 // Call with nil to use global config only.
 func (db *DB) SetDbConfigResolver(resolver DbConfigResolver) {
@@ -2122,7 +2112,7 @@ func (db *DB) EmbedQueryForDB(ctx context.Context, dbName string, query string) 
 	if resolver == nil || len(vec) == 0 {
 		return vec, nil
 	}
-	resolvedDims, _ := resolver(dbName)
+	resolvedDims, _, _ := resolver(dbName)
 	if resolvedDims <= 0 {
 		return vec, nil
 	}

@@ -28,6 +28,7 @@ func AllowedKeys() []KeyMeta {
 		{"NORNICDB_EMBEDDING_WARMUP_INTERVAL", "duration", "Embeddings"},
 		// Search
 		{"NORNICDB_SEARCH_MIN_SIMILARITY", "number", "Search"},
+		{"NORNICDB_SEARCH_BM25_ENGINE", "string", "Search"},
 		{"NORNICDB_SEARCH_RERANK_ENABLED", "boolean", "Search"},
 		{"NORNICDB_SEARCH_RERANK_PROVIDER", "string", "Search"},
 		{"NORNICDB_SEARCH_RERANK_MODEL", "string", "Search"},

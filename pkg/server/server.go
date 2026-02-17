@@ -1317,13 +1317,13 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		} else {
 			s.dbConfigStore = dbConfigStore
 			globalConfig := nornicConfig.LoadFromEnv()
-			db.SetDbConfigResolver(func(dbName string) (int, float64) {
+			db.SetDbConfigResolver(func(dbName string) (int, float64, string) {
 				overrides := dbConfigStore.GetOverrides(dbName)
 				r := dbconfig.Resolve(globalConfig, overrides)
 				if r == nil {
-					return 0, 0
+					return 0, 0, ""
 				}
-				return r.EmbeddingDimensions, r.SearchMinSimilarity
+				return r.EmbeddingDimensions, r.SearchMinSimilarity, r.BM25Engine
 			})
 			// Per-DB embedder registry: resolve embed config per database for EmbedQueryForDB.
 			db.SetEmbedConfigForDB(func(dbName string) (*embed.Config, error) {

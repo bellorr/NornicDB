@@ -13,6 +13,7 @@ interface SearchPanelProps {
   setSearchQuery: (query: string) => void;
   searchLoading: boolean;
   searchResults: SearchResult[];
+  searchError: string | null;
   /** Current database name for semantic search (empty = default). Shown as context. */
   selectedDatabase: string;
   selectedNodeIds: Set<string>;
@@ -39,6 +40,7 @@ export function SearchPanel({
   setSearchQuery,
   searchLoading,
   searchResults,
+  searchError,
   selectedDatabase,
   selectedNodeIds,
   selectedNode,
@@ -89,6 +91,12 @@ export function SearchPanel({
           {searchLoading ? "..." : "Search"}
         </button>
       </form>
+
+      {searchError && (
+        <div className="p-3 bg-amber-500/10 border border-amber-500/30 rounded-lg">
+          <p className="text-sm text-amber-300">{searchError}</p>
+        </div>
+      )}
 
       {/* Search Results */}
       <div className="flex-1 flex flex-col overflow-hidden">

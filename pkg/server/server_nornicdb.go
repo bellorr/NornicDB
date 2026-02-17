@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/math/vector"
@@ -275,6 +277,13 @@ func (s *Server) getOrCreateSearchService(dbName string, storageEngine storage.E
 }
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	reqStart := time.Now()
+	searchDiagEnabled := false
+	if raw := os.Getenv("NORNICDB_SEARCH_DIAG_TIMINGS"); raw != "" {
+		if b, err := strconv.ParseBool(raw); err == nil {
+			searchDiagEnabled = b
+		}
+	}
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "POST required", ErrMethodNotAllowed)
 		return
@@ -302,6 +311,21 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		dbName = s.dbManager.DefaultDatabaseName()
 	}
 	log.Printf("🔍 Search request database=%q query=%q", dbName, req.Query)
+	if dbName == "translations" {
+		searchDiagEnabled = true
+	}
+
+	var (
+		serviceLookupDur   time.Duration
+		embedTotalDur      time.Duration
+		searchExecDur      time.Duration
+		chunkLoopDur       time.Duration
+		embedCalls         int
+		embedSuccessCalls  int
+		searchCalls        int
+		fallbackBM25Calls  int
+		vectorChunkQueries int
+	)
 
 	// Per-database RBAC: deny if principal may not access this database (Neo4j-aligned).
 	if !s.getDatabaseAccessMode(getClaims(r)).CanAccessDatabase(dbName) {
@@ -335,7 +359,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 	// Search service should already be initialized at startup once status is ready.
 	ctx := r.Context()
+	serviceLookupStart := time.Now()
 	searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine)
+	serviceLookupDur = time.Since(serviceLookupStart)
 	if err != nil {
 		s.writeError(w, http.StatusServiceUnavailable, "search service unavailable", ErrInternalError)
 		return
@@ -374,6 +400,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	// Bound embedding latency even if the embedder ignores context cancellation.
 	embedQuery := func(parent context.Context, q string) ([]float32, error) {
+		embedCalls++
+		embedStart := time.Now()
 		type embedResult struct {
 			emb []float32
 			err error
@@ -387,10 +415,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		}()
 		select {
 		case out := <-resultCh:
+			embedTotalDur += time.Since(embedStart)
+			if out.err == nil && len(out.emb) > 0 {
+				embedSuccessCalls++
+			}
 			return out.emb, out.err
 		case <-parent.Done():
+			embedTotalDur += time.Since(embedStart)
 			return nil, parent.Err()
 		case <-time.After(embedTimeout):
+			embedTotalDur += time.Since(embedStart)
 			return nil, context.DeadlineExceeded
 		}
 	}
@@ -407,12 +441,19 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			log.Printf("⚠️ Query embedding failed: %v", embedErr)
 		}
 		if len(emb) > 0 {
+			searchCalls++
+			searchStart := time.Now()
 			searchResponse, err = searchSvc.Search(ctx, req.Query, emb, buildOpts(req.Query, req.Limit))
+			searchExecDur += time.Since(searchStart)
 		} else {
+			searchCalls++
+			searchStart := time.Now()
 			searchResponse, err = searchSvc.Search(ctx, req.Query, nil, buildOpts(req.Query, req.Limit))
+			searchExecDur += time.Since(searchStart)
 		}
 	} else {
 		// Multi-chunk: embed/search each chunk, then fuse results across chunks using RRF.
+		chunkLoopStart := time.Now()
 		perChunkLimit := req.Limit
 		if perChunkLimit < 10 {
 			perChunkLimit = 10
@@ -447,8 +488,12 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			usedVectorChunks++
+			vectorChunkQueries++
 
+			searchCalls++
+			searchStart := time.Now()
 			resp, searchErr := searchSvc.Search(ctx, chunkQuery, emb, buildOpts(chunkQuery, perChunkLimit))
+			searchExecDur += time.Since(searchStart)
 			if searchErr != nil {
 				if errors.Is(searchErr, search.ErrSearchIndexBuilding) {
 					err = searchErr
@@ -486,7 +531,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if err == nil {
 			if usedVectorChunks == 0 || len(fusedByID) == 0 {
 				// Embeddings not available (or all failed): fall back to BM25.
+				fallbackBM25Calls++
+				searchCalls++
+				searchStart := time.Now()
 				searchResponse, err = searchSvc.Search(ctx, req.Query, nil, buildOpts(req.Query, req.Limit))
+				searchExecDur += time.Since(searchStart)
 			} else {
 				// Materialize fused response.
 				fusedList := make([]*fused, 0, len(fusedByID))
@@ -521,9 +570,15 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		chunkLoopDur = time.Since(chunkLoopStart)
 	}
 
 	if err != nil {
+		if searchDiagEnabled {
+			log.Printf("🔎 Search timing db=%q status=error total=%v svc_lookup=%v embed_total=%v embed_calls=%d embed_ok=%d search_total=%v search_calls=%d chunks=%d vector_chunks=%d chunk_loop=%v fallback_bm25=%d err=%v",
+				dbName, time.Since(reqStart), serviceLookupDur, embedTotalDur, embedCalls, embedSuccessCalls,
+				searchExecDur, searchCalls, len(queryChunks), vectorChunkQueries, chunkLoopDur, fallbackBM25Calls, err)
+		}
 		if errors.Is(err, search.ErrSearchIndexBuilding) {
 			s.writeError(w, http.StatusServiceUnavailable, err.Error(), ErrServiceUnavailable)
 			return
@@ -547,6 +602,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			VectorRank: r.VectorRank,
 			BM25Rank:   r.BM25Rank,
 		}
+	}
+	if searchDiagEnabled {
+		log.Printf("🔎 Search timing db=%q status=ok total=%v svc_lookup=%v embed_total=%v embed_calls=%d embed_ok=%d search_total=%v search_calls=%d chunks=%d vector_chunks=%d chunk_loop=%v fallback_bm25=%d search_method=%q fallback=%t results=%d",
+			dbName, time.Since(reqStart), serviceLookupDur, embedTotalDur, embedCalls, embedSuccessCalls,
+			searchExecDur, searchCalls, len(queryChunks), vectorChunkQueries, chunkLoopDur, fallbackBM25Calls, searchResponse.SearchMethod, searchResponse.FallbackTriggered, len(searchResponse.Results))
 	}
 
 	s.writeJSON(w, http.StatusOK, results)

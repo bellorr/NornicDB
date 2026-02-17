@@ -1,6 +1,7 @@
 package dbconfig
 
 import (
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,8 @@ type ResolvedDbConfig struct {
 	EmbeddingDimensions int
 	// SearchMinSimilarity is the min cosine similarity for vector search (0.0–1.0).
 	SearchMinSimilarity float64
+	// BM25Engine selects fulltext engine implementation ("v1" or "v2").
+	BM25Engine string
 	// Effective is the full effective value for every allowed key (string form for API).
 	Effective map[string]string
 }
@@ -25,6 +28,7 @@ func Resolve(global *config.Config, overrides map[string]string) *ResolvedDbConf
 	r := &ResolvedDbConfig{
 		EmbeddingDimensions: global.Memory.EmbeddingDimensions,
 		SearchMinSimilarity: global.Memory.SearchMinSimilarity,
+		BM25Engine:          normalizeBM25Engine(os.Getenv("NORNICDB_SEARCH_BM25_ENGINE")),
 		Effective:           make(map[string]string),
 	}
 	if r.EmbeddingDimensions <= 0 {
@@ -64,6 +68,7 @@ func effectiveFromGlobal(c *config.Config, m map[string]string) {
 	m["NORNICDB_EMBEDDING_WARMUP_INTERVAL"] = c.Memory.EmbeddingWarmupInterval.String()
 	// Search
 	m["NORNICDB_SEARCH_MIN_SIMILARITY"] = strconv.FormatFloat(c.Memory.SearchMinSimilarity, 'f', -1, 64)
+	m["NORNICDB_SEARCH_BM25_ENGINE"] = normalizeBM25Engine(os.Getenv("NORNICDB_SEARCH_BM25_ENGINE"))
 	m["NORNICDB_SEARCH_RERANK_ENABLED"] = boolStr(c.Features.SearchRerankEnabled)
 	m["NORNICDB_SEARCH_RERANK_PROVIDER"] = c.Features.SearchRerankProvider
 	m["NORNICDB_SEARCH_RERANK_MODEL"] = c.Features.SearchRerankModel
@@ -141,6 +146,18 @@ func applyOverride(r *ResolvedDbConfig, key, value string) {
 		if f, err := strconv.ParseFloat(value, 64); err == nil {
 			r.SearchMinSimilarity = f
 		}
+	}
+	if key == "NORNICDB_SEARCH_BM25_ENGINE" {
+		r.BM25Engine = normalizeBM25Engine(value)
+	}
+}
+
+func normalizeBM25Engine(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "v2":
+		return "v2"
+	default:
+		return "v1"
 	}
 }
 

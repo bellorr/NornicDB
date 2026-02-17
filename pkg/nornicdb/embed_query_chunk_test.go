@@ -124,8 +124,8 @@ func TestDB_EmbedQueryForDB_ResolverMatchesDims_Success(t *testing.T) {
 	emb := &chunkingTestEmbedder{dims: 8}
 	db := &DB{
 		embedQueue: &EmbedQueue{embedder: emb},
-		dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64) {
-			return 8, 0.5
+		dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64, bm25Engine string) {
+			return 8, 0.5, ""
 		},
 	}
 
@@ -138,8 +138,8 @@ func TestDB_EmbedQueryForDB_ResolverMismatchDims_ReturnsErrQueryEmbeddingDimensi
 	emb := &chunkingTestEmbedder{dims: 8}
 	db := &DB{
 		embedQueue: &EmbedQueue{embedder: emb},
-		dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64) {
-			return 768, 0.5 // index is 768-d, query will be 8-d from global embedder
+		dbConfigResolver: func(dbName string) (embeddingDims int, searchMinSimilarity float64, bm25Engine string) {
+			return 768, 0.5, "" // index is 768-d, query will be 8-d from global embedder
 		},
 	}
 

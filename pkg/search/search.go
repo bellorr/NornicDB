@@ -128,6 +128,62 @@ var SearchableProperties = []string{
 	"requirements",
 }
 
+const (
+	// EnvSearchBM25Engine selects the BM25 engine implementation.
+	// Supported values: "v1", "v2". Default: "v1".
+	EnvSearchBM25Engine = "NORNICDB_SEARCH_BM25_ENGINE"
+	BM25EngineV1        = "v1"
+	BM25EngineV2        = "v2"
+)
+
+type bm25Index interface {
+	Index(id, text string)
+	Remove(id string)
+	Search(query string, limit int) []indexResult
+	PhraseSearch(query string, limit int) []indexResult
+	GetDocument(id string) (string, bool)
+	LexicalSeedDocIDs(maxTerms, perTerm int) []string
+	Clear()
+	Count() int
+	Save(path string) error
+	SaveNoCopy(path string) error
+	Load(path string) error
+	IsDirty() bool
+	IndexBatch(entries []FulltextBatchEntry)
+}
+
+func normalizeBM25Engine(raw string) string {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case BM25EngineV2:
+		return BM25EngineV2
+	default:
+		return BM25EngineV1
+	}
+}
+
+// DefaultBM25Engine returns the configured BM25 engine from environment.
+// Valid values: "v1", "v2". Invalid/empty values fall back to "v1".
+func DefaultBM25Engine() string {
+	return normalizeBM25Engine(os.Getenv(EnvSearchBM25Engine))
+}
+
+func newBM25Index(engine string) (bm25Index, string) {
+	switch normalizeBM25Engine(engine) {
+	case BM25EngineV2:
+		return NewFulltextIndexV2(), BM25EngineV2
+	default:
+		return NewFulltextIndex(), BM25EngineV1
+	}
+}
+
+var searchablePropertiesSet = func() map[string]struct{} {
+	out := make(map[string]struct{}, len(SearchableProperties))
+	for _, p := range SearchableProperties {
+		out[p] = struct{}{}
+	}
+	return out
+}()
+
 // SearchResult represents a unified search result.
 type SearchResult struct {
 	ID             string         `json:"id"`
@@ -356,9 +412,11 @@ type Service struct {
 	engine          storage.Engine
 	vectorIndex     *VectorIndex
 	vectorFileStore *VectorFileStore // when set, vectors are stored on disk (low-RAM build)
-	fulltextIndex   *FulltextIndex
-	reranker        Reranker
-	mu              sync.RWMutex
+	// Primary BM25 implementation used by the live search pipeline.
+	fulltextIndex bm25Index
+	bm25Engine    string
+	reranker      Reranker
+	mu            sync.RWMutex
 	// indexMu serializes index mutation operations (IndexNode/RemoveNode/BuildIndexes batches)
 	// without blocking read paths that use s.mu for lightweight config/state reads.
 	indexMu        sync.Mutex
@@ -564,10 +622,18 @@ func NewService(engine storage.Engine) *Service {
 //	// For OpenAI text-embedding-3-small (1536 dimensions)
 //	svc := search.NewServiceWithDimensions(engine, 1536)
 func NewServiceWithDimensions(engine storage.Engine, dimensions int) *Service {
+	return NewServiceWithDimensionsAndBM25Engine(engine, dimensions, DefaultBM25Engine())
+}
+
+// NewServiceWithDimensionsAndBM25Engine creates a search Service with explicit BM25 engine selection.
+// bm25Engine values: "v1", "v2" (invalid values default to "v1").
+func NewServiceWithDimensionsAndBM25Engine(engine storage.Engine, dimensions int, bm25Engine string) *Service {
+	fulltextIndex, selectedBM25Engine := newBM25Index(bm25Engine)
 	svc := &Service{
 		engine:                     engine,
 		vectorIndex:                NewVectorIndex(dimensions),
-		fulltextIndex:              NewFulltextIndex(),
+		fulltextIndex:              fulltextIndex,
+		bm25Engine:                 selectedBM25Engine,
 		minEmbeddingsForClustering: DefaultMinEmbeddingsForClustering,
 		defaultMinSimilarity:       -1, // -1 = not set, use SearchOptions default
 		nodeLabels:                 make(map[string][]string, 1024),
@@ -580,12 +646,18 @@ func NewServiceWithDimensions(engine storage.Engine, dimensions int) *Service {
 	svc.ready.Store(false)
 	svc.buildPhase.Store("idle")
 	svc.buildPhaseUnix.Store(time.Now().Unix())
+	log.Printf("📇 Search: BM25 engine selected: %s", selectedBM25Engine)
 	return svc
 }
 
 // IsReady reports whether the search indexes are fully built and ready to serve queries.
 func (s *Service) IsReady() bool {
 	return s.ready.Load()
+}
+
+// BM25Engine returns the configured BM25 engine for this service ("v1" or "v2").
+func (s *Service) BM25Engine() string {
+	return normalizeBM25Engine(s.bm25Engine)
 }
 
 // BuildInProgress reports whether BuildIndexes is currently running.
@@ -1835,8 +1907,8 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 			dim = s.vectorFileStore.GetDimensions()
 		}
 		for key, value := range node.Properties {
-			vec := toFloat32SliceAny(value)
-			if len(vec) == 0 || len(vec) != dim {
+			vec, ok := vectorFromPropertyValue(value, dim)
+			if !ok {
 				continue
 			}
 			propID := fmt.Sprintf("%s-prop-%s", nodeIDStr, key)
@@ -2043,6 +2115,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		log.Printf("⚠️ BuildIndexes: failed to load build settings metadata (%s): %v", settingsPath, err)
 	} else if savedSettings != nil {
 		forceFulltextRebuild = savedSettings.BM25 != currentSettings.BM25
+		if forceFulltextRebuild && bm25SettingsEquivalent(savedSettings.BM25, currentSettings.BM25, s.currentBM25FormatVersion()) {
+			forceFulltextRebuild = false
+		}
 		forceVectorRebuild = savedSettings.Vector != currentSettings.Vector
 		forceHNSWRebuild = savedSettings.HNSW != currentSettings.HNSW
 		forceRoutingRebuild = savedSettings.Routing != currentSettings.Routing
@@ -2062,6 +2137,12 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 
 	if fulltextPath != "" {
 		_ = s.fulltextIndex.Load(fulltextPath)
+		if s.fulltextIndex.Count() == 0 {
+			if info, statErr := os.Stat(fulltextPath); statErr == nil {
+				log.Printf("📇 BuildIndexes: BM25 file present but loaded 0 docs (%s, %d bytes); rebuilding from storage",
+					fulltextPath, info.Size())
+			}
+		}
 	}
 	// Prefer file-backed vector store when .vec exists (low-RAM format); else legacy in-memory index.
 	if vectorPath != "" && s.vectorIndex != nil {
@@ -2289,7 +2370,6 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			return ctx.Err()
 		}
 		flushFulltextBatch(fulltextBatch)
-		count += len(fulltextBatch)
 		fmt.Printf("📊 Indexed %d total nodes\n", count)
 		// Persist BM25 + vector store before HNSW/k-means build so base indexes are durable.
 		s.setBuildPhase("persisting_base_indexes")
@@ -2355,7 +2435,6 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		return err
 	}
 	flushFulltextBatchFallback(fulltextBatch)
-	count += len(fulltextBatch)
 	fmt.Printf("📊 Indexed %d total nodes\n", count)
 	// Persist BM25 + vector store before HNSW/k-means build so base indexes are durable.
 	s.setBuildPhase("persisting_base_indexes")
@@ -3203,6 +3282,38 @@ func envFloat(key string, fallback float64) float64 {
 	return v
 }
 
+// bm25SettingsEquivalent treats legacy BM25 format version as compatible when schema/props match.
+// This avoids unnecessary fulltext rebuilds during one-time migration from legacy bm25 to bm25.v2.
+func bm25SettingsEquivalent(saved, current, currentFormat string) bool {
+	if saved == current {
+		return true
+	}
+	parse := func(raw string) map[string]string {
+		out := make(map[string]string, 4)
+		for _, part := range strings.Split(raw, ";") {
+			if part == "" {
+				continue
+			}
+			k, v, ok := strings.Cut(part, "=")
+			if !ok {
+				continue
+			}
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+		return out
+	}
+	savedKV := parse(saved)
+	currentKV := parse(current)
+	if savedKV["schema"] == "" || currentKV["schema"] == "" {
+		return false
+	}
+	if savedKV["schema"] != currentKV["schema"] || savedKV["props"] != currentKV["props"] {
+		return false
+	}
+	// Treat BM25 format 1.0.0 and current V2 format as equivalent for rebuild gating.
+	return savedKV["format"] == "1.0.0" && currentKV["format"] == currentFormat && currentFormat == bm25V2FormatVersion
+}
+
 func envInt(key string, fallback int) int {
 	raw, ok := os.LookupEnv(key)
 	if !ok || raw == "" {
@@ -3845,14 +3956,9 @@ func (s *Service) extractSearchableText(node *storage.Node) string {
 	}
 
 	// 3. Add ALL other properties (for comprehensive search)
-	prioritySet := make(map[string]bool)
-	for _, p := range SearchableProperties {
-		prioritySet[p] = true
-	}
-
 	for key, val := range node.Properties {
 		// Skip if already added as priority property
-		if prioritySet[key] {
+		if _, ok := searchablePropertiesSet[key]; ok {
 			continue
 		}
 		// Add property name and value for searchability
@@ -3872,6 +3978,9 @@ func propertyToString(val interface{}) string {
 		return v
 	case []string:
 		return strings.Join(v, " ")
+	case []float32, []float64:
+		// Avoid indexing dense numeric vectors as BM25 text.
+		return ""
 	case int, int64, int32, float64, float32:
 		return fmt.Sprintf("%v", v)
 	case bool:
@@ -3888,11 +3997,54 @@ func propertyToString(val interface{}) string {
 		}
 		return strings.Join(strs, " ")
 	default:
-		// For complex types, try to get string representation
-		if v != nil {
-			return fmt.Sprintf("%v", v)
-		}
+		// Skip complex objects/maps/arrays; indexing their fmt output is noisy and expensive.
 		return ""
+	}
+}
+
+// vectorFromPropertyValue extracts a vector with the expected dimension.
+// It avoids allocations for non-vector values and []float32 values.
+func vectorFromPropertyValue(value any, expectedDim int) ([]float32, bool) {
+	if expectedDim <= 0 {
+		return nil, false
+	}
+	switch v := value.(type) {
+	case []float32:
+		if len(v) != expectedDim {
+			return nil, false
+		}
+		return v, true
+	case []float64:
+		if len(v) != expectedDim {
+			return nil, false
+		}
+		out := make([]float32, len(v))
+		for i := range v {
+			out[i] = float32(v[i])
+		}
+		return out, true
+	case []any:
+		if len(v) != expectedDim {
+			return nil, false
+		}
+		out := make([]float32, len(v))
+		for i := range v {
+			switch n := v[i].(type) {
+			case float32:
+				out[i] = n
+			case float64:
+				out[i] = float32(n)
+			case int:
+				out[i] = float32(n)
+			case int64:
+				out[i] = float32(n)
+			default:
+				return nil, false
+			}
+		}
+		return out, true
+	default:
+		return nil, false
 	}
 }
 

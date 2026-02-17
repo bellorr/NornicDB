@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Terminal, Sparkles, Database } from "lucide-react";
 import { useAppStore } from "../store/appStore";
@@ -48,6 +48,7 @@ export function Browser() {
     searchResults,
     executeSearch,
     searchLoading,
+    searchError,
     selectedNode,
     setSelectedNode,
     selectedNodeIds,
@@ -73,6 +74,7 @@ export function Browser() {
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [deleting, setDeleting] = useState(false);
   const navigate = useNavigate();
+  const databaseSelectId = useId();
 
   // Fetch embed stats periodically
   useEffect(() => {
@@ -208,11 +210,11 @@ export function Browser() {
           {/* Database selector - all queries run against this database */}
           <div className="flex items-center gap-2 px-4 py-2 border-b border-norse-rune bg-norse-shadow/30">
             <Database className="w-4 h-4 text-norse-silver shrink-0" aria-hidden />
-            <label htmlFor="browser-database" className="text-sm text-norse-silver shrink-0">
+            <label htmlFor={databaseSelectId} className="text-sm text-norse-silver shrink-0">
               Database
             </label>
             <select
-              id="browser-database"
+              id={databaseSelectId}
               value={selectedDatabase ?? ""}
               onChange={(e) => handleDatabaseChange(e.target.value)}
               className="flex-1 min-w-0 px-3 py-1.5 text-sm bg-norse-stone border border-norse-rune rounded-lg text-white focus:outline-none focus:ring-2 focus:ring-nornic-primary focus:border-transparent"
@@ -289,6 +291,7 @@ export function Browser() {
               searchQuery={searchQuery}
               setSearchQuery={setSearchQuery}
               searchLoading={searchLoading}
+              searchError={searchError}
               searchResults={searchResults}
               selectedDatabase={selectedDatabase ?? ""}
               selectedNodeIds={selectedNodeIds}
