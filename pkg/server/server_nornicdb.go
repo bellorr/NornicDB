@@ -402,36 +402,27 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	embedQuery := func(parent context.Context, q string) ([]float32, error) {
 		embedCalls++
 		embedStart := time.Now()
-		type embedResult struct {
-			emb []float32
-			err error
+		emb, embedErr := runEmbedWithTimeout(parent, embedTimeout, func(embedCtx context.Context) ([]float32, error) {
+			return s.db.EmbedQueryForDB(embedCtx, dbName, q)
+		})
+		embedTotalDur += time.Since(embedStart)
+		if embedErr == nil && len(emb) > 0 {
+			embedSuccessCalls++
 		}
-		resultCh := make(chan embedResult, 1)
-		go func() {
-			embedCtx, cancelEmbed := context.WithTimeout(parent, embedTimeout)
-			emb, embedErr := s.db.EmbedQueryForDB(embedCtx, dbName, q)
-			cancelEmbed()
-			resultCh <- embedResult{emb: emb, err: embedErr}
-		}()
-		select {
-		case out := <-resultCh:
-			embedTotalDur += time.Since(embedStart)
-			if out.err == nil && len(out.emb) > 0 {
-				embedSuccessCalls++
-			}
-			return out.emb, out.err
-		case <-parent.Done():
-			embedTotalDur += time.Since(embedStart)
-			return nil, parent.Err()
-		case <-time.After(embedTimeout):
-			embedTotalDur += time.Since(embedStart)
-			return nil, context.DeadlineExceeded
-		}
+		return emb, embedErr
 	}
+	vectorSearchUsable := searchSvc.EmbeddingCount() > 0
 
-	// Fast path: short query (single chunk). Try hybrid; fall back to BM25.
-	// Use per-DB query embedding so vector dims match the index for this database.
-	if len(queryChunks) <= 1 {
+	if !vectorSearchUsable {
+		// No indexed vectors for this database: skip query embedding entirely and
+		// run fulltext directly to avoid paying embedding latency with guaranteed fallback.
+		searchCalls++
+		searchStart := time.Now()
+		searchResponse, err = searchSvc.Search(ctx, req.Query, nil, buildOpts(req.Query, req.Limit))
+		searchExecDur += time.Since(searchStart)
+	} else if len(queryChunks) <= 1 {
+		// Fast path: short query (single chunk). Try hybrid; fall back to BM25.
+		// Use per-DB query embedding so vector dims match the index for this database.
 		emb, embedErr := embedQuery(ctx, req.Query)
 		if embedErr != nil {
 			if errors.Is(embedErr, nornicdb.ErrQueryEmbeddingDimensionMismatch) {
@@ -610,6 +601,19 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.writeJSON(w, http.StatusOK, results)
+}
+
+func runEmbedWithTimeout(parent context.Context, timeout time.Duration, fn func(context.Context) ([]float32, error)) ([]float32, error) {
+	if parent == nil {
+		parent = context.Background()
+	}
+	embedCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	emb, err := fn(embedCtx)
+	if errors.Is(err, context.DeadlineExceeded) || embedCtx.Err() == context.DeadlineExceeded {
+		return nil, context.DeadlineExceeded
+	}
+	return emb, err
 }
 
 func (s *Server) handleSimilar(w http.ResponseWriter, r *http.Request) {

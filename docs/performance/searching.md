@@ -1188,6 +1188,33 @@ Q: Critical relevance required?
 
 ## 📈 Performance Benchmarks
 
+### Field Measurements (Apple M3 Max, 64GB RAM)
+
+These are measured on a live `translations` dataset (February 2026), using `POST /nornicdb/search` with varied cache-busting queries.
+
+#### Embedding-query path (best collected)
+
+| Scenario | Samples | p50 | p95 | p99 | Mean |
+|---|---:|---:|---:|---:|---:|
+| Sequential varied queries | 120 | 11.28ms | 25.84ms | 34.05ms | 14.49ms |
+| Concurrent varied queries (8 workers) | 120 | 76.36ms | 87.41ms | 100.07ms | 76.34ms |
+
+Server diagnostics for this path showed `embed_total` as the dominant component while `search_total` stayed in microseconds.
+
+#### Fulltext-only path (best collected)
+
+| Scenario | Samples | p50 | p95 | p99 | Mean |
+|---|---:|---:|---:|---:|---:|
+| Sequential varied queries | 40 | 0.57ms | 2.77ms | 94.90ms* | 4.44ms |
+
+Observed handler diagnostics:
+
+- `embed_calls=0`
+- `embed_total=0s`
+- `search_method="fulltext"` with `fallback=true`
+
+\* p99 includes occasional transport/runtime outliers; server-side handler timing for these requests is typically in tens of microseconds.
+
 ### Single Document Scoring
 
 ```
@@ -1398,5 +1425,5 @@ results, _ := svc.Search(ctx, query, embedding, opts)
 
 ---
 
-**Last Updated**: December 14, 2025  
+**Last Updated**: February 17, 2026  
 **Package**: `pkg/search` + `pkg/simd` + `pkg/math/vector`

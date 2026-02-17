@@ -986,6 +986,23 @@ func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
 	}
 	server.db.SetEmbedder(emb)
 
+	// Ensure vector search is actually usable; otherwise the handler correctly
+	// short-circuits to BM25 and embedding is intentionally skipped.
+	dbName := server.dbManager.DefaultDatabaseName()
+	storageEngine, err := server.dbManager.GetStorage(dbName)
+	require.NoError(t, err)
+	searchSvc, err := server.db.GetOrCreateSearchService(dbName, storageEngine)
+	require.NoError(t, err)
+	seedVec := make([]float32, 1024)
+	seedVec[0] = 1
+	require.NoError(t, searchSvc.IndexNode(&storage.Node{
+		ID:              storage.NodeID("seed-vector-node"),
+		Labels:          []string{"Seed"},
+		Properties:      map[string]interface{}{"name": "seed"},
+		ChunkEmbeddings: [][]float32{seedVec},
+	}))
+	require.Greater(t, searchSvc.EmbeddingCount(), 0)
+
 	longQuery := strings.Repeat("a", 1200)
 	resp := makeRequest(t, server, "POST", "/nornicdb/search", map[string]interface{}{
 		"query": longQuery,
@@ -1000,6 +1017,34 @@ func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
 
 	require.GreaterOrEqual(t, calls, 2, "expected query embedding to run on multiple chunks")
 	require.LessOrEqual(t, maxLen, 512, "expected no embedding call on the full query")
+}
+
+func TestHandleSearch_SkipsEmbeddingWhenNoVectorsIndexed(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	emb := &countingEmbedder{dims: 1024}
+	server.db.SetEmbedder(emb)
+
+	dbName := server.dbManager.DefaultDatabaseName()
+	storageEngine, err := server.dbManager.GetStorage(dbName)
+	require.NoError(t, err)
+	searchSvc, err := server.db.GetOrCreateSearchService(dbName, storageEngine)
+	require.NoError(t, err)
+	searchSvc.ClearVectorIndex()
+	require.Equal(t, 0, searchSvc.EmbeddingCount())
+
+	longQuery := strings.Repeat("a", 1200)
+	resp := makeRequest(t, server, "POST", "/nornicdb/search", map[string]interface{}{
+		"query": longQuery,
+		"limit": 10,
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+	emb.mu.Lock()
+	calls := emb.calls
+	emb.mu.Unlock()
+	require.Equal(t, 0, calls, "expected no query embedding calls when vector index is empty")
 }
 
 func TestHandleSearchRebuild(t *testing.T) {

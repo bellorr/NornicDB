@@ -319,6 +319,26 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 
 To reduce latency (e.g. if search is ~4s), try `NORNICDB_VECTOR_ANN_QUALITY=fast` or lower `NORNICDB_VECTOR_HNSW_EF_SEARCH` (e.g. `50`). Ensure you have ≥ 5000 vectors so the pipeline uses HNSW instead of CPU brute-force.
 
+### Search timing diagnostics
+
+Use these flags to identify whether latency comes from embedding, vector retrieval, BM25, or fusion:
+
+| Variable | Default | Description |
+|---|---:|---|
+| `NORNICDB_SEARCH_LOG_TIMINGS` | `false` | Logs per-search service stage timing (`vector_ms`, `bm25_ms`, `fusion_ms`, candidates, fallback). |
+| `NORNICDB_SEARCH_DIAG_TIMINGS` | `false` | Logs HTTP-handler timing breakdown (`embed_total`, `search_total`, `embed_calls`, chunk stats). |
+
+Typical diagnostic pattern for fulltext-only/fallback traffic after optimization:
+
+- `embed_calls=0`
+- `embed_total=0s`
+- `search_total` in microseconds
+
+Observed reference on Apple M3 Max (64GB RAM), varied cache-busting queries:
+
+- **Embedding-query path:** sequential p50 ~11.28ms, p95 ~25.84ms; concurrent (8 workers) p50 ~76.36ms, p95 ~87.41ms
+- **Fulltext-only path:** sequential p50 ~0.57ms, p95 ~2.77ms; handler-internal `total` commonly ~15-100us (HTTP overhead can be higher)
+
 ### A/B testing hybrid routing on/off
 
 Use the same data directory and run two profiles to compare startup/build time and query latency.

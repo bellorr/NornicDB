@@ -246,6 +246,33 @@ logging:
 nornicdb serve --log-queries
 ```
 
+### Search Timing Diagnostics
+
+Enable detailed search timing logs when tuning search latency:
+
+```bash
+# Search-service stage timing (vector/BM25/fusion/candidates)
+export NORNICDB_SEARCH_LOG_TIMINGS=true
+
+# HTTP handler timing breakdown (embed_total/search_total/embed_calls)
+export NORNICDB_SEARCH_DIAG_TIMINGS=true
+```
+
+You will see two complementary log lines per search:
+
+- `⏱️ Search timing:` stage-level search-service timings (`vector_ms`, `bm25_ms`, `fusion_ms`, candidate counts, fallback).
+- `🔎 Search timing db=...:` request-path timings (`embed_total`, `search_total`, `embed_calls`, chunk info).
+
+Field reference (Apple M3 Max, 64GB RAM, Feb 2026):
+
+- **Embedding-query path (best collected):**
+  - Sequential varied queries: p50 11.28ms, p95 25.84ms
+  - Concurrent (8 workers): p50 76.36ms, p95 87.41ms
+  - Typical diagnostic pattern: `embed_total` dominates request time.
+- **Fulltext-only path (best collected):**
+  - Sequential varied queries: p50 0.57ms, p95 2.77ms
+  - Diagnostic pattern: `embed_calls=0`, `embed_total=0s`, handler internal timing in tens of microseconds.
+
 ### Slow Query Log
 
 ```json
