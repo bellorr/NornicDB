@@ -880,6 +880,7 @@ type Session struct {
 	// Query metadata for Neo4j driver compatibility
 	queryId          int64          // Query ID counter for qid field
 	lastQueryIsWrite bool           // Was last query a write operation
+	lastQueryDatabase string        // Effective database for last RUN
 	lastRunMetadata  map[string]any // Metadata from last RUN message (bookmarks, tx_timeout, etc.)
 
 	// Transaction sequence for this session's last committed transaction
@@ -1351,14 +1352,32 @@ func (s *Session) handleRun(data []byte) error {
 		}
 	}
 
-	// Resolve effective database name (for multi-database or for per-DB access check).
-	dbName := s.database
+	// Resolve effective database name (Neo4j-compatible precedence):
+	// 1) RUN metadata db/database
+	// 2) active transaction metadata db/database (BEGIN)
+	// 3) session database (HELLO)
+	// 4) server default
+	dbName := ""
+	if runDB, ok := databaseFromMetadata(metadata); ok {
+		dbName = runDB
+	} else if s.inTransaction {
+		if txDB, ok := databaseFromMetadata(s.txMetadata); ok {
+			dbName = txDB
+		}
+	}
+	if dbName == "" {
+		dbName = s.database
+	}
 	if dbName == "" {
 		if s.server != nil && s.server.dbManager != nil {
 			dbName = s.server.dbManager.DefaultDatabaseName()
 		} else {
 			dbName = "nornic" // single-DB mode default
 		}
+	}
+	if s.server != nil && s.server.dbManager != nil && dbName != "" && !s.server.dbManager.Exists(dbName) {
+		return s.sendFailure("Neo.ClientError.Database.DatabaseNotFound",
+			fmt.Sprintf("Database '%s' does not exist", dbName))
 	}
 	// Per-database access: deny if principal may not access this database (Neo4j-aligned).
 	var mode auth.DatabaseAccessMode
@@ -1431,6 +1450,7 @@ func (s *Session) handleRun(data []byte) error {
 		s.pendingFlush = true
 	}
 	s.lastQueryIsWrite = isWrite
+	s.lastQueryDatabase = dbName
 
 	// Store result for PULL
 	s.lastResult = result
@@ -1614,7 +1634,13 @@ func (s *Session) handlePull(data []byte) error {
 			"bookmark": bookmark,
 			"type":     queryType,
 			"t_last":   int64(0), // Streaming time
-			"db":       "nornic", // Default database name
+		}
+		if s.lastQueryDatabase != "" {
+			metadata["db"] = s.lastQueryDatabase
+		} else if s.database != "" {
+			metadata["db"] = s.database
+		} else {
+			metadata["db"] = "nornic"
 		}
 
 		// Note: Neo4j does NOT send has_more when it's false
@@ -1631,6 +1657,29 @@ func (s *Session) handlePull(data []byte) error {
 		return err
 	}
 	return s.flushIfPending()
+}
+
+func databaseFromMetadata(metadata map[string]any) (string, bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+	if raw, ok := metadata["db"]; ok {
+		if db, ok := raw.(string); ok {
+			db = strings.TrimSpace(db)
+			if db != "" {
+				return db, true
+			}
+		}
+	}
+	if raw, ok := metadata["database"]; ok {
+		if db, ok := raw.(string); ok {
+			db = strings.TrimSpace(db)
+			if db != "" {
+				return db, true
+			}
+		}
+	}
+	return "", false
 }
 
 // handleDiscard handles the DISCARD message.

@@ -248,7 +248,6 @@ func (tx *BadgerTransaction) CreateNode(node *Node) (NodeID, error) {
 	if !isSystemNamespaceID(string(node.ID)) &&
 		(len(node.ChunkEmbeddings) == 0 || len(node.ChunkEmbeddings[0]) == 0) &&
 		NodeNeedsEmbedding(node) {
-		log.Printf("🧪 pending-embed add: node=%s reason=tx_create_node_needs_embedding", node.ID)
 		tx.bufferSet(pendingEmbedKey(node.ID), []byte{})
 	}
 

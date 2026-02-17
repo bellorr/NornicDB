@@ -742,6 +742,7 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 			}
 
 			ae.mu.Unlock()
+			ae.MarkNodeEmbedded(id)
 			if shouldNotify {
 				ae.notifyNodeDeleted(id)
 			}
@@ -753,6 +754,7 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 			ae.deleteNodes[id] = true
 			ae.pendingWrites++
 			ae.mu.Unlock()
+			ae.MarkNodeEmbedded(id)
 			return nil
 		}
 
@@ -779,12 +781,14 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 			ae.deleteNodes[id] = true
 			ae.pendingWrites++
 			ae.mu.Unlock()
+			ae.MarkNodeEmbedded(id)
 			return nil
 		}
 
 		ae.deleteNodes[id] = true
 		ae.pendingWrites++
 		ae.mu.Unlock()
+		ae.MarkNodeEmbedded(id)
 		return nil
 	}
 }
@@ -2162,6 +2166,12 @@ func (ae *AsyncEngine) FindNodeNeedingEmbedding() *Node {
 			// This node has embedding pending flush - no work to do
 			return nil
 		}
+		if ae.isNodeMarkedDeleted(node.ID) {
+			// If delete is pending in AsyncEngine, proactively remove this stale queue
+			// entry from the underlying pending-embeddings index.
+			ae.MarkNodeEmbedded(node.ID)
+			return nil
+		}
 
 		return node
 	}
@@ -2175,6 +2185,9 @@ func (ae *AsyncEngine) FindNodeNeedingEmbedding() *Node {
 		for _, node := range nodes {
 			// Skip if in cache with embedding
 			if cachedWithEmbedding[node.ID] {
+				continue
+			}
+			if ae.isNodeMarkedDeleted(node.ID) {
 				continue
 			}
 			if NodeNeedsEmbedding(node) {
@@ -2207,6 +2220,10 @@ func (ae *AsyncEngine) MarkNodeEmbedded(nodeID NodeID) {
 // AddToPendingEmbeddings delegates to the underlying engine, if supported.
 // Call this to re-queue a node for embedding after a failed attempt (e.g. so another worker can retry).
 func (ae *AsyncEngine) AddToPendingEmbeddings(nodeID NodeID) {
+	// Don't allow re-queue while delete is pending in AsyncEngine.
+	if ae.isNodeMarkedDeleted(nodeID) {
+		return
+	}
 	if mgr, ok := ae.engine.(interface{ AddToPendingEmbeddings(NodeID) }); ok {
 		mgr.AddToPendingEmbeddings(nodeID)
 	}
@@ -2218,6 +2235,13 @@ func (ae *AsyncEngine) PendingEmbeddingsCount() int {
 		return mgr.PendingEmbeddingsCount()
 	}
 	return 0
+}
+
+func (ae *AsyncEngine) isNodeMarkedDeleted(nodeID NodeID) bool {
+	ae.mu.RLock()
+	deleted := ae.deleteNodes[nodeID]
+	ae.mu.RUnlock()
+	return deleted
 }
 
 // IterateNodes iterates through all nodes, checking cache first.

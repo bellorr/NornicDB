@@ -462,7 +462,7 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 		// Execute CREATE for each unwound item
 		for _, item := range items {
 			// Replace variable references ONLY in the CREATE clause
-			createQuerySubstituted := replaceVariableInQuery(createPart, variable, item)
+			createQuerySubstituted := e.replaceVariableInQuery(createPart, variable, item)
 
 			// Reconstruct full query with RETURN
 			fullQuery := createQuerySubstituted
@@ -470,8 +470,9 @@ func (e *StorageExecutor) executeUnwind(ctx context.Context, cypher string) (*Ex
 				fullQuery += " " + returnPart
 			}
 
-			// Execute the CREATE (with RETURN if present)
-			createResult, err := e.executeCreate(ctx, fullQuery)
+			// Execute via the main router so CREATE...SET and other valid CREATE
+			// variants use their dedicated execution paths.
+			createResult, err := e.Execute(ctx, fullQuery, nil)
 			if err != nil {
 				return nil, fmt.Errorf("UNWIND CREATE failed: %w", err)
 			}
@@ -1842,7 +1843,7 @@ func (e *StorageExecutor) executeForeachWithContext(ctx context.Context, cypher 
 	}
 
 	for _, item := range items {
-		substituted := strings.TrimSpace(replaceVariableInQuery(updateClause, variable, item))
+		substituted := strings.TrimSpace(e.replaceVariableInQuery(updateClause, variable, item))
 		if substituted == "" {
 			continue
 		}
@@ -1887,38 +1888,23 @@ func (e *StorageExecutor) executeLoadCSV(ctx context.Context, cypher string) (*E
 // Helper Functions
 // ========================================
 
-// replaceVariableInQuery replaces all occurrences of a variable with its value in a query
-func replaceVariableInQuery(query string, variable string, value interface{}) string {
+// replaceVariableInQuery replaces all occurrences of a variable with its value in a query.
+func (e *StorageExecutor) replaceVariableInQuery(query string, variable string, value interface{}) string {
 	result := query
 
 	// Handle property access patterns first (variable.property)
-	// For maps, replace variable.key with the actual value
-	if valueMap, ok := value.(map[string]interface{}); ok {
+	// For maps, replace variable.key with the actual value.
+	if valueMap, ok := toStringAnyMap(value); ok {
 		// Find all property access patterns
 		for key, propVal := range valueMap {
+			propValStr := e.valueToLiteral(propVal)
 			pattern := variable + "." + key
-			var propValStr string
-			switch pv := propVal.(type) {
-			case string:
-				escaped := strings.ReplaceAll(pv, "'", "\\'")
-				propValStr = fmt.Sprintf("'%s'", escaped)
-			case int, int64:
-				propValStr = fmt.Sprintf("%d", pv)
-			case float64:
-				propValStr = fmt.Sprintf("%f", pv)
-			case bool:
-				if pv {
-					propValStr = "true"
-				} else {
-					propValStr = "false"
-				}
-			default:
-				propValStr = fmt.Sprintf("%v", pv)
-			}
 			result = strings.ReplaceAll(result, pattern, propValStr)
+			backtickedPattern := variable + ".`" + strings.ReplaceAll(key, "`", "``") + "`"
+			result = strings.ReplaceAll(result, backtickedPattern, propValStr)
 		}
-		// Don't replace standalone variable for maps - already handled property access
-		return result
+		// Also handle standalone variable references (e.g. SET n = row).
+		value = valueMap
 	}
 
 	// For simple values, convert to string representation
@@ -1968,4 +1954,22 @@ func replaceVariableInQuery(query string, variable string, value interface{}) st
 	result = strings.Join(words, " ")
 
 	return result
+}
+
+func toStringAnyMap(value interface{}) (map[string]interface{}, bool) {
+	if m, ok := value.(map[string]interface{}); ok {
+		return m, true
+	}
+	if m, ok := value.(map[interface{}]interface{}); ok {
+		out := make(map[string]interface{}, len(m))
+		for k, v := range m {
+			ks, ok := k.(string)
+			if !ok {
+				return nil, false
+			}
+			out[ks] = v
+		}
+		return out, true
+	}
+	return nil, false
 }

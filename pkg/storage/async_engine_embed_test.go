@@ -208,3 +208,70 @@ func TestProductionScenario(t *testing.T) {
 
 	assert.Equal(t, 10, len(embedded), "Should have embedded all 10 nodes")
 }
+
+func TestFindNodeNeedingEmbedding_SkipsPendingDeleteBeforeFlush(t *testing.T) {
+	badger, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	defer badger.Close()
+
+	config := DefaultAsyncEngineConfig()
+	config.FlushInterval = 1 * time.Hour
+	namespaced := NewNamespacedEngine(badger, "test")
+	async := NewAsyncEngine(namespaced, config)
+	defer async.Close()
+
+	node := &Node{
+		ID:     NodeID("to-delete"),
+		Labels: []string{"File"},
+		Properties: map[string]any{
+			"path":    "/tmp/to-delete.md",
+			"content": "needs embedding",
+		},
+	}
+	_, err = async.CreateNode(node)
+	require.NoError(t, err)
+	require.NoError(t, async.Flush()) // Persist so inner pending index contains the node
+
+	first := async.FindNodeNeedingEmbedding()
+	require.NotNil(t, first)
+	require.Equal(t, NodeID("to-delete"), first.ID)
+
+	require.NoError(t, async.DeleteNode(NodeID("to-delete")))
+
+	// Before this fix, AsyncEngine could return the same node again from the inner
+	// pending-embeddings index while deletion was still pending.
+	next := async.FindNodeNeedingEmbedding()
+	assert.Nil(t, next, "deleted node must not be returned for embedding while delete is pending")
+}
+
+func TestAddToPendingEmbeddings_NoRequeueWhenDeletePending(t *testing.T) {
+	badger, err := NewBadgerEngineInMemory()
+	require.NoError(t, err)
+	defer badger.Close()
+
+	config := DefaultAsyncEngineConfig()
+	config.FlushInterval = 1 * time.Hour
+	namespaced := NewNamespacedEngine(badger, "test")
+	async := NewAsyncEngine(namespaced, config)
+	defer async.Close()
+
+	node := &Node{
+		ID:     NodeID("requeue-delete"),
+		Labels: []string{"File"},
+		Properties: map[string]any{
+			"path":    "/tmp/requeue-delete.md",
+			"content": "needs embedding",
+		},
+	}
+	_, err = async.CreateNode(node)
+	require.NoError(t, err)
+	require.NoError(t, async.Flush())
+
+	require.NoError(t, async.DeleteNode(NodeID("requeue-delete")))
+
+	// Simulate a failed embed worker trying to requeue while delete is pending.
+	async.AddToPendingEmbeddings(NodeID("requeue-delete"))
+
+	// Should remain absent from pending queue until explicitly recreated.
+	assert.Equal(t, 0, async.PendingEmbeddingsCount())
+}

@@ -191,11 +191,11 @@ curl -X POST http://localhost:7474/auth/token \
 
 ```bash
 # Authorization header
-curl http://localhost:7474/db/neo4j/tx/commit \
+curl http://localhost:7474/db/nornicdb/tx/commit \
   -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIs..."
 
 # Or API key header
-curl http://localhost:7474/db/neo4j/tx/commit \
+curl http://localhost:7474/db/nornicdb/tx/commit \
   -H "X-API-Key: your-api-key"
 ```
 
@@ -221,7 +221,7 @@ curl http://localhost:7474/nornicdb/search \
 | `GET /health` | None (public) |
 | `GET /status` | `read` |
 | `GET /metrics` | `read` |
-| `POST /db/neo4j/tx/commit` | `read` or `write` |
+| `POST /db/nornicdb/tx/commit` | `read` or `write` |
 | `POST /nornicdb/search` | `read` |
 | `DELETE /nornicdb/gdpr/*` | `admin` |
 | `POST /auth/users` | `admin` |

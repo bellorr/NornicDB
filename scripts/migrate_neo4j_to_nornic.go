@@ -106,7 +106,7 @@ func clearNornicDB() error {
 	}
 
 	body, _ := json.Marshal(query)
-	req, _ := http.NewRequest("POST", nornicHTTPURL+"/db/neo4j/tx/commit", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", nornicHTTPURL+"/db/nornicdb/tx/commit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", basicAuth(nornicUser, nornicPass))
 
@@ -144,7 +144,7 @@ func fetchNodesFromNeo4j() ([]Neo4jNode, time.Duration, error) {
 	}
 
 	body, _ := json.Marshal(query)
-	req, _ := http.NewRequest("POST", neo4jHTTPURL+"/db/neo4j/tx/commit", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", neo4jHTTPURL+"/db/nornicdb/tx/commit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", basicAuth(neo4jUser, neo4jPass))
 
@@ -271,7 +271,7 @@ func insertNodesIntoNornic(nodes []Neo4jNode) (time.Duration, error) {
 		}
 
 		body, _ := json.Marshal(query)
-		req, _ := http.NewRequest("POST", nornicHTTPURL+"/db/neo4j/tx/commit", bytes.NewReader(body))
+		req, _ := http.NewRequest("POST", nornicHTTPURL+"/db/nornicdb/tx/commit", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", basicAuth(nornicUser, nornicPass))
 
@@ -325,7 +325,7 @@ func verifyMigration(expectedCount int) {
 	}
 
 	body, _ := json.Marshal(query)
-	req, _ := http.NewRequest("POST", nornicHTTPURL+"/db/neo4j/tx/commit", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", nornicHTTPURL+"/db/nornicdb/tx/commit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", basicAuth(nornicUser, nornicPass))
 
@@ -391,7 +391,7 @@ func runQuery(baseURL, user, pass, query string) time.Duration {
 	}
 
 	body, _ := json.Marshal(q)
-	req, _ := http.NewRequest("POST", baseURL+"/db/neo4j/tx/commit", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", baseURL+"/db/nornicdb/tx/commit", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", basicAuth(user, pass))
 

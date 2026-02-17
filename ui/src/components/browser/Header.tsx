@@ -15,7 +15,7 @@ import {
   Database,
 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
-import { DatabaseStats } from "../../utils/api";
+import type { DatabaseStats } from "../../utils/api";
 
 interface HeaderProps {
   stats: DatabaseStats | null;
@@ -23,6 +23,7 @@ interface HeaderProps {
   embedData: {
     stats: { running: boolean; processed: number; failed: number } | null;
     totalEmbeddings: number;
+    pendingNodes: number;
     enabled: boolean;
   };
   embedTriggering: boolean;
@@ -43,6 +44,12 @@ export function Header({
   onSecurityClick,
 }: HeaderProps) {
   const navigate = useNavigate();
+  const totalNodes = stats?.database?.nodes ?? 0;
+  const pendingNodes = Math.max(0, embedData.pendingNodes ?? 0);
+  const queueCompletePct =
+    totalNodes > 0
+      ? Math.max(0, Math.min(100, ((totalNodes - pendingNodes) / totalNodes) * 100))
+      : 100;
 
   const formatUptime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600);
@@ -178,7 +185,7 @@ export function Header({
               embedData.stats
                 ? `, Session: ${embedData.stats.processed} processed, ${embedData.stats.failed} failed`
                 : ""
-            }`}
+            }, Queue: ${queueCompletePct.toFixed(1)}% complete (${pendingNodes.toLocaleString()} pending / ${totalNodes.toLocaleString()} total nodes)`}
           >
             {embedTriggering || embedData.stats?.running ? (
               <Loader2 className="w-4 h-4 animate-spin" />
@@ -190,6 +197,9 @@ export function Header({
             </span>
             <span className="text-xs text-valhalla-gold">
               ({embedData.totalEmbeddings.toLocaleString()})
+            </span>
+            <span className="text-xs text-norse-silver">
+              {queueCompletePct.toFixed(1)}% queue
             </span>
           </button>
 

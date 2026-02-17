@@ -87,7 +87,7 @@ Search nodes by meaning, not just keywords:
 | `/status` | GET | Database stats |
 | `/nornicdb/search` | POST | Full-text + vector search |
 | `/nornicdb/similar` | POST | Find similar nodes |
-| `/db/neo4j/tx/commit` | POST | Execute Cypher |
+| `/db/nornicdb/tx/commit` | POST | Execute Cypher |
 
 ## License
 

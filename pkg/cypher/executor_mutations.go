@@ -394,16 +394,35 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 
 		left := strings.TrimSpace(assignment[:eqIdx])
 		right := strings.TrimSpace(assignment[eqIdx+1:])
+		propValue := e.parseValue(right)
 
-		// Extract variable and property
+		// Extract variable and property (or whole-variable map replacement)
 		parts := strings.SplitN(left, ".", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid SET assignment: %q (expected variable.property)", left)
-		}
 		validAssignments++
+		if len(parts) != 2 {
+			variable = strings.TrimSpace(left)
+			props, err := normalizePropsMap(propValue, "SET assignment")
+			if err != nil {
+				return nil, err
+			}
+			// Replace properties on matched entities: SET n = { ... }
+			for _, row := range matchResult.Rows {
+				for _, val := range row {
+					node, ok := val.(*storage.Node)
+					if !ok || node == nil {
+						continue
+					}
+					node.Properties = cloneStringAnyMap(props)
+					if err := store.UpdateNode(node); err == nil {
+						result.Stats.PropertiesSet++
+						e.notifyNodeMutated(string(node.ID))
+					}
+				}
+			}
+			continue
+		}
 		variable = parts[0]
 		propName := parts[1]
-		propValue := e.parseValue(right)
 
 		// Update matched nodes
 		for _, row := range matchResult.Rows {
@@ -1275,6 +1294,10 @@ func (e *StorageExecutor) parseValue(s string) interface{} {
 	if strings.HasPrefix(s, "[") && strings.HasSuffix(s, "]") {
 		return e.parseArrayValue(s)
 	}
+	// Handle map literals: {key: value}
+	if strings.HasPrefix(s, "{") && strings.HasSuffix(s, "}") {
+		return e.parseProperties(s)
+	}
 
 	// Handle quoted strings with escape sequence support
 	if (strings.HasPrefix(s, "'") && strings.HasSuffix(s, "'")) ||
@@ -1309,6 +1332,14 @@ func (e *StorageExecutor) parseValue(s string) interface{} {
 	}
 
 	return s
+}
+
+func cloneStringAnyMap(src map[string]interface{}) map[string]interface{} {
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }
 
 func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, node *storage.Node) interface{} {

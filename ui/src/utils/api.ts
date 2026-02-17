@@ -91,9 +91,71 @@ interface DiscoveryResponse {
 
 class NornicDBClient {
   private defaultDatabase: string | null = null;
+  private static readonly TX_COMMIT_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes
+
+  private async fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+    const controller = new AbortController();
+    const timeoutHandle = window.setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, { ...init, signal: controller.signal });
+    } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        throw new Error(`Request timed out after ${Math.floor(timeoutMs / 1000)} seconds`);
+      }
+      throw err;
+    } finally {
+      window.clearTimeout(timeoutHandle);
+    }
+  }
+
   private async parseErrorMessage(res: Response, fallback: string): Promise<string> {
-    const payload = await res.json().catch(() => null) as { message?: string; error?: string } | null;
-    return payload?.message || payload?.error || fallback;
+    const raw = await res.text().catch(() => '');
+    if (raw) {
+      try {
+        const payload = JSON.parse(raw) as { message?: string; error?: string };
+        return payload?.message || payload?.error || raw || fallback;
+      } catch {
+        return raw;
+      }
+    }
+    return fallback;
+  }
+
+  private async parseCypherResponseOrThrow(res: Response, fallback: string): Promise<CypherResponse> {
+    if (!res.ok) {
+      const message = await this.parseErrorMessage(res, `${fallback} (${res.status})`);
+      throw new Error(message);
+    }
+    const raw = await res.text().catch(() => '');
+    if (!raw) {
+      throw new Error(`${fallback}: empty response`);
+    }
+    try {
+      return JSON.parse(raw) as CypherResponse;
+    } catch {
+      throw new Error(`${fallback}: invalid JSON response`);
+    }
+  }
+
+  private async postCypherCommit(
+    dbName: string,
+    statement: string,
+    parameters?: Record<string, unknown>,
+    timeoutMs: number = NornicDBClient.TX_COMMIT_TIMEOUT_MS,
+  ): Promise<CypherResponse> {
+    const res = await this.fetchWithTimeout(
+      `${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({
+          statements: [{ statement, parameters }],
+        }),
+      },
+      timeoutMs,
+    );
+    return this.parseCypherResponseOrThrow(res, 'Cypher request failed');
   }
 
   // Get default database name from discovery endpoint
@@ -245,27 +307,11 @@ class NornicDBClient {
 
   async executeCypher(statement: string, parameters?: Record<string, unknown>, database?: string): Promise<CypherResponse> {
     const dbName = database != null && database !== '' ? database : await this.getDefaultDatabase();
-    const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        statements: [{ statement, parameters }],
-      }),
-    });
-    return await res.json();
+    return this.postCypherCommit(dbName, statement, parameters);
   }
 
   async executeCypherOnDatabase(dbName: string, statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
-    const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      credentials: 'include',
-      body: JSON.stringify({
-        statements: [{ statement, parameters }],
-      }),
-    });
-    return await res.json();
+    return this.postCypherCommit(dbName, statement, parameters);
   }
 
   async executeSystemCypher(statement: string, parameters?: Record<string, unknown>): Promise<CypherResponse> {
@@ -376,16 +422,7 @@ class NornicDBClient {
     try {
       // First, verify the nodes exist before deleting (safety check)
       const verifyStatement = `MATCH (n) WHERE id(n) IN $ids RETURN id(n) as nodeId, elementId(n) as elementId`;
-      const verifyRes = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          statements: [{ statement: verifyStatement, parameters: { ids: nodeIds } }],
-        }),
-      });
-      
-      const verifyResult: CypherResponse = await verifyRes.json();
+      const verifyResult = await this.postCypherCommit(dbName, verifyStatement, { ids: nodeIds });
       const foundCount = verifyResult.results[0]?.data?.length || 0;
       
       if (foundCount === 0) {
@@ -418,16 +455,7 @@ class NornicDBClient {
       const statement = `MATCH (n) WHERE id(n) IN $ids DETACH DELETE n RETURN count(n) as deleted`;
       const parameters = { ids: nodeIds };
 
-      const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          statements: [{ statement, parameters }],
-        }),
-      });
-
-      const result: CypherResponse = await res.json();
+      const result = await this.postCypherCommit(dbName, statement, parameters);
       
       if (result.errors && result.errors.length > 0) {
         return {
@@ -501,16 +529,7 @@ class NornicDBClient {
     const statement = `MATCH (n) WHERE id(n) = $nodeId OR n.id = $nodeId SET ${setParts.join(', ')} RETURN n`;
     
     try {
-      const res = await fetch(`${BASE_PATH}/db/${encodeURIComponent(dbName)}/tx/commit`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        credentials: 'include',
-        body: JSON.stringify({
-          statements: [{ statement, parameters }],
-        }),
-      });
-
-      const result: CypherResponse = await res.json();
+      const result = await this.postCypherCommit(dbName, statement, parameters);
       
       if (result.errors && result.errors.length > 0) {
         return {

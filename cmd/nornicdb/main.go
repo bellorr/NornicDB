@@ -683,7 +683,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  • Bolt:         bolt://%s:%d\n", displayAddr, boltPort)
 	fmt.Printf("  • Health:       http://%s:%d/health\n", displayAddr, httpPort)
 	fmt.Printf("  • Search:       POST http://%s:%d/nornicdb/search\n", displayAddr, httpPort)
-	fmt.Printf("  • Cypher:       POST http://%s:%d/db/neo4j/tx/commit\n", displayAddr, httpPort)
+	fmt.Printf("  • Cypher:       POST http://%s:%d/db/nornicdb/tx/commit\n", displayAddr, httpPort)
 	if mcpEnabled {
 		fmt.Printf("  • MCP:          http://%s:%d/mcp\n", displayAddr, httpPort)
 	}

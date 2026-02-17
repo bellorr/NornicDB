@@ -14,6 +14,17 @@ func TestPropertyToString_SkipsDenseNumericVectors(t *testing.T) {
 
 	got = propertyToString([]float64{0.1, 0.2, 0.3})
 	require.Equal(t, "", got)
+
+	denseAny := make([]any, 64)
+	for i := range denseAny {
+		denseAny[i] = float64(i) / 10.0
+	}
+	got = propertyToString(denseAny)
+	require.Equal(t, "", got)
+
+	smallAny := []any{1.0, 2.0, 3.0}
+	got = propertyToString(smallAny)
+	require.Equal(t, "1 2 3", got)
 }
 
 func TestVectorFromPropertyValue_DimensionAware(t *testing.T) {

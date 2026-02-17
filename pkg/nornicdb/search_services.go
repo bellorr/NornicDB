@@ -153,11 +153,13 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	}
 	svc := search.NewServiceWithDimensionsAndBM25Engine(storageEngine, dims, bm25Engine)
 	svc.SetDefaultMinSimilarity(minSim)
+	persistSearchIndexesEnabled := db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes
+	svc.SetPersistenceEnabled(persistSearchIndexesEnabled)
 
 	// When PersistSearchIndexes is true, set paths so BuildIndexes saves indexes after a
 	// build and loads them on startup (skipping the full iteration when both are present).
 	// HNSW is also persisted so the approximate nearest-neighbor index does not need rebuilding.
-	if db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes {
+	if persistSearchIndexesEnabled {
 		base := filepath.Join(db.config.DataDir, "search", dbName)
 		fulltextFilename := "bm25"
 		if strings.EqualFold(strings.TrimSpace(bm25Engine), search.BM25EngineV2) {

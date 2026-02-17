@@ -202,10 +202,10 @@ func (e *StorageExecutor) splitSetAssignments(setClause string) []string {
 				}
 			}
 			current.WriteRune(c)
-		case c == '(' && !inQuote:
+		case (c == '(' || c == '{' || c == '[') && !inQuote:
 			parenDepth++
 			current.WriteRune(c)
-		case c == ')' && !inQuote:
+		case (c == ')' || c == '}' || c == ']') && !inQuote:
 			parenDepth--
 			current.WriteRune(c)
 		case c == ',' && !inQuote && parenDepth == 0:
@@ -244,7 +244,7 @@ func (e *StorageExecutor) splitSetAssignments(setClause string) []string {
 func (e *StorageExecutor) splitSetAssignmentsRespectingBrackets(setClause string) []string {
 	var assignments []string
 	var current strings.Builder
-	depth := 0 // Tracks both () and []
+	depth := 0 // Tracks (), [], and {}
 	inQuote := false
 	quoteChar := rune(0)
 
@@ -261,10 +261,10 @@ func (e *StorageExecutor) splitSetAssignmentsRespectingBrackets(setClause string
 				}
 			}
 			current.WriteRune(c)
-		case (c == '(' || c == '[') && !inQuote:
+		case (c == '(' || c == '[' || c == '{') && !inQuote:
 			depth++
 			current.WriteRune(c)
-		case (c == ')' || c == ']') && !inQuote:
+		case (c == ')' || c == ']' || c == '}') && !inQuote:
 			depth--
 			current.WriteRune(c)
 		case c == ',' && !inQuote && depth == 0:

@@ -23,6 +23,7 @@ interface EmbedStats {
 interface EmbedData {
   stats: EmbedStats | null;
   totalEmbeddings: number;
+  pendingNodes: number;
   enabled: boolean;
 }
 
@@ -64,6 +65,7 @@ export function Browser() {
   const [embedData, setEmbedData] = useState<EmbedData>({
     stats: null,
     totalEmbeddings: 0,
+    pendingNodes: 0,
     enabled: false,
   });
   const [embedTriggering, setEmbedTriggering] = useState(false);
@@ -86,6 +88,7 @@ export function Browser() {
           setEmbedData({
             stats: data.stats || null,
             totalEmbeddings: data.total_embeddings || 0,
+            pendingNodes: data.pending_nodes || 0,
             enabled: data.enabled || false,
           });
         }

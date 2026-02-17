@@ -91,7 +91,7 @@ curl http://localhost:7474/metrics \
 ```prometheus
 # Request metrics
 nornicdb_http_requests_total{method="GET",path="/health",status="200"} 1234
-nornicdb_http_request_duration_seconds{method="POST",path="/db/neo4j/tx/commit"} 0.045
+nornicdb_http_request_duration_seconds{method="POST",path="/db/nornicdb/tx/commit"} 0.045
 
 # Database metrics
 nornicdb_nodes_total 150000

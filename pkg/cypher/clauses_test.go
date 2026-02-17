@@ -1429,6 +1429,53 @@ func TestUnwindRange(t *testing.T) {
 	}
 }
 
+func TestUnwindCreateSetFromMapParameter(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	e := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := e.Execute(ctx, `
+UNWIND $rows AS row
+CREATE (n:MongoRecord)
+SET n = row.properties
+`, map[string]interface{}{
+		"rows": []map[string]interface{}{
+			{
+				"properties": map[string]interface{}{
+					"_mongo_database":   "caremark-translation",
+					"_mongo_collection": "caremark_language_list",
+					"_mongo_id":         "abc123",
+					"name":              "English",
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("UNWIND CREATE/SET from parameterized map failed: %v", err)
+	}
+
+	result, err := e.Execute(ctx, `
+MATCH (n:MongoRecord {_mongo_id: 'abc123'})
+RETURN n._mongo_collection AS coll, n._mongo_database AS db, n._mongo_id AS id
+`, nil)
+	if err != nil {
+		t.Fatalf("MATCH failed: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 imported node, got %d", len(result.Rows))
+	}
+	if got := result.Rows[0][0]; got != "caremark_language_list" {
+		t.Fatalf("expected _mongo_collection=caremark_language_list, got %#v", got)
+	}
+	if got := result.Rows[0][1]; got != "caremark-translation" {
+		t.Fatalf("expected _mongo_database=caremark-translation, got %#v", got)
+	}
+	if got := result.Rows[0][2]; got != "abc123" {
+		t.Fatalf("expected _mongo_id=abc123, got %#v", got)
+	}
+}
+
 // ========================================
 // Helper Function Tests
 // ========================================

@@ -8,6 +8,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/storage"
 )
 
 // mockExecutor implements QueryExecutor for testing.
@@ -23,6 +25,29 @@ func (m *mockExecutor) Execute(ctx context.Context, query string, params map[str
 		Columns: []string{"n"},
 		Rows:    [][]any{{"test"}},
 	}, nil
+}
+
+type mockDBManager struct {
+	stores     map[string]storage.Engine
+	defaultDB  string
+	lastGetDB  string
+}
+
+func (m *mockDBManager) GetStorage(name string) (storage.Engine, error) {
+	m.lastGetDB = name
+	if s, ok := m.stores[name]; ok {
+		return s, nil
+	}
+	return nil, io.EOF
+}
+
+func (m *mockDBManager) Exists(name string) bool {
+	_, ok := m.stores[name]
+	return ok
+}
+
+func (m *mockDBManager) DefaultDatabaseName() string {
+	return m.defaultDB
 }
 
 func TestDefaultConfig(t *testing.T) {
@@ -1623,6 +1648,97 @@ func TestParseRunMessage(t *testing.T) {
 			t.Error("bookmark with negative sequence number should fail validation")
 		}
 	})
+}
+
+func TestHandleRun_UsesRunMetadataDatabase(t *testing.T) {
+	manager := &mockDBManager{
+		stores: map[string]storage.Engine{
+			"nornic":       storage.NewMemoryEngine(),
+			"translations": storage.NewMemoryEngine(),
+		},
+		defaultDB: "nornic",
+	}
+
+	server := &Server{
+		config:   DefaultConfig(),
+		dbManager: manager,
+	}
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	go func() { _, _ = io.Copy(io.Discard, clientConn) }()
+
+	session := &Session{
+		conn:          serverConn,
+		reader:        bufio.NewReaderSize(serverConn, 8192),
+		writer:        bufio.NewWriterSize(serverConn, 8192),
+		server:         server,
+		executor:       &mockExecutor{},
+		authenticated:  true,
+		authResult:     &BoltAuthResult{Authenticated: true, Username: "admin", Roles: []string{"admin"}},
+		messageBuf:     make([]byte, 0, 4096),
+	}
+
+	queryBytes := encodePackStreamString("RETURN 1 AS one")
+	paramsBytes := encodePackStreamMap(map[string]any{})
+	metadataBytes := encodePackStreamMap(map[string]any{"db": "translations"})
+	data := append(append(queryBytes, paramsBytes...), metadataBytes...)
+
+	if err := session.handleRun(data); err != nil {
+		t.Fatalf("handleRun failed: %v", err)
+	}
+	if manager.lastGetDB != "translations" {
+		t.Fatalf("expected db routing to translations, got %q", manager.lastGetDB)
+	}
+	if session.lastQueryDatabase != "translations" {
+		t.Fatalf("expected lastQueryDatabase=translations, got %q", session.lastQueryDatabase)
+	}
+}
+
+func TestHandleRun_UsesBeginDatabaseWhenRunOmitsDatabase(t *testing.T) {
+	manager := &mockDBManager{
+		stores: map[string]storage.Engine{
+			"nornic":       storage.NewMemoryEngine(),
+			"translations": storage.NewMemoryEngine(),
+		},
+		defaultDB: "nornic",
+	}
+
+	server := &Server{
+		config:   DefaultConfig(),
+		dbManager: manager,
+	}
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+	go func() { _, _ = io.Copy(io.Discard, clientConn) }()
+
+	session := &Session{
+		conn:          serverConn,
+		reader:        bufio.NewReaderSize(serverConn, 8192),
+		writer:        bufio.NewWriterSize(serverConn, 8192),
+		server:         server,
+		executor:       &mockExecutor{},
+		authenticated:  true,
+		authResult:     &BoltAuthResult{Authenticated: true, Username: "admin", Roles: []string{"admin"}},
+		messageBuf:     make([]byte, 0, 4096),
+	}
+
+	beginData := encodePackStreamMap(map[string]any{"db": "translations"})
+	if err := session.handleBegin(beginData); err != nil {
+		t.Fatalf("handleBegin failed: %v", err)
+	}
+
+	runData := append(encodePackStreamString("RETURN 1 AS one"), 0xA0, 0xA0)
+	if err := session.handleRun(runData); err != nil {
+		t.Fatalf("handleRun failed: %v", err)
+	}
+	if manager.lastGetDB != "translations" {
+		t.Fatalf("expected db routing to translations from BEGIN metadata, got %q", manager.lastGetDB)
+	}
+	if session.lastQueryDatabase != "translations" {
+		t.Fatalf("expected lastQueryDatabase=translations, got %q", session.lastQueryDatabase)
+	}
 }
 
 // =============================================================================

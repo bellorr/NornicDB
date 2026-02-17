@@ -136,7 +136,7 @@ func getParamsFromContext(ctx context.Context) map[string]interface{} {
 // Values are properly escaped to prevent injection attacks.
 // String values have single quotes escaped by doubling them.
 func (e *StorageExecutor) substituteParams(cypher string, params map[string]interface{}) string {
-	if params == nil || len(params) == 0 {
+	if len(params) == 0 {
 		return cypher
 	}
 
@@ -285,6 +285,31 @@ func (e *StorageExecutor) valueToLiteral(v interface{}) string {
 			parts = append(parts, fmt.Sprintf("%s: %s", k, e.valueToLiteral(v)))
 		}
 		return "{" + strings.Join(parts, ", ") + "}"
+
+	case map[interface{}]interface{}:
+		parts := make([]string, 0, len(val))
+		for rawKey, v := range val {
+			key, ok := rawKey.(string)
+			if !ok {
+				continue
+			}
+			parts = append(parts, fmt.Sprintf("%s: %s", key, e.valueToLiteral(v)))
+		}
+		return "{" + strings.Join(parts, ", ") + "}"
+
+	case []map[string]interface{}:
+		parts := make([]string, len(val))
+		for i, item := range val {
+			parts[i] = e.valueToLiteral(item)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
+
+	case []map[interface{}]interface{}:
+		parts := make([]string, len(val))
+		for i, item := range val {
+			parts[i] = e.valueToLiteral(item)
+		}
+		return "[" + strings.Join(parts, ", ") + "]"
 
 	default:
 		// Fallback: convert to string

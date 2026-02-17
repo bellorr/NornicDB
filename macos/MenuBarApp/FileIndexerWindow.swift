@@ -709,7 +709,7 @@ class FileWatchManager: ObservableObject {
         ]
         
         let checkData = try JSONSerialization.data(withJSONObject: checkBody)
-        let (checkResponseData, _) = try await makeAuthenticatedRequest(to: "/db/neo4j/tx/commit", method: "POST", body: checkData)
+        let (checkResponseData, _) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: checkData)
         
         if let json = try? JSONSerialization.jsonObject(with: checkResponseData) as? [String: Any],
            let results = json["results"] as? [[String: Any]],
@@ -763,7 +763,7 @@ class FileWatchManager: ObservableObject {
         ]
         
         let bodyData = try JSONSerialization.data(withJSONObject: body)
-        let (_, response) = try await makeAuthenticatedRequest(to: "/db/neo4j/tx/commit", method: "POST", body: bodyData)
+        let (_, response) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: bodyData)
         
         if response.statusCode != 200 {
             throw NSError(domain: "FileWatchManager", code: response.statusCode, 
@@ -787,7 +787,7 @@ class FileWatchManager: ObservableObject {
         ]
         
         let countData = try JSONSerialization.data(withJSONObject: countBody)
-        let (countResponseData, _) = try await makeAuthenticatedRequest(to: "/db/neo4j/tx/commit", method: "POST", body: countData)
+        let (countResponseData, _) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: countData)
         
         var fileCount = 0
         var chunkCount = 0
@@ -819,7 +819,7 @@ class FileWatchManager: ObservableObject {
         ]
         
         let deleteData = try JSONSerialization.data(withJSONObject: deleteBody)
-        let (_, response) = try await makeAuthenticatedRequest(to: "/db/neo4j/tx/commit", method: "POST", body: deleteData)
+        let (_, response) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: deleteData)
         
         if response.statusCode == 200 {
             print("✅ Successfully deleted all nodes for folder: \(folderPath)")

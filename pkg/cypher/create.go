@@ -1595,13 +1595,38 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 					leftSide := strings.TrimSpace(assignment[:eqIdx])
 					rightSide := strings.TrimSpace(assignment[eqIdx+1:])
 					dotIdx := strings.Index(leftSide, ".")
+					value := e.parseValue(rightSide)
 					if dotIdx == -1 {
-						return nil, fmt.Errorf("invalid SET assignment (expected var.property): %s", assignment)
+						varName := strings.TrimSpace(leftSide)
+						props, err := normalizePropsMap(value, "SET assignment")
+						if err != nil {
+							return nil, err
+						}
+						if node, exists := combinedNodeVars[varName]; exists {
+							node.Properties = cloneStringAnyMap(props)
+							if err := store.UpdateNode(node); err != nil {
+								return nil, fmt.Errorf("failed to replace node properties: %w", err)
+							}
+							result.Stats.PropertiesSet++
+							e.notifyNodeMutated(string(node.ID))
+						} else if edge, exists := edgeVars[varName]; exists {
+							edge.Properties = cloneStringAnyMap(props)
+							if err := store.UpdateEdge(edge); err != nil {
+								return nil, fmt.Errorf("failed to replace edge properties: %w", err)
+							}
+							result.Stats.PropertiesSet++
+						} else {
+							return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
+						}
+						continue
 					}
+
 					varName := strings.TrimSpace(leftSide[:dotIdx])
 					propName := strings.TrimSpace(leftSide[dotIdx+1:])
-					value := e.parseValue(rightSide)
 					if node, exists := combinedNodeVars[varName]; exists {
+						if node.Properties == nil {
+							node.Properties = make(map[string]interface{})
+						}
 						node.Properties[propName] = value
 						if err := store.UpdateNode(node); err != nil {
 							return nil, fmt.Errorf("failed to update node property: %w", err)
@@ -1609,6 +1634,9 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 						result.Stats.PropertiesSet++
 						e.notifyNodeMutated(string(node.ID))
 					} else if edge, exists := edgeVars[varName]; exists {
+						if edge.Properties == nil {
+							edge.Properties = make(map[string]interface{})
+						}
 						edge.Properties[propName] = value
 						if err := store.UpdateEdge(edge); err != nil {
 							return nil, fmt.Errorf("failed to update edge property: %w", err)
@@ -2117,21 +2145,40 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 
 			// Parse variable.property
 			dotIdx := strings.Index(leftSide, ".")
+			value := e.parseValue(rightSide)
 			if dotIdx == -1 {
-				return nil, fmt.Errorf("invalid SET assignment (expected var.property): %s", assignment)
+				varName := strings.TrimSpace(leftSide)
+				props, err := normalizePropsMap(value, "SET assignment")
+				if err != nil {
+					return nil, err
+				}
+				if node, exists := createdNodes[varName]; exists {
+					node.Properties = cloneStringAnyMap(props)
+					if err := store.UpdateNode(node); err != nil {
+						return nil, fmt.Errorf("failed to replace node properties: %w", err)
+					}
+					result.Stats.PropertiesSet++
+					e.notifyNodeMutated(string(node.ID))
+				} else if edge, exists := createdEdges[varName]; exists {
+					edge.Properties = cloneStringAnyMap(props)
+					if err := store.UpdateEdge(edge); err != nil {
+						return nil, fmt.Errorf("failed to replace edge properties: %w", err)
+					}
+					result.Stats.PropertiesSet++
+				} else {
+					return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
+				}
+				continue
 			}
 
 			varName := strings.TrimSpace(leftSide[:dotIdx])
 			propName := strings.TrimSpace(leftSide[dotIdx+1:])
 
-			// Note: Function validation is already done in validateSetAssignments()
-			// which runs before CREATE to ensure rollback safety
-
-			// Parse the value
-			value := e.parseValue(rightSide)
-
 			// Apply to created node or edge
 			if node, exists := createdNodes[varName]; exists {
+				if node.Properties == nil {
+					node.Properties = make(map[string]interface{})
+				}
 				node.Properties[propName] = value
 				if err := store.UpdateNode(node); err != nil {
 					return nil, fmt.Errorf("failed to update node property: %w", err)
@@ -2139,6 +2186,9 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 				result.Stats.PropertiesSet++
 				e.notifyNodeMutated(string(node.ID))
 			} else if edge, exists := createdEdges[varName]; exists {
+				if edge.Properties == nil {
+					edge.Properties = make(map[string]interface{})
+				}
 				edge.Properties[propName] = value
 				if err := store.UpdateEdge(edge); err != nil {
 					return nil, fmt.Errorf("failed to update edge property: %w", err)

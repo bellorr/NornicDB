@@ -42,7 +42,7 @@
 //	// Use with Neo4j Browser
 //	// Open: http://localhost:7474
 //	// Connect URI: bolt://localhost:7687 (if Bolt server is running)
-//	// Or use HTTP: http://localhost:7474/db/neo4j/tx/commit
+//	// Or use HTTP: http://localhost:7474/db/nornic/tx/commit
 //
 //	// Use with Neo4j drivers
 //	driver := neo4j.NewDriver("http://localhost:7474", neo4j.BasicAuth("admin", "password"))

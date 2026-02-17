@@ -161,7 +161,7 @@ func (e *StorageExecutor) parseProperties(propsStr string) map[string]interface{
 			continue
 		}
 
-		key := strings.TrimSpace(pair[:colonIdx])
+		key := normalizePropertyKey(strings.TrimSpace(pair[:colonIdx]))
 		valueStr := strings.TrimSpace(pair[colonIdx+1:])
 
 		// Parse the value
@@ -169,6 +169,20 @@ func (e *StorageExecutor) parseProperties(propsStr string) map[string]interface{
 	}
 
 	return props
+}
+
+func normalizePropertyKey(key string) string {
+	key = strings.TrimSpace(key)
+	if len(key) >= 2 {
+		if strings.HasPrefix(key, "`") && strings.HasSuffix(key, "`") {
+			return strings.ReplaceAll(key[1:len(key)-1], "``", "`")
+		}
+		if (strings.HasPrefix(key, "'") && strings.HasSuffix(key, "'")) ||
+			(strings.HasPrefix(key, "\"") && strings.HasSuffix(key, "\"")) {
+			return key[1 : len(key)-1]
+		}
+	}
+	return key
 }
 
 // splitPropertyPairs splits a property string into key:value pairs,

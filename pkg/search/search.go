@@ -132,6 +132,9 @@ const (
 	// EnvSearchBM25Engine selects the BM25 engine implementation.
 	// Supported values: "v1", "v2". Default: "v1".
 	EnvSearchBM25Engine = "NORNICDB_SEARCH_BM25_ENGINE"
+	// EnvSearchLogTimings enables per-query timing logs for search stages.
+	// When true, logs vector/BM25/fusion/total timing to help identify bottlenecks.
+	EnvSearchLogTimings = "NORNICDB_SEARCH_LOG_TIMINGS"
 	BM25EngineV1        = "v1"
 	BM25EngineV2        = "v2"
 )
@@ -491,6 +494,7 @@ type Service struct {
 	persistRunMu     sync.Mutex
 	persistTimer     *time.Timer
 	buildInProgress  atomic.Bool
+	persistEnabled   atomic.Bool
 	buildPhase       atomic.Value // string
 	buildStartedUnix atomic.Int64
 	buildPhaseUnix   atomic.Int64
@@ -644,6 +648,7 @@ func NewServiceWithDimensionsAndBM25Engine(engine storage.Engine, dimensions int
 		resultCache:                newSearchResultCache(1000, 5*time.Minute), // same order as Cypher query cache
 	}
 	svc.ready.Store(false)
+	svc.persistEnabled.Store(false)
 	svc.buildPhase.Store("idle")
 	svc.buildPhaseUnix.Store(time.Now().Unix())
 	log.Printf("📇 Search: BM25 engine selected: %s", selectedBM25Engine)
@@ -883,6 +888,11 @@ const DefaultMinEmbeddingsForClustering = 1000
 
 // fulltextBuildBatchSize is the number of nodes to index in one fulltext IndexBatch during BuildIndexes.
 const fulltextBuildBatchSize = 5000
+
+// fulltextIndexChunkSize controls cancellability granularity during BuildIndexes.
+// Large IndexBatch calls can run for a long time (especially BM25 v2), so we split
+// batch writes into smaller chunks and check ctx between chunks.
+const fulltextIndexChunkSize = 250
 
 // buildIndexPersistInterval removed: we no longer checkpoint persist during BuildIndexes
 // because the append-only vector store can be rebuilt from .vec on resume.
@@ -1195,11 +1205,38 @@ func (s *Service) SetHNSWIndexPath(path string) {
 	s.hnswIndexPath = path
 }
 
+// SetPersistenceEnabled controls whether index persistence is allowed.
+// When false, all persist paths (debounced writes, build checkpoints, and shutdown flush)
+// are treated as no-ops even if index paths are configured.
+func (s *Service) SetPersistenceEnabled(enabled bool) {
+	s.persistEnabled.Store(enabled)
+	if enabled {
+		return
+	}
+	s.persistMu.Lock()
+	if s.persistTimer != nil {
+		s.persistTimer.Stop()
+		s.persistTimer = nil
+	}
+	s.persistMu.Unlock()
+	s.persistRunMu.Lock()
+	s.indexMu.Lock()
+	if s.vectorFileStore != nil {
+		_ = s.vectorFileStore.Close()
+		s.vectorFileStore = nil
+	}
+	s.indexMu.Unlock()
+	s.persistRunMu.Unlock()
+}
+
 // schedulePersist schedules a write of BM25 and vector indexes to disk after an idle delay.
 // Called after IndexNode/RemoveNode when paths are set; resets the timer on each mutation
 // so we only write after activity settles. No-ops during BuildIndexes (we save at end there).
 // Delay is NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC (default 30).
 func (s *Service) schedulePersist() {
+	if !s.persistEnabled.Load() {
+		return
+	}
 	if s.buildInProgress.Load() {
 		return
 	}
@@ -1241,8 +1278,14 @@ func (s *Service) schedulePersist() {
 // persistBaseIndexes writes BM25 + vector store only (no HNSW/IVF-HNSW).
 // Used after BuildIndexes iteration to make base indexes durable before HNSW/k-means.
 func (s *Service) persistBaseIndexes() {
+	if !s.persistEnabled.Load() {
+		return
+	}
 	s.persistRunMu.Lock()
 	defer s.persistRunMu.Unlock()
+	if !s.persistEnabled.Load() {
+		return
+	}
 	s.mu.RLock()
 	ftPath := s.fulltextIndexPath
 	vPath := s.vectorIndexPath
@@ -1289,8 +1332,14 @@ func (s *Service) persistBaseIndexes() {
 }
 
 func (s *Service) runPersist() {
+	if !s.persistEnabled.Load() {
+		return
+	}
 	s.persistRunMu.Lock()
 	defer s.persistRunMu.Unlock()
+	if !s.persistEnabled.Load() {
+		return
+	}
 	s.mu.RLock()
 	ftPath := s.fulltextIndexPath
 	vPath := s.vectorIndexPath
@@ -1368,6 +1417,18 @@ func (s *Service) runPersist() {
 // Call this on shutdown so the latest in-memory state is saved before exit, same as every other persisted index.
 // Cancels any pending debounced persist so no write runs after shutdown.
 func (s *Service) PersistIndexesToDisk() {
+	if !s.persistEnabled.Load() {
+		return
+	}
+	s.mu.RLock()
+	ftPath := s.fulltextIndexPath
+	vPath := s.vectorIndexPath
+	hnswPath := s.hnswIndexPath
+	s.mu.RUnlock()
+	if ftPath == "" && vPath == "" && hnswPath == "" {
+		return
+	}
+
 	log.Printf("📇 Persisting search indexes (BM25, vector, HNSW/IVF-HNSW)...")
 	s.persistMu.Lock()
 	if s.persistTimer != nil {
@@ -1717,6 +1778,9 @@ func (s *Service) removeVectorLocked(id string) {
 // Caller holds s.indexMu.
 // When not resuming, BuildIndexes has already removed .vec/.meta so we start from 0; when resuming, existing files are appended to.
 func (s *Service) ensureBuildVectorFileStore() {
+	if !s.persistEnabled.Load() {
+		return
+	}
 	if s.vectorIndexPath == "" {
 		return
 	}
@@ -1776,7 +1840,7 @@ func (s *Service) indexNodeLocked(node *storage.Node, skipFulltext bool) error {
 	}
 
 	// When building from storage with a vector path, use file-backed store to bound RAM.
-	if skipFulltext && s.vectorIndexPath != "" {
+	if skipFulltext && s.persistEnabled.Load() && s.vectorIndexPath != "" {
 		s.ensureBuildVectorFileStore()
 	}
 
@@ -2085,6 +2149,30 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			s.setBuildPhase("idle")
 		}
 	}()
+	if sec := envInt("NORNICDB_SEARCH_BUILD_PROGRESS_LOG_SEC", 15); sec > 0 {
+		interval := time.Duration(sec) * time.Second
+		ticker := time.NewTicker(interval)
+		stop := make(chan struct{})
+		bm25Engine := s.BM25Engine()
+		go func() {
+			for {
+				select {
+				case <-ticker.C:
+					phase := "unknown"
+					if p, ok := s.buildPhase.Load().(string); ok && p != "" {
+						phase = p
+					}
+					processed := s.buildProcessed.Load()
+					total := s.buildTotalNodes.Load()
+					log.Printf("📇 BuildIndexes progress: phase=%s processed=%d/%d bm25_engine=%s", phase, processed, total, bm25Engine)
+				case <-stop:
+					return
+				}
+			}
+		}()
+		defer close(stop)
+		defer ticker.Stop()
+	}
 
 	// Clear cache once for the whole build so IndexNode/RemoveNode don't clear per node.
 	if s.resultCache != nil {
@@ -2096,6 +2184,11 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	vectorPath := s.vectorIndexPath
 	hnswPath := s.hnswIndexPath
 	s.mu.RUnlock()
+	if !s.persistEnabled.Load() {
+		fulltextPath = ""
+		vectorPath = ""
+		hnswPath = ""
+	}
 	if n, err := s.engine.NodeCount(); err == nil && n > 0 {
 		s.buildTotalNodes.Store(n)
 	}
@@ -2314,7 +2407,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		s.mu.Unlock()
 	}
 
-	if s.vectorIndexPath != "" {
+	if vectorPath != "" {
 		log.Printf("📇 BuildIndexes: building from storage (file-backed vector store)")
 	} else {
 		log.Printf("📇 BuildIndexes: building from storage (vector index in memory)")
@@ -2337,7 +2430,27 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 					text := s.extractSearchableText(n)
 					entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
 				}
-				s.fulltextIndex.IndexBatch(entries)
+				chunkSize := fulltextIndexChunkSize
+				if chunkSize <= 0 {
+					chunkSize = len(entries)
+				}
+				for i := 0; i < len(entries); i += chunkSize {
+					select {
+					case <-ctx.Done():
+						return
+					default:
+					}
+					end := i + chunkSize
+					if end > len(entries) {
+						end = len(entries)
+					}
+					s.fulltextIndex.IndexBatch(entries[i:end])
+					// Keep heartbeat progress moving during heavy BM25 batch work.
+					s.buildProcessed.Store(int64(count + end))
+				}
+				if ctx.Err() != nil {
+					return
+				}
 			}
 			s.indexMu.Lock()
 			for _, n := range batch {
@@ -2353,6 +2466,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 				return false
 			default:
 				fulltextBatch = append(fulltextBatch, node)
+				// Expose forward progress while accumulating a batch, so long BM25 batches
+				// don't appear "stuck" at 0 until the first flush completes.
+				s.buildProcessed.Store(int64(count + len(fulltextBatch)))
 				if len(fulltextBatch) >= fulltextBuildBatchSize {
 					flushFulltextBatch(fulltextBatch)
 					fulltextBatch = nil
@@ -2370,7 +2486,11 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			return ctx.Err()
 		}
 		flushFulltextBatch(fulltextBatch)
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		fmt.Printf("📊 Indexed %d total nodes\n", count)
+		log.Printf("📇 BuildIndexes: base index iteration complete (processed=%d)", count)
 		// Persist BM25 + vector store before HNSW/k-means build so base indexes are durable.
 		s.setBuildPhase("persisting_base_indexes")
 		s.persistBaseIndexes()
@@ -2407,7 +2527,27 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 				text := s.extractSearchableText(n)
 				entries = append(entries, FulltextBatchEntry{ID: string(n.ID), Text: text})
 			}
-			s.fulltextIndex.IndexBatch(entries)
+			chunkSize := fulltextIndexChunkSize
+			if chunkSize <= 0 {
+				chunkSize = len(entries)
+			}
+			for i := 0; i < len(entries); i += chunkSize {
+				select {
+				case <-ctx.Done():
+					return
+				default:
+				}
+				end := i + chunkSize
+				if end > len(entries) {
+					end = len(entries)
+				}
+				s.fulltextIndex.IndexBatch(entries[i:end])
+				// Keep heartbeat progress moving during heavy BM25 batch work.
+				s.buildProcessed.Store(int64(count + end))
+			}
+			if ctx.Err() != nil {
+				return
+			}
 		}
 		s.indexMu.Lock()
 		for _, n := range batch {
@@ -2422,6 +2562,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			return ctx.Err()
 		}
 		fulltextBatch = append(fulltextBatch, node)
+		// Expose forward progress while accumulating a batch, so long BM25 batches
+		// don't appear "stuck" at 0 until the first flush completes.
+		s.buildProcessed.Store(int64(count + len(fulltextBatch)))
 		if len(fulltextBatch) >= fulltextBuildBatchSize {
 			flushFulltextBatchFallback(fulltextBatch)
 			fulltextBatch = nil
@@ -2434,8 +2577,15 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	flushFulltextBatchFallback(fulltextBatch)
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	fmt.Printf("📊 Indexed %d total nodes\n", count)
+	log.Printf("📇 BuildIndexes: base index iteration complete (processed=%d)", count)
 	// Persist BM25 + vector store before HNSW/k-means build so base indexes are durable.
 	s.setBuildPhase("persisting_base_indexes")
 	s.persistBaseIndexes()
@@ -2561,6 +2711,7 @@ func (s *Service) warmupVectorPipeline(ctx context.Context) {
 //
 // Returns a SearchResponse with ranked results and metadata about the search method used.
 func (s *Service) Search(ctx context.Context, query string, embedding []float32, opts *SearchOptions) (*SearchResponse, error) {
+	start := time.Now()
 	if s.buildAttempted.Load() && !s.IsReady() {
 		return nil, ErrSearchIndexBuilding
 	}
@@ -2575,6 +2726,7 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 	cacheKey := searchCacheKey(query, opts)
 	if s.resultCache != nil {
 		if cached := s.resultCache.Get(cacheKey); cached != nil {
+			s.maybeLogSearchTiming(query, cached, time.Since(start), true)
 			return cached, nil
 		}
 	}
@@ -2585,6 +2737,7 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 		if err == nil && s.resultCache != nil {
 			s.resultCache.Put(cacheKey, resp)
 		}
+		s.maybeLogSearchTiming(query, resp, time.Since(start), false)
 		return resp, err
 	}
 
@@ -2596,6 +2749,7 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 		if err == nil && s.resultCache != nil {
 			s.resultCache.Put(cacheKey, resp)
 		}
+		s.maybeLogSearchTiming(query, resp, time.Since(start), false)
 		return resp, err
 	}
 
@@ -2605,6 +2759,7 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 		if s.resultCache != nil {
 			s.resultCache.Put(cacheKey, response)
 		}
+		s.maybeLogSearchTiming(query, response, time.Since(start), false)
 		return response, nil
 	}
 
@@ -2616,6 +2771,7 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 		if s.resultCache != nil {
 			s.resultCache.Put(cacheKey, response)
 		}
+		s.maybeLogSearchTiming(query, response, time.Since(start), false)
 		return response, nil
 	}
 
@@ -2624,11 +2780,13 @@ func (s *Service) Search(ctx context.Context, query string, embedding []float32,
 	if err == nil && s.resultCache != nil {
 		s.resultCache.Put(cacheKey, resp)
 	}
+	s.maybeLogSearchTiming(query, resp, time.Since(start), false)
 	return resp, err
 }
 
 // rrfHybridSearch performs Reciprocal Rank Fusion combining vector and BM25 results.
 func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding []float32, opts *SearchOptions) (*SearchResponse, error) {
+	totalStart := time.Now()
 	// Avoid holding s.mu while interacting with the vector pipeline (pipelineMu),
 	// otherwise we can deadlock with writers that lock pipelineMu and then need s.mu.
 	// See: maybeAutoSetVectorDimensions(), ClearVectorIndex(), SetGPUManager().
@@ -2645,6 +2803,7 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	}
 
 	// Step 1: Vector search
+	vectorStart := time.Now()
 	var vectorResults []indexResult
 	ctx = withQueryText(ctx, query)
 	pipeline, pipelineErr := s.getOrCreateVectorPipeline(ctx)
@@ -2658,12 +2817,15 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	for _, r := range scored {
 		vectorResults = append(vectorResults, indexResult{ID: r.ID, Score: r.Score})
 	}
+	vectorMs := int(time.Since(vectorStart).Milliseconds())
 
 	// Step 2: BM25 full-text search (skip if no full-text index; ranks will have vector only)
+	bm25Start := time.Now()
 	var bm25Results []indexResult
 	if fulltextIndex != nil {
 		bm25Results = fulltextIndex.Search(query, bm25CandidateLimit)
 	}
+	bm25Ms := int(time.Since(bm25Start).Milliseconds())
 
 	// Collapse vector IDs back to unique node IDs.
 	vectorResults = collapseIndexResultsByNodeID(vectorResults)
@@ -2677,6 +2839,7 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	}
 
 	// Step 4: Fuse with RRF
+	fusionStart := time.Now()
 	fusedResults := s.fuseRRF(vectorResults, bm25Results, opts)
 
 	// Step 5: Apply MMR diversification if enabled
@@ -2710,6 +2873,8 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 
 	// Step 7: Convert to SearchResult and enrich with node data
 	results := s.enrichResults(ctx, fusedResults, opts.Limit, seenOrphans)
+	fusionMs := int(time.Since(fusionStart).Milliseconds())
+	totalMs := int(time.Since(totalStart).Milliseconds())
 
 	return &SearchResponse{
 		Status:          "success",
@@ -2720,9 +2885,13 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 		SearchMethod:    searchMethod,
 		Message:         message,
 		Metrics: &SearchMetrics{
-			VectorCandidates: len(vectorResults),
-			BM25Candidates:   len(bm25Results),
-			FusedCandidates:  len(fusedResults),
+			VectorSearchTimeMs: vectorMs,
+			BM25SearchTimeMs:   bm25Ms,
+			FusionTimeMs:       fusionMs,
+			TotalTimeMs:        totalMs,
+			VectorCandidates:   len(vectorResults),
+			BM25Candidates:     len(bm25Results),
+			FusedCandidates:    len(fusedResults),
 		},
 	}, nil
 }
@@ -3816,6 +3985,8 @@ func (s *Service) RerankerAvailable(ctx context.Context) bool {
 // We do not hold s.mu across getOrCreateVectorPipeline() because it takes s.mu.RLock() internally;
 // Go's RWMutex is not reentrant, so holding s.mu here would risk deadlock if a writer were waiting.
 func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opts *SearchOptions) (*SearchResponse, error) {
+	totalStart := time.Now()
+	searchStart := time.Now()
 	pipeline, pipelineErr := s.getOrCreateVectorPipeline(ctx)
 	if pipelineErr != nil {
 		return nil, pipelineErr
@@ -3831,7 +4002,6 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 	}
 	searchMethod := "vector"
 	message := "Vector similarity search (cosine)"
-	searchStart := time.Now()
 
 	switch pipeline.candidateGen.(type) {
 	case *KMeansCandidateGen:
@@ -3873,6 +4043,8 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 		searchResults[i].VectorRank = i + 1
 		searchResults[i].BM25Rank = 0
 	}
+	vectorMs := int(time.Since(searchStart).Milliseconds())
+	totalMs := int(time.Since(totalStart).Milliseconds())
 
 	return &SearchResponse{
 		Status:          "success",
@@ -3881,11 +4053,17 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 		Returned:        len(searchResults),
 		SearchMethod:    searchMethod,
 		Message:         message,
+		Metrics: &SearchMetrics{
+			VectorSearchTimeMs: vectorMs,
+			TotalTimeMs:        totalMs,
+			VectorCandidates:   len(results),
+		},
 	}, nil
 }
 
 // fullTextSearchOnly performs full-text BM25 search only.
 func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *SearchOptions) (*SearchResponse, error) {
+	totalStart := time.Now()
 	s.mu.RLock()
 	ft := s.fulltextIndex
 	s.mu.RUnlock()
@@ -3899,9 +4077,14 @@ func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *Se
 			SearchMethod:      "fulltext",
 			FallbackTriggered: true,
 			Message:           "Full-text index not available",
+			Metrics: &SearchMetrics{
+				TotalTimeMs: int(time.Since(totalStart).Milliseconds()),
+			},
 		}, nil
 	}
+	bm25Start := time.Now()
 	results := ft.Search(query, opts.Limit*2)
+	bm25Ms := int(time.Since(bm25Start).Milliseconds())
 
 	seenOrphans := make(map[string]bool)
 	if len(opts.Types) > 0 {
@@ -3914,6 +4097,7 @@ func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *Se
 		searchResults[i].VectorRank = 0
 		searchResults[i].BM25Rank = i + 1
 	}
+	totalMs := int(time.Since(totalStart).Milliseconds())
 
 	return &SearchResponse{
 		Status:            "success",
@@ -3924,7 +4108,53 @@ func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *Se
 		SearchMethod:      "fulltext",
 		FallbackTriggered: true,
 		Message:           "Full-text BM25 search (vector search unavailable or returned no results)",
+		Metrics: &SearchMetrics{
+			BM25SearchTimeMs: bm25Ms,
+			TotalTimeMs:      totalMs,
+			BM25Candidates:   len(results),
+		},
 	}, nil
+}
+
+func (s *Service) maybeLogSearchTiming(query string, resp *SearchResponse, elapsed time.Duration, cacheHit bool) {
+	if !envBool(EnvSearchLogTimings, false) || resp == nil {
+		return
+	}
+	totalMs := int(elapsed.Milliseconds())
+	vectorMs := 0
+	bm25Ms := 0
+	fusionMs := 0
+	vectorCandidates := 0
+	bm25Candidates := 0
+	fusedCandidates := 0
+	if resp.Metrics != nil {
+		if resp.Metrics.TotalTimeMs > 0 {
+			totalMs = resp.Metrics.TotalTimeMs
+		}
+		vectorMs = resp.Metrics.VectorSearchTimeMs
+		bm25Ms = resp.Metrics.BM25SearchTimeMs
+		fusionMs = resp.Metrics.FusionTimeMs
+		vectorCandidates = resp.Metrics.VectorCandidates
+		bm25Candidates = resp.Metrics.BM25Candidates
+		fusedCandidates = resp.Metrics.FusedCandidates
+	}
+	queryPreview := strings.TrimSpace(query)
+	if len(queryPreview) > 80 {
+		queryPreview = queryPreview[:77] + "..."
+	}
+	log.Printf("⏱️ Search timing: method=%s cache_hit=%t fallback=%t total_ms=%d vector_ms=%d bm25_ms=%d fusion_ms=%d candidates[v=%d,b=%d,f=%d] returned=%d query=%q",
+		resp.SearchMethod,
+		cacheHit,
+		resp.FallbackTriggered,
+		totalMs,
+		vectorMs,
+		bm25Ms,
+		fusionMs,
+		vectorCandidates,
+		bm25Candidates,
+		fusedCandidates,
+		resp.Returned,
+		queryPreview)
 }
 
 // extractSearchableText extracts text from ALL node properties for full-text indexing.
@@ -3989,6 +4219,11 @@ func propertyToString(val interface{}) string {
 		}
 		return "false"
 	case []interface{}:
+		if looksLikeDenseNumericSlice(v) {
+			// Avoid indexing dense numeric arrays encoded as []interface{} (common in imports).
+			// Treat these as vector-like payloads, not searchable BM25 text.
+			return ""
+		}
 		var strs []string
 		for _, item := range v {
 			if s := propertyToString(item); s != "" {
@@ -4000,6 +4235,22 @@ func propertyToString(val interface{}) string {
 		// Skip complex objects/maps/arrays; indexing their fmt output is noisy and expensive.
 		return ""
 	}
+}
+
+func looksLikeDenseNumericSlice(v []interface{}) bool {
+	if len(v) < 32 {
+		return false
+	}
+	numeric := 0
+	for _, item := range v {
+		switch item.(type) {
+		case int, int8, int16, int32, int64,
+			uint, uint8, uint16, uint32, uint64,
+			float32, float64:
+			numeric++
+		}
+	}
+	return float64(numeric)/float64(len(v)) >= 0.9
 }
 
 // vectorFromPropertyValue extracts a vector with the expected dimension.

@@ -92,7 +92,7 @@ upstream nornicdb_write {
 }
 
 server {
-    location /db/neo4j/tx/commit {
+    location /db/nornicdb/tx/commit {
         # Route writes to primary
         proxy_pass http://nornicdb_write;
     }

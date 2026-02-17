@@ -1807,14 +1807,16 @@ func (db *DB) closeInternal() error {
 
 	var errs []error
 
-	// Persist search indexes to disk so the latest state is saved on next startup.
-	db.searchServicesMu.RLock()
-	for _, entry := range db.searchServices {
-		if entry != nil && entry.svc != nil {
-			entry.svc.PersistIndexesToDisk()
+	// Persist search indexes on shutdown only when persistence is enabled.
+	if db.config != nil && db.config.PersistSearchIndexes && db.config.DataDir != "" {
+		db.searchServicesMu.RLock()
+		for _, entry := range db.searchServices {
+			if entry != nil && entry.svc != nil {
+				entry.svc.PersistIndexesToDisk()
+			}
 		}
+		db.searchServicesMu.RUnlock()
 	}
-	db.searchServicesMu.RUnlock()
 
 	if db.decay != nil {
 		db.decay.Stop()
