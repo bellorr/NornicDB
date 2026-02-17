@@ -403,7 +403,7 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 			variable = strings.TrimSpace(left)
 			props, err := normalizePropsMap(propValue, "SET assignment")
 			if err != nil {
-				return nil, err
+				return nil, fmt.Errorf("invalid SET assignment: %q (expected variable.property = value or variable = {property: value}): %w", assignment, err)
 			}
 			// Replace properties on matched entities: SET n = { ... }
 			for _, row := range matchResult.Rows {
