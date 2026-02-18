@@ -747,7 +747,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
     @objc func downloadModels() {
         let alert = NSAlert()
         alert.messageText = "Download Default Models"
-        alert.informativeText = "This will download:\n• BGE-M3 embedding model (~400MB)\n• qwen3-0.6b-Instruct model (~350MB)\n\nTotal: ~750MB\n\nDownloading from HuggingFace..."
+        alert.informativeText = "This will download:\n• BGE-M3 embedding model (~400MB)\n• BGE reranker model (~440MB)\n• qwen3-0.6b-Instruct model (~350MB)\n\nTotal: ~890MB\n\nDownloading from HuggingFace..."
         alert.alertStyle = .informational
         alert.addButton(withTitle: "Download")
         alert.addButton(withTitle: "Cancel")
@@ -764,7 +764,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 let task = Process()
                 task.launchPath = "/bin/bash"
-                task.arguments = ["-c", "cd /usr/local/var/nornicdb && curl -L -o models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -L -o models/qwen3-0.6b-instruct.gguf https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"]
+                task.arguments = ["-c", "cd /usr/local/var/nornicdb && curl -L -o models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -L -o models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf && curl -L -o models/qwen3-0.6b-instruct.gguf https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"]
                 
                 // Create models directory first
                 try? FileManager.default.createDirectory(atPath: "/usr/local/var/nornicdb/models", withIntermediateDirectories: true, attributes: nil)
@@ -846,6 +846,7 @@ enum ServerStatus {
 class ConfigManager: ObservableObject {
     @Published var embeddingsEnabled: Bool = false
     @Published var kmeansEnabled: Bool = false
+    @Published var searchRerankEnabled: Bool = false
     @Published var autoTLPEnabled: Bool = false
     @Published var heimdallEnabled: Bool = false
     @Published var autoStartEnabled: Bool = true
@@ -883,6 +884,7 @@ class ConfigManager: ObservableObject {
     @Published var encryptionKeychainAccessDenied: Bool = false  // Track if user denied Keychain access
     
     @Published var embeddingModel: String = "bge-m3.gguf"
+    @Published var searchRerankModel: String = "bge-reranker-v2-m3-Q4_K_M.gguf"
     @Published var embeddingDimensions: Int = 1024  // Read from config, default 1024 for bge-m3
     @Published var heimdallModel: String = "qwen3-0.6b-instruct.gguf"
     @Published var availableModels: [String] = []
@@ -1030,6 +1032,16 @@ class ConfigManager: ObservableObject {
         if let kmeansSection = extractYAMLSection(named: "kmeans", from: content) {
             kmeansEnabled = getYAMLBool(key: "enabled", from: kmeansSection)
             print("✅ Loaded kmeans enabled: \(kmeansEnabled)")
+        }
+
+        // Load search_rerank section
+        if let searchRerankSection = extractYAMLSection(named: "search_rerank", from: content) {
+            searchRerankEnabled = getYAMLBool(key: "enabled", from: searchRerankSection)
+            print("✅ Loaded search_rerank enabled: \(searchRerankEnabled)")
+            if let model = getYAMLString(key: "model", from: searchRerankSection) {
+                searchRerankModel = model
+                print("✅ Loaded search_rerank model: \(model)")
+            }
         }
         
         // Load auto_tlp section
@@ -1209,6 +1221,16 @@ class ConfigManager: ObservableObject {
         kmeans:
           enabled: false
         """)
+
+        content = ensureSectionExists(in: content, section: "search_rerank", defaultContent: """
+        
+        search_rerank:
+          enabled: false
+          provider: local
+          model: bge-reranker-v2-m3-Q4_K_M.gguf
+          api_url: ""
+          api_key: ""
+        """)
         
         content = ensureSectionExists(in: content, section: "auto_tlp", defaultContent: """
         
@@ -1234,6 +1256,9 @@ class ConfigManager: ObservableObject {
         // Update each feature setting
         content = updateYAMLValue(in: content, section: "embedding", key: "enabled", value: embeddingsEnabled)
         content = updateYAMLValue(in: content, section: "kmeans", key: "enabled", value: kmeansEnabled)
+        content = updateYAMLValue(in: content, section: "search_rerank", key: "enabled", value: searchRerankEnabled)
+        content = updateYAMLStringValue(in: content, section: "search_rerank", key: "provider", value: "local")
+        content = updateYAMLStringValue(in: content, section: "search_rerank", key: "model", value: searchRerankModel)
         content = updateYAMLValue(in: content, section: "auto_tlp", key: "enabled", value: autoTLPEnabled)
         content = updateYAMLValue(in: content, section: "heimdall", key: "enabled", value: heimdallEnabled)
         
@@ -1499,6 +1524,7 @@ struct SettingsView: View {
     @State private var originalEmbeddingsEnabled: Bool = false
     @State private var originalUseAppleIntelligence: Bool = false
     @State private var originalKmeansEnabled: Bool = false
+    @State private var originalSearchRerankEnabled: Bool = false
     @State private var originalAutoTLPEnabled: Bool = false
     @State private var originalHeimdallEnabled: Bool = false
     @State private var originalAutoStartEnabled: Bool = true
@@ -1506,6 +1532,7 @@ struct SettingsView: View {
     @State private var originalHttpPortNumber: String = "7474"
     @State private var originalHostAddress: String = "localhost"
     @State private var originalEmbeddingModel: String = "bge-m3.gguf"
+    @State private var originalSearchRerankModel: String = "bge-reranker-v2-m3-Q4_K_M.gguf"
     @State private var originalHeimdallModel: String = "qwen3-0.6b-instruct.gguf"
     @State private var originalAdminUsername: String = "admin"
     @State private var originalAdminPassword: String = "password"
@@ -1525,6 +1552,7 @@ struct SettingsView: View {
         return config.embeddingsEnabled != originalEmbeddingsEnabled ||
                config.useAppleIntelligence != originalUseAppleIntelligence ||
                config.kmeansEnabled != originalKmeansEnabled ||
+               config.searchRerankEnabled != originalSearchRerankEnabled ||
                config.autoTLPEnabled != originalAutoTLPEnabled ||
                config.heimdallEnabled != originalHeimdallEnabled ||
                config.autoStartEnabled != originalAutoStartEnabled ||
@@ -1532,6 +1560,7 @@ struct SettingsView: View {
                config.httpPortNumber != originalHttpPortNumber ||
                config.hostAddress != originalHostAddress ||
                config.embeddingModel != originalEmbeddingModel ||
+               config.searchRerankModel != originalSearchRerankModel ||
                config.heimdallModel != originalHeimdallModel ||
                config.adminUsername != originalAdminUsername ||
                config.adminPassword != originalAdminPassword ||
@@ -1626,6 +1655,7 @@ struct SettingsView: View {
         originalEmbeddingsEnabled = config.embeddingsEnabled
         originalUseAppleIntelligence = config.useAppleIntelligence
         originalKmeansEnabled = config.kmeansEnabled
+        originalSearchRerankEnabled = config.searchRerankEnabled
         originalAutoTLPEnabled = config.autoTLPEnabled
         originalHeimdallEnabled = config.heimdallEnabled
         originalAutoStartEnabled = config.autoStartEnabled
@@ -1633,6 +1663,7 @@ struct SettingsView: View {
         originalHttpPortNumber = config.httpPortNumber
         originalHostAddress = config.hostAddress
         originalEmbeddingModel = config.embeddingModel
+        originalSearchRerankModel = config.searchRerankModel
         originalHeimdallModel = config.heimdallModel
         originalAdminUsername = config.adminUsername
         originalAdminPassword = config.adminPassword
@@ -1767,6 +1798,12 @@ struct SettingsView: View {
                 <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
                 <string>\(config.kmeansEnabled ? "true" : "false")</string>
+                <key>NORNICDB_SEARCH_RERANK_ENABLED</key>
+                <string>\(config.searchRerankEnabled ? "true" : "false")</string>
+                <key>NORNICDB_SEARCH_RERANK_PROVIDER</key>
+                <string>local</string>
+                <key>NORNICDB_SEARCH_RERANK_MODEL</key>
+                <string>\(config.searchRerankModel)</string>
                 <key>NORNICDB_AUTO_TLP_ENABLED</key>
                 <string>\(config.autoTLPEnabled ? "true" : "false")</string>
                 <key>NORNICDB_HEIMDALL_ENABLED</key>
@@ -1915,6 +1952,13 @@ struct SettingsView: View {
                     isEnabled: $config.kmeansEnabled,
                     icon: "circle.hexagongrid.fill"
                 )
+
+                FeatureToggle(
+                    title: "Search Reranking",
+                    description: "Stage-2 reranking for improved result relevance",
+                    isEnabled: $config.searchRerankEnabled,
+                    icon: "line.3.horizontal.decrease.circle.fill"
+                )
                 
                 FeatureToggle(
                     title: "Auto-TLP",
@@ -2061,6 +2105,27 @@ struct SettingsView: View {
                                 .foregroundColor(.secondary)
                             
                             Picker("Heimdall Model", selection: $config.heimdallModel) {
+                                ForEach(config.availableModels, id: \.self) { model in
+                                    Text(model).tag(model)
+                                }
+                            }
+                            .pickerStyle(.menu)
+                            .frame(maxWidth: 400)
+                        }
+
+                        Divider()
+
+                        // Search Reranker Model Selection
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Search Reranker Model")
+                                .font(.subheadline)
+                                .fontWeight(.medium)
+
+                            Text("Used for Stage-2 reranking in hybrid/vector search")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+
+                            Picker("Search Reranker Model", selection: $config.searchRerankModel) {
                                 ForEach(config.availableModels, id: \.self) { model in
                                     Text(model).tag(model)
                                 }
@@ -2420,6 +2485,7 @@ struct FirstRunWizard: View {
     @State private var isDownloadingModels: Bool = false
     @State private var downloadProgress: String = ""
     @State private var bgeModelExists: Bool = false
+    @State private var bgeRerankerModelExists: Bool = false
     @State private var qwenModelExists: Bool = false
     @State private var serverIsRunning: Bool = false
     @State private var isSaving: Bool = false
@@ -2661,6 +2727,12 @@ struct FirstRunWizard: View {
                                 <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
                                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
                                 <string>\(config.kmeansEnabled ? "true" : "false")</string>
+                                <key>NORNICDB_SEARCH_RERANK_ENABLED</key>
+                                <string>\(config.searchRerankEnabled ? "true" : "false")</string>
+                                <key>NORNICDB_SEARCH_RERANK_PROVIDER</key>
+                                <string>local</string>
+                                <key>NORNICDB_SEARCH_RERANK_MODEL</key>
+                                <string>\(config.searchRerankModel)</string>
                                 <key>NORNICDB_AUTO_TLP_ENABLED</key>
                                 <string>\(config.autoTLPEnabled ? "true" : "false")</string>
                                 <key>NORNICDB_HEIMDALL_ENABLED</key>
@@ -2867,7 +2939,7 @@ struct FirstRunWizard: View {
                         selected: $selectedPreset,
                         title: "Standard (Recommended)",
                         subtitle: "Great for most users",
-                        features: ["All basic features", "Vector embeddings", "K-Means clustering"]
+                        features: ["All basic features", "Vector embeddings", "Search reranking (BGE reranker model)"]
                     )
                     
                     PresetOption(
@@ -2875,7 +2947,7 @@ struct FirstRunWizard: View {
                         selected: $selectedPreset,
                         title: "Advanced",
                         subtitle: "Full AI capabilities",
-                        features: ["All features enabled", "Heimdall AI guardian", "Auto-predictions", "Maximum performance"]
+                        features: ["All standard features", "Heimdall AI guardian", "Auto-predictions", "Embedding + reranker models"]
                     )
                 }
                 .padding()
@@ -3108,7 +3180,7 @@ struct FirstRunWizard: View {
                 
                 VStack(alignment: .leading, spacing: 15) {
                     FeatureSummary(enabled: getPresetFeatures().embeddings, title: "Embeddings", icon: "brain.head.profile")
-                    FeatureSummary(enabled: getPresetFeatures().kmeans, title: "K-Means Clustering", icon: "circle.hexagongrid.fill")
+                    FeatureSummary(enabled: getPresetFeatures().searchRerank, title: "Search Reranking", icon: "line.3.horizontal.decrease.circle.fill")
                     FeatureSummary(enabled: getPresetFeatures().autoTLP, title: "Auto-TLP", icon: "clock.arrow.circlepath")
                     FeatureSummary(enabled: getPresetFeatures().heimdall, title: "Heimdall", icon: "eye.fill")
                 }
@@ -3280,8 +3352,8 @@ struct FirstRunWizard: View {
                     .padding()
                 }
                 
-                // Model Requirements Section (only show if NOT using Apple Intelligence)
-                if needsModels() && !config.useAppleIntelligence {
+                // Model requirements (reranker is required for Standard/Advanced even with Apple Intelligence).
+                if needsModels() {
                     Divider()
                     
                     VStack(spacing: 15) {
@@ -3315,14 +3387,24 @@ struct FirstRunWizard: View {
                             }
                             .padding()
                         } else {
-                            // Embedding Model (Standard & Advanced)
-                            if selectedPreset == .standard || selectedPreset == .advanced {
+                            // Embedding model is only required when using local GGUF embeddings.
+                            if !config.useAppleIntelligence && (selectedPreset == .standard || selectedPreset == .advanced) {
                                 ModelDownloadRow(
                                     modelName: "BGE-M3 Embedding Model",
                                     fileName: "bge-m3.gguf",
                                     size: "~400MB",
                                     exists: bgeModelExists,
                                     onDownload: { downloadBGEModel() }
+                                )
+                            }
+
+                            if selectedPreset == .standard || selectedPreset == .advanced {
+                                ModelDownloadRow(
+                                    modelName: "BGE Reranker Model",
+                                    fileName: "bge-reranker-v2-m3-Q4_K_M.gguf",
+                                    size: "~440MB",
+                                    exists: bgeRerankerModelExists,
+                                    onDownload: { downloadBGERerankerModel() }
                                 )
                             }
                             
@@ -3403,9 +3485,15 @@ struct FirstRunWizard: View {
     
     private func allRequiredModelsExist() -> Bool {
         if selectedPreset == .standard {
-            return bgeModelExists
+            if config.useAppleIntelligence {
+                return bgeRerankerModelExists
+            }
+            return bgeModelExists && bgeRerankerModelExists
         } else if selectedPreset == .advanced {
-            return bgeModelExists && qwenModelExists
+            if config.useAppleIntelligence {
+                return bgeRerankerModelExists && qwenModelExists
+            }
+            return bgeModelExists && bgeRerankerModelExists && qwenModelExists
         }
         return true
     }
@@ -3415,13 +3503,16 @@ struct FirstRunWizard: View {
         let fileManager = FileManager.default
         
         let bgePath = "\(modelsPath)/bge-m3.gguf"
+        let bgeRerankerPath = "\(modelsPath)/bge-reranker-v2-m3-Q4_K_M.gguf"
         let qwenPath = "\(modelsPath)/qwen3-0.6b-instruct.gguf"
         
         bgeModelExists = fileManager.fileExists(atPath: bgePath)
+        bgeRerankerModelExists = fileManager.fileExists(atPath: bgeRerankerPath)
         qwenModelExists = fileManager.fileExists(atPath: qwenPath)
         
         print("Checking models:")
         print("  BGE: \(bgePath) - exists: \(bgeModelExists)")
+        print("  BGE Reranker: \(bgeRerankerPath) - exists: \(bgeRerankerModelExists)")
         print("  Qwen: \(qwenPath) - exists: \(qwenModelExists)")
     }
     
@@ -3481,16 +3572,48 @@ struct FirstRunWizard: View {
         }
     }
 
+    private func downloadBGERerankerModel() {
+        isDownloadingModels = true
+        downloadProgress = "Downloading BGE reranker model (~440MB)..."
+
+        DispatchQueue.global(qos: .userInitiated).async {
+            let task = Process()
+            task.launchPath = "/bin/bash"
+            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf"]
+
+            task.launch()
+            task.waitUntilExit()
+
+            DispatchQueue.main.async {
+                if task.terminationStatus == 0 {
+                    downloadProgress = "BGE reranker downloaded successfully!"
+                    bgeRerankerModelExists = true
+                } else {
+                    downloadProgress = "Download failed. You can download manually later."
+                }
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+                    isDownloadingModels = false
+                    downloadProgress = ""
+                }
+            }
+        }
+    }
+
     func applyPreset() {
         let features = getPresetFeatures()
         config.embeddingsEnabled = features.embeddings
-        config.kmeansEnabled = features.kmeans
+        config.kmeansEnabled = false
+        config.searchRerankEnabled = features.searchRerank
+        if config.searchRerankModel.isEmpty {
+            config.searchRerankModel = "bge-reranker-v2-m3-Q4_K_M.gguf"
+        }
         config.autoTLPEnabled = features.autoTLP
         config.heimdallEnabled = features.heimdall
         config.autoStartEnabled = true
     }
     
-    func getPresetFeatures() -> (embeddings: Bool, kmeans: Bool, autoTLP: Bool, heimdall: Bool) {
+    func getPresetFeatures() -> (embeddings: Bool, searchRerank: Bool, autoTLP: Bool, heimdall: Bool) {
         switch selectedPreset {
         case .basic:
             return (false, false, false, false)
