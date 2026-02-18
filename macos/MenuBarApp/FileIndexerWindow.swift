@@ -117,6 +117,7 @@ class FileWatchManager: ObservableObject {
     @Published var connectionStatus: ServerConnectionStatus = .unknown
     @Published var authRequired: Bool = false
     @Published var isAuthenticated: Bool = false
+    @Published var activeDatabaseName: String = "nornic"
     
     /// Delay between indexing each file (in milliseconds) to reduce system load
     @Published var indexingThrottleMs: Int = 50 {
@@ -134,6 +135,7 @@ class FileWatchManager: ObservableObject {
     private var serverHost: String { config.hostAddress }
     private var serverPort: String { config.httpPortNumber }
     private var serverBaseURL: String { "http://\(serverHost):\(serverPort)" }
+    private var txCommitEndpoint: String { "/db/\(activeDatabaseName)/tx/commit" }
     
     // Persistence path
     private var configPath: String {
@@ -179,6 +181,7 @@ class FileWatchManager: ObservableObject {
             }
             
             connectionStatus = .connected
+            await resolveDefaultDatabaseName()
             
             // Now check if auth is required
             await checkAuthStatus()
@@ -262,6 +265,32 @@ class FileWatchManager: ObservableObject {
         } catch {
             isAuthenticated = false
             connectionStatus = .authRequired
+        }
+    }
+    
+    /// Resolve the server default database so writes go to the same DB shown in UI.
+    @MainActor
+    private func resolveDefaultDatabaseName() async {
+        guard let discoveryURL = URL(string: "\(serverBaseURL)/") else {
+            return
+        }
+        
+        do {
+            let (data, response) = try await URLSession.shared.data(from: discoveryURL)
+            guard let httpResponse = response as? HTTPURLResponse,
+                  httpResponse.statusCode == 200 else {
+                return
+            }
+            
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let dbName = json["default_database"] as? String,
+                  !dbName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                return
+            }
+            
+            activeDatabaseName = dbName
+        } catch {
+            // Keep fallback default.
         }
     }
     
@@ -375,6 +404,57 @@ class FileWatchManager: ObservableObject {
         }
         
         return (data, httpResponse)
+    }
+    
+    @MainActor
+    private func canWriteToServer() async -> Bool {
+        if connectionStatus == .connected || connectionStatus == .authenticated {
+            return true
+        }
+        
+        // Try one explicit refresh before giving up.
+        await checkServerConnection()
+        return connectionStatus == .connected || connectionStatus == .authenticated
+    }
+    
+    /// Execute a Cypher statement and surface Neo4j-style errors even when HTTP status is 200.
+    private func executeCypher(_ statement: String, parameters: [String: Any]) async throws -> [String: Any] {
+        let body: [String: Any] = [
+            "statements": [
+                ["statement": statement, "parameters": parameters]
+            ]
+        ]
+        let bodyData = try JSONSerialization.data(withJSONObject: body)
+        let (data, response) = try await makeAuthenticatedRequest(to: txCommitEndpoint, method: "POST", body: bodyData)
+        
+        guard response.statusCode == 200 else {
+            throw NSError(
+                domain: "FileWatchManager",
+                code: response.statusCode,
+                userInfo: [NSLocalizedDescriptionKey: "Cypher request failed with status \(response.statusCode) on database '\(activeDatabaseName)'"]
+            )
+        }
+        
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw NSError(
+                domain: "FileWatchManager",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Invalid Cypher response from server"]
+            )
+        }
+        
+        if let errors = json["errors"] as? [[String: Any]], !errors.isEmpty {
+            let first = errors[0]
+            let code = first["code"] as? String ?? "Unknown"
+            let message = first["message"] as? String ?? "Cypher execution failed"
+            throw NSError(
+                domain: "FileWatchManager",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "\(code): \(message)"]
+            )
+        }
+        
+        return json
     }
     
     // MARK: - Persistence
@@ -566,8 +646,13 @@ class FileWatchManager: ObservableObject {
         
         // Run indexing in background
         Task {
-            // Check if we can connect to server
-            let canStoreInServer = connectionStatus == .connected || connectionStatus == .authenticated
+            // Resolve current connection/auth state before deciding whether to write.
+            var canStoreInServer = await MainActor.run {
+                return self.connectionStatus == .connected || self.connectionStatus == .authenticated
+            }
+            if !canStoreInServer {
+                canStoreInServer = await self.canWriteToServer()
+            }
             
             let files = await indexerService.indexFolder(at: path, recursive: true)
             
@@ -632,12 +717,18 @@ class FileWatchManager: ObservableObject {
                     self.watchedFolders[index].isIndexing = false
                     self.watchedFolders[index].lastSync = Date()
                     
-                    if finalErrorCount > 0 && !canStoreInServer {
-                        self.watchedFolders[index].error = "Server not connected - files indexed locally only"
+                    if !canStoreInServer {
+                        self.watchedFolders[index].error = "Database write skipped: not connected/authenticated. Re-run indexing after connection is green."
+                        self.error = "No files were inserted into NornicDB. Connect/authenticate first, then click Refresh on the folder."
                     } else if finalErrorCount > 0 {
                         self.watchedFolders[index].error = "\(finalErrorCount) files failed to index"
+                        self.error = "Some files failed to insert. Check logs for Cypher/API errors."
                     } else {
                         self.watchedFolders[index].error = nil
+                        // Clear stale global error once an indexing pass fully succeeds.
+                        if self.error?.contains("insert") == true || self.error?.contains("failed") == true {
+                            self.error = nil
+                        }
                     }
                 }
                 
@@ -703,20 +794,11 @@ class FileWatchManager: ObservableObject {
         RETURN f.last_modified as last_modified, f.indexed_date as indexed_date
         """
         
-        let checkParams: [String: Any] = ["path": file.path]
-        let checkBody: [String: Any] = [
-            "statements": [["statement": checkQuery, "parameters": checkParams]]
-        ]
-        
-        let checkData = try JSONSerialization.data(withJSONObject: checkBody)
-        let (checkResponseData, _) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: checkData)
-        
-        if let json = try? JSONSerialization.jsonObject(with: checkResponseData) as? [String: Any],
-           let results = json["results"] as? [[String: Any]],
+        let checkJSON = try await executeCypher(checkQuery, parameters: ["path": file.path])
+        if let results = checkJSON["results"] as? [[String: Any]],
            let data = results.first?["data"] as? [[String: Any]],
-           let row = data.first?["row"] as? [String],
-           let _ = row.first,
-           let indexedDate = row.last {
+           let row = data.first?["row"] as? [Any],
+           let indexedDate = row.last as? String {
             // If indexed after file was last modified, skip
             let fileModifiedDate = ISO8601DateFormatter().string(from: file.lastModified)
             if indexedDate >= fileModifiedDate {
@@ -749,26 +831,14 @@ class FileWatchManager: ObservableObject {
             "language": file.language ?? "unknown",
             "size_bytes": file.size,
             "content": file.content,
-            "content_type": file.contentType == .text ? "text" : 
+            "content_type": file.contentType == .text ? "text" :
                            file.contentType == .document ? "document" :
                            file.contentType == .imageOCR ? "image_ocr" : "image_description",
             "folder_root": folderPath,
             "last_modified": ISO8601DateFormatter().string(from: file.lastModified)
         ]
         
-        let body: [String: Any] = [
-            "statements": [
-                ["statement": query, "parameters": params]
-            ]
-        ]
-        
-        let bodyData = try JSONSerialization.data(withJSONObject: body)
-        let (_, response) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: bodyData)
-        
-        if response.statusCode != 200 {
-            throw NSError(domain: "FileWatchManager", code: response.statusCode, 
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to store file in NornicDB"])
-        }
+        _ = try await executeCypher(query, parameters: params)
     }
     
     /// Delete all file nodes and their chunks for a folder
@@ -780,23 +850,25 @@ class FileWatchManager: ObservableObject {
         RETURN count(DISTINCT f) as fileCount, count(DISTINCT c) as chunkCount
         """
         
-        let countBody: [String: Any] = [
-            "statements": [
-                ["statement": countQuery, "parameters": ["folder_root": folderPath]]
-            ]
-        ]
-        
-        let countData = try JSONSerialization.data(withJSONObject: countBody)
-        let (countResponseData, _) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: countData)
+        let countJSON = try await executeCypher(countQuery, parameters: ["folder_root": folderPath])
         
         var fileCount = 0
         var chunkCount = 0
-        if let json = try? JSONSerialization.jsonObject(with: countResponseData) as? [String: Any],
-           let results = json["results"] as? [[String: Any]],
+        if let results = countJSON["results"] as? [[String: Any]],
            let data = results.first?["data"] as? [[String: Any]],
-           let row = data.first?["row"] as? [Int] {
-            fileCount = row[0]
-            chunkCount = row[1]
+           let row = data.first?["row"] as? [Any] {
+            if let v = row.first as? Int {
+                fileCount = v
+            } else if let v = row.first as? NSNumber {
+                fileCount = v.intValue
+            }
+            if row.count > 1 {
+                if let v = row[1] as? Int {
+                    chunkCount = v
+                } else if let v = row[1] as? NSNumber {
+                    chunkCount = v.intValue
+                }
+            }
         }
         
         print("🗑️  Deleting \(fileCount) File nodes and \(chunkCount) FileChunk nodes for folder: \(folderPath)")
@@ -812,21 +884,8 @@ class FileWatchManager: ObservableObject {
         FOREACH (chunk IN chunks | DETACH DELETE chunk)
         """
         
-        let deleteBody: [String: Any] = [
-            "statements": [
-                ["statement": deleteQuery, "parameters": ["folder_root": folderPath]]
-            ]
-        ]
-        
-        let deleteData = try JSONSerialization.data(withJSONObject: deleteBody)
-        let (_, response) = try await makeAuthenticatedRequest(to: "/db/nornicdb/tx/commit", method: "POST", body: deleteData)
-        
-        if response.statusCode == 200 {
-            print("✅ Successfully deleted all nodes for folder: \(folderPath)")
-        } else {
-            throw NSError(domain: "FileWatchManager", code: response.statusCode,
-                         userInfo: [NSLocalizedDescriptionKey: "Failed to delete nodes from NornicDB"])
-        }
+        _ = try await executeCypher(deleteQuery, parameters: ["folder_root": folderPath])
+        print("✅ Successfully deleted all nodes for folder: \(folderPath)")
     }
     
     /// Perform vector search
