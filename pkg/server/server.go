@@ -213,6 +213,38 @@ func embeddingCacheMemoryMB(cacheSize, dimensions int) int {
 	return cacheSize * dimensions * 4 / 1024 / 1024
 }
 
+// waitForDurationOrServerClose sleeps for d and returns true only when the full
+// duration elapsed. It returns false when the server is closing so background
+// retry loops can exit promptly during shutdown.
+func waitForDurationOrServerClose(s *Server, d time.Duration) bool {
+	if d <= 0 {
+		return true
+	}
+	if s == nil {
+		time.Sleep(d)
+		return true
+	}
+
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	poll := time.NewTicker(250 * time.Millisecond)
+	defer poll.Stop()
+
+	for {
+		if s.closed.Load() {
+			return false
+		}
+		select {
+		case <-timer.C:
+			return true
+		case <-poll.C:
+			if s.closed.Load() {
+				return false
+			}
+		}
+	}
+}
+
 // buildEmbedConfigFromResolved builds an embed.Config from per-DB effective map and server config fallbacks.
 // Used by the per-DB embedder registry when EmbedConfigForDB is set.
 func buildEmbedConfigFromResolved(effective map[string]string, fallback *Config) *embed.Config {
@@ -1157,57 +1189,88 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		log.Println("   → Server will start immediately, embeddings available after model loads")
 
 		go func() {
-			// Use factory function for all providers
-			embedder, err := embed.NewEmbedder(embedConfig)
-			if err != nil {
-				if config.EmbeddingProvider == "local" {
-					log.Printf("⚠️  Local embedding model unavailable: %v", err)
-				} else {
-					log.Printf("⚠️  Embeddings endpoint unavailable (%s): %v", config.EmbeddingAPIURL, err)
+			// Retry forever: exponential backoff to 5m, then fixed 5m interval.
+			const (
+				initialBackoff = 2 * time.Second
+				maxBackoff     = 5 * time.Minute
+			)
+
+			backoff := initialBackoff
+			attempt := 0
+
+			for {
+				if s.closed.Load() {
+					log.Println("🛑 Embedding init retry loop stopped: server shutting down")
+					return
 				}
-				log.Println("   → Falling back to full-text search only")
-				// Don't set embedder - MCP server will use text search
-				return
-			}
 
-			// Health check: test embedding before enabling
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			_, healthErr := embedder.Embed(ctx, "health check")
-			cancel()
+				attempt++
 
-			if healthErr != nil {
-				if config.EmbeddingProvider == "local" {
-					log.Printf("⚠️  Local embedding model failed health check: %v", healthErr)
-				} else {
-					log.Printf("⚠️  Embeddings endpoint unavailable (%s): %v", config.EmbeddingAPIURL, healthErr)
+				// Use factory function for all providers.
+				embedder, err := embed.NewEmbedder(embedConfig)
+				if err == nil {
+					// Health check: test embedding before enabling.
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					_, healthErr := embedder.Embed(ctx, "health check")
+					cancel()
+					if healthErr != nil {
+						err = fmt.Errorf("health check failed: %w", healthErr)
+					}
 				}
-				log.Println("   → Falling back to full-text search only")
-				return
-			}
 
-			// Wrap with caching if enabled (default: 10K cache)
-			if config.EmbeddingCacheSize > 0 {
-				embedder = embed.NewCachedEmbedder(embedder, config.EmbeddingCacheSize)
-				log.Printf("✓ Embedding cache enabled: %d entries (~%dMB)",
-					config.EmbeddingCacheSize, embeddingCacheMemoryMB(config.EmbeddingCacheSize, config.EmbeddingDimensions))
-			}
+				if err == nil {
+					// Wrap with caching if enabled (default: 10K cache).
+					if config.EmbeddingCacheSize > 0 {
+						embedder = embed.NewCachedEmbedder(embedder, config.EmbeddingCacheSize)
+						log.Printf("✓ Embedding cache enabled: %d entries (~%dMB)",
+							config.EmbeddingCacheSize, embeddingCacheMemoryMB(config.EmbeddingCacheSize, config.EmbeddingDimensions))
+					}
 
-			if config.EmbeddingProvider == "local" {
-				log.Printf("✅ Embeddings ready: local GGUF (%s, %d dims)",
-					config.EmbeddingModel, config.EmbeddingDimensions)
-			} else {
-				log.Printf("✅ Embeddings ready: %s (%s, %d dims)",
-					config.EmbeddingAPIURL, config.EmbeddingModel, config.EmbeddingDimensions)
-			}
+					if config.EmbeddingProvider == "local" {
+						log.Printf("✅ Embeddings ready: local GGUF (%s, %d dims)",
+							config.EmbeddingModel, config.EmbeddingDimensions)
+					} else {
+						log.Printf("✅ Embeddings ready: %s (%s, %d dims)",
+							config.EmbeddingAPIURL, config.EmbeddingModel, config.EmbeddingDimensions)
+					}
 
-			if mcpServer != nil {
-				mcpServer.SetEmbedder(embedder)
+					if mcpServer != nil {
+						mcpServer.SetEmbedder(embedder)
+					}
+					// Share embedder with DB for auto-embed queue.
+					// The embed worker will wait for this to be set before processing.
+					db.SetEmbedder(embedder)
+					// Register as default for per-DB embedder registry (no-op if SetEmbedConfigForDB was not set).
+					db.SetDefaultEmbedConfig(embedConfig)
+					return
+				}
+
+				if config.EmbeddingProvider == "local" {
+					log.Printf("⚠️  Embedding init attempt %d failed (provider=local, model=%s): %v",
+						attempt, config.EmbeddingModel, err)
+				} else {
+					log.Printf("⚠️  Embedding init attempt %d failed (provider=%s, model=%s, url=%s): %v",
+						attempt, config.EmbeddingProvider, config.EmbeddingModel, config.EmbeddingAPIURL, err)
+				}
+
+				if backoff < maxBackoff {
+					log.Printf("⏳ Retrying embedding init in %s (exponential backoff)", backoff)
+					if !waitForDurationOrServerClose(s, backoff) {
+						log.Println("🛑 Embedding init retry interrupted by server shutdown")
+						return
+					}
+					backoff *= 2
+					if backoff > maxBackoff {
+						backoff = maxBackoff
+					}
+				} else {
+					log.Printf("⏳ Embedding init retry interval capped at %s; continuing periodic retries", maxBackoff)
+					if !waitForDurationOrServerClose(s, maxBackoff) {
+						log.Println("🛑 Embedding init retry interrupted by server shutdown")
+						return
+					}
+				}
 			}
-			// Share embedder with DB for auto-embed queue
-			// The embed worker will wait for this to be set before processing
-			db.SetEmbedder(embedder)
-			// Register as default for per-DB embedder registry (no-op if SetEmbedConfigForDB was not set)
-			db.SetDefaultEmbedConfig(embedConfig)
 		}()
 	}
 
