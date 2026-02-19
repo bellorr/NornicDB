@@ -256,6 +256,7 @@ class FileWatchManager: ObservableObject {
         let token: String? = await Task.detached(priority: .userInitiated) {
             return KeychainHelper.shared.getAPIToken()
         }.value
+        restoreFileIndexerWindowFocus()
         
         guard let token = token,
               let authMeURL = URL(string: "\(serverBaseURL)/auth/me") else {
@@ -359,6 +360,7 @@ class FileWatchManager: ObservableObject {
                         // Use updateAPIToken to ensure cache is updated even if token exists
                         return KeychainHelper.shared.updateAPIToken(token)
                     }.value
+                    restoreFileIndexerWindowFocus()
                     print("✅ Token saved to keychain: \(saved)")
                     isAuthenticated = true
                     connectionStatus = .authenticated
@@ -384,6 +386,18 @@ class FileWatchManager: ObservableObject {
         }
         
         return false
+    }
+
+    @MainActor
+    private func restoreFileIndexerWindowFocus() {
+        NSApp.activate(ignoringOtherApps: true)
+
+        // Re-focus the File Indexer window in case macOS leaves it behind after Keychain auth dialogs.
+        for window in NSApp.windows where window.title == "NornicDB Code Intelligence" {
+            window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            break
+        }
     }
     
     /// Get authorization header for API requests (uses cached token to avoid Keychain prompts)
