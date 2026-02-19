@@ -211,6 +211,8 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 	wasInsert := false
 	var existingNode *Node
 
+	var persistSeparateEmbeddings bool
+	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
 		key := nodeKey(node.ID)
 
@@ -230,18 +232,10 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 				return err
 			}
 
-			// If embeddings are stored separately, store them now
+			// Persist separate embeddings in bounded txns after this txn commits.
 			if embeddingsSeparate {
-				for i, emb := range node.ChunkEmbeddings {
-					embKey := embeddingKey(node.ID, i)
-					embData, err := encodeEmbedding(emb)
-					if err != nil {
-						return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
-					}
-					if err := txn.Set(embKey, embData); err != nil {
-						return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
-					}
-				}
+				persistSeparateEmbeddings = true
+				embeddingsToPersist = node.ChunkEmbeddings
 			}
 			// Create label indexes
 			for _, label := range node.Labels {
@@ -293,31 +287,10 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 			return err
 		}
 
-		// If embeddings are stored separately, update them
+		// If embeddings are stored separately, write them after commit in bounded txns.
 		if embeddingsSeparate {
-			// Delete old embedding chunks (if any)
-			embPrefix := embeddingPrefix(node.ID)
-			opts := badger.DefaultIteratorOptions
-			opts.Prefix = embPrefix
-			it := txn.NewIterator(opts)
-			defer it.Close()
-			for it.Rewind(); it.Valid(); it.Next() {
-				if err := txn.Delete(it.Item().Key()); err != nil {
-					return fmt.Errorf("failed to delete old embedding chunk: %w", err)
-				}
-			}
-
-			// Store new embedding chunks
-			for i, emb := range node.ChunkEmbeddings {
-				embKey := embeddingKey(node.ID, i)
-				embData, err := encodeEmbedding(emb)
-				if err != nil {
-					return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
-				}
-				if err := txn.Set(embKey, embData); err != nil {
-					return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
-				}
-			}
+			persistSeparateEmbeddings = true
+			embeddingsToPersist = node.ChunkEmbeddings
 		} else {
 			// Node fits inline - clean up any old separately stored embeddings
 			embPrefix := embeddingPrefix(node.ID)
@@ -353,6 +326,9 @@ func (b *BadgerEngine) UpdateNode(node *Node) error {
 
 		return nil
 	})
+	if err == nil && persistSeparateEmbeddings {
+		err = b.replaceSeparateEmbeddingChunks(node.ID, embeddingsToPersist)
+	}
 
 	// Update cache on successful operation
 	if err == nil {
@@ -411,6 +387,8 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 	}
 
 	var updated *Node
+	var persistSeparateEmbeddings bool
+	var embeddingsToPersist [][]float32
 	err := b.withUpdate(func(txn *badger.Txn) error {
 		key := nodeKey(node.ID)
 
@@ -491,31 +469,10 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 			return err
 		}
 
-		// If embeddings are stored separately, update them
+		// If embeddings are stored separately, write them after commit in bounded txns.
 		if embeddingsSeparate {
-			// Delete old embedding chunks (if any)
-			embPrefix := embeddingPrefix(node.ID)
-			opts := badger.DefaultIteratorOptions
-			opts.Prefix = embPrefix
-			embIt := txn.NewIterator(opts)
-			defer embIt.Close()
-			for embIt.Rewind(); embIt.Valid(); embIt.Next() {
-				if err := txn.Delete(embIt.Item().Key()); err != nil {
-					return fmt.Errorf("failed to delete old embedding chunk: %w", err)
-				}
-			}
-
-			// Store new embedding chunks
-			for i, emb := range existing.ChunkEmbeddings {
-				embKey := embeddingKey(node.ID, i)
-				embData, err := encodeEmbedding(emb)
-				if err != nil {
-					return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
-				}
-				if err := txn.Set(embKey, embData); err != nil {
-					return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
-				}
-			}
+			persistSeparateEmbeddings = true
+			embeddingsToPersist = existing.ChunkEmbeddings
 		} else {
 			// Node fits inline - clean up any old separately stored embeddings
 			embPrefix := embeddingPrefix(node.ID)
@@ -538,6 +495,9 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 		updated = existing
 		return nil
 	})
+	if err == nil && persistSeparateEmbeddings {
+		err = b.replaceSeparateEmbeddingChunks(node.ID, embeddingsToPersist)
+	}
 
 	// Update cache on successful operation
 	if err == nil {
@@ -550,6 +510,98 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 	}
 
 	return err
+}
+
+func (b *BadgerEngine) replaceSeparateEmbeddingChunks(nodeID NodeID, embeddings [][]float32) error {
+	if err := b.deleteEmbeddingChunksBatched(nodeID); err != nil {
+		return fmt.Errorf("failed to delete old embedding chunks: %w", err)
+	}
+	if len(embeddings) == 0 {
+		return nil
+	}
+	if err := b.writeEmbeddingChunksBatched(nodeID, embeddings); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (b *BadgerEngine) deleteEmbeddingChunksBatched(nodeID NodeID) error {
+	const deleteBatchSize = 256
+	prefix := embeddingPrefix(nodeID)
+
+	for {
+		keys := make([][]byte, 0, deleteBatchSize)
+		err := b.withView(func(txn *badger.Txn) error {
+			opts := badger.DefaultIteratorOptions
+			opts.Prefix = prefix
+			it := txn.NewIterator(opts)
+			defer it.Close()
+			for it.Rewind(); it.ValidForPrefix(prefix); it.Next() {
+				keys = append(keys, append([]byte(nil), it.Item().Key()...))
+				if len(keys) >= deleteBatchSize {
+					break
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		if len(keys) == 0 {
+			return nil
+		}
+
+		if err := b.withUpdate(func(txn *badger.Txn) error {
+			for _, key := range keys {
+				if err := txn.Delete(key); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return err
+		}
+	}
+}
+
+func (b *BadgerEngine) writeEmbeddingChunksBatched(nodeID NodeID, embeddings [][]float32) error {
+	const (
+		maxChunksPerTxn = 128
+		maxBytesPerTxn  = 1 << 20 // 1 MiB per txn keeps requests small
+	)
+
+	for start := 0; start < len(embeddings); {
+		next := start
+		err := b.withUpdate(func(txn *badger.Txn) error {
+			bytesUsed := 0
+			chunksWritten := 0
+			for i := start; i < len(embeddings); i++ {
+				embData, err := encodeEmbedding(embeddings[i])
+				if err != nil {
+					return fmt.Errorf("failed to encode embedding chunk %d: %w", i, err)
+				}
+				if chunksWritten > 0 &&
+					(chunksWritten >= maxChunksPerTxn || bytesUsed+len(embData) > maxBytesPerTxn) {
+					break
+				}
+				if err := txn.Set(embeddingKey(nodeID, i), embData); err != nil {
+					return fmt.Errorf("failed to store embedding chunk %d: %w", i, err)
+				}
+				next = i + 1
+				chunksWritten++
+				bytesUsed += len(embData)
+			}
+			if chunksWritten == 0 {
+				return fmt.Errorf("failed to store embedding chunk %d: chunk exceeds per-txn write budget", start)
+			}
+			return nil
+		})
+		if err != nil {
+			return err
+		}
+		start = next
+	}
+	return nil
 }
 
 // DeleteNode removes a node and all its edges.

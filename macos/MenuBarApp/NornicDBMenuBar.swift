@@ -1193,21 +1193,13 @@ class ConfigManager: ObservableObject {
         if trimmed.isEmpty {
             return fallback
         }
-
-        let lower = trimmed.lowercased()
-        switch lower {
-        case "bge-m3":
-            return ConfigManager.defaultEmbeddingModel
-        case "bge-reranker-v2-m3", "bge-reranker-v2-m3.gguf":
-            return ConfigManager.defaultSearchRerankModel
-        case "qwen3-0.6b-instruct":
-            return ConfigManager.defaultHeimdallModel
-        default:
-            if trimmed.hasSuffix(".gguf") {
-                return trimmed
-            }
-            return "\(trimmed).gguf"
+        if trimmed == "apple-ml-embeddings" {
+            return trimmed
         }
+        if trimmed.hasSuffix(".gguf") {
+            return trimmed
+        }
+        return "\(trimmed).gguf"
     }
     
     private func extractBoolValue(from text: String, after index: String.Index) -> Bool? {
@@ -1437,29 +1429,46 @@ class ConfigManager: ObservableObject {
     }
     
     private func updateYAMLStringValue(in content: String, section: String, key: String, value: String) -> String {
-        var result = content
-        // Pattern explanation:
-        // - Match section header (e.g., "embedding:")
-        // - Then any lines (non-greedy) until we find the key
-        // - Match the key with optional whitespace and colon
-        // - Capture everything up to and including "key: " as group 1
-        // - Match the rest of the line (the value to replace) - but NOT greedy across newlines
-        let pattern = "(\(section):(?:[^\n]*\n)*?\\s+\(key):[ \\t]*)([^\n]*)"
+        let lines = content.components(separatedBy: "\n")
+        var mutable = lines
         
-        if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
-            let range = NSRange(content.startIndex..., in: content)
-            if regex.firstMatch(in: content, options: [], range: range) != nil {
-                // Escape any special regex characters in the replacement value
-                let escapedValue = NSRegularExpression.escapedTemplate(for: value)
-                let replacement = "$1\(escapedValue)"
-                result = regex.stringByReplacingMatches(in: content, options: [], range: range, withTemplate: replacement)
-            } else {
-                // Key doesn't exist, add it to the section
-                result = addKeyToSection(in: content, section: section, key: key, value: value)
+        var sectionStart = -1
+        var sectionEnd = lines.count
+        for (i, line) in lines.enumerated() {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if sectionStart == -1 {
+                if trimmed == "\(section):" || (line.hasPrefix("\(section):") && !line.hasPrefix(" ") && !line.hasPrefix("\t")) {
+                    sectionStart = i
+                }
+                continue
+            }
+            
+            // Found start already; next top-level section marks the end.
+            if !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.hasPrefix("#") && trimmed.contains(":") {
+                sectionEnd = i
+                break
             }
         }
         
-        return result
+        guard sectionStart >= 0 else {
+            return content
+        }
+        
+        var updated = false
+        for i in (sectionStart + 1)..<sectionEnd {
+            let trimmed = mutable[i].trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("\(key):") {
+                mutable[i] = "  \(key): \(value)"
+                updated = true
+                break
+            }
+        }
+        
+        if !updated {
+            mutable.insert("  \(key): \(value)", at: sectionEnd)
+        }
+        
+        return mutable.joined(separator: "\n")
     }
     
     private func updateYAMLIntValue(in content: String, section: String, key: String, value: Int) -> String {
