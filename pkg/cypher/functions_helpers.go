@@ -223,7 +223,9 @@ func (e *StorageExecutor) evaluateMapLiteralFull(expr string, nodes map[string]*
 			continue
 		}
 
-		key := strings.TrimSpace(pair[:colonIdx])
+		// Keep map-literal key normalization aligned with property/map parsing:
+		// supports backticked and quoted keys like `foo`, 'foo', "foo".
+		key := normalizePropertyKey(strings.TrimSpace(pair[:colonIdx]))
 		valueExpr := strings.TrimSpace(pair[colonIdx+1:])
 
 		// Evaluate the value expression in context with full path info
