@@ -294,17 +294,16 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		return nil, fmt.Errorf("SET requires a MATCH clause first (e.g., MATCH (n) SET n.property = value)")
 	}
 
-	// Execute the match first (use normalized query for slicing)
-	// Extract variable names from the MATCH pattern to handle RETURN * correctly
+	// Execute MATCH/WITH pipeline first and retain row scope for SET expression
+	// evaluation, including aliases introduced by WITH ... AS.
+	matchSegment := normalized[matchIdx:setIdx]
 	matchPattern := strings.TrimSpace(normalized[matchIdx+5 : setIdx]) // Skip "MATCH"
-	varNames := e.extractVariableNamesFromPattern(matchPattern)
-
-	var matchQuery string
-	if len(varNames) > 0 {
-		// Use explicit variable names instead of RETURN * for better handling
-		matchQuery = normalized[matchIdx:setIdx] + " RETURN " + strings.Join(varNames, ", ")
-	} else {
-		matchQuery = normalized[matchIdx:setIdx] + " RETURN *"
+	matchVars := e.extractVariableNamesFromPattern(matchPattern)
+	withAliases := extractWithAliases(matchSegment)
+	allVars := dedupeNonEmpty(matchVars, withAliases)
+	matchQuery := matchSegment + " RETURN *"
+	if len(allVars) > 0 {
+		matchQuery = matchSegment + " RETURN " + strings.Join(allVars, ", ")
 	}
 	matchResult, err := e.executeMatch(ctx, matchQuery)
 	if err != nil {
@@ -489,21 +488,52 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 
 		left := strings.TrimSpace(assignment[:eqIdx])
 		right := strings.TrimSpace(assignment[eqIdx+1:])
-		propValue := e.parseValue(right)
-		if strings.HasPrefix(right, "$") {
-			paramName := strings.TrimSpace(right[1:])
-			if paramName == "" {
-				return nil, fmt.Errorf("SET assignment requires a valid parameter name after $")
+
+		buildEvalNodes := func(row []interface{}) map[string]*storage.Node {
+			evalNodes := make(map[string]*storage.Node, len(matchResult.Columns))
+			for i, col := range matchResult.Columns {
+				if i >= len(row) {
+					continue
+				}
+				switch v := row[i].(type) {
+				case *storage.Node:
+					if v != nil {
+						evalNodes[col] = v
+					}
+				case map[string]interface{}:
+					evalNodes[col] = &storage.Node{
+						ID:         storage.NodeID(col),
+						Properties: v,
+					}
+				default:
+					evalNodes[col] = &storage.Node{
+						ID: storage.NodeID(col),
+						Properties: map[string]interface{}{
+							"value": v,
+						},
+					}
+				}
 			}
-			params := getParamsFromContext(ctx)
-			if params == nil {
-				return nil, fmt.Errorf("SET assignment parameter $%s requires parameters to be provided", paramName)
+			return evalNodes
+		}
+
+		resolvePropValue := func(row []interface{}) (interface{}, error) {
+			if strings.HasPrefix(right, "$") {
+				paramName := strings.TrimSpace(right[1:])
+				if paramName == "" {
+					return nil, fmt.Errorf("SET assignment requires a valid parameter name after $")
+				}
+				params := getParamsFromContext(ctx)
+				if params == nil {
+					return nil, fmt.Errorf("SET assignment parameter $%s requires parameters to be provided", paramName)
+				}
+				paramValue, exists := params[paramName]
+				if !exists {
+					return nil, fmt.Errorf("SET assignment parameter $%s not found in provided parameters", paramName)
+				}
+				return normalizePropValue(paramValue), nil
 			}
-			paramValue, exists := params[paramName]
-			if !exists {
-				return nil, fmt.Errorf("SET assignment parameter $%s not found in provided parameters", paramName)
-			}
-			propValue = normalizePropValue(paramValue)
+			return e.evaluateExpressionWithContext(right, buildEvalNodes(row), make(map[string]*storage.Edge)), nil
 		}
 
 		// Extract variable and property (or whole-variable map replacement)
@@ -511,12 +541,16 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		validAssignments++
 		if len(parts) != 2 {
 			variable = strings.TrimSpace(left)
-			props, err := normalizePropsMap(propValue, "SET assignment")
-			if err != nil {
-				return nil, fmt.Errorf("invalid SET assignment: %q (expected variable.property = value or variable = {property: value}): %w", assignment, err)
-			}
 			// Replace properties on matched entities: SET n = { ... }
 			for _, row := range matchResult.Rows {
+				propValue, err := resolvePropValue(row)
+				if err != nil {
+					return nil, err
+				}
+				props, err := normalizePropsMap(propValue, "SET assignment")
+				if err != nil {
+					return nil, fmt.Errorf("invalid SET assignment: %q (expected variable.property = value or variable = {property: value}): %w", assignment, err)
+				}
 				for _, val := range row {
 					node, ok := val.(*storage.Node)
 					if !ok || node == nil {
@@ -536,6 +570,10 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 
 		// Update matched nodes
 		for _, row := range matchResult.Rows {
+			propValue, err := resolvePropValue(row)
+			if err != nil {
+				return nil, err
+			}
 			for _, val := range row {
 				node, ok := val.(*storage.Node)
 				if !ok || node == nil {
@@ -646,6 +684,37 @@ func collapseChainedSetClauses(setPart string) string {
 		return setPart
 	}
 	return strings.Join(segments, ", ")
+}
+
+func extractWithAliases(querySegment string) []string {
+	re := regexp.MustCompile(`(?i)\bAS\s+([A-Za-z_][A-Za-z0-9_]*)\b`)
+	matches := re.FindAllStringSubmatch(querySegment, -1)
+	aliases := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if len(m) > 1 {
+			aliases = append(aliases, m[1])
+		}
+	}
+	return aliases
+}
+
+func dedupeNonEmpty(groups ...[]string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0)
+	for _, group := range groups {
+		for _, item := range group {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if _, ok := seen[item]; ok {
+				continue
+			}
+			seen[item] = struct{}{}
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // executeSetMerge handles SET n += $properties for property merging.

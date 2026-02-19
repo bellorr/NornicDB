@@ -572,6 +572,31 @@ func (e *StorageExecutor) splitByOperator(expr, op string) []string {
 //	add(5.0, 3)                                  // float64(8.0)
 //	add("2025-01-01", &CypherDuration{Days: 5})  // "2025-01-06T00:00:00Z"
 func (e *StorageExecutor) add(left, right interface{}) interface{} {
+	// Cypher list concatenation:
+	// - list + list
+	// - list + scalar
+	// - scalar + list
+	leftList, leftIsList := toInterfaceSlice(left)
+	rightList, rightIsList := toInterfaceSlice(right)
+	if leftIsList && rightIsList {
+		out := make([]interface{}, 0, len(leftList)+len(rightList))
+		out = append(out, leftList...)
+		out = append(out, rightList...)
+		return out
+	}
+	if leftIsList {
+		out := make([]interface{}, 0, len(leftList)+1)
+		out = append(out, leftList...)
+		out = append(out, right)
+		return out
+	}
+	if rightIsList {
+		out := make([]interface{}, 0, len(rightList)+1)
+		out = append(out, left)
+		out = append(out, rightList...)
+		return out
+	}
+
 	// Handle date/datetime + duration
 	if dur, ok := right.(*CypherDuration); ok {
 		result := addDurationToDate(left, dur)

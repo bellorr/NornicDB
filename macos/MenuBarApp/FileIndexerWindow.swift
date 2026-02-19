@@ -992,6 +992,15 @@ class FileWatchManager: ObservableObject {
     }
 
     private func tagsFromAny(_ value: Any?) -> [String] {
+        if let raw = value as? String {
+            // Defensive: older/broken writes may have stored expression text instead of arrays.
+            // Ignore those placeholders so subsequent writes can heal data back to arrays.
+            if raw.lowercased().contains("reduce(") {
+                return []
+            }
+            let sanitized = sanitizeTag(raw)
+            return sanitized.isEmpty ? [] : [sanitized]
+        }
         guard let values = value as? [Any] else { return [] }
         return values.compactMap { $0 as? String }.map { sanitizeTag($0) }.filter { !$0.isEmpty }
     }
@@ -999,28 +1008,46 @@ class FileWatchManager: ObservableObject {
     /// Update tags for all files in a folder
     func updateFolderTags(_ folderPath: String, tags: [String]) async throws {
         let folderManagedTags = inheritedTagsForFolder(folderPath, tags: tags)
-        
-        let query = """
+
+        let fetchQuery = """
         MATCH (f:File {folder_root: $folder_root})
-        WITH f, coalesce(f.file_tags, []) AS file_tags
-        SET f.folder_tags = $folder_tags
-        SET f.tags = reduce(acc = [], t IN ($folder_tags + file_tags) |
-            CASE WHEN t IN acc THEN acc ELSE acc + t END
-        )
-        RETURN count(f) as updated
+        RETURN f.path as path, coalesce(f.file_tags, []) as file_tags
         """
-        
-        let result = try await executeCypher(query, parameters: [
-            "folder_root": folderPath,
-            "folder_tags": folderManagedTags
-        ])
-        
-        if let results = result["results"] as? [[String: Any]],
-           let data = results.first?["data"] as? [[String: Any]],
-           let row = data.first?["row"] as? [Any],
-           let count = row.first as? Int {
-            print("✅ Updated tags for \(count) files in \(folderPath)")
+        let fetched = try await executeCypher(fetchQuery, parameters: ["folder_root": folderPath])
+
+        var updatedCount = 0
+        if let results = fetched["results"] as? [[String: Any]],
+           let data = results.first?["data"] as? [[String: Any]] {
+            for entry in data {
+                guard let row = entry["row"] as? [Any], row.count >= 2 else { continue }
+                guard let path = row[0] as? String else { continue }
+                let fileTags = uniqueTags(tagsFromAny(row[1]))
+                let effectiveTags = uniqueTags(folderManagedTags + fileTags)
+
+                let updateQuery = """
+                MATCH (f:File {path: $path, folder_root: $folder_root})
+                SET f.folder_tags = $folder_tags
+                SET f.file_tags = $file_tags
+                SET f.tags = $tags
+                RETURN count(f) as updated
+                """
+                let result = try await executeCypher(updateQuery, parameters: [
+                    "path": path,
+                    "folder_root": folderPath,
+                    "folder_tags": folderManagedTags,
+                    "file_tags": fileTags,
+                    "tags": effectiveTags,
+                ])
+
+                if let r = result["results"] as? [[String: Any]],
+                   let d = r.first?["data"] as? [[String: Any]],
+                   let out = d.first?["row"] as? [Any],
+                   let count = out.first as? NSNumber {
+                    updatedCount += count.intValue
+                }
+            }
         }
+        print("✅ Updated tags for \(updatedCount) files in \(folderPath)")
         await loadIndexedFiles(for: folderPath)
     }
     
@@ -1135,24 +1162,24 @@ class FileWatchManager: ObservableObject {
             return
         }
 
+        let currentFileTags = folderFiles[folderPath]?.first(where: { $0.path == filePath })?.fileTags ?? []
+        let newFileTags = uniqueTags(currentFileTags + [sanitized])
+        let effectiveTags = uniqueTags(inherited + newFileTags)
+
         let query = """
         MATCH (f:File {path: $path, folder_root: $folder_root})
-        WITH f, coalesce(f.file_tags, []) AS file_tags
-        SET f.file_tags = reduce(acc = [], t IN (file_tags + [$new_tag]) |
-            CASE WHEN t IN acc THEN acc ELSE acc + t END
-        )
+        SET f.file_tags = $file_tags
         SET f.folder_tags = $folder_tags
-        SET f.tags = reduce(acc = [], t IN ($folder_tags + f.file_tags) |
-            CASE WHEN t IN acc THEN acc ELSE acc + t END
-        )
+        SET f.tags = $tags
         RETURN f.path as path
         """
 
         _ = try await executeCypher(query, parameters: [
             "path": filePath,
             "folder_root": folderPath,
-            "new_tag": sanitized,
-            "folder_tags": inherited
+            "file_tags": newFileTags,
+            "folder_tags": inherited,
+            "tags": effectiveTags,
         ])
         await loadIndexedFiles(for: folderPath)
     }
@@ -1170,22 +1197,24 @@ class FileWatchManager: ObservableObject {
             return
         }
 
+        let currentFileTags = folderFiles[folderPath]?.first(where: { $0.path == filePath })?.fileTags ?? []
+        let newFileTags = currentFileTags.filter { $0 != sanitized }
+        let effectiveTags = uniqueTags(inherited + newFileTags)
+
         let query = """
         MATCH (f:File {path: $path, folder_root: $folder_root})
-        WITH f, [t IN coalesce(f.file_tags, []) WHERE t <> $tag] AS file_tags
-        SET f.file_tags = file_tags
+        SET f.file_tags = $file_tags
         SET f.folder_tags = $folder_tags
-        SET f.tags = reduce(acc = [], t IN ($folder_tags + file_tags) |
-            CASE WHEN t IN acc THEN acc ELSE acc + t END
-        )
+        SET f.tags = $tags
         RETURN f.path as path
         """
 
         _ = try await executeCypher(query, parameters: [
             "path": filePath,
             "folder_root": folderPath,
-            "tag": sanitized,
-            "folder_tags": inherited
+            "file_tags": newFileTags,
+            "folder_tags": inherited,
+            "tags": effectiveTags,
         ])
         await loadIndexedFiles(for: folderPath)
     }

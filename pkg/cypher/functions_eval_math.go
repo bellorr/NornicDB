@@ -526,20 +526,27 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullMath(
 				items = []interface{}{list}
 			}
 
-			// Apply reduce
+			// Apply reduce using variable bindings in evaluation context.
+			// Text replacement is incorrect for identifiers and nested expressions.
 			for _, item := range items {
-				// Create context with acc and item
+				// Create context with acc and item bound as scalar pseudo-nodes.
 				tempNodes := make(map[string]*storage.Node)
 				for k, v := range nodes {
 					tempNodes[k] = v
 				}
-
-				// Store acc and item as pseudo-properties (simplified)
-				// For a proper implementation, we'd need to handle this more comprehensively
-				substitutedExpr := strings.ReplaceAll(reduceExpr, accName, fmt.Sprintf("%v", acc))
-				substitutedExpr = strings.ReplaceAll(substitutedExpr, varName, fmt.Sprintf("%v", item))
-
-				acc = e.evaluateExpressionWithContext(substitutedExpr, tempNodes, rels)
+				tempNodes[accName] = &storage.Node{
+					ID: storage.NodeID(accName),
+					Properties: map[string]interface{}{
+						"value": acc,
+					},
+				}
+				tempNodes[varName] = &storage.Node{
+					ID: storage.NodeID(varName),
+					Properties: map[string]interface{}{
+						"value": item,
+					},
+				}
+				acc = e.evaluateExpressionWithContext(reduceExpr, tempNodes, rels)
 			}
 
 			return acc

@@ -67,6 +67,21 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullFunctions(expr string
 			baseExpr := expr[:bracketStart]
 			indexExpr := expr[bracketStart+1 : bracketEnd]
 
+			// Avoid misclassifying list literals in larger expressions as indexing.
+			// Example: "file_tags + ['hello']" should parse as list concatenation,
+			// not "(file_tags +)['hello']".
+			lastNonSpace := byte(0)
+			for i := len(baseExpr) - 1; i >= 0; i-- {
+				if baseExpr[i] != ' ' && baseExpr[i] != '\t' && baseExpr[i] != '\n' && baseExpr[i] != '\r' {
+					lastNonSpace = baseExpr[i]
+					break
+				}
+			}
+			switch lastNonSpace {
+			case '+', '-', '*', '/', '%', '(', ',', '=', '<', '>', '|':
+				goto skipArrayIndexing
+			}
+
 			// Skip if this is an IN expression (e.g., "1 IN [1, 2, 3]")
 			// The base would be "1 IN " which ends with " IN "
 			baseUpper := strings.ToUpper(strings.TrimSpace(baseExpr))

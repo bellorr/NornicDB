@@ -7,6 +7,7 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -201,4 +202,136 @@ FOREACH (chunk IN chunks | DETACH DELETE chunk)
 		defer cleanup()
 		run(t)
 	})
+}
+
+// TestSwiftFileIndexerTagQueriesExecuteReduceExpressions validates the runtime
+// execution semantics for Swift file-indexer tag updates.
+// This intentionally executes (not EXPLAINs) SET clauses using reduce(...)
+// to catch cases where expressions are stored as literal strings.
+func TestSwiftFileIndexerTagQueriesExecuteReduceExpressions(t *testing.T) {
+	t.Parallel()
+
+	run := func(t *testing.T) {
+		t.Helper()
+
+		store := storage.NewMemoryEngine()
+		exec := NewStorageExecutor(store)
+		ctx := context.Background()
+
+		_, err := store.CreateNode(&storage.Node{
+			ID:     storage.NodeID("nornic:file-main-go"),
+			Labels: []string{"File", "Node"},
+			Properties: map[string]any{
+				"path":        "/tmp/ws/main.go",
+				"folder_root": "/tmp/ws",
+				"file_tags":   []any{"existing"},
+				"folder_tags": []any{"File", "ws"},
+				"tags":        []any{"File", "ws", "existing"},
+			},
+		})
+		require.NoError(t, err)
+
+		query := `
+MATCH (f:File {path: $path, folder_root: $folder_root})
+WITH f, coalesce(f.file_tags, []) AS file_tags
+SET f.file_tags = reduce(acc = [], t IN (file_tags + [$new_tag]) |
+    CASE WHEN t IN acc THEN acc ELSE acc + t END
+)
+SET f.folder_tags = $folder_tags
+SET f.tags = reduce(acc = [], t IN ($folder_tags + f.file_tags) |
+    CASE WHEN t IN acc THEN acc ELSE acc + t END
+)
+RETURN f.file_tags as file_tags, f.tags as tags
+`
+		params := map[string]any{
+			"path":        "/tmp/ws/main.go",
+			"folder_root": "/tmp/ws",
+			"new_tag":     "hello",
+			"folder_tags": []string{"File", "ws", "backend"},
+		}
+
+		res, err := exec.Execute(ctx, strings.TrimSpace(query), params)
+		require.NoError(t, err)
+		require.Len(t, res.Rows, 1)
+		require.Len(t, res.Rows[0], 2)
+
+		fileTags, ok := res.Rows[0][0].([]interface{})
+		assert.True(t, ok, "f.file_tags should be list, got %T (%v)", res.Rows[0][0], res.Rows[0][0])
+		if ok {
+			assert.ElementsMatch(t, []interface{}{"existing", "hello"}, fileTags)
+		}
+
+		tags, ok := res.Rows[0][1].([]interface{})
+		assert.True(t, ok, "f.tags should be list, got %T (%v)", res.Rows[0][1], res.Rows[0][1])
+		if ok {
+			assert.ElementsMatch(t, []interface{}{"File", "ws", "backend", "existing", "hello"}, tags)
+		}
+
+		node, err := store.GetNode(storage.NodeID("nornic:file-main-go"))
+		require.NoError(t, err)
+		require.NotNil(t, node)
+		_, storedAsString := node.Properties["file_tags"].(string)
+		assert.False(t, storedAsString, "file_tags must not be stored as literal expression text")
+		storedFileTags, ok := node.Properties["file_tags"].([]interface{})
+		assert.True(t, ok, "stored file_tags should be list, got %T (%v)", node.Properties["file_tags"], node.Properties["file_tags"])
+		if ok {
+			assert.ElementsMatch(t, []interface{}{"existing", "hello"}, storedFileTags)
+		}
+	}
+
+	t.Run("nornic_parser", func(t *testing.T) {
+		cleanup := config.WithNornicParser()
+		defer cleanup()
+		run(t)
+	})
+
+	t.Run("antlr_parser", func(t *testing.T) {
+		cleanup := config.WithANTLRParser()
+		defer cleanup()
+		run(t)
+	})
+}
+
+func TestReduceExpressionWithAliasListContext(t *testing.T) {
+	t.Parallel()
+
+	store := storage.NewMemoryEngine()
+	exec := NewStorageExecutor(store)
+	expr := "reduce(acc = [], t IN (file_tags + ['hello']) | CASE WHEN t IN acc THEN acc ELSE acc + t END)"
+	nodes := map[string]*storage.Node{
+		"file_tags": {
+			ID: storage.NodeID("file_tags"),
+			Properties: map[string]any{
+				"value": []any{"existing"},
+			},
+		},
+	}
+	combined := exec.evaluateExpressionWithContext("file_tags + ['hello']", nodes, map[string]*storage.Edge{})
+	combinedList, ok := combined.([]interface{})
+	require.True(t, ok, "expected combined list expression to evaluate to list, got %T (%v)", combined, combined)
+	assert.ElementsMatch(t, []interface{}{"existing", "hello"}, combinedList)
+
+	got := exec.evaluateExpressionWithContext(expr, nodes, map[string]*storage.Edge{})
+	list, ok := got.([]interface{})
+	require.True(t, ok, "expected reduce expression to evaluate to list, got %T (%v)", got, got)
+	assert.ElementsMatch(t, []interface{}{"existing", "hello"}, list)
+
+	condNodes := map[string]*storage.Node{
+		"acc": {
+			ID: storage.NodeID("acc"),
+			Properties: map[string]any{
+				"value": []any{"existing"},
+			},
+		},
+		"t": {
+			ID: storage.NodeID("t"),
+			Properties: map[string]any{
+				"value": "hello",
+			},
+		},
+	}
+	cond := exec.evaluateExpressionWithContext("t IN acc", condNodes, map[string]*storage.Edge{})
+	condBool, ok := cond.(bool)
+	require.True(t, ok, "expected boolean for IN condition, got %T (%v)", cond, cond)
+	assert.False(t, condBool)
 }
