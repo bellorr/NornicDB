@@ -4049,7 +4049,16 @@ func (s *Service) SetCrossEncoder(ce *CrossEncoder) {
 }
 
 // SetReranker configures the Stage-2 reranker.
+// Uses a quick read-lock check to avoid write-lock contention when the value hasn't changed.
+// This prevents deadlock when multiple goroutines call getOrCreateSearchService concurrently.
 func (s *Service) SetReranker(r Reranker) {
+	s.mu.RLock()
+	current := s.reranker
+	s.mu.RUnlock()
+	// Skip write lock if value is already set to the same pointer (common case: nil -> nil or same instance).
+	if current == r {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.reranker = r

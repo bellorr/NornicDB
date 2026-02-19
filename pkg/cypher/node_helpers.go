@@ -88,20 +88,11 @@ func (e *StorageExecutor) nodeToMap(node *storage.Node) map[string]interface{} {
 		"labels":  node.Labels,
 	}
 
-	// Build properties map (excluding internal properties)
-	properties := make(map[string]interface{})
-	for k, v := range node.Properties {
-		if e.isInternalProperty(k) {
-			continue
-		}
-		properties[k] = v
-	}
-
 	// Add properties both at top level (for Neo4j compatibility) and nested (for standard graph format)
-	for k, v := range properties {
+	for k, v := range node.Properties {
 		result[k] = v
 	}
-	result["properties"] = properties
+	result["properties"] = node.Properties
 
 	// If no user "id" property, use storage ID for backward compatibility
 	if _, hasUserID := result["id"]; !hasUserID {
@@ -143,8 +134,8 @@ func (e *StorageExecutor) buildEmbeddingSummary(node *storage.Node) map[string]i
 		summary["dimensions"] = 0
 	}
 
-	// Include model info from properties if available
-	if model, ok := node.Properties["embedding_model"]; ok {
+	// Include model info from EmbedMeta
+	if model, ok := node.EmbedMeta["embedding_model"]; ok {
 		summary["model"] = model
 	}
 
@@ -179,49 +170,6 @@ func (e *StorageExecutor) edgeToMap(edge *storage.Edge) map[string]interface{} {
 		"endNode":    string(edge.EndNode),
 		"properties": edge.Properties,
 	}
-}
-
-// internalProps is pre-computed at package init to avoid allocation per call.
-// These properties should not be returned in query results.
-// All keys are lowercase for case-insensitive matching.
-var internalProps = map[string]bool{
-	// Embedding arrays (huge float arrays - never return these)
-	"embedding":        true,
-	"embeddings":       true,
-	"vector":           true,
-	"vectors":          true,
-	"_embedding":       true,
-	"_embeddings":      true,
-	"chunk_embedding":  true,
-	"chunk_embeddings": true,
-	// Embedding metadata (shown in embedding summary instead)
-	"embedding_model":      true,
-	"embedding_dimensions": true,
-	"has_embedding":        true,
-	"embedded_at":          true,
-}
-
-// isInternalProperty returns true for properties that should not be returned in results.
-// This includes embeddings (huge float arrays) and other internal metadata.
-// Uses direct lookup for common lowercase names, falls back to ToLower for mixed case.
-//
-// # Parameters
-//
-//   - propName: The property name to check
-//
-// # Returns
-//
-//   - true if the property should be hidden from results
-func (e *StorageExecutor) isInternalProperty(propName string) bool {
-	// Fast path: check if it's already lowercase (most common case)
-	if internalProps[propName] {
-		return true
-	}
-	// Check for uppercase first char (common pattern: Embedding, Vector)
-	if len(propName) > 0 && propName[0] >= 'A' && propName[0] <= 'Z' {
-		return internalProps[strings.ToLower(propName)]
-	}
-	return false
 }
 
 // extractVarName extracts the variable name from a pattern like "(n:Label {...})".

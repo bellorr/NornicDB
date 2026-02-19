@@ -20,8 +20,10 @@ func TestUpdateNode_InvalidatesManagedEmbeddings(t *testing.T) {
 		ID:     storage.NodeID(nodeID),
 		Labels: []string{"Test"},
 		Properties: map[string]any{
-			"id":                   nodeID,
-			"name":                 "Alice",
+			"id":   nodeID,
+			"name": "Alice",
+		},
+		EmbedMeta: map[string]any{
 			"has_embedding":        true,
 			"embedding_model":      "test-model",
 			"embedding_dimensions": 1024,
@@ -43,11 +45,7 @@ func TestUpdateNode_InvalidatesManagedEmbeddings(t *testing.T) {
 	after, err := db.storage.GetNode(storage.NodeID(nodeID))
 	require.NoError(t, err)
 	require.Empty(t, after.ChunkEmbeddings, "managed embeddings should be cleared on mutation")
-	require.NotContains(t, after.Properties, "has_embedding")
-	require.NotContains(t, after.Properties, "embedding_model")
-	require.NotContains(t, after.Properties, "embedding_dimensions")
-	require.NotContains(t, after.Properties, "embedded_at")
-	require.NotContains(t, after.Properties, "chunk_count")
+	require.Empty(t, after.EmbedMeta, "managed embedding metadata should be cleared on mutation")
 }
 
 func TestExecuteCypher_SetInvalidatesManagedEmbeddings(t *testing.T) {
@@ -77,4 +75,3 @@ func TestExecuteCypher_SetInvalidatesManagedEmbeddings(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, after.ChunkEmbeddings, "managed embeddings should be cleared on Cypher SET mutation")
 }
-

@@ -196,6 +196,13 @@ type Node struct {
 	AccessCount     int64                  `json:"-"`
 	NamedEmbeddings map[string][]float32   `json:"-"` // Named vector embeddings (e.g., "title", "content", "default")
 	ChunkEmbeddings [][]float32            `json:"-"` // Chunked embeddings for long documents (legacy, migration support)
+
+	// Embedding metadata (separate from user Properties to avoid namespace pollution)
+	// Keys: embedding_model, embedding_dimensions, has_embedding, embedded_at, has_chunks, chunk_count
+	EmbedMeta map[string]any `json:"-"`
+
+	// Internal storage flags (not exposed to users, used during encode/decode)
+	EmbeddingsStoredSeparately bool `json:"-"` // True when embeddings are stored in separate keys (large node optimization)
 }
 
 // Edge represents a directed graph relationship (arc) between two nodes.

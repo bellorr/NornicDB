@@ -6,7 +6,6 @@ package cypher
 
 import (
 	"math"
-	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -867,49 +866,6 @@ func TestCountFunction(t *testing.T) {
 
 // ========================================
 // Embedding Property Filter Tests
-// ========================================
-
-func TestEmbeddingPropertyFilter(t *testing.T) {
-	e := setupTestExecutor(t)
-
-	// Create node with embedding (should be filtered)
-	node := createTestNode(t, e, "node-1", []string{"Doc"}, map[string]interface{}{
-		"name":      "Test",
-		"embedding": []float64{0.1, 0.2, 0.3},
-		"vector":    []float64{0.4, 0.5, 0.6},
-	})
-
-	nodes := map[string]*storage.Node{"n": node}
-
-	// keys() should not include embedding/vector
-	result := e.evaluateExpressionWithContext("keys(n)", nodes, nil)
-	keys, ok := result.([]interface{})
-	if !ok {
-		t.Fatalf("keys() should return list")
-	}
-
-	for _, k := range keys {
-		kStr := k.(string)
-		if strings.Contains(strings.ToLower(kStr), "embedding") || strings.Contains(strings.ToLower(kStr), "vector") {
-			t.Errorf("keys() should not include %s", kStr)
-		}
-	}
-
-	// properties() should also filter embeddings
-	propsResult := e.evaluateExpressionWithContext("properties(n)", nodes, nil)
-	props, ok := propsResult.(map[string]interface{})
-	if !ok {
-		t.Fatalf("properties() should return map")
-	}
-
-	if _, exists := props["embedding"]; exists {
-		t.Error("properties() should not include embedding")
-	}
-	if _, exists := props["vector"]; exists {
-		t.Error("properties() should not include vector")
-	}
-}
-
 // ========================================
 // OrNull Variants Tests
 // ========================================

@@ -78,11 +78,11 @@ func TestExplainBasicQuery(t *testing.T) {
 		result, err := exec.Execute(ctx, `EXPLAIN MATCH (n:Person) RETURN n`, nil)
 		require.NoError(t, err)
 		require.NotNil(t, result)
-		require.Equal(t, []string{"Plan"}, result.Columns)
-		require.Len(t, result.Rows, 1)
+		require.Equal(t, []string{"n"}, result.Columns)
+		require.Len(t, result.Rows, 0)
 
 		// Check that plan is returned
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "EXPLAIN")
 		require.Contains(t, planStr, "Query Plan")
 
@@ -96,7 +96,7 @@ func TestExplainBasicQuery(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Filter")
 	})
 
@@ -105,7 +105,7 @@ func TestExplainBasicQuery(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Sort")
 	})
 
@@ -114,7 +114,7 @@ func TestExplainBasicQuery(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Limit")
 	})
 
@@ -123,7 +123,7 @@ func TestExplainBasicQuery(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "EagerAggregation")
 	})
 
@@ -132,9 +132,23 @@ func TestExplainBasicQuery(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "ProcedureCall")
 		require.Contains(t, planStr, "db.labels")
+	})
+
+	t.Run("EXPLAIN returns projected columns and no rows", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `EXPLAIN MATCH (n:Person) RETURN n.name AS name`, nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{"name"}, result.Columns)
+		require.Len(t, result.Rows, 0)
+	})
+
+	t.Run("EXPLAIN CALL YIELD RETURN * infers YIELD columns", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `EXPLAIN CALL db.labels() YIELD label RETURN *`, nil)
+		require.NoError(t, err)
+		require.Equal(t, []string{"label"}, result.Columns)
+		require.Len(t, result.Rows, 0)
 	})
 }
 
@@ -154,11 +168,11 @@ func TestProfileBasicQuery(t *testing.T) {
 		result, err := exec.Execute(ctx, `PROFILE MATCH (n:Person) RETURN n`, nil)
 		require.NoError(t, err)
 		require.NotNil(t, result)
-		require.Equal(t, []string{"Plan"}, result.Columns)
-		require.Len(t, result.Rows, 1)
+		require.Equal(t, []string{"n"}, result.Columns)
+		require.Len(t, result.Rows, 3)
 
 		// Check that plan is returned with statistics
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "PROFILE")
 		require.Contains(t, planStr, "Query Plan")
 		require.Contains(t, planStr, "Total Time:")
@@ -222,7 +236,7 @@ func TestExplainComplexQueries(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Expand")
 	})
 
@@ -231,7 +245,7 @@ func TestExplainComplexQueries(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "ShortestPath")
 	})
 
@@ -240,8 +254,8 @@ func TestExplainComplexQueries(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
-		require.Contains(t, planStr, "CreateNode")
+		planStr := planStringFromResult(t, result)
+		require.Contains(t, planStr, "Create")
 	})
 
 	t.Run("EXPLAIN MERGE", func(t *testing.T) {
@@ -249,8 +263,17 @@ func TestExplainComplexQueries(t *testing.T) {
 		require.NoError(t, err)
 		require.NotNil(t, result)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Merge")
+	})
+
+	t.Run("EXPLAIN DETACH DELETE includes DetachDelete operator", func(t *testing.T) {
+		result, err := exec.Execute(ctx, `EXPLAIN MATCH (n:Person) DETACH DELETE n`, nil)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+
+		planStr := planStringFromResult(t, result)
+		require.Contains(t, planStr, "DetachDelete")
 	})
 }
 
@@ -271,7 +294,7 @@ func TestExplainPlanStructure(t *testing.T) {
 
 		// Collect all operator types
 		ops := collectOperatorTypes(plan.Root)
-		
+
 		// Should contain expected operators
 		// Note: NodeByLabelScan is used because the WHERE is handled by Filter operator
 		require.Contains(t, ops, "NodeByLabelScan")
@@ -285,7 +308,7 @@ func TestExplainPlanStructure(t *testing.T) {
 		result, err := exec.Execute(ctx, `EXPLAIN MATCH (n:Person) RETURN n`, nil)
 		require.NoError(t, err)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Estimated Rows:")
 	})
 }
@@ -357,7 +380,7 @@ func collectOperatorTypes(op *PlanOperator) []string {
 	if op == nil {
 		return nil
 	}
-	
+
 	types := []string{op.OperatorType}
 	for _, child := range op.Children {
 		types = append(types, collectOperatorTypes(child)...)
@@ -379,7 +402,7 @@ func TestExplainVsProfileOutput(t *testing.T) {
 		result, err := exec.Execute(ctx, `EXPLAIN MATCH (n:Person) RETURN n`, nil)
 		require.NoError(t, err)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Estimated Rows:")
 		require.NotContains(t, planStr, "Actual:")
 	})
@@ -388,11 +411,20 @@ func TestExplainVsProfileOutput(t *testing.T) {
 		result, err := exec.Execute(ctx, `PROFILE MATCH (n:Person) RETURN n`, nil)
 		require.NoError(t, err)
 
-		planStr := result.Rows[0][0].(string)
+		planStr := planStringFromResult(t, result)
 		require.Contains(t, planStr, "Est:")
 		require.Contains(t, planStr, "Actual:")
 		require.Contains(t, planStr, "Hits:")
 	})
+}
+
+func planStringFromResult(t *testing.T, result *ExecuteResult) string {
+	t.Helper()
+	require.NotNil(t, result)
+	require.NotNil(t, result.Metadata)
+	planStr, ok := result.Metadata["planString"].(string)
+	require.True(t, ok, "planString metadata must be present")
+	return planStr
 }
 
 func TestAnalyzeNodeScan(t *testing.T) {

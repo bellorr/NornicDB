@@ -9,7 +9,7 @@ import (
 
 func TestDBClose_DoesNotDeadlock(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

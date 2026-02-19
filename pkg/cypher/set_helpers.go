@@ -151,17 +151,8 @@ func invalidateManagedEmbeddings(node *storage.Node) {
 	// Managed embeddings live in ChunkEmbeddings (embed worker output).
 	node.ChunkEmbeddings = nil
 
-	// Clear embedding-related metadata so Cypher queries reflect reality until regeneration completes.
-	if node.Properties != nil {
-		delete(node.Properties, "embedding")
-		delete(node.Properties, "has_embedding")
-		delete(node.Properties, "embedding_skipped")
-		delete(node.Properties, "embedding_model")
-		delete(node.Properties, "embedding_dimensions")
-		delete(node.Properties, "embedded_at")
-		delete(node.Properties, "has_chunks")
-		delete(node.Properties, "chunk_count")
-	}
+	// Clear embedding metadata from EmbedMeta
+	node.EmbedMeta = nil
 }
 
 // splitSetAssignments splits a SET clause into individual assignments,

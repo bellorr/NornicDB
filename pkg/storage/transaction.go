@@ -99,13 +99,14 @@ func copyNode(node *Node) *Node {
 	}
 
 	nodeCopy := &Node{
-		ID:           node.ID,
-		Labels:       make([]string, 0, len(node.Labels)),
-		CreatedAt:    node.CreatedAt,
-		UpdatedAt:    node.UpdatedAt,
-		DecayScore:   node.DecayScore,
-		LastAccessed: node.LastAccessed,
-		AccessCount:  node.AccessCount,
+		ID:                         node.ID,
+		Labels:                     make([]string, 0, len(node.Labels)),
+		CreatedAt:                  node.CreatedAt,
+		UpdatedAt:                  node.UpdatedAt,
+		DecayScore:                 node.DecayScore,
+		LastAccessed:               node.LastAccessed,
+		AccessCount:                node.AccessCount,
+		EmbeddingsStoredSeparately: node.EmbeddingsStoredSeparately,
 	}
 	nodeCopy.Labels = append(nodeCopy.Labels, node.Labels...)
 
@@ -113,6 +114,13 @@ func copyNode(node *Node) *Node {
 		nodeCopy.Properties = make(map[string]interface{})
 		for k, v := range node.Properties {
 			nodeCopy.Properties[k] = v
+		}
+	}
+
+	if node.EmbedMeta != nil {
+		nodeCopy.EmbedMeta = make(map[string]any, len(node.EmbedMeta))
+		for k, v := range node.EmbedMeta {
+			nodeCopy.EmbedMeta[k] = v
 		}
 	}
 

@@ -163,7 +163,7 @@ embeddings:
 
 ### Embedding text: which properties are used
 
-By default, the embedding worker builds text from **all node properties** (except built-in metadata like `embedding`, `embedded_at`, `id`, etc.) plus **node labels**. You can restrict this so that only specific properties are embedded, or exclude certain properties.
+By default, the embedding worker builds text from **all node properties** plus **node labels**. Managed embedding metadata is stored internally (in `EmbedMeta`, not `Properties`). You can restrict this so that only specific properties are embedded, or exclude certain properties.
 
 Use this when you want to:
 - **Embed only one field** (e.g. only `content`) to avoid re-embedding stored embeddings or noisy fields.
@@ -190,8 +190,8 @@ embedding_worker:
 | `NORNICDB_EMBEDDING_INCLUDE_LABELS` | `true` | Set to `false` to omit node labels from the embedding text (e.g. when embedding only a single field). |
 
 **Behavior:**
-- If **properties_include** is set, only those keys (minus any in the exclude list and built-in skips) are used.
-- **properties_exclude** is applied on top of the built-in skip list; it is also applied when include is set (so an excluded key is never embedded even if listed in include).
+- If **properties_include** is set, only those keys (minus any in the exclude list) are used.
+- **properties_exclude** is always applied; it is also applied when include is set (so an excluded key is never embedded even if listed in include).
 - Precedence: defaults → config file → environment variables (env wins).
 
 ### Search Similarity ⭐ New

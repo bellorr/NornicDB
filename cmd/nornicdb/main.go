@@ -441,50 +441,52 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Configure database
 	dbConfig := nornicdb.DefaultConfig()
-	dbConfig.DataDir = dataDir
-	dbConfig.BoltPort = boltPort
-	dbConfig.HTTPPort = httpPort
-	dbConfig.EmbeddingAPIURL = embeddingURL
-	dbConfig.EmbeddingAPIKey = embeddingKey
-	dbConfig.EmbeddingModel = embeddingModel
-	dbConfig.EmbeddingDimensions = embeddingDim
-	dbConfig.SearchMinSimilarity = cfg.Memory.SearchMinSimilarity
-	dbConfig.EmbedWorkerNumWorkers = cfg.EmbeddingWorker.NumWorkers
-	dbConfig.EmbeddingPropertiesInclude = cfg.EmbeddingWorker.PropertiesInclude
-	dbConfig.EmbeddingPropertiesExclude = cfg.EmbeddingWorker.PropertiesExclude
-	dbConfig.EmbeddingIncludeLabels = cfg.EmbeddingWorker.IncludeLabels
-	dbConfig.ParallelEnabled = parallelEnabled
-	dbConfig.ParallelMaxWorkers = parallelWorkers
-	dbConfig.ParallelMinBatchSize = parallelBatchSize
+	dbConfig.Database.DataDir = dataDir
+	dbConfig.Server.BoltPort = boltPort
+	dbConfig.Server.HTTPPort = httpPort
+	dbConfig.Memory.EmbeddingAPIURL = embeddingURL
+	dbConfig.Memory.EmbeddingAPIKey = embeddingKey
+	dbConfig.Memory.EmbeddingModel = embeddingModel
+	dbConfig.Memory.EmbeddingDimensions = embeddingDim
+	dbConfig.Memory.SearchMinSimilarity = cfg.Memory.SearchMinSimilarity
+	dbConfig.EmbeddingWorker.NumWorkers = cfg.EmbeddingWorker.NumWorkers
+	dbConfig.EmbeddingWorker.PropertiesInclude = cfg.EmbeddingWorker.PropertiesInclude
+	dbConfig.EmbeddingWorker.PropertiesExclude = cfg.EmbeddingWorker.PropertiesExclude
+	dbConfig.EmbeddingWorker.IncludeLabels = cfg.EmbeddingWorker.IncludeLabels
 
 	// Memory mode
 	lowMemory, _ := cmd.Flags().GetBool("low-memory")
-	dbConfig.LowMemoryMode = lowMemory
+	if lowMemory {
+		// Preserve low-memory behavior by shrinking hot caches.
+		dbConfig.Database.BadgerNodeCacheMaxEntries = 1000
+		dbConfig.Database.BadgerEdgeTypeCacheMaxTypes = 10
+	}
 
 	// Encryption settings from config
-	dbConfig.EncryptionEnabled = cfg.Database.EncryptionEnabled
-	dbConfig.EncryptionPassword = cfg.Database.EncryptionPassword
+	dbConfig.Database.EncryptionEnabled = cfg.Database.EncryptionEnabled
+	dbConfig.Database.EncryptionPassword = cfg.Database.EncryptionPassword
 
 	// Async write settings from config
-	dbConfig.AsyncWritesEnabled = cfg.Database.AsyncWritesEnabled
-	dbConfig.AsyncFlushInterval = cfg.Database.AsyncFlushInterval
-	dbConfig.AsyncMaxNodeCacheSize = cfg.Database.AsyncMaxNodeCacheSize
-	dbConfig.AsyncMaxEdgeCacheSize = cfg.Database.AsyncMaxEdgeCacheSize
+	dbConfig.Database.AsyncWritesEnabled = cfg.Database.AsyncWritesEnabled
+	dbConfig.Database.AsyncFlushInterval = cfg.Database.AsyncFlushInterval
+	dbConfig.Database.AsyncMaxNodeCacheSize = cfg.Database.AsyncMaxNodeCacheSize
+	dbConfig.Database.AsyncMaxEdgeCacheSize = cfg.Database.AsyncMaxEdgeCacheSize
 
 	// WAL retention settings from config
-	dbConfig.WALRetentionMaxSegments = cfg.Database.WALRetentionMaxSegments
-	dbConfig.WALRetentionMaxAge = cfg.Database.WALRetentionMaxAge
-	dbConfig.WALRetentionLedgerDefaults = cfg.Database.WALRetentionLedgerDefaults
-	dbConfig.WALAutoCompactionEnabled = cfg.Database.WALAutoCompactionEnabled
-	dbConfig.WALSnapshotRetentionMaxCount = cfg.Database.WALSnapshotRetentionMaxCount
-	dbConfig.WALSnapshotRetentionMaxAge = cfg.Database.WALSnapshotRetentionMaxAge
+	dbConfig.Database.WALRetentionMaxSegments = cfg.Database.WALRetentionMaxSegments
+	dbConfig.Database.WALRetentionMaxAge = cfg.Database.WALRetentionMaxAge
+	dbConfig.Database.WALRetentionLedgerDefaults = cfg.Database.WALRetentionLedgerDefaults
+	dbConfig.Database.WALAutoCompactionEnabled = cfg.Database.WALAutoCompactionEnabled
+	dbConfig.Database.WALSnapshotRetentionMaxCount = cfg.Database.WALSnapshotRetentionMaxCount
+	dbConfig.Database.WALSnapshotRetentionMaxAge = cfg.Database.WALSnapshotRetentionMaxAge
 
 	// Badger in-process cache sizing (hot read paths)
-	dbConfig.BadgerNodeCacheMaxEntries = cfg.Database.BadgerNodeCacheMaxEntries
-	dbConfig.BadgerEdgeTypeCacheMaxTypes = cfg.Database.BadgerEdgeTypeCacheMaxTypes
-	dbConfig.StorageSerializer = cfg.Database.StorageSerializer
-	dbConfig.PersistSearchIndexes = cfg.Database.PersistSearchIndexes
-	dbConfig.KmeansNumClusters = cfg.Memory.KmeansNumClusters
+	dbConfig.Database.BadgerNodeCacheMaxEntries = cfg.Database.BadgerNodeCacheMaxEntries
+	dbConfig.Database.BadgerEdgeTypeCacheMaxTypes = cfg.Database.BadgerEdgeTypeCacheMaxTypes
+	dbConfig.Database.StorageSerializer = cfg.Database.StorageSerializer
+	dbConfig.Database.PersistSearchIndexes = cfg.Database.PersistSearchIndexes
+	dbConfig.Memory.KmeansNumClusters = cfg.Memory.KmeansNumClusters
+	dbConfig.Memory.EmbeddingEnabled = cfg.Memory.EmbeddingEnabled
 
 	// Open database
 	fmt.Println("📂 Opening database...")
@@ -817,8 +819,8 @@ func runImport(cmd *cobra.Command, args []string) error {
 
 	// Configure and open database
 	config := nornicdb.DefaultConfig()
-	config.DataDir = dataDir
-	config.EmbeddingAPIURL = embeddingURL
+	config.Database.DataDir = dataDir
+	config.Memory.EmbeddingAPIURL = embeddingURL
 
 	db, err := nornicdb.Open(dataDir, config)
 	if err != nil {
@@ -858,7 +860,7 @@ func runShell(cmd *cobra.Command, args []string) error {
 	// Open database
 	fmt.Printf("📂 Opening database at %s...\n", dataDir)
 	config := nornicdb.DefaultConfig()
-	config.DataDir = dataDir
+	config.Database.DataDir = dataDir
 
 	db, err := nornicdb.Open(dataDir, config)
 	if err != nil {
@@ -936,7 +938,7 @@ func runDecayRecalculate(cmd *cobra.Command, args []string) error {
 	// Open database
 	fmt.Printf("📂 Opening database at %s...\n", dataDir)
 	config := nornicdb.DefaultConfig()
-	config.DataDir = dataDir
+	config.Database.DataDir = dataDir
 
 	db, err := nornicdb.Open(dataDir, config)
 	if err != nil {
@@ -1031,7 +1033,7 @@ func runDecayArchive(cmd *cobra.Command, args []string) error {
 	// Open database
 	fmt.Printf("📂 Opening database at %s...\n", dataDir)
 	config := nornicdb.DefaultConfig()
-	config.DataDir = dataDir
+	config.Database.DataDir = dataDir
 
 	db, err := nornicdb.Open(dataDir, config)
 	if err != nil {
@@ -1121,7 +1123,7 @@ func runDecayStats(cmd *cobra.Command, args []string) error {
 	// Open database
 	fmt.Printf("📂 Opening database at %s...\n", dataDir)
 	config := nornicdb.DefaultConfig()
-	config.DataDir = dataDir
+	config.Database.DataDir = dataDir
 
 	db, err := nornicdb.Open(dataDir, config)
 	if err != nil {

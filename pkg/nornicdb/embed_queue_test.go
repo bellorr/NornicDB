@@ -971,15 +971,15 @@ func TestLargeContentEmbedding(t *testing.T) {
 		require.NoError(t, err)
 
 		// Large content gets chunked and all chunk embeddings stored on the same node
-		// The node has chunk_count=N property if there are multiple chunks
+		// The node has chunk_count in EmbedMeta if there are multiple chunks
 		// All chunk embeddings are stored in ChunkEmbeddings (opaque to users)
 		assert.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings")
 		assert.Greater(t, len(node.ChunkEmbeddings), 1, "Large content should create multiple chunks")
 
-		// Verify chunk_count property is set for multiple chunks
-		chunkCountProp, hasChunkCount := node.Properties["chunk_count"]
-		assert.True(t, hasChunkCount, "Should have chunk_count property for multiple chunks")
-		chunkCount := chunkCountProp.(int)
+		// Verify chunk_count is set in EmbedMeta for multiple chunks
+		chunkCountVal, hasChunkCount := node.EmbedMeta["chunk_count"]
+		assert.True(t, hasChunkCount, "Should have chunk_count in EmbedMeta for multiple chunks")
+		chunkCount := chunkCountVal.(int)
 		assert.Equal(t, len(node.ChunkEmbeddings), chunkCount, "chunk_count should match number of chunks")
 		assert.Greater(t, chunkCount, 1, "Large content should create multiple chunks")
 		t.Logf("Created %d chunk embeddings on the same node", chunkCount)

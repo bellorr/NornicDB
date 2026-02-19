@@ -2,6 +2,7 @@ package nornicdb
 
 import (
 	"fmt"
+	"time"
 
 	featureflags "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/inference"
@@ -22,7 +23,7 @@ func (db *DB) getOrCreateInferenceService(dbName string, storageEngine storage.E
 		dbName = db.defaultDatabaseName()
 	}
 
-	if db.config == nil || !db.config.AutoLinksEnabled {
+	if db.config == nil || !db.config.Memory.AutoLinksEnabled {
 		// Inference is disabled by configuration.
 		return nil, nil
 	}
@@ -44,10 +45,10 @@ func (db *DB) getOrCreateInferenceService(dbName string, storageEngine storage.E
 
 	// Create inference engine using current config flags.
 	inferConfig := &inference.Config{
-		SimilarityThreshold: db.config.AutoLinksSimilarityThreshold,
+		SimilarityThreshold: db.config.Memory.AutoLinksSimilarityThreshold,
 		SimilarityTopK:      10,
 		CoAccessEnabled:     true,
-		CoAccessWindow:      db.config.AutoLinksCoAccessWindow,
+		CoAccessWindow:      30 * time.Second,
 		CoAccessMinCount:    3,
 		TransitiveEnabled:   true,
 		TransitiveMinConf:   0.5,

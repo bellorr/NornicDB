@@ -4,6 +4,7 @@ import (
 	"os"
 	"testing"
 
+	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,11 +30,15 @@ func TestDBSearchServiceDimensionsMatchConfig(t *testing.T) {
 			defer os.RemoveAll(tmpDir)
 
 			cfg := &Config{
-				DataDir:             tmpDir,
-				EmbeddingDimensions: tt.configDims,
+				Database: nornicConfig.DatabaseConfig{
+					DataDir: tmpDir,
+				},
+				Memory: nornicConfig.MemoryConfig{
+					EmbeddingDimensions: tt.configDims,
+				},
 			}
 
-			t.Logf("Opening DB with config.EmbeddingDimensions = %d", cfg.EmbeddingDimensions)
+			t.Logf("Opening DB with config.Memory.EmbeddingDimensions = %d", cfg.Memory.EmbeddingDimensions)
 
 			db, err := Open(tmpDir, cfg)
 			require.NoError(t, err)
@@ -65,9 +70,9 @@ func TestDBConfigVsServerConfigDimensions(t *testing.T) {
 
 	// Create DB config (like main.go line 342-349)
 	dbConfig := DefaultConfig()
-	dbConfig.DataDir = tmpDir
-	dbConfig.EmbeddingDimensions = embeddingDim
-	t.Logf("dbConfig.EmbeddingDimensions = %d", dbConfig.EmbeddingDimensions)
+	dbConfig.Database.DataDir = tmpDir
+	dbConfig.Memory.EmbeddingDimensions = embeddingDim
+	t.Logf("dbConfig.Memory.EmbeddingDimensions = %d", dbConfig.Memory.EmbeddingDimensions)
 
 	// Open DB
 	db, err := Open(tmpDir, dbConfig)
@@ -81,6 +86,6 @@ func TestDBConfigVsServerConfigDimensions(t *testing.T) {
 	t.Logf("Search service vector index dimensions: %d", searchServiceDims)
 
 	// Both should be 512
-	assert.Equal(t, 512, dbConfig.EmbeddingDimensions, "DB config should have 512")
+	assert.Equal(t, 512, dbConfig.Memory.EmbeddingDimensions, "DB config should have 512")
 	assert.Equal(t, 512, searchServiceDims, "Search service should have 512")
 }

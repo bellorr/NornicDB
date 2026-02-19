@@ -9,8 +9,8 @@ import (
 
 func TestInferenceServices_PerDatabaseIsolation(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.AutoLinksEnabled = true
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.AutoLinksEnabled = true
+	cfg.Memory.EmbeddingDimensions = 3
 
 	db, err := Open("", cfg)
 	require.NoError(t, err)

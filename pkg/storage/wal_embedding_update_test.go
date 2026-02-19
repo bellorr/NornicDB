@@ -25,7 +25,7 @@ func TestWALEngine_UpdateNodeEmbedding_DelegatesToEmbeddingUpdater(t *testing.T)
 
 	// Make it an embedding update.
 	node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-	node.Properties["has_embedding"] = true
+	node.EmbedMeta = map[string]any{"has_embedding": true}
 
 	count1, err := engine.NodeCount()
 	require.NoError(t, err)

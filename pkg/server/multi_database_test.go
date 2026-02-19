@@ -430,8 +430,8 @@ func TestMultiDatabase_GetExecutorForDatabase(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
-	config.AsyncWritesEnabled = false
+	config.Memory.DecayEnabled = false
+	config.Database.AsyncWritesEnabled = false
 
 	db, err := nornicdb.Open(tmpDir, config)
 	require.NoError(t, err)

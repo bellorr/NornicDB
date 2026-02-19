@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -19,8 +20,10 @@ import (
 func TestBug_BulkImportCount(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &Config{
-		AsyncWritesEnabled: true,
-		AsyncFlushInterval: 50 * time.Millisecond,
+		Database: nornicConfig.DatabaseConfig{
+			AsyncWritesEnabled: true,
+			AsyncFlushInterval: 50 * time.Millisecond,
+		},
 	}
 
 	db, err := Open(tmpDir, config)
@@ -93,8 +96,10 @@ func TestBug_BulkImportCount(t *testing.T) {
 func TestBug_ClearAndImport(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &Config{
-		AsyncWritesEnabled: true,
-		AsyncFlushInterval: 50 * time.Millisecond,
+		Database: nornicConfig.DatabaseConfig{
+			AsyncWritesEnabled: true,
+			AsyncFlushInterval: 50 * time.Millisecond,
+		},
 	}
 
 	db, err := Open(tmpDir, config)

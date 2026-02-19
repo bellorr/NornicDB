@@ -226,8 +226,8 @@ func TestDB_GetDecayInfo(t *testing.T) {
 
 	t.Run("returns config when decay enabled", func(t *testing.T) {
 		config := DefaultConfig()
-		config.DecayEnabled = true
-		config.DecayArchiveThreshold = 0.1
+		config.Memory.DecayEnabled = true
+		config.Memory.ArchiveThreshold = 0.1
 
 		db, err := Open("", config)
 		require.NoError(t, err)

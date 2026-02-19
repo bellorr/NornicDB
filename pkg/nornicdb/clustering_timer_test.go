@@ -13,8 +13,8 @@ func TestClusteringTimer_StopDoesNotPanic(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
-	cfg.KmeansClusterInterval = 5 * time.Millisecond
+	cfg.Memory.EmbeddingDimensions = 3
+	cfg.Memory.KmeansClusterInterval = 5 * time.Millisecond
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })

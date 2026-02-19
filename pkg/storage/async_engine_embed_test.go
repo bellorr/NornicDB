@@ -45,8 +45,7 @@ func TestEmbedThenFindNext(t *testing.T) {
 
 	// Simulate embedding it - set embedding directly
 	first.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-	first.Properties["has_embedding"] = true
-	first.Properties["embedding"] = true
+	first.EmbedMeta = map[string]any{"has_embedding": true}
 	err = async.UpdateNode(first)
 	require.NoError(t, err)
 
@@ -59,7 +58,7 @@ func TestEmbedThenFindNext(t *testing.T) {
 
 	// Keep going - embed second, find third
 	second.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-	second.Properties["has_embedding"] = true
+	second.EmbedMeta = map[string]any{"has_embedding": true}
 	err = async.UpdateNode(second)
 	require.NoError(t, err)
 
@@ -117,8 +116,7 @@ func TestEmbedThenFindNextWithFlush(t *testing.T) {
 
 	// Simulate embedding it
 	first.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-	first.Properties["has_embedding"] = true
-	first.Properties["embedding"] = true
+	first.EmbedMeta = map[string]any{"has_embedding": true}
 	err = async.UpdateNode(first)
 	require.NoError(t, err)
 
@@ -196,8 +194,7 @@ func TestProductionScenario(t *testing.T) {
 
 		// Embed it
 		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-		node.Properties["has_embedding"] = true
-		node.Properties["embedding"] = true
+		node.EmbedMeta = map[string]any{"has_embedding": true}
 		err = async.UpdateNode(node)
 		require.NoError(t, err)
 

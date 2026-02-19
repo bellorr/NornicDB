@@ -44,13 +44,6 @@ texts := []string{"memory", "storage", "database"}
 embeddings, err := embedder.EmbedBatch(ctx, texts)
 ```
 
-### ⚠️ EXPERIMENTAL - DISABLED BY DEFAULT
-
-**File**: `auto_embed.go`  
-**Coverage**: 0% (tests disabled)  
-**Status**: NOT PRODUCTION READY
-
-The automatic embedding generation features with background processing, caching, and async operations are experimental and disabled by default.
 
 **See**: [AUTO_EMBED_STATUS.md](./AUTO_EMBED_STATUS.md) for details.
 

@@ -67,7 +67,7 @@ func TestPluginFunctionE2E(t *testing.T) {
 
 		// Open database
 		config := DefaultConfig()
-		config.EmbeddingProvider = "none"
+		config.Memory.EmbeddingProvider = "none"
 		db, err := Open(filepath.Join(tempDir, "testdb"), config)
 		require.NoError(t, err)
 		defer db.Close()
@@ -134,7 +134,7 @@ func TestPluginLookupWiring(t *testing.T) {
 
 	// Open database - this should wire up the plugin lookup
 	config := DefaultConfig()
-	config.EmbeddingProvider = "none"
+	config.Memory.EmbeddingProvider = "none"
 	db, err := Open(filepath.Join(tempDir, "testdb"), config)
 	require.NoError(t, err)
 	defer db.Close()
@@ -173,7 +173,7 @@ func TestBuiltInFallback(t *testing.T) {
 	pluginsMu.Unlock()
 
 	config := DefaultConfig()
-	config.EmbeddingProvider = "none"
+	config.Memory.EmbeddingProvider = "none"
 	db, err := Open(filepath.Join(tempDir, "testdb"), config)
 	require.NoError(t, err)
 	defer db.Close()
@@ -221,7 +221,7 @@ func TestPluginOverridesBuiltIn(t *testing.T) {
 	pluginsMu.Unlock()
 
 	config := DefaultConfig()
-	config.EmbeddingProvider = "none"
+	config.Memory.EmbeddingProvider = "none"
 	db, err := Open(filepath.Join(tempDir, "testdb"), config)
 	require.NoError(t, err)
 	defer db.Close()

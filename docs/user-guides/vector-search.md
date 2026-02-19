@@ -156,7 +156,7 @@ See **[Qdrant gRPC Endpoint](qdrant-grpc.md)** for setup, configuration, and mul
 MATCH (n:Document {id: 'doc1'})
 SET n.embedding = [0.7, 0.2, 0.05, 0.05]
 
--- Multi-line SET with metadata ✨ NEW
+-- Multi-line SET with optional user metadata
 MATCH (n:Document {id: 'doc1'})
 SET n.embedding = [0.7, 0.2, 0.05, 0.05],
     n.embedding_dimensions = 1024,
@@ -176,7 +176,7 @@ CALL db.index.vector.createNodeIndex(
 )
 ```
 
-> 💡 **Tip:** If nodes don’t have `node.Properties["embedding"]`, Cypher search can still match them via `node.ChunkEmbeddings` (managed embeddings) and/or `node.NamedEmbeddings`.
+> 💡 **Tip:** Managed embeddings are stored internally (`ChunkEmbeddings` + `EmbedMeta`). Even if a node has no `node.Properties["embedding"]`, Cypher/vector search can still match it via managed/internal embeddings and/or `NamedEmbeddings`.
 
 ---
 

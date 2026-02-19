@@ -144,12 +144,14 @@ YIELD node, score
 CALL db.index.vector.queryNodes('idx', 10, [0.1, 0.2, 0.3])
 YIELD node, score
 
--- Multi-line SET with arrays
+-- Multi-line SET with arrays (optional user metadata)
 MATCH (n:Node {id: 'abc'})
 SET n.embedding = [0.7, 0.2, 0.05, 0.05],
     n.embedding_model = 'mxbai-embed-large',
     n.has_embedding = true
 ```
+
+> Note: NornicDB-managed embedding metadata is stored internally (not in `Properties`) to avoid property namespace pollution.
 
 ---
 

@@ -656,10 +656,9 @@ func TestEvaluateExpression(t *testing.T) {
 		ID:     "eval-1",
 		Labels: []string{"Test"},
 		Properties: map[string]interface{}{
-			"name":      "Test Node",
-			"count":     float64(42),
-			"active":    true,
-			"embedding": []float64{0.1, 0.2, 0.3}, // Should be filtered
+			"name":   "Test Node",
+			"count":  float64(42),
+			"active": true,
 		},
 	}
 
@@ -675,7 +674,6 @@ func TestEvaluateExpression(t *testing.T) {
 		{"numeric property", "n.count", "n", float64(42)},
 		{"boolean property", "n.active", "n", true},
 		{"missing property", "n.missing", "n", nil},
-		{"embedding property filtered", "n.embedding", "n", nil},
 		{"string literal", "'hello'", "n", "hello"},
 		{"integer literal", "42", "n", int64(42)},
 		{"float literal", "3.14", "n", float64(3.14)},
@@ -687,98 +685,6 @@ func TestEvaluateExpression(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-// =============================================================================
-// Tests for Internal Property Filtering (Embeddings)
-// =============================================================================
-
-func TestIsInternalProperty(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
-
-	store := storage.NewNamespacedEngine(baseStore, "test")
-	exec := NewStorageExecutor(store)
-
-	internalProps := []string{
-		"embedding",
-		"embeddings",
-		"vector",
-		"vectors",
-		"_embedding",
-		"_embeddings",
-		"chunk_embedding",
-		"chunk_embeddings",
-		"EMBEDDING",  // Case insensitive
-		"Embeddings", // Mixed case
-	}
-
-	externalProps := []string{
-		"name",
-		"age",
-		"content",
-		"description",
-		"embed", // Not exact match
-		"id",
-	}
-
-	for _, prop := range internalProps {
-		t.Run("internal_"+prop, func(t *testing.T) {
-			assert.True(t, exec.isInternalProperty(prop), "%s should be internal", prop)
-		})
-	}
-
-	for _, prop := range externalProps {
-		t.Run("external_"+prop, func(t *testing.T) {
-			assert.False(t, exec.isInternalProperty(prop), "%s should not be internal", prop)
-		})
-	}
-}
-
-func TestNodeToMapFiltersEmbeddings(t *testing.T) {
-	baseStore := storage.NewMemoryEngine()
-
-	store := storage.NewNamespacedEngine(baseStore, "test")
-	exec := NewStorageExecutor(store)
-
-	node := &storage.Node{
-		ID:              "embed-filter-1",
-		Labels:          []string{"Document"},
-		ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3, 0.4, 0.5}}, // Actual embedding in storage
-		Properties: map[string]interface{}{
-			"name":                 "Test Doc",
-			"content":              "Hello world",
-			"embedding":            []float64{0.1, 0.2, 0.3, 0.4, 0.5}, // Should be filtered from properties
-			"chunk_embedding":      []float64{0.5, 0.4, 0.3, 0.2, 0.1},
-			"vector":               []float64{1.0, 2.0, 3.0},
-			"embedding_model":      "mxbai-embed-large",
-			"embedding_dimensions": 1024,
-			"has_embedding":        true,
-		},
-	}
-
-	result := exec.nodeToMap(node)
-
-	// Check that regular properties are present at top level (Neo4j compatible)
-	assert.Equal(t, "Test Doc", result["name"])
-	assert.Equal(t, "Hello world", result["content"])
-
-	// Check that embedding is now a summary object, not raw array
-	embSummary, ok := result["embedding"].(map[string]interface{})
-	assert.True(t, ok, "embedding should be a summary map")
-	assert.Equal(t, "ready", embSummary["status"])
-	assert.Equal(t, 5, embSummary["dimensions"]) // 5 from node.Embedding
-	assert.Equal(t, "mxbai-embed-large", embSummary["model"])
-
-	// Check that raw embedding arrays are NOT in properties
-	assert.NotContains(t, result, "chunk_embedding")
-	assert.NotContains(t, result, "vector")
-	assert.NotContains(t, result, "embedding_model")      // Shown in summary instead
-	assert.NotContains(t, result, "embedding_dimensions") // Shown in summary instead
-	assert.NotContains(t, result, "has_embedding")        // Shown in summary instead
-
-	// Check node metadata fields
-	assert.Equal(t, "embed-filter-1", result["id"])
-	assert.Equal(t, []string{"Document"}, result["labels"])
 }
 
 // =============================================================================

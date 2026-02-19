@@ -410,9 +410,11 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 
 		// Add embedding to the node
 		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3, 0.4}}
-		node.Properties["embedding_model"] = "test-model"
-		node.Properties["embedding_dimensions"] = 4
-		node.Properties["has_embedding"] = true
+		node.EmbedMeta = map[string]any{
+			"embedding_model":      "test-model",
+			"embedding_dimensions": 4,
+			"has_embedding":        true,
+		}
 
 		// UpdateNodeEmbedding should succeed for existing node
 		err = engine.UpdateNodeEmbedding(node)
@@ -422,7 +424,7 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 		updated, err := engine.GetNode(node.ID)
 		require.NoError(t, err)
 		assert.Equal(t, [][]float32{{0.1, 0.2, 0.3, 0.4}}, updated.ChunkEmbeddings)
-		assert.Equal(t, "test-model", updated.Properties["embedding_model"])
+		assert.Equal(t, "test-model", updated.EmbedMeta["embedding_model"])
 
 		// Try to update a non-existent node - should return ErrNotFound
 		nonExistent := &Node{
@@ -455,9 +457,11 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 
 		// Update only embedding-related fields
 		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-		node.Properties["embedding_model"] = "test-model"
-		node.Properties["embedding_dimensions"] = 3
-		node.Properties["has_embedding"] = true
+		node.EmbedMeta = map[string]any{
+			"embedding_model":      "test-model",
+			"embedding_dimensions": 3,
+			"has_embedding":        true,
+		}
 
 		err = engine.UpdateNodeEmbedding(node)
 		require.NoError(t, err)
@@ -488,9 +492,11 @@ func TestBadgerEngine_PendingEmbeddingsIndex(t *testing.T) {
 
 		// Add embedding and update
 		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-		node.Properties["embedding_model"] = "test-model"
-		node.Properties["embedding_dimensions"] = 3
-		node.Properties["has_embedding"] = true
+		node.EmbedMeta = map[string]any{
+			"embedding_model":      "test-model",
+			"embedding_dimensions": 3,
+			"has_embedding":        true,
+		}
 
 		err = engine.UpdateNodeEmbedding(node)
 		require.NoError(t, err)

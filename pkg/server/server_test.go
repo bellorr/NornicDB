@@ -40,9 +40,9 @@ func setupTestServer(t *testing.T) (*Server, *auth.Authenticator) {
 
 	// Create database with decay disabled for faster tests
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
-	config.AutoLinksEnabled = false
-	config.AsyncWritesEnabled = false // Disable async writes for predictable test behavior (200 OK vs 202 Accepted)
+	config.Memory.DecayEnabled = false
+	config.Memory.AutoLinksEnabled = false
+	config.Database.AsyncWritesEnabled = false // Disable async writes for predictable test behavior (200 OK vs 202 Accepted)
 
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {
@@ -180,7 +180,7 @@ func TestNew(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
+	config.Memory.DecayEnabled = false
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)
@@ -2000,7 +2000,7 @@ func TestTokenAuthDisabled(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
+	config.Memory.DecayEnabled = false
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {
 		t.Fatalf("failed to create database: %v", err)

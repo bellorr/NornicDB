@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/stretchr/testify/assert"
@@ -18,8 +19,10 @@ import (
 func testDB(t *testing.T) *nornicdb.DB {
 	t.Helper()
 	db, err := nornicdb.Open(t.TempDir(), &nornicdb.Config{
-		DecayEnabled:     false,
-		AutoLinksEnabled: false,
+		Memory: nornicConfig.MemoryConfig{
+			DecayEnabled:     false,
+			AutoLinksEnabled: false,
+		},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { db.Close() })

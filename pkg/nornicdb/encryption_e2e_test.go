@@ -13,6 +13,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func testEncryptionConfig(password string) *Config {
+	cfg := DefaultConfig()
+	cfg.Database.EncryptionEnabled = true
+	cfg.Database.EncryptionPassword = password
+	cfg.Memory.AutoLinksEnabled = false
+	cfg.Memory.DecayEnabled = false
+	return cfg
+}
+
 // TestEncryptionE2E tests the full encryption lifecycle with memory storage.
 // These tests ensure encryption works correctly and doesn't break normal database operations.
 
@@ -28,12 +37,7 @@ func TestEncryptionDisabledByDefault(t *testing.T) {
 }
 
 func TestEncryptionRequiresPassword(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "", // No password
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("") // No password
 
 	_, err := Open(t.TempDir(), config)
 	require.Error(t, err, "should fail without password")
@@ -41,12 +45,7 @@ func TestEncryptionRequiresPassword(t *testing.T) {
 }
 
 func TestEncryptionInitialization(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -65,12 +64,7 @@ func TestEncryptionFromEnvironment(t *testing.T) {
 	os.Setenv("NORNICDB_ENCRYPTION_PASSWORD", "env-password-secure-123!")
 	defer os.Unsetenv("NORNICDB_ENCRYPTION_PASSWORD")
 
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "config-password", // Should be overridden
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("config-password") // Should be overridden
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -84,12 +78,7 @@ func TestEncryptionPersistsSalt(t *testing.T) {
 	password := "test-password-secure-12345!"
 
 	// First open - creates salt
-	config1 := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: password,
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config1 := testEncryptionConfig(password)
 
 	db1, err := Open(tmpDir, config1)
 	require.NoError(t, err)
@@ -110,12 +99,7 @@ func TestEncryptionPersistsSalt(t *testing.T) {
 	assert.Len(t, saltData, 32, "salt should be 32 bytes")
 
 	// Second open - loads existing salt
-	config2 := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: password,
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config2 := testEncryptionConfig(password)
 
 	db2, err := Open(tmpDir, config2)
 	require.NoError(t, err)
@@ -128,12 +112,7 @@ func TestEncryptionPersistsSalt(t *testing.T) {
 }
 
 func TestEncryptionOfPHIFields(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -178,12 +157,7 @@ func TestEncryptionOfPHIFields(t *testing.T) {
 }
 
 func TestEncryptionDataAtRest(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -210,12 +184,7 @@ func TestEncryptionDataAtRest(t *testing.T) {
 func TestEncryptionWithCustomFields(t *testing.T) {
 	// Note: Field-level encryption was removed in favor of full-database encryption.
 	// This test now verifies that encryption works at the BadgerDB storage level.
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -240,12 +209,7 @@ func TestEncryptionWithCustomFields(t *testing.T) {
 }
 
 func TestEncryptionDoesNotBreakNonSensitiveFields(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -277,12 +241,7 @@ func TestEncryptionDoesNotBreakNonSensitiveFields(t *testing.T) {
 }
 
 func TestEncryptionConcurrentAccess(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -356,12 +315,7 @@ func TestEncryptionConcurrentAccess(t *testing.T) {
 }
 
 func TestEncryptionWithUpdateNode(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -394,12 +348,7 @@ func TestEncryptionWithUpdateNode(t *testing.T) {
 }
 
 func TestEncryptionWithCypherQueries(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -425,11 +374,10 @@ func TestEncryptionWithCypherQueries(t *testing.T) {
 }
 
 func TestEncryptionDisabledDoesNotEncrypt(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled: false, // Explicitly disabled
-		DecayEnabled:      false,
-		AutoLinksEnabled:  false,
-	}
+	config := DefaultConfig()
+	config.Database.EncryptionEnabled = false // Explicitly disabled
+	config.Memory.DecayEnabled = false
+	config.Memory.AutoLinksEnabled = false
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -453,12 +401,8 @@ func TestEncryptionDisabledDoesNotEncrypt(t *testing.T) {
 }
 
 func TestEncryptionWithMemory(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       true,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
+	config.Memory.DecayEnabled = true
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -493,12 +437,7 @@ func TestEncryptionPerformance(t *testing.T) {
 		t.Skip("skipping performance test in short mode")
 	}
 
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -544,12 +483,7 @@ func TestEncryptionWrongPassword(t *testing.T) {
 	password2 := "wrong-password-67890!"
 
 	// Create database with first password
-	config1 := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: password1,
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config1 := testEncryptionConfig(password1)
 
 	db1, err := Open(tmpDir, config1)
 	require.NoError(t, err)
@@ -564,24 +498,14 @@ func TestEncryptionWrongPassword(t *testing.T) {
 	// Try to open with wrong password
 	// Note: This might not fail immediately since PBKDF2 will derive a different key
 	// The failure would happen when trying to decrypt data
-	config2 := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: password2,
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config2 := testEncryptionConfig(password2)
 
 	_, err = Open(tmpDir, config2)
 	require.Error(t, err, "should fail to open with wrong password")
 }
 
 func TestEncryptionEmptyProperties(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -600,12 +524,7 @@ func TestEncryptionEmptyProperties(t *testing.T) {
 }
 
 func TestEncryptionNilProperties(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)
@@ -624,12 +543,7 @@ func TestEncryptionNilProperties(t *testing.T) {
 }
 
 func TestEncryptionEmptyStringValues(t *testing.T) {
-	config := &Config{
-		EncryptionEnabled:  true,
-		EncryptionPassword: "test-secure-password-12345!",
-		DecayEnabled:       false,
-		AutoLinksEnabled:   false,
-	}
+	config := testEncryptionConfig("test-secure-password-12345!")
 
 	db, err := Open(t.TempDir(), config)
 	require.NoError(t, err)

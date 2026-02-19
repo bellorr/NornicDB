@@ -448,8 +448,8 @@ func TestCORSWildcardDoesNotSendCredentials(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
-	config.AsyncWritesEnabled = false
+	config.Memory.DecayEnabled = false
+	config.Database.AsyncWritesEnabled = false
 
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {
@@ -494,8 +494,8 @@ func TestCORSSpecificOriginAllowsCredentials(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
-	config.AsyncWritesEnabled = false
+	config.Memory.DecayEnabled = false
+	config.Database.AsyncWritesEnabled = false
 
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {
@@ -540,8 +540,8 @@ func TestCORSDisallowedOriginNoHeaders(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
-	config.AsyncWritesEnabled = false
+	config.Memory.DecayEnabled = false
+	config.Database.AsyncWritesEnabled = false
 
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {
@@ -631,8 +631,8 @@ func TestRateLimitMiddleware_Returns429WhenLimited(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
-	config.AsyncWritesEnabled = false
+	config.Memory.DecayEnabled = false
+	config.Database.AsyncWritesEnabled = false
 
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {
@@ -690,8 +690,8 @@ func TestRateLimitMiddleware_SkipsHealthEndpoint(t *testing.T) {
 	defer os.RemoveAll(tmpDir)
 
 	config := nornicdb.DefaultConfig()
-	config.DecayEnabled = false
-	config.AsyncWritesEnabled = false
+	config.Memory.DecayEnabled = false
+	config.Database.AsyncWritesEnabled = false
 
 	db, err := nornicdb.Open(tmpDir, config)
 	if err != nil {

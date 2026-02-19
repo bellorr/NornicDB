@@ -304,7 +304,11 @@ class KeychainHelper {
     
     /// Save API token - won't overwrite if one already exists
     func saveAPIToken(_ token: String) -> Bool {
-        return saveSecret(token, account: apiTokenAccount, overwrite: false)
+        let result = saveSecret(token, account: apiTokenAccount, overwrite: false)
+        if result {
+            cachedAPIToken = token  // Update cache to avoid re-prompting Keychain
+        }
+        return result
     }
     
     /// Save API token - forces overwrite even if one exists
@@ -880,6 +884,57 @@ class ConfigManager: ObservableObject {
         return newKey
     }
     
+    /// Suggest embedding dimensions based on known model names
+    static func suggestedDimensions(for modelName: String) -> Int {
+        let name = modelName.lowercased()
+        // BGE-M3 family: 1024 dimensions
+        if name.contains("bge-m3") || name.contains("bge_m3") {
+            return 1024
+        }
+        // BGE-Large: 1024 dimensions
+        if name.contains("bge-large") || name.contains("bge_large") {
+            return 1024
+        }
+        // BGE-Base: 768 dimensions
+        if name.contains("bge-base") || name.contains("bge_base") {
+            return 768
+        }
+        // BGE-Small: 384 dimensions
+        if name.contains("bge-small") || name.contains("bge_small") {
+            return 384
+        }
+        // MXBai embed large: 1024 dimensions
+        if name.contains("mxbai") && name.contains("large") {
+            return 1024
+        }
+        // Nomic embed: 768 dimensions
+        if name.contains("nomic") {
+            return 768
+        }
+        // E5 models
+        if name.contains("e5-large") {
+            return 1024
+        }
+        if name.contains("e5-base") {
+            return 768
+        }
+        if name.contains("e5-small") {
+            return 384
+        }
+        // OpenAI text-embedding-3 models
+        if name.contains("text-embedding-3-large") {
+            return 3072
+        }
+        if name.contains("text-embedding-3-small") {
+            return 1536
+        }
+        if name.contains("text-embedding-ada") {
+            return 1536
+        }
+        // Default to 1024 for unknown models (common for modern embedding models)
+        return 1024
+    }
+    
     // Authentication settings
     @Published var adminUsername: String = "admin"
     @Published var adminPassword: String = "password"
@@ -1311,8 +1366,8 @@ class ConfigManager: ObservableObject {
                 key: "model",
                 value: normalizeModelName(embeddingModel, fallback: ConfigManager.defaultEmbeddingModel)
             )
-            // Reset dimensions to default (will be auto-detected from model)
-            content = updateYAMLIntValue(in: content, section: "embedding", key: "dimensions", value: 1024)
+            // Use the configured embedding dimensions for the selected model
+            content = updateYAMLIntValue(in: content, section: "embedding", key: "dimensions", value: embeddingDimensions)
         }
         content = updateYAMLStringValue(
             in: content,
@@ -1590,6 +1645,7 @@ struct SettingsView: View {
     @State private var originalHttpPortNumber: String = "7474"
     @State private var originalHostAddress: String = "localhost"
     @State private var originalEmbeddingModel: String = ConfigManager.defaultEmbeddingModel
+    @State private var originalEmbeddingDimensions: Int = 1024
     @State private var originalSearchRerankModel: String = ConfigManager.defaultSearchRerankModel
     @State private var originalHeimdallModel: String = ConfigManager.defaultHeimdallModel
     @State private var originalAdminUsername: String = "admin"
@@ -1618,6 +1674,7 @@ struct SettingsView: View {
                config.httpPortNumber != originalHttpPortNumber ||
                config.hostAddress != originalHostAddress ||
                config.embeddingModel != originalEmbeddingModel ||
+               config.embeddingDimensions != originalEmbeddingDimensions ||
                config.searchRerankModel != originalSearchRerankModel ||
                config.heimdallModel != originalHeimdallModel ||
                config.adminUsername != originalAdminUsername ||
@@ -1721,6 +1778,7 @@ struct SettingsView: View {
         originalHttpPortNumber = config.httpPortNumber
         originalHostAddress = config.hostAddress
         originalEmbeddingModel = config.embeddingModel
+        originalEmbeddingDimensions = config.embeddingDimensions
         originalSearchRerankModel = config.searchRerankModel
         originalHeimdallModel = config.heimdallModel
         originalAdminUsername = config.adminUsername
@@ -1998,6 +2056,18 @@ struct SettingsView: View {
                                     .foregroundColor(.secondary)
                             }
                             .padding(.top, 4)
+                            
+                            // Warning about Apple Intelligence limitations
+                            HStack(alignment: .top, spacing: 8) {
+                                Image(systemName: "info.circle")
+                                    .foregroundColor(.orange)
+                                    .font(.caption)
+                                Text("Best for simple text search. For code, technical docs, or complex content, use a dedicated model like BGE-M3 for better results.")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            .padding(.top, 2)
                         }
                     }
                     .padding()
@@ -2148,6 +2218,33 @@ struct SettingsView: View {
                             }
                             .pickerStyle(.menu)
                             .frame(maxWidth: 400)
+                            .onChange(of: config.embeddingModel) { newModel in
+                                // Auto-set dimensions based on known model defaults
+                                config.embeddingDimensions = ConfigManager.suggestedDimensions(for: newModel)
+                            }
+                            
+                            // Embedding Dimensions selector
+                            HStack(spacing: 12) {
+                                Text("Dimensions:")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                                
+                                Picker("Dimensions", selection: $config.embeddingDimensions) {
+                                    Text("384").tag(384)
+                                    Text("512").tag(512)
+                                    Text("768").tag(768)
+                                    Text("1024").tag(1024)
+                                    Text("1536").tag(1536)
+                                    Text("3072").tag(3072)
+                                }
+                                .pickerStyle(.menu)
+                                .frame(width: 80)
+                                
+                                Text("(must match model output)")
+                                    .font(.caption2)
+                                    .foregroundColor(.secondary)
+                            }
+                            .padding(.top, 4)
                         }
                         
                         Divider()

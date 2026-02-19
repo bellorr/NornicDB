@@ -55,7 +55,7 @@ export NORNICDB_EMBEDDING_GPU_LAYERS=-1  # Auto-detect
 
 ### Which properties are embedded
 
-By default, the embedding worker builds text from **all node properties** (except metadata like `embedding`, `embedded_at`, `id`, etc.) and **node labels**. You can limit this so that only specific properties are used, or exclude others.
+By default, the embedding worker builds text from **all node properties** and **node labels**. Managed embedding metadata is stored internally (`EmbedMeta`) to avoid property namespace pollution. You can limit this so that only specific properties are used, or exclude others.
 
 **Use cases:**
 - **Embed only one field** (e.g. `content`) so you don’t re-embed stored vectors or noisy fields.
@@ -86,7 +86,7 @@ export NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE=internal_id,raw_html
 export NORNICDB_EMBEDDING_INCLUDE_LABELS=false
 ```
 
-If `properties_include` is set, only those keys are used (and exclude still applies). If only `properties_exclude` is set, all properties except those and the built-in metadata list are used. See [Configuration Guide](../operations/configuration.md#embedding-text-which-properties-are-used) for full details.
+If `properties_include` is set, only those keys are used (and exclude still applies). If only `properties_exclude` is set, all properties except those keys are used. See [Configuration Guide](../operations/configuration.md#embedding-text-which-properties-are-used) for full details.
 
 ## Automatic Embedding
 

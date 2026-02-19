@@ -20,6 +20,7 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -97,8 +98,12 @@ func (e *StorageExecutor) executeExplain(ctx context.Context, query string) (*Ex
 		return nil, fmt.Errorf("failed to build execution plan: %w", err)
 	}
 	plan.Mode = ModeExplain
-
-	return e.planToResult(plan), nil
+	result := &ExecuteResult{
+		Columns: e.inferExplainColumns(query),
+		Rows:    [][]interface{}{},
+		Stats:   &QueryStats{},
+	}
+	return e.attachPlanMetadata(result, plan), nil
 }
 
 // executeProfile executes the query and returns the plan with statistics
@@ -130,7 +135,14 @@ func (e *StorageExecutor) executeProfile(ctx context.Context, query string) (*Ex
 	// Calculate total DB hits (estimate based on operations)
 	plan.TotalDBHits = e.estimateDBHits(plan.Root)
 
-	return e.planToResult(plan), nil
+	if result == nil {
+		result = &ExecuteResult{
+			Columns: []string{},
+			Rows:    [][]interface{}{},
+			Stats:   &QueryStats{},
+		}
+	}
+	return e.attachPlanMetadata(result, plan), nil
 }
 
 // buildExecutionPlan creates an execution plan for a query
@@ -152,81 +164,91 @@ func (e *StorageExecutor) buildExecutionPlan(query string) (*ExecutionPlan, erro
 
 // analyzeQuery analyzes a Cypher query and builds the operator tree
 func (e *StorageExecutor) analyzeQuery(query string) (*PlanOperator, error) {
-	upper := strings.ToUpper(query)
-
-	// Build operator tree based on query structure
-	// The tree is built bottom-up (data sources at leaves, results at root)
-
-	var operators []*PlanOperator
-
-	// Check for MATCH clause - the main data source
-	if strings.Contains(upper, "MATCH") {
-		matchOp := e.analyzeMatchClause(query)
-		operators = append(operators, matchOp)
+	// Build operators in query clause order (Neo4j-style plan chain).
+	type plannedClause struct {
+		idx int
+		op  *PlanOperator
 	}
+	clauses := make([]plannedClause, 0, 12)
 
-	// Check for CREATE clause
-	if strings.Contains(upper, "CREATE") {
-		createOp := &PlanOperator{
-			OperatorType:  "CreateNode",
-			Description:   "Create nodes and relationships",
-			EstimatedRows: 1,
+	add := func(idx int, op *PlanOperator) {
+		if idx >= 0 && op != nil {
+			clauses = append(clauses, plannedClause{idx: idx, op: op})
 		}
-		operators = append(operators, createOp)
 	}
 
-	// Check for MERGE clause
-	if strings.Contains(upper, "MERGE") {
-		mergeOp := &PlanOperator{
-			OperatorType:  "Merge",
-			Description:   "Merge (create if not exists)",
-			EstimatedRows: 1,
-		}
-		operators = append(operators, mergeOp)
+	if idx := findKeywordIndex(query, "MATCH"); idx >= 0 {
+		add(idx, e.analyzeMatchClause(query))
 	}
-
-	// Check for WHERE clause - adds Filter operator
-	if strings.Contains(upper, "WHERE") {
-		filterOp := e.analyzeWhereClause(query)
-		operators = append(operators, filterOp)
+	if idx := findKeywordIndex(query, "CALL"); idx >= 0 {
+		add(idx, e.analyzeCallClause(query))
 	}
-
-	// Check for WITH clause - adds Projection
-	if strings.Contains(upper, "WITH") {
-		withOp := &PlanOperator{
+	if idx := findKeywordIndex(query, "WHERE"); idx >= 0 {
+		add(idx, e.analyzeWhereClause(query))
+	}
+	if idx := findKeywordIndex(query, "WITH"); idx >= 0 {
+		add(idx, &PlanOperator{
 			OperatorType:  "Projection",
 			Description:   "Project intermediate results",
 			EstimatedRows: 100,
-		}
-		operators = append(operators, withOp)
+		})
 	}
-
-	// Check for ORDER BY - adds Sort operator
-	if strings.Contains(upper, "ORDER BY") {
-		sortOp := &PlanOperator{
+	if idx := findKeywordIndex(query, "CREATE"); idx >= 0 {
+		add(idx, &PlanOperator{
+			OperatorType:  "Create",
+			Description:   "Create nodes and relationships",
+			EstimatedRows: 1,
+		})
+	}
+	if idx := findKeywordIndex(query, "MERGE"); idx >= 0 {
+		add(idx, &PlanOperator{
+			OperatorType:  "Merge",
+			Description:   "Merge (create if not exists)",
+			EstimatedRows: 1,
+		})
+	}
+	if idx := findKeywordIndex(query, "SET"); idx >= 0 {
+		add(idx, &PlanOperator{
+			OperatorType:  "Set",
+			Description:   "Set properties",
+			EstimatedRows: 100,
+		})
+	}
+	if idx := findKeywordIndex(query, "REMOVE"); idx >= 0 {
+		add(idx, &PlanOperator{
+			OperatorType:  "Remove",
+			Description:   "Remove labels/properties",
+			EstimatedRows: 100,
+		})
+	}
+	if idx := findKeywordIndex(query, "DETACH DELETE"); idx >= 0 {
+		add(idx, e.analyzeDeleteClause(query, true))
+	} else if idx := findKeywordIndex(query, "DELETE"); idx >= 0 {
+		add(idx, e.analyzeDeleteClause(query, false))
+	}
+	if idx := findKeywordIndex(query, "ORDER BY"); idx >= 0 {
+		add(idx, &PlanOperator{
 			OperatorType:  "Sort",
 			Description:   "Sort results",
 			EstimatedRows: 100,
-		}
-		operators = append(operators, sortOp)
+		})
+	}
+	if idx := findKeywordIndex(query, "LIMIT"); idx >= 0 {
+		add(idx, e.analyzeLimitSkip(query))
+	} else if idx := findKeywordIndex(query, "SKIP"); idx >= 0 {
+		add(idx, e.analyzeLimitSkip(query))
+	}
+	if idx := findKeywordIndex(query, "RETURN"); idx >= 0 {
+		add(idx, e.analyzeReturnClause(query))
 	}
 
-	// Check for LIMIT/SKIP - adds Limit operator
-	if strings.Contains(upper, "LIMIT") || strings.Contains(upper, "SKIP") {
-		limitOp := e.analyzeLimitSkip(query)
-		operators = append(operators, limitOp)
-	}
+	sort.SliceStable(clauses, func(i, j int) bool {
+		return clauses[i].idx < clauses[j].idx
+	})
 
-	// Check for RETURN clause - the final result projection
-	if strings.Contains(upper, "RETURN") {
-		returnOp := e.analyzeReturnClause(query)
-		operators = append(operators, returnOp)
-	}
-
-	// Check for CALL procedure
-	if strings.Contains(upper, "CALL") {
-		callOp := e.analyzeCallClause(query)
-		operators = append(operators, callOp)
+	operators := make([]*PlanOperator, 0, len(clauses))
+	for _, c := range clauses {
+		operators = append(operators, c.op)
 	}
 
 	// Build the operator tree (chain operators bottom-up)
@@ -339,7 +361,7 @@ func (e *StorageExecutor) analyzeWhereClause(query string) *PlanOperator {
 
 	// Find end of WHERE clause
 	endIdx := len(query)
-	for _, keyword := range []string{"RETURN", "ORDER", "LIMIT", "SKIP", "WITH", "CREATE", "SET", "DELETE"} {
+	for _, keyword := range []string{"RETURN", "ORDER", "LIMIT", "SKIP", "WITH", "CREATE", "SET", "REMOVE", "DETACH DELETE", "DELETE"} {
 		if idx := strings.Index(upper[whereIdx:], keyword); idx > 0 {
 			if whereIdx+idx < endIdx {
 				endIdx = whereIdx + idx
@@ -355,6 +377,53 @@ func (e *StorageExecutor) analyzeWhereClause(query string) *PlanOperator {
 		EstimatedRows: 100,
 		Arguments: map[string]interface{}{
 			"predicate": whereClause,
+		},
+	}
+}
+
+func (e *StorageExecutor) analyzeDeleteClause(query string, detach bool) *PlanOperator {
+	startKeyword := "DELETE"
+	operator := "Delete"
+	if detach {
+		startKeyword = "DETACH DELETE"
+		operator = "DetachDelete"
+	}
+	deleteIdx := findKeywordIndex(query, startKeyword)
+	if deleteIdx < 0 {
+		return &PlanOperator{
+			OperatorType:  operator,
+			Description:   "Delete matched entities",
+			EstimatedRows: 100,
+		}
+	}
+
+	endIdx := len(query)
+	upperTail := strings.ToUpper(query[deleteIdx:])
+	for _, keyword := range []string{"RETURN", "WITH", "ORDER BY", "LIMIT", "SKIP"} {
+		if idx := strings.Index(upperTail, keyword); idx > 0 {
+			candidate := deleteIdx + idx
+			if candidate < endIdx {
+				endIdx = candidate
+			}
+		}
+	}
+
+	deleteClause := strings.TrimSpace(query[deleteIdx:endIdx])
+	strip := startKeyword + " "
+	if strings.HasPrefix(strings.ToUpper(deleteClause), strip) {
+		deleteClause = strings.TrimSpace(deleteClause[len(strip):])
+	}
+	desc := "Delete matched entities"
+	if deleteClause != "" {
+		desc = fmt.Sprintf("%s %s", operator, truncate(deleteClause, 50))
+	}
+
+	return &PlanOperator{
+		OperatorType:  operator,
+		Description:   desc,
+		EstimatedRows: 100,
+		Arguments: map[string]interface{}{
+			"details": deleteClause,
 		},
 	}
 }
@@ -517,25 +586,73 @@ func (e *StorageExecutor) estimateDBHits(op *PlanOperator) int64 {
 }
 
 // planToResult converts an execution plan to an ExecuteResult
-func (e *StorageExecutor) planToResult(plan *ExecutionPlan) *ExecuteResult {
-	result := &ExecuteResult{
-		Columns: []string{"Plan"},
-		Rows:    [][]interface{}{},
-		Stats:   &QueryStats{},
-	}
-
-	// Build plan representation
-	planStr := e.formatPlan(plan)
-	result.Rows = append(result.Rows, []interface{}{planStr})
-
+func (e *StorageExecutor) attachPlanMetadata(result *ExecuteResult, plan *ExecutionPlan) *ExecuteResult {
 	// Add plan as metadata
 	if result.Metadata == nil {
 		result.Metadata = make(map[string]interface{})
 	}
+	result.Metadata["planString"] = e.formatPlan(plan)
 	result.Metadata["plan"] = plan
 	result.Metadata["planType"] = string(plan.Mode)
 
 	return result
+}
+
+func (e *StorageExecutor) inferExplainColumns(query string) []string {
+	// Neo4j EXPLAIN returns the same columns as the underlying query but no rows.
+	if y := parseYieldClause(query); y != nil {
+		if y.hasReturn && strings.TrimSpace(y.returnExpr) != "" {
+			items := e.parseReturnItems(y.returnExpr)
+			// For RETURN * after explicit YIELD items, project yielded aliases/names.
+			if len(items) == 1 && strings.TrimSpace(items[0].expr) == "*" && len(y.items) > 0 {
+				cols := make([]string, 0, len(y.items))
+				for _, item := range y.items {
+					if item.alias != "" {
+						cols = append(cols, item.alias)
+					} else {
+						cols = append(cols, item.name)
+					}
+				}
+				return cols
+			}
+			cols := make([]string, 0, len(items))
+			for _, item := range items {
+				if item.alias != "" {
+					cols = append(cols, item.alias)
+				} else {
+					cols = append(cols, item.expr)
+				}
+			}
+			return cols
+		}
+		if !y.yieldAll {
+			cols := make([]string, 0, len(y.items))
+			for _, item := range y.items {
+				if item.alias != "" {
+					cols = append(cols, item.alias)
+				} else {
+					cols = append(cols, item.name)
+				}
+			}
+			return cols
+		}
+	}
+
+	if returnIdx := findKeywordIndex(query, "RETURN"); returnIdx >= 0 {
+		returnClause := strings.TrimSpace(query[returnIdx+len("RETURN"):])
+		items := e.parseReturnItems(returnClause)
+		cols := make([]string, 0, len(items))
+		for _, item := range items {
+			if item.alias != "" {
+				cols = append(cols, item.alias)
+			} else {
+				cols = append(cols, item.expr)
+			}
+		}
+		return cols
+	}
+
+	return []string{}
 }
 
 // formatPlan formats the execution plan as a string (tree visualization)

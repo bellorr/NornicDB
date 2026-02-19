@@ -10,7 +10,8 @@
 - **Location:** `pkg/nornicdb/embed_queue.go` → `buildEmbeddingText(properties, labels)`.
 - **Logic:**
   - Labels are always included first (`labels: A, B`).
-  - All properties are included except a **fixed** internal list: `embedding`, `has_embedding`, `embedding_skipped`, `embedding_model`, `embedding_dimensions`, `embedded_at`, `createdAt`, `updatedAt`, `id`.
+  - All properties are included by default.
+  - Managed embedding metadata is stored internally in `EmbedMeta` (not in `Properties`).
 - **Result:** “Embed the entire node except metadata.” No user-configurable include/exclude.
 
 ---
@@ -18,8 +19,8 @@
 ## Proposed behavior
 
 - **Include list (optional):** If set, **only** these property keys (and optionally labels) are used when building embedding text. Enables “embed only `content`” or “embed only `title` and `description`”.
-- **Exclude list (optional):** If set, these keys are **excluded** in addition to the built-in metadata list. Enables “embed everything except `internal_id`, `raw_html`”.
-- **Defaults:** Empty include and empty exclude → keep current behavior (all properties except built-in skip list).
+- **Exclude list (optional):** If set, these keys are **excluded**. Enables “embed everything except `internal_id`, `raw_html`”.
+- **Defaults:** Empty include and empty exclude → keep current behavior (all properties included).
 
 ---
 
@@ -32,11 +33,11 @@ Add to `EmbedWorkerConfig` in `pkg/nornicdb/embed_queue.go`:
 ```go
 // PropertiesInclude: if non-empty, ONLY these property keys are used when building
 // embedding text (plus labels if IncludeLabels is true). Enables "embed only content".
-// Empty = use all properties (subject to PropertiesExclude and built-in skips).
+// Empty = use all properties (subject to PropertiesExclude).
 PropertiesInclude []string
 
 // PropertiesExclude: these property keys are never used when building embedding text.
-// Applied in addition to the built-in metadata skip list. Empty = no extra exclusions.
+// Applied as explicit exclusions. Empty = no extra exclusions.
 PropertiesExclude []string
 
 // IncludeLabels: if true (default), node labels are prepended to the embedding text.
@@ -48,18 +49,17 @@ IncludeLabels bool
 
 When building text for a node:
 
-1. **Built-in skip list** always applies (embedding metadata, `createdAt`, `updatedAt`, `id`, etc.).
-2. If **PropertiesInclude** is non-empty:
-   - Consider only keys in this list (and still apply built-in skips).
+1. If **PropertiesInclude** is non-empty:
+   - Consider only keys in this list.
    - If **PropertiesExclude** is also set, exclude those keys from the include set (so we never embed an excluded key even if mistakenly listed in include).
-3. If **PropertiesInclude** is empty:
-   - Consider all property keys except built-in skips and **PropertiesExclude**.
+2. If **PropertiesInclude** is empty:
+   - Consider all property keys except **PropertiesExclude**.
 
 So:
 
 - **Include only:** `PropertiesInclude = ["content"]` → only `content` (and labels if `IncludeLabels`) used.
-- **Exclude only:** `PropertiesExclude = ["internal_id", "raw_html"]` → all properties except built-in + these.
-- **Both:** Include defines the candidate set; Exclude is then removed from that set (and built-in skips always apply).
+- **Exclude only:** `PropertiesExclude = ["internal_id", "raw_html"]` → all properties except these.
+- **Both:** Include defines the candidate set; Exclude is then removed from that set.
 
 ### 3. Labels
 
@@ -155,9 +155,8 @@ Where `dbConfig` is populated from `cfg` (around 444–483), add:
    - Change signature to accept filter options, e.g.  
      `buildEmbeddingText(properties, labels, opts *EmbedTextOptions)`  
      with `Include []string`, `Exclude []string`, `IncludeLabels bool`.
-   - Apply built-in skips first.
-   - If `opts.Include` non-empty, restrict to those keys (minus built-in and opts.Exclude).
-   - Else, use all keys minus built-in and opts.Exclude.
+   - If `opts.Include` non-empty, restrict to those keys (minus opts.Exclude).
+   - Else, use all keys minus opts.Exclude.
    - If `opts.IncludeLabels`, prepend labels as today.
    - Keep existing value-to-string conversion and “at least return something” fallback.
 
@@ -185,12 +184,12 @@ Where `dbConfig` is populated from `cfg` (around 444–483), add:
 
 | Config             | Default | Effect |
 |--------------------|---------|--------|
-| PropertiesInclude  | empty   | Use all properties (minus built-in skips and Exclude). |
+| PropertiesInclude  | empty   | Use all properties (minus Exclude). |
 | PropertiesExclude  | empty   | Additional keys to never embed. |
 | IncludeLabels      | true    | Prepend `labels: ...` to embedding text. |
 
 - **Include** = “only these keys (plus optional labels)”.
-- **Exclude** = “never these keys (on top of built-in skips)”.
+- **Exclude** = “never these keys”.
 - **Precedence (Option C):** defaults (code) → YAML `embedding_worker.*` → env `NORNICDB_EMBEDDING_*`.
 - **Env vars:** `NORNICDB_EMBEDDING_PROPERTIES_INCLUDE`, `NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE`, `NORNICDB_EMBEDDING_INCLUDE_LABELS`.
 - **YAML (under `embedding_worker`):** `properties_include`, `properties_exclude`, `include_labels`.

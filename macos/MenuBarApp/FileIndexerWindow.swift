@@ -84,6 +84,19 @@ struct IndexedFolder: Identifiable, Codable {
     var lastSync: Date
     var isIndexing: Bool
     var error: String?
+    var tags: [String]  // User-defined tags for this folder
+    
+    /// Folder name derived from path
+    var folderName: String {
+        return (path as NSString).lastPathComponent
+    }
+    
+    /// Sanitized folder identifier for use as a tag (alphanumeric + underscore)
+    var folderTag: String {
+        let name = folderName.replacingOccurrences(of: " ", with: "_")
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+        return String(name.unicodeScalars.filter { allowed.contains($0) })
+    }
     
     enum FolderStatus: String, Codable {
         case active
@@ -304,7 +317,12 @@ class FileWatchManager: ObservableObject {
     /// Check if current token is valid by calling /auth/me
     @MainActor
     private func checkAuthWithToken() async {
-        guard let token = KeychainHelper.shared.getAPIToken(),
+        // Access Keychain off the main actor to avoid blocking UI during authorization dialog
+        let token: String? = await Task.detached(priority: .userInitiated) {
+            return KeychainHelper.shared.getAPIToken()
+        }.value
+        
+        guard let token = token,
               let authMeURL = URL(string: "\(serverBaseURL)/auth/me") else {
             // No token - auth required
             authRequired = true
@@ -401,7 +419,11 @@ class FileWatchManager: ObservableObject {
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let token = json["access_token"] as? String {
                     print("✅ Received auth token, saving to keychain")
-                    let saved = KeychainHelper.shared.saveAPIToken(token)
+                    // Save token off main thread to avoid blocking UI during Keychain access
+                    let saved = await Task.detached(priority: .userInitiated) {
+                        // Use updateAPIToken to ensure cache is updated even if token exists
+                        return KeychainHelper.shared.updateAPIToken(token)
+                    }.value
                     print("✅ Token saved to keychain: \(saved)")
                     isAuthenticated = true
                     connectionStatus = .authenticated
@@ -429,9 +451,21 @@ class FileWatchManager: ObservableObject {
         return false
     }
     
-    /// Get authorization header for API requests
+    /// Get authorization header for API requests (uses cached token to avoid Keychain prompts)
     private func getAuthHeader() -> String? {
+        // This uses the cached token from KeychainHelper to avoid triggering Keychain prompts
         if let token = KeychainHelper.shared.getAPIToken() {
+            return "Bearer \(token)"
+        }
+        return nil
+    }
+    
+    /// Get authorization header asynchronously (safe for initial access)
+    private func getAuthHeaderAsync() async -> String? {
+        let token: String? = await Task.detached(priority: .userInitiated) {
+            return KeychainHelper.shared.getAPIToken()
+        }.value
+        if let token = token {
             return "Bearer \(token)"
         }
         return nil
@@ -590,7 +624,8 @@ class FileWatchManager: ObservableObject {
             status: .indexing,
             lastSync: Date(),
             isIndexing: true,
-            error: nil
+            error: nil,
+            tags: []  // User can add tags later
         )
         
         DispatchQueue.main.async {
@@ -763,6 +798,11 @@ class FileWatchManager: ObservableObject {
             var storedCount = 0
             var errorCount = 0
             
+            // Get folder tags from watchedFolders
+            let folderTags = await MainActor.run {
+                return self.watchedFolders.first(where: { $0.path == path })?.tags ?? []
+            }
+            
             if canStoreInServer {
                 for (index, file) in files.enumerated() {
                     // Update current file in progress
@@ -775,7 +815,7 @@ class FileWatchManager: ObservableObject {
                     }
                     
                     do {
-                        try await storeFileInNornicDB(file, folderPath: path)
+                        try await storeFileInNornicDB(file, folderPath: path, tags: folderTags)
                         storedCount += 1
                     } catch {
                         logger.log(.error, "Failed to store indexed file", metadata: [
@@ -892,8 +932,8 @@ class FileWatchManager: ObservableObject {
     
     // MARK: - NornicDB API Integration
     
-    /// Store an indexed file in NornicDB
-    func storeFileInNornicDB(_ file: FileIndexer.IndexedFile, folderPath: String) async throws {
+    /// Store an indexed file in NornicDB with folder tags
+    func storeFileInNornicDB(_ file: FileIndexer.IndexedFile, folderPath: String, tags: [String] = []) async throws {
         // Check if node exists and is already up-to-date
         let checkQuery = """
         MATCH (f:File {path: $path})
@@ -913,6 +953,14 @@ class FileWatchManager: ObservableObject {
             }
         }
         
+        // Derive folder name for automatic tagging
+        let folderName = (folderPath as NSString).lastPathComponent
+        let folderTag = sanitizeTag(folderName)
+        
+        // Build tags array: folder tag + user-defined tags
+        var allTags = ["File", folderTag]  // Always include File and folder name as tags
+        allTags.append(contentsOf: tags.map { sanitizeTag($0) }.filter { !$0.isEmpty })
+        
         let properties: [String: Any] = [
             "path": file.path,
             "name": (file.path as NSString).lastPathComponent,
@@ -924,6 +972,8 @@ class FileWatchManager: ObservableObject {
                     file.contentType == .document ? "document" :
                     file.contentType == .imageOCR ? "image_ocr" : "image_description",
             "folder_root": folderPath,
+            "folder_name": folderName,
+            "tags": allTags,
             "last_modified": ISO8601DateFormatter().string(from: file.lastModified)
         ]
         let params: [String: Any] = [
@@ -972,6 +1022,82 @@ class FileWatchManager: ObservableObject {
                 throw error
             }
         }
+    }
+    
+    /// Sanitize a string to be a valid tag (alphanumeric + underscore)
+    private func sanitizeTag(_ tag: String) -> String {
+        let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
+        let withUnderscores = trimmed.replacingOccurrences(of: " ", with: "_")
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+        return String(withUnderscores.unicodeScalars.filter { allowed.contains($0) })
+    }
+    
+    /// Update tags for all files in a folder
+    func updateFolderTags(_ folderPath: String, tags: [String]) async throws {
+        let sanitizedTags = tags.map { sanitizeTag($0) }.filter { !$0.isEmpty }
+        let folderName = (folderPath as NSString).lastPathComponent
+        let folderTag = sanitizeTag(folderName)
+        
+        // Build complete tags array
+        var allTags = ["File", folderTag]
+        allTags.append(contentsOf: sanitizedTags)
+        
+        let query = """
+        MATCH (f:File {folder_root: $folder_root})
+        SET f.tags = $tags
+        RETURN count(f) as updated
+        """
+        
+        let result = try await executeCypher(query, parameters: [
+            "folder_root": folderPath,
+            "tags": allTags
+        ])
+        
+        if let results = result["results"] as? [[String: Any]],
+           let data = results.first?["data"] as? [[String: Any]],
+           let row = data.first?["row"] as? [Any],
+           let count = row.first as? Int {
+            print("✅ Updated tags for \(count) files in \(folderPath)")
+        }
+    }
+    
+    /// Add a tag to a folder (updates all files)
+    func addTagToFolder(_ folderPath: String, tag: String) async throws {
+        guard let index = watchedFolders.firstIndex(where: { $0.path == folderPath }) else {
+            throw NSError(domain: "FileWatchManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Folder not found"])
+        }
+        
+        let sanitized = sanitizeTag(tag)
+        guard !sanitized.isEmpty else { return }
+        
+        // Add to local folder tags
+        if !watchedFolders[index].tags.contains(sanitized) {
+            await MainActor.run {
+                self.watchedFolders[index].tags.append(sanitized)
+                self.saveFolders()
+            }
+        }
+        
+        // Update all files in database
+        try await updateFolderTags(folderPath, tags: watchedFolders[index].tags)
+    }
+    
+    /// Remove a tag from a folder (updates all files)
+    func removeTagFromFolder(_ folderPath: String, tag: String) async throws {
+        guard let index = watchedFolders.firstIndex(where: { $0.path == folderPath }) else {
+            throw NSError(domain: "FileWatchManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Folder not found"])
+        }
+        
+        let sanitized = sanitizeTag(tag)
+        
+        // Remove from local folder tags
+        await MainActor.run {
+            self.watchedFolders[index].tags.removeAll { $0 == sanitized }
+            self.saveFolders()
+        }
+        
+        // Update all files in database
+        try await updateFolderTags(folderPath, tags: watchedFolders[index].tags)
     }
     
     /// Delete all file nodes and their chunks for a folder
@@ -1101,6 +1227,11 @@ struct FileIndexerView: View {
     @State private var authPassword: String = ""
     @State private var isAuthenticating: Bool = false
     
+    // Tag editing state
+    @State private var editingTagsForFolder: String? = nil  // Folder path being edited
+    @State private var newTagText: String = ""
+    @State private var isUpdatingTags: Bool = false
+    
     init(config: ConfigManager) {
         self.config = config
         self._watchManager = StateObject(wrappedValue: FileWatchManager(config: config))
@@ -1145,6 +1276,8 @@ struct FileIndexerView: View {
         .frame(minWidth: 700, minHeight: 600)
         .onAppear {
             Task {
+                // Small delay to let UI fully initialize before potentially triggering Keychain dialog
+                try? await Task.sleep(nanoseconds: 100_000_000)  // 100ms
                 await watchManager.checkServerConnection()
             }
         }
@@ -1598,69 +1731,219 @@ struct FileIndexerView: View {
     }
     
     func folderRow(_ folder: IndexedFolder) -> some View {
-        HStack(spacing: 12) {
-            // Status icon
-            Text(folder.status.icon)
-                .font(.title2)
-            
-            // Folder info
-            VStack(alignment: .leading, spacing: 4) {
-                Text((folder.path as NSString).lastPathComponent)
-                    .font(.callout)
-                    .fontWeight(.medium)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                // Status icon
+                Text(folder.status.icon)
+                    .font(.title2)
                 
-                Text(folder.path)
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                
-                HStack(spacing: 12) {
-                    Label("\(folder.fileCount) files", systemImage: "doc")
-                    Label("Last: \(formatDate(folder.lastSync))", systemImage: "clock")
-                }
-                .font(.caption2)
-                .foregroundColor(.secondary)
-            }
-            
-            Spacer()
-            
-            // Progress indicator if indexing
-            if let progress = watchManager.progressMap[folder.path], progress.status == .indexing {
-                VStack(alignment: .trailing, spacing: 4) {
-                    ProgressView(value: progress.percentComplete, total: 100)
-                        .frame(width: 100)
-                    Text("\(progress.indexed)/\(progress.totalFiles)")
-                        .font(.caption2)
+                // Folder info
+                VStack(alignment: .leading, spacing: 4) {
+                    Text((folder.path as NSString).lastPathComponent)
+                        .font(.callout)
+                        .fontWeight(.medium)
+                    
+                    Text(folder.path)
+                        .font(.caption)
                         .foregroundColor(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    
+                    HStack(spacing: 12) {
+                        Label("\(folder.fileCount) files", systemImage: "doc")
+                        Label("Last: \(formatDate(folder.lastSync))", systemImage: "clock")
+                    }
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                // Progress indicator if indexing
+                if let progress = watchManager.progressMap[folder.path], progress.status == .indexing {
+                    VStack(alignment: .trailing, spacing: 4) {
+                        ProgressView(value: progress.percentComplete, total: 100)
+                            .frame(width: 100)
+                        Text("\(progress.indexed)/\(progress.totalFiles)")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                }
+                
+                // Actions
+                HStack(spacing: 8) {
+                    Button(action: { 
+                        withAnimation {
+                            editingTagsForFolder = editingTagsForFolder == folder.path ? nil : folder.path
+                        }
+                    }) {
+                        Image(systemName: "tag")
+                            .foregroundColor(folder.isIndexing ? .secondary : (editingTagsForFolder == folder.path ? .accentColor : .primary))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(folder.isIndexing)
+                    .help(folder.isIndexing ? "Cannot edit tags while indexing" : "Manage tags")
+                    
+                    Button(action: { watchManager.refreshFolder(folder) }) {
+                        Image(systemName: "arrow.clockwise")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Re-index folder")
+                    
+                    Button(action: { watchManager.toggleFolder(folder) }) {
+                        Image(systemName: folder.status == .active ? "pause.fill" : "play.fill")
+                    }
+                    .buttonStyle(.plain)
+                    .help(folder.status == .active ? "Pause watching" : "Resume watching")
+                    
+                    Button(action: { watchManager.removeFolder(folder) }) {
+                        Image(systemName: "trash")
+                            .foregroundColor(.red)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Remove from index")
                 }
             }
             
-            // Actions
-            HStack(spacing: 8) {
-                Button(action: { watchManager.refreshFolder(folder) }) {
-                    Image(systemName: "arrow.clockwise")
+            // Tags section
+            VStack(alignment: .leading, spacing: 6) {
+                // Always show tags if any exist
+                if !folder.tags.isEmpty {
+                    tagDisplayRow(folder)
                 }
-                .buttonStyle(.plain)
-                .help("Re-index folder")
                 
-                Button(action: { watchManager.toggleFolder(folder) }) {
-                    Image(systemName: folder.status == .active ? "pause.fill" : "play.fill")
+                // Show tag editor when expanded (but not while indexing)
+                if editingTagsForFolder == folder.path && !folder.isIndexing {
+                    tagEditorRow(folder)
                 }
-                .buttonStyle(.plain)
-                .help(folder.status == .active ? "Pause watching" : "Resume watching")
                 
-                Button(action: { watchManager.removeFolder(folder) }) {
-                    Image(systemName: "trash")
-                        .foregroundColor(.red)
+                // Show warning if trying to edit while indexing
+                if editingTagsForFolder == folder.path && folder.isIndexing {
+                    HStack(spacing: 4) {
+                        Image(systemName: "info.circle")
+                            .font(.caption2)
+                            .foregroundColor(.orange)
+                        Text("Tag editing disabled while indexing is in progress")
+                            .font(.caption2)
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 4)
                 }
-                .buttonStyle(.plain)
-                .help("Remove from index")
             }
         }
         .padding()
         .background(folder.status.color.opacity(0.1))
         .cornerRadius(8)
+    }
+    
+    // Display current tags for a folder
+    func tagDisplayRow(_ folder: IndexedFolder) -> some View {
+        HStack(spacing: 4) {
+            Image(systemName: "tag.fill")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+            
+            // Auto-tags (folder name)
+            Text(folder.folderTag)
+                .font(.caption2)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.blue.opacity(0.2))
+                .cornerRadius(4)
+            
+            // User tags
+            ForEach(folder.tags, id: \.self) { tag in
+                HStack(spacing: 2) {
+                    Text(tag)
+                        .font(.caption2)
+                    
+                    // Only show remove button when editing and not indexing
+                    if editingTagsForFolder == folder.path && !folder.isIndexing {
+                        Button(action: {
+                            removeTag(tag, from: folder)
+                        }) {
+                            Image(systemName: "xmark.circle.fill")
+                                .font(.caption2)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(Color.green.opacity(0.2))
+                .cornerRadius(4)
+            }
+        }
+    }
+    
+    // Tag editor row for adding new tags
+    func tagEditorRow(_ folder: IndexedFolder) -> some View {
+        HStack(spacing: 8) {
+            TextField("Add tag...", text: $newTagText)
+                .textFieldStyle(.roundedBorder)
+                .frame(width: 150)
+                .onSubmit {
+                    addTag(to: folder)
+                }
+            
+            Button(action: { addTag(to: folder) }) {
+                if isUpdatingTags {
+                    ProgressView()
+                        .scaleEffect(0.7)
+                } else {
+                    Image(systemName: "plus.circle.fill")
+                }
+            }
+            .buttonStyle(.plain)
+            .disabled(newTagText.trimmingCharacters(in: .whitespaces).isEmpty || isUpdatingTags)
+            
+            Spacer()
+            
+            Text("Tags help organize and filter files in search")
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.top, 4)
+    }
+    
+    // Add a tag to a folder
+    func addTag(to folder: IndexedFolder) {
+        let tag = newTagText.trimmingCharacters(in: .whitespaces)
+        guard !tag.isEmpty else { return }
+        
+        isUpdatingTags = true
+        Task {
+            do {
+                try await watchManager.addTagToFolder(folder.path, tag: tag)
+                await MainActor.run {
+                    newTagText = ""
+                    isUpdatingTags = false
+                }
+            } catch {
+                await MainActor.run {
+                    watchManager.error = "Failed to add tag: \(error.localizedDescription)"
+                    isUpdatingTags = false
+                }
+            }
+        }
+    }
+    
+    // Remove a tag from a folder
+    func removeTag(_ tag: String, from folder: IndexedFolder) {
+        isUpdatingTags = true
+        Task {
+            do {
+                try await watchManager.removeTagFromFolder(folder.path, tag: tag)
+                await MainActor.run {
+                    isUpdatingTags = false
+                }
+            } catch {
+                await MainActor.run {
+                    watchManager.error = "Failed to remove tag: \(error.localizedDescription)"
+                    isUpdatingTags = false
+                }
+            }
+        }
     }
     
     func selectFolder() {

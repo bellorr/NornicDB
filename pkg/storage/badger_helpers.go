@@ -192,16 +192,19 @@ func encodeNode(n *Node) ([]byte, bool, error) {
 	// Node is too large - store embeddings separately
 	// Create a copy without embeddings for encoding
 	nodeCopy := *n
-	embeddingsToStore := nodeCopy.ChunkEmbeddings
+	chunkCount := len(nodeCopy.ChunkEmbeddings)
 	nodeCopy.ChunkEmbeddings = nil // Remove embeddings for encoding
 
 	// Re-encode without embeddings
-	// Set flag in properties to indicate embeddings are stored separately
-	if nodeCopy.Properties == nil {
-		nodeCopy.Properties = make(map[string]any)
+	// Set struct flag to indicate embeddings are stored separately
+	nodeCopy.EmbeddingsStoredSeparately = true
+	// Ensure chunk_count is set in EmbedMeta (embed queue sets it, but direct creates might not)
+	if nodeCopy.EmbedMeta == nil {
+		nodeCopy.EmbedMeta = make(map[string]any)
 	}
-	nodeCopy.Properties["_embeddings_stored_separately"] = true
-	nodeCopy.Properties["_embedding_chunk_count"] = int64(len(embeddingsToStore))
+	if _, hasChunkCount := nodeCopy.EmbedMeta["chunk_count"]; !hasChunkCount {
+		nodeCopy.EmbedMeta["chunk_count"] = chunkCount
+	}
 
 	// Final encode with flag
 	data, err = encodeValue(&nodeCopy)
@@ -243,11 +246,12 @@ func decodeNodeWithEmbeddings(txn *badger.Txn, data []byte, nodeID NodeID) (*Nod
 		return nil, err
 	}
 
-	// Check if embeddings are stored separately
-	if storedSeparately, ok := node.Properties["_embeddings_stored_separately"].(bool); ok && storedSeparately {
+	// Check if embeddings are stored separately (struct flag set during encode)
+	if node.EmbeddingsStoredSeparately {
+		// Use chunk_count from EmbedMeta (set by embed queue) to know how many chunks to load
 		// Handle various integer types (gob may decode as different types depending on value size)
 		var chunkCount int
-		switch v := node.Properties["_embedding_chunk_count"].(type) {
+		switch v := node.EmbedMeta["chunk_count"].(type) {
 		case int:
 			chunkCount = v
 		case int8:
@@ -313,9 +317,8 @@ func decodeNodeWithEmbeddings(txn *badger.Txn, data []byte, nodeID NodeID) (*Nod
 				node.ChunkEmbeddings = append(node.ChunkEmbeddings, emb)
 			}
 
-			// Remove internal flags from properties
-			delete(node.Properties, "_embeddings_stored_separately")
-			delete(node.Properties, "_embedding_chunk_count")
+			// Clear internal storage flag after loading (chunk_count is user-facing, keep it)
+			node.EmbeddingsStoredSeparately = false
 		}
 	}
 

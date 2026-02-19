@@ -12,7 +12,7 @@ import (
 
 func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -91,7 +91,7 @@ func TestSearchServices_PerDatabaseIsolation_EventRouting(t *testing.T) {
 
 func TestSearchServices_ResetDropsCache(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -117,7 +117,7 @@ func TestSearchServices_ClusteringRunnerInitializesKnownNamespaces(t *testing.T)
 	t.Cleanup(cleanup)
 
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -151,7 +151,7 @@ func TestSearchServices_ClusteringFlagUpgradesCachedService(t *testing.T) {
 	t.Cleanup(cleanup)
 
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -174,7 +174,7 @@ func TestSearchServices_ClusteringFlagUpgradesCachedService(t *testing.T) {
 
 func TestSearchServices_SkipsQdrantNamespaceNodes(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -201,7 +201,7 @@ func TestRunClusteringOnceAllDatabases_RespectsContextCancellation(t *testing.T)
 	t.Cleanup(cleanup)
 
 	cfg := DefaultConfig()
-	cfg.EmbeddingDimensions = 3
+	cfg.Memory.EmbeddingDimensions = 3
 	db, err := Open("", cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = db.Close() })
@@ -233,7 +233,7 @@ func TestTriggerSearchClustering_DoesNotPanic(t *testing.T) {
 		t.Cleanup(cleanup)
 
 		cfg := DefaultConfig()
-		cfg.EmbeddingDimensions = 3
+		cfg.Memory.EmbeddingDimensions = 3
 		db, err := Open("", cfg)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })
@@ -247,7 +247,7 @@ func TestTriggerSearchClustering_DoesNotPanic(t *testing.T) {
 		t.Cleanup(cleanup)
 
 		cfg := DefaultConfig()
-		cfg.EmbeddingDimensions = 3
+		cfg.Memory.EmbeddingDimensions = 3
 		db, err := Open("", cfg)
 		require.NoError(t, err)
 		t.Cleanup(func() { _ = db.Close() })

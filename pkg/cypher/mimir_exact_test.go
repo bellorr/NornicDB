@@ -182,8 +182,8 @@ func TestMimirExactQueriesWithEmbeddings(t *testing.T) {
 	// Set embedding on first 2 nodes
 	for i := 0; i < 2; i++ {
 		nodes[i].ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-		nodes[i].Properties["has_embedding"] = true
-		nodes[i].Properties["embedding"] = true // Marker for IS NOT NULL check
+		nodes[i].Properties["embedding"] = true // Marker for f.embedding IS NOT NULL compatibility
+		nodes[i].EmbedMeta = map[string]any{"has_embedding": true}
 		err = store.UpdateNode(nodes[i])
 		require.NoError(t, err)
 	}
@@ -413,12 +413,13 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 			continue
 		}
 		// Store embedding as []interface{} property (like Mimir/Neo4j does)
-		embeddingArray := []interface{}{0.1, 0.2, 0.3, 0.4}
-		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3, 0.4}} // Also native field
-		node.Properties["embedding"] = embeddingArray            // Property like Mimir!
-		node.Properties["embedding_dimensions"] = 4
-		node.Properties["embedding_model"] = "test-model"
-		node.Properties["has_embedding"] = true
+		node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3, 0.4}}
+		node.Properties["embedding"] = true
+		node.EmbedMeta = map[string]any{
+			"embedding_dimensions": 4,
+			"embedding_model":      "test-model",
+			"has_embedding":        true,
+		}
 		err := store.UpdateNode(node)
 		require.NoError(t, err)
 	}
@@ -431,12 +432,13 @@ func TestMimirE2EWithAsyncStorageAndEmbeddings(t *testing.T) {
 			continue
 		}
 		// Store embedding as []interface{} property (like Mimir does)
-		embeddingArray := []interface{}{0.5, 0.6, 0.7, 0.8}
-		node.ChunkEmbeddings = [][]float32{{0.5, 0.6, 0.7, 0.8}} // Also native field
-		node.Properties["embedding"] = embeddingArray            // Property like Mimir!
-		node.Properties["embedding_dimensions"] = 4
-		node.Properties["embedding_model"] = "test-model"
-		node.Properties["has_embedding"] = true
+		node.ChunkEmbeddings = [][]float32{{0.5, 0.6, 0.7, 0.8}}
+		node.Properties["embedding"] = true
+		node.EmbedMeta = map[string]any{
+			"embedding_dimensions": 4,
+			"embedding_model":      "test-model",
+			"has_embedding":        true,
+		}
 		err := store.UpdateNode(node)
 		require.NoError(t, err)
 	}

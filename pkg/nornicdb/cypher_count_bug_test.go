@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,8 +18,10 @@ func TestBug_CypherCountVsStorageCount(t *testing.T) {
 	// Create DB with full stack (AsyncEngine + WAL + Badger)
 	tmpDir := t.TempDir()
 	config := &Config{
-		AsyncWritesEnabled: true,
-		AsyncFlushInterval: 50 * time.Millisecond,
+		Database: nornicConfig.DatabaseConfig{
+			AsyncWritesEnabled: true,
+			AsyncFlushInterval: 50 * time.Millisecond,
+		},
 	}
 
 	db, err := Open(tmpDir, config)
@@ -70,8 +73,10 @@ func TestBug_CypherCountVsStorageCount(t *testing.T) {
 func TestBug_CypherCountAfterDeleteRecreate(t *testing.T) {
 	tmpDir := t.TempDir()
 	config := &Config{
-		AsyncWritesEnabled: true,
-		AsyncFlushInterval: 50 * time.Millisecond,
+		Database: nornicConfig.DatabaseConfig{
+			AsyncWritesEnabled: true,
+			AsyncFlushInterval: 50 * time.Millisecond,
+		},
 	}
 
 	db, err := Open(tmpDir, config)

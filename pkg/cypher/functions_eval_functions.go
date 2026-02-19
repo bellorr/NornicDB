@@ -193,9 +193,6 @@ skipArrayIndexing:
 				return e.evaluateExpressionWithContextFull(argExpr, nodes, rels, paths, allPathEdges, allPathNodes, pathLength), nil
 			},
 			Now: time.Now,
-			IsInternalProperty: func(key string) bool {
-				return e.isInternalProperty(key)
-			},
 		}
 
 		if v, found, err := cypherfn.EvaluateFunction(name, args, ctx); found {
@@ -282,9 +279,7 @@ skipArrayIndexing:
 		if node, ok := nodes[inner]; ok {
 			keys := make([]interface{}, 0, len(node.Properties))
 			for k := range node.Properties {
-				if !e.isInternalProperty(k) {
-					keys = append(keys, k)
-				}
+				keys = append(keys, k)
 			}
 			return keys
 		}
@@ -302,13 +297,7 @@ skipArrayIndexing:
 	if matchFuncStartAndSuffix(expr, "properties") {
 		inner := extractFuncArgs(expr, "properties")
 		if node, ok := nodes[inner]; ok {
-			props := make(map[string]interface{})
-			for k, v := range node.Properties {
-				if !e.isInternalProperty(k) {
-					props[k] = v
-				}
-			}
-			return props
+			return node.Properties
 		}
 		if rel, ok := rels[inner]; ok {
 			return rel.Properties

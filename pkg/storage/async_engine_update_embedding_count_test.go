@@ -25,7 +25,7 @@ func TestAsyncEngine_UpdateNodeEmbedding_DoesNotChangeNodeCount(t *testing.T) {
 	require.Equal(t, int64(1), count1)
 
 	node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-	node.Properties["has_embedding"] = true
+	node.EmbedMeta = map[string]any{"has_embedding": true}
 	err = async.UpdateNodeEmbedding(node)
 	require.NoError(t, err)
 
@@ -59,7 +59,7 @@ func TestAsyncEngine_UpdateNodeEmbedding_InFlight_DoesNotChangeNodeCount(t *test
 	require.Equal(t, int64(1), count1)
 
 	node.ChunkEmbeddings = [][]float32{{0.1, 0.2, 0.3}}
-	node.Properties["has_embedding"] = true
+	node.EmbedMeta = map[string]any{"has_embedding": true}
 	err = async.UpdateNodeEmbedding(node)
 	require.NoError(t, err)
 

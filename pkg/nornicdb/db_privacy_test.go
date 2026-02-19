@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	nornicConfig "github.com/orneryd/nornicdb/pkg/config"
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -707,9 +708,13 @@ func TestClearAllEmbeddings_UnwrapsStorageLayers(t *testing.T) {
 		// Create persistent database (WAL is auto-enabled for persistent storage)
 		tmpDir := t.TempDir()
 		config := &Config{
-			DecayEnabled:       false,
-			AutoLinksEnabled:   false,
-			AsyncWritesEnabled: false, // Just WAL, no async
+			Memory: nornicConfig.MemoryConfig{
+				DecayEnabled:     false,
+				AutoLinksEnabled: false,
+			},
+			Database: nornicConfig.DatabaseConfig{
+				AsyncWritesEnabled: false, // Just WAL, no async
+			},
 		}
 		db, err := Open(tmpDir, config)
 		require.NoError(t, err)
@@ -735,10 +740,14 @@ func TestClearAllEmbeddings_UnwrapsStorageLayers(t *testing.T) {
 		// Create persistent database with both async and WAL enabled
 		tmpDir := t.TempDir()
 		config := &Config{
-			DecayEnabled:       false,
-			AutoLinksEnabled:   false,
-			AsyncWritesEnabled: true,                  // WAL + async
-			AsyncFlushInterval: 50 * time.Millisecond, // Required for async writes
+			Memory: nornicConfig.MemoryConfig{
+				DecayEnabled:     false,
+				AutoLinksEnabled: false,
+			},
+			Database: nornicConfig.DatabaseConfig{
+				AsyncWritesEnabled: true,                  // WAL + async
+				AsyncFlushInterval: 50 * time.Millisecond, // Required for async writes
+			},
 		}
 		db, err := Open(tmpDir, config)
 		require.NoError(t, err)

@@ -17,8 +17,4 @@ type Context struct {
 
 	Eval func(expr string) (interface{}, error)
 	Now  func() time.Time
-
-	// IsInternalProperty returns true for properties that must not be exposed
-	// in Cypher function outputs (e.g., embedding vectors).
-	IsInternalProperty func(key string) bool
 }

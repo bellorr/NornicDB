@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"reflect"
 	"strings"
 	"time"
 
@@ -1108,8 +1107,8 @@ func (s *Server) nodeToNeo4jHTTPFormat(node *storage.Node) map[string]interface{
 
 	elementId := fmt.Sprintf("4:nornicdb:%s", node.ID)
 
-	// Filter properties - remove only embedding arrays, keep metadata
-	props := s.filterNodeProperties(node.Properties)
+	// Preserve user properties exactly as stored for Neo4j compatibility.
+	props := node.Properties
 
 	return map[string]interface{}{
 		"elementId":  elementId,
@@ -1135,10 +1134,10 @@ func (s *Server) mapNodeToNeo4jHTTPFormat(nodeId interface{}, m map[string]inter
 		}
 	}
 
-	// Extract and filter properties
+	// Extract properties without key-based filtering.
 	var props map[string]interface{}
 	if p, ok := m["properties"].(map[string]interface{}); ok {
-		props = s.filterNodeProperties(p)
+		props = p
 	} else {
 		// Properties might be at top level - collect them
 		props = make(map[string]interface{})
@@ -1147,9 +1146,7 @@ func (s *Server) mapNodeToNeo4jHTTPFormat(nodeId interface{}, m map[string]inter
 			if k == "id" || k == "_nodeId" || k == "labels" || k == "properties" || k == "elementId" || k == "embedding" {
 				continue
 			}
-			if !s.isEmbeddingArrayProperty(k, v) {
-				props[k] = v
-			}
+			props[k] = v
 		}
 	}
 
@@ -1177,57 +1174,6 @@ func (s *Server) edgeToNeo4jHTTPFormat(edge *storage.Edge) map[string]interface{
 		"endNodeElementId":   endElementId,
 		"properties":         edge.Properties,
 	}
-}
-
-// filterNodeProperties filters out embedding arrays but keeps embedding metadata.
-// Removes: embedding (array), embeddings, vector, vectors, chunk_embedding, etc.
-// Keeps: embedding_model, embedding_dimensions, has_embedding, embedded_at
-func (s *Server) filterNodeProperties(props map[string]interface{}) map[string]interface{} {
-	if props == nil {
-		return make(map[string]interface{})
-	}
-
-	filtered := make(map[string]interface{}, len(props))
-	for k, v := range props {
-		if s.isEmbeddingArrayProperty(k, v) {
-			continue
-		}
-		filtered[k] = v
-	}
-	return filtered
-}
-
-// isEmbeddingArrayProperty returns true if this property is an embedding array
-// that should be filtered from HTTP responses (too large to serialize).
-// Returns false for embedding metadata like embedding_model, has_embedding, etc.
-func (s *Server) isEmbeddingArrayProperty(key string, value interface{}) bool {
-	lowerKey := strings.ToLower(key)
-
-	// These are the actual embedding vector properties that contain large arrays
-	arrayProps := map[string]bool{
-		"embedding":        true,
-		"embeddings":       true,
-		"vector":           true,
-		"vectors":          true,
-		"_embedding":       true,
-		"_embeddings":      true,
-		"chunk_embedding":  true,
-		"chunk_embeddings": true,
-	}
-
-	if !arrayProps[lowerKey] {
-		return false
-	}
-
-	// Only filter if the value is actually an array/slice (not metadata)
-	if value == nil {
-		return false
-	}
-
-	// Check if it's a slice/array type
-	rv := reflect.ValueOf(value)
-	kind := rv.Kind()
-	return kind == reflect.Slice || kind == reflect.Array
 }
 
 // generateRowMeta generates Neo4j-compatible metadata for each value in a row.

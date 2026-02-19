@@ -1383,8 +1383,22 @@ func (e *StorageExecutor) evaluateWhere(node *storage.Node, variable, whereClaus
 
 	propName := left[len(variable)+1:]
 
-	// Get actual value
-	actualVal, exists := node.Properties[propName]
+	// Get actual value - check EmbedMeta first for embedding metadata
+	var actualVal any
+	var exists bool
+	if propName == "has_embedding" {
+		// Check EmbedMeta first, then fall back to ChunkEmbeddings
+		if node.EmbedMeta != nil {
+			actualVal, exists = node.EmbedMeta["has_embedding"]
+		}
+		if !exists {
+			// Fall back to native embedding field
+			actualVal = len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
+			exists = true
+		}
+	} else {
+		actualVal, exists = node.Properties[propName]
+	}
 	if !exists {
 		return false
 	}
@@ -1555,25 +1569,33 @@ func (e *StorageExecutor) resolveReturnItem(item returnItem, variable string, no
 			return string(node.ID)
 		}
 
-		// Handle special "embedding" property - return summary, never the raw array
+		// Handle special "embedding" property:
+		// - Return user-provided property if present.
+		// - Otherwise expose managed embedding summary only when embedding exists.
 		if propName == "embedding" {
-			return e.buildEmbeddingSummary(node)
+			if val, ok := node.Properties["embedding"]; ok {
+				return val
+			}
+			hasManagedEmbedding := len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
+			if !hasManagedEmbedding && node.EmbedMeta != nil {
+				if v, ok := node.EmbedMeta["has_embedding"].(bool); ok {
+					hasManagedEmbedding = v
+				}
+			}
+			if hasManagedEmbedding {
+				return e.buildEmbeddingSummary(node)
+			}
+			return nil
 		}
 
-		// Handle has_embedding specially - check both property and native embedding field
+		// Handle has_embedding specially - check EmbedMeta and native embedding field
 		// This supports Mimir's query: WHERE f.has_embedding = true
 		if propName == "has_embedding" {
-			// Check property first
-			if val, ok := node.Properties["has_embedding"]; ok {
+			if val, ok := node.EmbedMeta["has_embedding"]; ok {
 				return val
 			}
 			// Fall back to checking native embedding field (always stored in ChunkEmbeddings)
 			return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
-		}
-
-		// Filter out internal embedding-related properties (except has_embedding handled above)
-		if e.isInternalProperty(propName) {
-			return nil
 		}
 
 		// Regular property access

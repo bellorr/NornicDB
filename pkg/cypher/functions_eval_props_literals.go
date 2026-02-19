@@ -24,16 +24,30 @@ func (e *StorageExecutor) evaluateExpressionWithContextFullPropsLiterals(
 		propName := expr[dotIdx+1:]
 
 		if node, ok := nodes[varName]; ok && node != nil {
-			// Handle has_embedding specially - check both property and native embedding field
+			// Handle embedding specially:
+			// - If user stored an "embedding" property, return it.
+			// - Otherwise expose managed embedding only when present (for IS NOT NULL compatibility).
+			if propName == "embedding" {
+				if val, ok := node.Properties["embedding"]; ok {
+					return val
+				}
+				hasManagedEmbedding := len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
+				if !hasManagedEmbedding && node.EmbedMeta != nil {
+					if v, ok := node.EmbedMeta["has_embedding"].(bool); ok {
+						hasManagedEmbedding = v
+					}
+				}
+				if hasManagedEmbedding {
+					return e.buildEmbeddingSummary(node)
+				}
+				return nil
+			}
+			// Handle has_embedding specially - check EmbedMeta and native embedding field
 			if propName == "has_embedding" {
-				if val, ok := node.Properties["has_embedding"]; ok {
+				if val, ok := node.EmbedMeta["has_embedding"]; ok {
 					return val
 				}
 				return len(node.ChunkEmbeddings) > 0 && len(node.ChunkEmbeddings[0]) > 0
-			}
-			// Don't return internal properties like embeddings (except has_embedding handled above)
-			if e.isInternalProperty(propName) {
-				return nil
 			}
 			if val, ok := node.Properties[propName]; ok {
 				return val

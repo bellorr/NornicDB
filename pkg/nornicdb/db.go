@@ -303,95 +303,7 @@ type Edge struct {
 //	// Development configuration
 //	config = nornicdb.DefaultConfig()
 //	config.DecayEnabled = false // Disable for testing
-type Config struct {
-	// Storage
-	DataDir string `yaml:"data_dir"`
-
-	// Search index persistence (EXPERIMENTAL): when true, BM25, vector, and HNSW indexes are saved under DataDir
-	// and loaded on startup so BuildIndexes can skip the full storage iteration. Default false.
-	// If indexes must be rebuilt, startup can be long for large datasets; rebuilding IVF-HNSW for
-	// ~1M embeddings can take ~30 minutes on startup (hardware dependent).
-	PersistSearchIndexes bool `yaml:"persist_search_indexes"`
-
-	// Embeddings
-	EmbeddingProvider          string   `yaml:"embedding_provider"` // ollama, openai
-	EmbeddingAPIURL            string   `yaml:"embedding_api_url"`
-	EmbeddingAPIKey            string   `yaml:"embedding_api_key"` // API key (use dummy for llama.cpp)
-	EmbeddingModel             string   `yaml:"embedding_model"`
-	EmbeddingDimensions        int      `yaml:"embedding_dimensions"`
-	AutoEmbedEnabled           bool     `yaml:"auto_embed_enabled"`           // Auto-generate embeddings on node create/update
-	EmbedWorkerNumWorkers      int      `yaml:"embed_worker_num_workers"`     // Number of concurrent embedding workers (default: 1)
-	EmbeddingPropertiesInclude []string `yaml:"embedding_properties_include"` // If non-empty, only these property keys used for embedding text
-	EmbeddingPropertiesExclude []string `yaml:"embedding_properties_exclude"` // Property keys to exclude from embedding text (in addition to built-in)
-	EmbeddingIncludeLabels     bool     `yaml:"embedding_include_labels"`     // Whether to prepend node labels to embedding text (default: true)
-	SearchMinSimilarity        float64  `yaml:"search_min_similarity"`        // Min cosine similarity for vector search (0.0 = no filter)
-
-	// Decay
-	DecayEnabled                    bool          `yaml:"decay_enabled"`
-	DecayRecalculateInterval        time.Duration `yaml:"decay_recalculate_interval"`
-	DecayArchiveThreshold           float64       `yaml:"decay_archive_threshold"`
-	DecayRecencyWeight              float64       `yaml:"decay_recency_weight"`
-	DecayFrequencyWeight            float64       `yaml:"decay_frequency_weight"`
-	DecayImportanceWeight           float64       `yaml:"decay_importance_weight"`
-	DecayPromotionEnabled           bool          `yaml:"decay_promotion_enabled"`
-	DecayEpisodicToSemanticThresh   int64         `yaml:"decay_episodic_to_semantic_threshold"`
-	DecayEpisodicToSemanticMinAge   time.Duration `yaml:"decay_episodic_to_semantic_min_age"`
-	DecaySemanticToProceduralThresh int64         `yaml:"decay_semantic_to_procedural_threshold"`
-	DecaySemanticToProceduralMinAge time.Duration `yaml:"decay_semantic_to_procedural_min_age"`
-
-	// Auto-linking
-	AutoLinksEnabled             bool          `yaml:"auto_links_enabled"`
-	AutoLinksSimilarityThreshold float64       `yaml:"auto_links_similarity_threshold"`
-	AutoLinksCoAccessWindow      time.Duration `yaml:"auto_links_co_access_window"`
-
-	// Parallel execution
-	ParallelEnabled      bool `yaml:"parallel_enabled"`        // Enable parallel query execution
-	ParallelMaxWorkers   int  `yaml:"parallel_max_workers"`    // Max worker goroutines (0 = auto, uses runtime.NumCPU())
-	ParallelMinBatchSize int  `yaml:"parallel_min_batch_size"` // Min items before parallelizing (default: 1000)
-
-	// Async writes (eventual consistency)
-	AsyncWritesEnabled    bool          `yaml:"async_writes_enabled"`      // Enable async writes for faster performance
-	AsyncFlushInterval    time.Duration `yaml:"async_flush_interval"`      // How often to flush pending writes (default: 50ms)
-	AsyncMaxNodeCacheSize int           `yaml:"async_max_node_cache_size"` // Max nodes to buffer before forcing flush (default: 50000, 0=unlimited)
-	AsyncMaxEdgeCacheSize int           `yaml:"async_max_edge_cache_size"` // Max edges to buffer before forcing flush (default: 100000, 0=unlimited)
-
-	// WAL retention settings (optional)
-	WALRetentionMaxSegments    int           `yaml:"wal_retention_max_segments"`    // Max sealed WAL segments to keep (0 = unlimited)
-	WALRetentionMaxAge         time.Duration `yaml:"wal_retention_max_age"`         // Max age of WAL segments to keep (0 = unlimited)
-	WALAutoCompactionEnabled   bool          `yaml:"wal_auto_compaction_enabled"`   // Enable automatic snapshots + WAL truncation
-	WALRetentionLedgerDefaults bool          `yaml:"wal_ledger_retention_defaults"` // Enable ledger-grade retention defaults when unset
-
-	// Snapshot file retention (keeps disk from growing unbounded)
-	WALSnapshotRetentionMaxCount int           `yaml:"wal_snapshot_retention_max_count"` // Max snapshot files to keep (0 = use WAL default, typically 3)
-	WALSnapshotRetentionMaxAge   time.Duration `yaml:"wal_snapshot_retention_max_age"`   // Max age of snapshot files to keep (0 = unlimited)
-
-	// BadgerEngine in-process caches (hot read paths)
-	BadgerNodeCacheMaxEntries   int `yaml:"badger_node_cache_max_entries"`    // Max hot nodes cached in-process (default: 10000)
-	BadgerEdgeTypeCacheMaxTypes int `yaml:"badger_edge_type_cache_max_types"` // Max edge types cached for GetEdgesByType (default: 50)
-
-	// Storage serialization format ("gob", "msgpack")
-	StorageSerializer string `yaml:"storage_serializer"`
-
-	// Encryption (data-at-rest) - AES-256 full database encryption
-	// Disabled by default for performance. Enable for HIPAA/GDPR/SOC2 compliance.
-	// When enabled, ALL data is encrypted at the storage level - all or nothing.
-	EncryptionEnabled  bool   `yaml:"encryption_enabled"`  // Enable AES-256 encryption for entire database
-	EncryptionPassword string `yaml:"encryption_password"` // Master password for key derivation (env: NORNICDB_ENCRYPTION_PASSWORD)
-
-	// Server
-	BoltPort int `yaml:"bolt_port"`
-	HTTPPort int `yaml:"http_port"`
-
-	// Plugins
-	PluginsDir string `yaml:"plugins_dir"` // Directory for APOC plugins
-
-	// Memory management
-	LowMemoryMode bool `yaml:"low_memory_mode"` // Use minimal RAM (for containers with limited memory)
-
-	// K-means clustering
-	KmeansClusterInterval time.Duration `yaml:"kmeans_cluster_interval"` // How often to run k-means (0 = disabled, default 15m)
-	KmeansNumClusters     int           `yaml:"kmeans_num_clusters"`     // Number of clusters (0 = auto from dataset size at trigger time). Env: NORNICDB_KMEANS_NUM_CLUSTERS.
-}
+type Config = nornicConfig.Config
 
 // DefaultConfig returns sensible default configuration for NornicDB.
 //
@@ -410,56 +322,7 @@ type Config struct {
 //
 //	db, err := nornicdb.Open("./data", config)
 func DefaultConfig() *Config {
-	return &Config{
-		DataDir:                         "./data",
-		EmbeddingProvider:               "openai", // Use OpenAI-compatible endpoint (llama.cpp, vLLM, etc.)
-		EmbeddingAPIURL:                 "http://localhost:11434",
-		EmbeddingAPIKey:                 "not-needed", // Dummy key for llama.cpp (doesn't validate)
-		EmbeddingModel:                  "bge-m3",
-		EmbeddingDimensions:             1024,
-		AutoEmbedEnabled:                true, // Auto-generate embeddings on node creation
-		EmbedWorkerNumWorkers:           1,    // Single worker by default, increase for network-based embedders or multiple GPUs
-		EmbeddingPropertiesInclude:      nil,  // Empty = use all properties (subject to exclude)
-		EmbeddingPropertiesExclude:      nil,
-		EmbeddingIncludeLabels:          true,
-		DecayEnabled:                    true,
-		DecayRecalculateInterval:        time.Hour,
-		DecayArchiveThreshold:           0.05,
-		DecayRecencyWeight:              0.4,
-		DecayFrequencyWeight:            0.3,
-		DecayImportanceWeight:           0.3,
-		DecayPromotionEnabled:           true,
-		DecayEpisodicToSemanticThresh:   10,
-		DecayEpisodicToSemanticMinAge:   3 * 24 * time.Hour,
-		DecaySemanticToProceduralThresh: 50,
-		DecaySemanticToProceduralMinAge: 30 * 24 * time.Hour,
-		AutoLinksEnabled:                true,
-		AutoLinksSimilarityThreshold:    0.82,
-		AutoLinksCoAccessWindow:         30 * time.Second,
-		ParallelEnabled:                 true,                  // Enable parallel query execution by default
-		ParallelMaxWorkers:              0,                     // 0 = auto (runtime.NumCPU())
-		ParallelMinBatchSize:            1000,                  // Parallelize for 1000+ items
-		AsyncWritesEnabled:              true,                  // Enable async writes for eventual consistency (faster writes)
-		AsyncFlushInterval:              50 * time.Millisecond, // Flush pending writes every 50ms
-		AsyncMaxNodeCacheSize:           50000,                 // Buffer up to 50K nodes before forcing flush (~35MB)
-		AsyncMaxEdgeCacheSize:           100000,                // Buffer up to 100K edges before forcing flush (~50MB)
-		WALRetentionMaxSegments:         0,                     // Unlimited by default
-		WALRetentionMaxAge:              0,                     // Unlimited by default
-		WALAutoCompactionEnabled:        true,                  // Auto-compaction enabled by default
-		WALRetentionLedgerDefaults:      false,                 // Ledger defaults disabled by default
-		WALSnapshotRetentionMaxCount:    0,                     // 0 = use storage default (3)
-		WALSnapshotRetentionMaxAge:      0,                     // Unlimited by default
-		BadgerNodeCacheMaxEntries:       10000,                 // Cache up to 10K hot nodes
-		BadgerEdgeTypeCacheMaxTypes:     50,                    // Cache up to 50 distinct edge types
-		StorageSerializer:               "msgpack",
-		EncryptionEnabled:               false, // Encryption disabled by default (opt-in)
-		EncryptionPassword:              "",    // Must be set if encryption enabled
-		BoltPort:                        7687,
-		HTTPPort:                        7474,
-		KmeansClusterInterval:           15 * time.Minute, // Run k-means every 15 min (skips if no changes)
-		KmeansNumClusters:               0,                // 0 = auto from dataset size at trigger time
-		PersistSearchIndexes:            false,            // EXPERIMENTAL opt-in; rebuild on startup by default
-	}
+	return nornicConfig.LoadDefaults()
 }
 
 // DB represents a NornicDB database instance with all core functionality.
@@ -880,7 +743,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
-	config.DataDir = dataDir
+	config.Database.DataDir = dataDir
 
 	db := &DB{
 		config: config,
@@ -892,29 +755,25 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		// HighPerformance uses ~1GB RAM, LowMemory uses ~50MB
 		badgerOpts := storage.BadgerOptions{
 			DataDir:               dataDir,
-			HighPerformance:       !config.LowMemoryMode,
-			LowMemory:             config.LowMemoryMode,
-			NodeCacheMaxEntries:   config.BadgerNodeCacheMaxEntries,
-			EdgeTypeCacheMaxTypes: config.BadgerEdgeTypeCacheMaxTypes,
+			HighPerformance:       true,
+			LowMemory:             false,
+			NodeCacheMaxEntries:   config.Database.BadgerNodeCacheMaxEntries,
+			EdgeTypeCacheMaxTypes: config.Database.BadgerEdgeTypeCacheMaxTypes,
 		}
-		if config.StorageSerializer != "" {
-			serializer, err := storage.ParseStorageSerializer(config.StorageSerializer)
+		if config.Database.StorageSerializer != "" {
+			serializer, err := storage.ParseStorageSerializer(config.Database.StorageSerializer)
 			if err != nil {
 				return nil, err
 			}
 			badgerOpts.Serializer = serializer
 		}
-		if config.LowMemoryMode {
-			fmt.Println("⚡ Using low-memory storage mode (reduced RAM usage)")
-		}
-
 		// Require password if encryption is enabled
-		if config.EncryptionEnabled && config.EncryptionPassword == "" {
+		if config.Database.EncryptionEnabled && config.Database.EncryptionPassword == "" {
 			return nil, fmt.Errorf("encryption is enabled but no password was provided")
 		}
 
 		// Enable BadgerDB-level encryption at rest if configured
-		if config.EncryptionEnabled {
+		if config.Database.EncryptionEnabled {
 			// Load or generate salt for this database
 			saltFile := dataDir + "/db.salt"
 			var salt []byte
@@ -938,7 +797,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			}
 
 			// Derive 32-byte AES-256 key from password using PBKDF2
-			encryptionKey := encryption.DeriveKey([]byte(config.EncryptionPassword), salt, 600000)
+			encryptionKey := encryption.DeriveKey([]byte(config.Database.EncryptionPassword), salt, 600000)
 			badgerOpts.EncryptionKey = encryptionKey
 			db.encryptionEnabled = true
 			fmt.Println("🔒 Database encryption enabled (AES-256)")
@@ -951,7 +810,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			errStr := err.Error()
 			if strings.Contains(errStr, "encryption") || strings.Contains(errStr, "decrypt") || strings.Contains(errStr, "cipher") ||
 				strings.Contains(errStr, "Invalid checksum") || strings.Contains(errStr, "MANIFEST") {
-				if config.EncryptionEnabled {
+				if config.Database.EncryptionEnabled {
 					// Log clear warning and fail safely
 					log.Printf("🔒 ENCRYPTION ERROR: Database decryption failed")
 					log.Printf("   ⚠️  Data files are safe and unchanged")
@@ -980,7 +839,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 			autoRecoverExplicit := strings.TrimSpace(os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION")) != ""
 			corruptionSuspected := looksLikeCorruption(err)
 			recoverableArtifacts := hasRecoverableArtifacts(dataDir)
-			if autoRecoverEnabled && !config.EncryptionEnabled && recoverableArtifacts && (corruptionSuspected || autoRecoverExplicit) {
+			if autoRecoverEnabled && !config.Database.EncryptionEnabled && recoverableArtifacts && (corruptionSuspected || autoRecoverExplicit) {
 				log.Printf("🔧 Auto-recover setting: enabled=%t env(NORNICDB_AUTO_RECOVER_ON_CORRUPTION)=%q", autoRecoverEnabled, os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION"))
 				log.Printf("⚠️  Persistent store open failed; attempting auto-recovery from snapshots + WAL (dataDir=%s)", dataDir)
 				recovered, backupDir, recErr := recoverBadgerFromSnapshotAndWAL(dataDir, badgerOpts)
@@ -991,7 +850,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 				badgerEngine = recovered
 			} else {
 				log.Printf("🔧 Auto-recover skipped: enabled=%t env(NORNICDB_AUTO_RECOVER_ON_CORRUPTION)=%q corruption_suspected=%t encryption_enabled=%t",
-					autoRecoverEnabled, os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION"), corruptionSuspected, config.EncryptionEnabled)
+					autoRecoverEnabled, os.Getenv("NORNICDB_AUTO_RECOVER_ON_CORRUPTION"), corruptionSuspected, config.Database.EncryptionEnabled)
 				return nil, fmt.Errorf("failed to open persistent storage: %w", err)
 			}
 		}
@@ -1000,24 +859,24 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		walConfig := storage.DefaultWALConfig()
 		walConfig.Dir = dataDir + "/wal"
 		walConfig.SnapshotInterval = 5 * time.Minute // Compact WAL every 5 minutes (not 1 hour!)
-		if config.WALRetentionLedgerDefaults &&
-			config.WALRetentionMaxSegments == 0 &&
-			config.WALRetentionMaxAge == 0 {
-			config.WALRetentionMaxSegments = 24
-			config.WALRetentionMaxAge = 7 * 24 * time.Hour
+		if config.Database.WALRetentionLedgerDefaults &&
+			config.Database.WALRetentionMaxSegments == 0 &&
+			config.Database.WALRetentionMaxAge == 0 {
+			config.Database.WALRetentionMaxSegments = 24
+			config.Database.WALRetentionMaxAge = 7 * 24 * time.Hour
 		}
 		// Apply WAL retention settings from config
-		if config.WALRetentionMaxSegments > 0 {
-			walConfig.RetentionMaxSegments = config.WALRetentionMaxSegments
+		if config.Database.WALRetentionMaxSegments > 0 {
+			walConfig.RetentionMaxSegments = config.Database.WALRetentionMaxSegments
 		}
-		if config.WALRetentionMaxAge > 0 {
-			walConfig.RetentionMaxAge = config.WALRetentionMaxAge
+		if config.Database.WALRetentionMaxAge > 0 {
+			walConfig.RetentionMaxAge = config.Database.WALRetentionMaxAge
 		}
-		if config.WALSnapshotRetentionMaxCount > 0 {
-			walConfig.SnapshotRetentionMaxCount = config.WALSnapshotRetentionMaxCount
+		if config.Database.WALSnapshotRetentionMaxCount > 0 {
+			walConfig.SnapshotRetentionMaxCount = config.Database.WALSnapshotRetentionMaxCount
 		}
-		if config.WALSnapshotRetentionMaxAge > 0 {
-			walConfig.SnapshotRetentionMaxAge = config.WALSnapshotRetentionMaxAge
+		if config.Database.WALSnapshotRetentionMaxAge > 0 {
+			walConfig.SnapshotRetentionMaxAge = config.Database.WALSnapshotRetentionMaxAge
 		}
 		wal, err := storage.NewWAL(walConfig.Dir, walConfig)
 		if err != nil {
@@ -1031,7 +890,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 		// Enable auto-compaction to prevent unbounded WAL growth
 		// This creates periodic snapshots and truncates the WAL
-		if config.WALAutoCompactionEnabled {
+		if config.Database.WALAutoCompactionEnabled {
 			snapshotDir := dataDir + "/snapshots"
 			if err := walEngine.EnableAutoCompaction(snapshotDir); err != nil {
 				fmt.Printf("⚠️  WAL auto-compaction failed to enable: %v\n", err)
@@ -1044,18 +903,18 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 		// Optionally wrap with AsyncEngine for faster writes (eventual consistency)
 		var baseStorage storage.Engine
-		if config.AsyncWritesEnabled {
+		if config.Database.AsyncWritesEnabled {
 			asyncConfig := &storage.AsyncEngineConfig{
-				FlushInterval:    config.AsyncFlushInterval,
-				MaxNodeCacheSize: config.AsyncMaxNodeCacheSize,
-				MaxEdgeCacheSize: config.AsyncMaxEdgeCacheSize,
+				FlushInterval:    config.Database.AsyncFlushInterval,
+				MaxNodeCacheSize: config.Database.AsyncMaxNodeCacheSize,
+				MaxEdgeCacheSize: config.Database.AsyncMaxEdgeCacheSize,
 			}
 			baseStorage = storage.NewAsyncEngine(walEngine, asyncConfig)
-			if config.AsyncMaxNodeCacheSize > 0 || config.AsyncMaxEdgeCacheSize > 0 {
+			if config.Database.AsyncMaxNodeCacheSize > 0 || config.Database.AsyncMaxEdgeCacheSize > 0 {
 				fmt.Printf("📂 Using persistent storage at %s (WAL + async writes, flush: %v, node cache: %d, edge cache: %d)\n",
-					dataDir, config.AsyncFlushInterval, config.AsyncMaxNodeCacheSize, config.AsyncMaxEdgeCacheSize)
+					dataDir, config.Database.AsyncFlushInterval, config.Database.AsyncMaxNodeCacheSize, config.Database.AsyncMaxEdgeCacheSize)
 			} else {
-				fmt.Printf("📂 Using persistent storage at %s (WAL + async writes, flush: %v)\n", dataDir, config.AsyncFlushInterval)
+				fmt.Printf("📂 Using persistent storage at %s (WAL + async writes, flush: %v)\n", dataDir, config.Database.AsyncFlushInterval)
 			}
 		} else {
 			baseStorage = walEngine
@@ -1115,14 +974,14 @@ func Open(dataDir string, config *Config) (*DB, error) {
 	db.cypherExecutor = cypher.NewStorageExecutor(db.storage)
 
 	// Configure executor with embedding dimensions for vector index creation
-	if config.EmbeddingDimensions > 0 {
-		db.cypherExecutor.SetDefaultEmbeddingDimensions(config.EmbeddingDimensions)
+	if config.Memory.EmbeddingDimensions > 0 {
+		db.cypherExecutor.SetDefaultEmbeddingDimensions(config.Memory.EmbeddingDimensions)
 	}
 
 	// Load function plugins from configured directory
 	// Heimdall plugins will be loaded later by the server after Heimdall is initialized
-	if db.config.PluginsDir != "" {
-		if err := LoadPluginsFromDir(db.config.PluginsDir, nil); err != nil {
+	if db.config.Server.PluginsDir != "" {
+		if err := LoadPluginsFromDir(db.config.Server.PluginsDir, nil); err != nil {
 			fmt.Printf("⚠️  Plugin loading warning: %v\n", err)
 		}
 	}
@@ -1138,42 +997,33 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Configure parallel execution
 	parallelCfg := cypher.ParallelConfig{
-		Enabled:      config.ParallelEnabled,
-		MaxWorkers:   config.ParallelMaxWorkers,
-		MinBatchSize: config.ParallelMinBatchSize,
+		Enabled:      true,
+		MaxWorkers:   0,
+		MinBatchSize: 1000,
 	}
 	// If MaxWorkers is 0, the parallel package will use runtime.NumCPU()
 	cypher.SetParallelConfig(parallelCfg)
 
 	// Initialize decay manager
-	if config.DecayEnabled {
+	if config.Memory.DecayEnabled {
+		defaultDecayConfig := decay.DefaultConfig()
 		decayConfig := &decay.Config{
-			RecalculateInterval:           config.DecayRecalculateInterval,
-			ArchiveThreshold:              config.DecayArchiveThreshold,
-			RecencyWeight:                 config.DecayRecencyWeight,
-			FrequencyWeight:               config.DecayFrequencyWeight,
-			ImportanceWeight:              config.DecayImportanceWeight,
-			PromotionEnabled:              config.DecayPromotionEnabled,
-			EpisodicToSemanticThreshold:   config.DecayEpisodicToSemanticThresh,
-			EpisodicToSemanticMinAge:      config.DecayEpisodicToSemanticMinAge,
-			SemanticToProceduralThreshold: config.DecaySemanticToProceduralThresh,
-			SemanticToProceduralMinAge:    config.DecaySemanticToProceduralMinAge,
-		}
-		// Use defaults if not explicitly set
-		if !config.DecayPromotionEnabled && config.DecayEpisodicToSemanticThresh == 0 {
-			// If promotion wasn't explicitly disabled and thresholds are zero, use defaults
-			defaultDecayConfig := decay.DefaultConfig()
-			decayConfig.PromotionEnabled = defaultDecayConfig.PromotionEnabled
-			decayConfig.EpisodicToSemanticThreshold = defaultDecayConfig.EpisodicToSemanticThreshold
-			decayConfig.EpisodicToSemanticMinAge = defaultDecayConfig.EpisodicToSemanticMinAge
-			decayConfig.SemanticToProceduralThreshold = defaultDecayConfig.SemanticToProceduralThreshold
-			decayConfig.SemanticToProceduralMinAge = defaultDecayConfig.SemanticToProceduralMinAge
+			RecalculateInterval:           config.Memory.DecayInterval,
+			ArchiveThreshold:              config.Memory.ArchiveThreshold,
+			RecencyWeight:                 defaultDecayConfig.RecencyWeight,
+			FrequencyWeight:               defaultDecayConfig.FrequencyWeight,
+			ImportanceWeight:              defaultDecayConfig.ImportanceWeight,
+			PromotionEnabled:              defaultDecayConfig.PromotionEnabled,
+			EpisodicToSemanticThreshold:   defaultDecayConfig.EpisodicToSemanticThreshold,
+			EpisodicToSemanticMinAge:      defaultDecayConfig.EpisodicToSemanticMinAge,
+			SemanticToProceduralThreshold: defaultDecayConfig.SemanticToProceduralThreshold,
+			SemanticToProceduralMinAge:    defaultDecayConfig.SemanticToProceduralMinAge,
 		}
 		db.decay = decay.New(decayConfig)
 	}
 
 	// Initialize inference engine
-	if config.AutoLinksEnabled {
+	if config.Memory.AutoLinksEnabled {
 		db.inferenceServices = make(map[string]*inference.Engine)
 		// Eagerly create default DB inference for parity with prior behavior.
 		if _, err := db.getOrCreateInferenceService(db.defaultDatabaseName(), db.storage); err != nil {
@@ -1187,7 +1037,7 @@ func Open(dataDir string, config *Config) (*DB, error) {
 
 	// Initialize embedding worker config from main config
 	db.embedWorkerConfig = &EmbedWorkerConfig{
-		NumWorkers:           config.EmbedWorkerNumWorkers,
+		NumWorkers:           config.EmbeddingWorker.NumWorkers,
 		ScanInterval:         15 * time.Minute,       // Scan for missed nodes every 15 minutes
 		BatchDelay:           500 * time.Millisecond, // Delay between processing nodes
 		MaxRetries:           3,
@@ -1195,25 +1045,25 @@ func Open(dataDir string, config *Config) (*DB, error) {
 		ChunkOverlap:         50,
 		ClusterDebounceDelay: 30 * time.Second, // Wait 30s after last embedding before k-means
 		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
-		PropertiesInclude:    config.EmbeddingPropertiesInclude,
-		PropertiesExclude:    config.EmbeddingPropertiesExclude,
-		IncludeLabels:        config.EmbeddingIncludeLabels,
+		PropertiesInclude:    config.EmbeddingWorker.PropertiesInclude,
+		PropertiesExclude:    config.EmbeddingWorker.PropertiesExclude,
+		IncludeLabels:        config.EmbeddingWorker.IncludeLabels,
 	}
 
 	// Initialize search service config (per-database services are created lazily).
-	embeddingDims := config.EmbeddingDimensions
+	embeddingDims := config.Memory.EmbeddingDimensions
 	if embeddingDims <= 0 {
 		embeddingDims = 1024 // Default for bge-m3 / mxbai-embed-large
 	}
 	db.embeddingDims = embeddingDims
-	db.searchMinSimilarity = config.SearchMinSimilarity
+	db.searchMinSimilarity = config.Memory.SearchMinSimilarity
 	db.searchServices = make(map[string]*dbSearchService)
 	log.Printf("🔍 Search services enabled (per-database init, %d-dimension vector index)", embeddingDims)
 
 	// Start the embed queue (with nil embedder) when auto-embed is enabled. Worker goroutines
 	// are deferred until after search index build + k-means warmup to avoid slowing startup.
 	// SetEmbedder(embedder) is called by the server when the model loads.
-	if config.AutoEmbedEnabled && db.baseStorage != nil && db.embedWorkerConfig != nil {
+	if config.Memory.EmbeddingEnabled && db.baseStorage != nil && db.embedWorkerConfig != nil {
 		workerCfg := *db.embedWorkerConfig
 		workerCfg.DeferWorkerStart = true
 		db.embedQueue = NewEmbedQueue(nil, db.baseStorage, &workerCfg)
@@ -1418,8 +1268,8 @@ func (db *DB) maybeEnableReplication(base storage.Engine) (storage.Engine, error
 
 	// Keep replication state under the DB data dir unless explicitly overridden.
 	if os.Getenv("NORNICDB_CLUSTER_DATA_DIR") == "" {
-		if db.config != nil && db.config.DataDir != "" {
-			replCfg.DataDir = db.config.DataDir + "/replication"
+		if db.config != nil && db.config.Database.DataDir != "" {
+			replCfg.DataDir = db.config.Database.DataDir + "/replication"
 		} else {
 			replCfg.DataDir = "./data/replication"
 		}
@@ -1494,7 +1344,7 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 			embedder.Model(), embedder.Dimensions())
 		db.mu.Unlock()
 		if nornicConfig.IsGPUClusteringEnabled() {
-			interval := db.config.KmeansClusterInterval
+			interval := db.config.Memory.KmeansClusterInterval
 			if interval > 0 {
 				db.startClusteringTimer(interval)
 			}
@@ -1518,7 +1368,7 @@ func (db *DB) SetEmbedder(embedder embed.Embedder) {
 	var startClusterTimer bool
 	var clusterInterval time.Duration
 	if nornicConfig.IsGPUClusteringEnabled() {
-		clusterInterval = db.config.KmeansClusterInterval
+		clusterInterval = db.config.Memory.KmeansClusterInterval
 		if clusterInterval > 0 {
 			startClusterTimer = true
 		} else {
@@ -1810,7 +1660,7 @@ func (db *DB) closeInternal() error {
 	var errs []error
 
 	// Persist search indexes on shutdown only when persistence is enabled.
-	if db.config != nil && db.config.PersistSearchIndexes && db.config.DataDir != "" {
+	if db.config != nil && db.config.Database.PersistSearchIndexes && db.config.Database.DataDir != "" {
 		db.searchServicesMu.RLock()
 		for _, entry := range db.searchServices {
 			if entry != nil && entry.svc != nil {

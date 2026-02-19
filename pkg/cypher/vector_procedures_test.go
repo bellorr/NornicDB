@@ -744,7 +744,7 @@ func TestMultiLineSetWithArray(t *testing.T) {
 	assert.Equal(t, 4, len(node.ChunkEmbeddings[0]), "Embedding should have 4 dimensions")
 	assert.InDelta(t, 0.7, node.ChunkEmbeddings[0][0], 0.01, "First embedding value")
 
-	// Check other properties were set - integers stored as int64 (Neo4j compatible)
+	// Check embedding metadata was set via Cypher (goes to Properties, not EmbedMeta)
 	assert.Equal(t, int64(4), node.Properties["embedding_dimensions"])
 	assert.Equal(t, "bge-m3", node.Properties["embedding_model"])
 	assert.Equal(t, true, node.Properties["has_embedding"])

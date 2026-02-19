@@ -411,51 +411,14 @@ func (b *BadgerEngine) UpdateNodeEmbedding(node *Node) error {
 			return err
 		}
 
-		// Update only the embedding and related properties (always stored in ChunkEmbeddings)
+		// Update only the embedding and related metadata (stored in ChunkEmbeddings and EmbedMeta)
 		existing.ChunkEmbeddings = node.ChunkEmbeddings
-		if node.Properties != nil {
-			// Update embedding-related properties
-			if val, ok := node.Properties["embedding_model"]; ok {
-				if existing.Properties == nil {
-					existing.Properties = make(map[string]interface{})
-				}
-				existing.Properties["embedding_model"] = val
+		// Copy embedding metadata from EmbedMeta (not Properties - avoids namespace pollution)
+		if node.EmbedMeta != nil {
+			existing.EmbedMeta = make(map[string]any, len(node.EmbedMeta))
+			for k, v := range node.EmbedMeta {
+				existing.EmbedMeta[k] = v
 			}
-			if val, ok := node.Properties["embedding_dimensions"]; ok {
-				if existing.Properties == nil {
-					existing.Properties = make(map[string]interface{})
-				}
-				existing.Properties["embedding_dimensions"] = val
-			}
-			if val, ok := node.Properties["has_embedding"]; ok {
-				if existing.Properties == nil {
-					existing.Properties = make(map[string]interface{})
-				}
-				existing.Properties["has_embedding"] = val
-			}
-			if val, ok := node.Properties["embedded_at"]; ok {
-				if existing.Properties == nil {
-					existing.Properties = make(map[string]interface{})
-				}
-				existing.Properties["embedded_at"] = val
-			}
-			if val, ok := node.Properties["embedding"]; ok {
-				if existing.Properties == nil {
-					existing.Properties = make(map[string]interface{})
-				}
-				existing.Properties["embedding"] = val
-			}
-			// Also copy other properties that might be set during embedding
-			for k, v := range node.Properties {
-				if k == "has_chunks" || k == "chunk_count" {
-					if existing.Properties == nil {
-						existing.Properties = make(map[string]interface{})
-					}
-					existing.Properties[k] = v
-				}
-			}
-			// Copy chunk embeddings from struct field (not properties - opaque to users)
-			existing.ChunkEmbeddings = node.ChunkEmbeddings
 		}
 		existing.UpdatedAt = time.Now() // Use time from encoding if available, otherwise current time
 

@@ -59,8 +59,7 @@ func TestNonFileNodeChunking(t *testing.T) {
 		assert.NotEmpty(t, node.ChunkEmbeddings, "Node should have chunk embeddings")
 		assert.Equal(t, 1, len(node.ChunkEmbeddings), "Should have 1 chunk (single chunk stored as array of 1)")
 		assert.Equal(t, 1024, len(node.ChunkEmbeddings[0]), "Embedding should have correct dimensions")
-		assert.Nil(t, node.Properties["chunk_embeddings"], "Single chunk should not have chunk_embeddings property")
-		assert.True(t, node.Properties["has_embedding"].(bool), "Should have has_embedding=true")
+		assert.True(t, node.EmbedMeta["has_embedding"].(bool), "Should have has_embedding=true in EmbedMeta")
 	})
 
 	t.Run("multiple_chunks_stored_on_same_node", func(t *testing.T) {
@@ -117,12 +116,9 @@ func TestNonFileNodeChunking(t *testing.T) {
 		require.NotNil(t, node.ChunkEmbeddings, "Should have ChunkEmbeddings struct field")
 		require.Greater(t, len(node.ChunkEmbeddings), 0, "Should have at least one chunk embedding")
 		require.Greater(t, len(node.ChunkEmbeddings), 1, "Should have multiple chunk embeddings")
-		// Verify chunk_embeddings is NOT in properties (should be opaque)
-		_, ok := node.Properties["chunk_embeddings"]
-		assert.False(t, ok, "chunk_embeddings should NOT be in properties (opaque to users)")
 
-		chunkCount, ok := node.Properties["chunk_count"].(int)
-		require.True(t, ok, "Should have chunk_count property")
+		chunkCount, ok := node.EmbedMeta["chunk_count"].(int)
+		require.True(t, ok, "Should have chunk_count in EmbedMeta")
 		assert.Equal(t, len(node.ChunkEmbeddings), chunkCount, "chunk_count should match number of chunks")
 
 		// Verify each chunk embedding has correct dimensions

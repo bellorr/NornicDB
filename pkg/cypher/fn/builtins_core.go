@@ -109,9 +109,6 @@ func evalKeys(ctx Context, args []string) (interface{}, error) {
 	if node, ok := ctx.Nodes[inner]; ok && node != nil {
 		keys := make([]interface{}, 0, len(node.Properties))
 		for k := range node.Properties {
-			if ctx.IsInternalProperty != nil && ctx.IsInternalProperty(k) {
-				continue
-			}
 			keys = append(keys, k)
 		}
 		return keys, nil
@@ -119,9 +116,6 @@ func evalKeys(ctx Context, args []string) (interface{}, error) {
 	if rel, ok := ctx.Rels[inner]; ok && rel != nil {
 		keys := make([]interface{}, 0, len(rel.Properties))
 		for k := range rel.Properties {
-			if ctx.IsInternalProperty != nil && ctx.IsInternalProperty(k) {
-				continue
-			}
 			keys = append(keys, k)
 		}
 		return keys, nil
@@ -135,27 +129,10 @@ func evalProperties(ctx Context, args []string) (interface{}, error) {
 	}
 	inner := strings.TrimSpace(args[0])
 	if node, ok := ctx.Nodes[inner]; ok && node != nil {
-		props := make(map[string]interface{}, len(node.Properties))
-		for k, v := range node.Properties {
-			if ctx.IsInternalProperty != nil && ctx.IsInternalProperty(k) {
-				continue
-			}
-			props[k] = v
-		}
-		return props, nil
+		return node.Properties, nil
 	}
 	if rel, ok := ctx.Rels[inner]; ok && rel != nil {
-		if ctx.IsInternalProperty == nil {
-			return rel.Properties, nil
-		}
-		props := make(map[string]interface{}, len(rel.Properties))
-		for k, v := range rel.Properties {
-			if ctx.IsInternalProperty(k) {
-				continue
-			}
-			props[k] = v
-		}
-		return props, nil
+		return rel.Properties, nil
 	}
 	return nil, nil
 }

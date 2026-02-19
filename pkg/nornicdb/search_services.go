@@ -60,7 +60,7 @@ func (db *DB) defaultDatabaseName() string {
 // Used when enabling clustering so EnableClustering receives the configured value.
 func (db *DB) kmeansNumClusters() int {
 	if db.config != nil {
-		return db.config.KmeansNumClusters
+		return db.config.Memory.KmeansNumClusters
 	}
 	return 0
 }
@@ -153,7 +153,7 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	}
 	svc := search.NewServiceWithDimensionsAndBM25Engine(storageEngine, dims, bm25Engine)
 	svc.SetDefaultMinSimilarity(minSim)
-	persistSearchIndexesEnabled := db.config != nil && db.config.DataDir != "" && db.config.PersistSearchIndexes
+	persistSearchIndexesEnabled := db.config != nil && db.config.Database.DataDir != "" && db.config.Database.PersistSearchIndexes
 	svc.SetPersistenceEnabled(persistSearchIndexesEnabled)
 
 	// EXPERIMENTAL: when PersistSearchIndexes is true, set paths so BuildIndexes saves indexes after a
@@ -162,7 +162,7 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 	// If a rebuild is required (e.g., missing/incompatible artifacts), IVF-HNSW rebuild at startup
 	// can be long on large datasets (~30 minutes for ~1M embeddings on observed hardware).
 	if persistSearchIndexesEnabled {
-		base := filepath.Join(db.config.DataDir, "search", dbName)
+		base := filepath.Join(db.config.Database.DataDir, "search", dbName)
 		fulltextFilename := "bm25"
 		if strings.EqualFold(strings.TrimSpace(bm25Engine), search.BM25EngineV2) {
 			fulltextFilename = "bm25.v2"
@@ -179,7 +179,7 @@ func (db *DB) getOrCreateSearchService(dbName string, storageEngine storage.Engi
 
 	// Enable per-database clustering if the feature flag is enabled.
 	// Each Service maintains its own cluster index and must cluster independently.
-	// Cluster count comes from db.config.KmeansNumClusters (0 = auto from dataset size).
+	// Cluster count comes from db.config.Memory.KmeansNumClusters (0 = auto from dataset size).
 	if featureflags.IsGPUClusteringEnabled() {
 		var mgr *gpu.Manager
 		if gpuMgr != nil && gpuMgr.IsEnabled() {

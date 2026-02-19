@@ -614,51 +614,29 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// This simplifies logic - always iterate over ChunkEmbeddings, always count the same way
 	// Store as struct field, not in properties (so it's filtered out from user queries - opaque)
 	node.ChunkEmbeddings = embeddings
-	if len(embeddings) > 1 {
-		node.Properties["chunk_count"] = len(embeddings)
-	}
 
-	// Update node with embedding metadata
-	node.Properties["embedding_model"] = ew.embedder.Model()
-	node.Properties["embedding_dimensions"] = ew.embedder.Dimensions()
-	node.Properties["has_embedding"] = true
-	node.Properties["embedded_at"] = time.Now().Format(time.RFC3339)
-	node.Properties["embedding"] = true // Marker for IS NOT NULL check
+	// Update node with embedding metadata (in EmbedMeta, not Properties - avoids namespace pollution)
+	if node.EmbedMeta == nil {
+		node.EmbedMeta = make(map[string]any)
+	}
+	node.EmbedMeta["chunk_count"] = len(embeddings)
+	node.EmbedMeta["embedding_model"] = ew.embedder.Model()
+	node.EmbedMeta["embedding_dimensions"] = ew.embedder.Dimensions()
+	node.EmbedMeta["has_embedding"] = true
+	node.EmbedMeta["embedded_at"] = time.Now().Format(time.RFC3339)
 
 	// CRITICAL: Double-check node still exists before updating
 	// This prevents creating orphaned nodes if the node was deleted between
 	// the initial check and now. Reload from storage to get latest version.
 	// BUT: Preserve the embeddings we just generated!
 	chunkEmbeddingsToSave := node.ChunkEmbeddings // Save the chunk embeddings we just generated
-	embeddingProps := make(map[string]interface{})
-	if node.Properties != nil {
-		// Save embedding-related properties
-		if val, ok := node.Properties["embedding_model"]; ok {
-			embeddingProps["embedding_model"] = val
-		}
-		if val, ok := node.Properties["embedding_dimensions"]; ok {
-			embeddingProps["embedding_dimensions"] = val
-		}
-		if val, ok := node.Properties["has_embedding"]; ok {
-			embeddingProps["has_embedding"] = val
-		}
-		if val, ok := node.Properties["embedded_at"]; ok {
-			embeddingProps["embedded_at"] = val
-		}
-		if val, ok := node.Properties["embedding"]; ok {
-			embeddingProps["embedding"] = val
-		}
-		if val, ok := node.Properties["has_chunks"]; ok {
-			embeddingProps["has_chunks"] = val
-		}
-		if val, ok := node.Properties["chunk_count"]; ok {
-			embeddingProps["chunk_count"] = val
+	embedMetaToSave := make(map[string]any)
+	if node.EmbedMeta != nil {
+		// Save embedding metadata
+		for k, v := range node.EmbedMeta {
+			embedMetaToSave[k] = v
 		}
 	}
-
-	// Preserve chunk embeddings from struct field (not properties - opaque to users)
-	// (chunkEmbeddingsToSave was already declared above)
-	chunkEmbeddingsToSave = node.ChunkEmbeddings
 
 	existingNode, err = ew.storage.GetNode(node.ID)
 	if err != nil {
@@ -675,13 +653,8 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	node.ChunkEmbeddings = chunkEmbeddingsToSave // Restore chunk embeddings (struct field, opaque to users)
 	node.UpdatedAt = time.Now()                  // Update timestamp
 
-	// Restore embedding-related properties
-	if node.Properties == nil {
-		node.Properties = make(map[string]interface{})
-	}
-	for k, v := range embeddingProps {
-		node.Properties[k] = v
-	}
+	// Restore embedding metadata (in EmbedMeta, not Properties)
+	node.EmbedMeta = embedMetaToSave
 
 	// Save the parent node (either with embedding for single chunk, or metadata for chunked files)
 	// CRITICAL: Use UpdateNodeEmbedding if available (only updates existing nodes, doesn't create)
