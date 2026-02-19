@@ -17,7 +17,6 @@ import Network
 ///   -H "Authorization: Bearer your-api-key" \
 ///   -d '{"input": "Hello, world!", "model": "apple-ml-embeddings"}'
 /// ```
-@MainActor
 class EmbeddingServer: ObservableObject {
     
     // MARK: - Published Properties
@@ -38,6 +37,14 @@ class EmbeddingServer: ObservableObject {
     
     /// API key for authentication. If set, requests must include Authorization: Bearer <key>
     private var apiKey: String?
+    
+    private func updatePublished(_ updates: @escaping () -> Void) {
+        if Thread.isMainThread {
+            updates()
+        } else {
+            DispatchQueue.main.async(execute: updates)
+        }
+    }
     
     // MARK: - Computed Properties
     
@@ -118,7 +125,9 @@ class EmbeddingServer: ObservableObject {
         // Check if embeddings are available
         guard AppleMLEmbedder.isAvailable() else {
             let error = "Apple ML embeddings not available on this system"
-            lastError = error
+            updatePublished {
+                self.lastError = error
+            }
             throw EmbeddingServerError.embeddingsNotAvailable
         }
         
@@ -133,7 +142,9 @@ class EmbeddingServer: ObservableObject {
         
         guard let listener = try? NWListener(using: parameters) else {
             let error = "Failed to create listener on 127.0.0.1:\(port)"
-            lastError = error
+            updatePublished {
+                self.lastError = error
+            }
             throw EmbeddingServerError.failedToStart(error)
         }
         
@@ -141,15 +152,11 @@ class EmbeddingServer: ObservableObject {
         
         // Set up listener handlers
         listener.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                self?.handleListenerState(state)
-            }
+            self?.handleListenerState(state)
         }
         
         listener.newConnectionHandler = { [weak self] connection in
-            Task { @MainActor in
-                self?.handleNewConnection(connection)
-            }
+            self?.handleNewConnection(connection)
         }
         
         // Start listening
@@ -172,7 +179,9 @@ class EmbeddingServer: ObservableObject {
         listener?.cancel()
         listener = nil
         
-        isRunning = false
+        updatePublished {
+            self.isRunning = false
+        }
         print("🛑 Embedding server stopped")
     }
     
@@ -181,17 +190,23 @@ class EmbeddingServer: ObservableObject {
     private func handleListenerState(_ state: NWListener.State) {
         switch state {
         case .ready:
-            isRunning = true
-            lastError = nil
+            updatePublished {
+                self.isRunning = true
+                self.lastError = nil
+            }
             print("✅ Embedding server ready on port \(port)")
             
         case .failed(let error):
-            isRunning = false
-            lastError = error.localizedDescription
+            updatePublished {
+                self.isRunning = false
+                self.lastError = error.localizedDescription
+            }
             print("❌ Embedding server failed: \(error)")
             
         case .cancelled:
-            isRunning = false
+            updatePublished {
+                self.isRunning = false
+            }
             print("🛑 Embedding server cancelled")
             
         default:
@@ -203,12 +218,10 @@ class EmbeddingServer: ObservableObject {
         connections.append(connection)
         
         connection.stateUpdateHandler = { [weak self] state in
-            Task { @MainActor in
-                if case .failed(_) = state {
-                    self?.removeConnection(connection)
-                } else if case .cancelled = state {
-                    self?.removeConnection(connection)
-                }
+            if case .failed(_) = state {
+                self?.removeConnection(connection)
+            } else if case .cancelled = state {
+                self?.removeConnection(connection)
             }
         }
         
@@ -226,42 +239,40 @@ class EmbeddingServer: ObservableObject {
     
     private func receiveRequest(on connection: NWConnection) {
         connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, isComplete, error in
-            Task { @MainActor in
-                guard let self = self else { return }
-                
-                let connectionId = ObjectIdentifier(connection)
-                
-                if let data = data, !data.isEmpty {
-                    // Append to buffer
-                    if self.connectionBuffers[connectionId] == nil {
-                        self.connectionBuffers[connectionId] = Data()
-                    }
-                    self.connectionBuffers[connectionId]?.append(data)
-                    
-                    // Check if we have a complete HTTP request (look for \r\n\r\n in body)
-                    if let bufferedData = self.connectionBuffers[connectionId],
-                       let str = String(data: bufferedData, encoding: .utf8),
-                       str.contains("\r\n\r\n") {
-                        // Check if body is complete by looking for Content-Length
-                        if self.isRequestComplete(str) {
-                            self.connectionBuffers.removeValue(forKey: connectionId)
-                            self.handleRequest(data: bufferedData, connection: connection)
-                            return
-                        }
-                    }
+            guard let self = self else { return }
+            
+            let connectionId = ObjectIdentifier(connection)
+            
+            if let data = data, !data.isEmpty {
+                // Append to buffer
+                if self.connectionBuffers[connectionId] == nil {
+                    self.connectionBuffers[connectionId] = Data()
                 }
+                self.connectionBuffers[connectionId]?.append(data)
                 
-                if isComplete {
-                    // Connection closed, process whatever we have
-                    if let bufferedData = self.connectionBuffers[connectionId], !bufferedData.isEmpty {
+                // Check if we have a complete HTTP request (look for \r\n\r\n in body)
+                if let bufferedData = self.connectionBuffers[connectionId],
+                   let str = String(data: bufferedData, encoding: .utf8),
+                   str.contains("\r\n\r\n") {
+                    // Check if body is complete by looking for Content-Length
+                    if self.isRequestComplete(str) {
                         self.connectionBuffers.removeValue(forKey: connectionId)
                         self.handleRequest(data: bufferedData, connection: connection)
-                    } else {
-                        connection.cancel()
+                        return
                     }
-                } else if error == nil {
-                    self.receiveRequest(on: connection)
                 }
+            }
+            
+            if isComplete {
+                // Connection closed, process whatever we have
+                if let bufferedData = self.connectionBuffers[connectionId], !bufferedData.isEmpty {
+                    self.connectionBuffers.removeValue(forKey: connectionId)
+                    self.handleRequest(data: bufferedData, connection: connection)
+                } else {
+                    connection.cancel()
+                }
+            } else if error == nil {
+                self.receiveRequest(on: connection)
             }
         }
     }
@@ -381,7 +392,7 @@ class EmbeddingServer: ObservableObject {
             
             // Update stats
             let latency = Date().timeIntervalSince(startTime)
-            Task { @MainActor in
+            updatePublished {
                 self.requestCount += 1
                 self.totalLatency += latency
             }
@@ -590,7 +601,9 @@ extension EmbeddingServer {
     
     /// Reset statistics
     func resetStatistics() {
-        requestCount = 0
-        totalLatency = 0.0
+        updatePublished {
+            self.requestCount = 0
+            self.totalLatency = 0.0
+        }
     }
 }

@@ -3,6 +3,9 @@ import AppKit
 import Foundation
 import Security
 
+private let defaultQwenHeimdallFileName = "qwen3-0.6b-instruct.gguf"
+private let defaultQwenHeimdallDownloadURL = "https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"
+
 // MARK: - Keychain Helper for Secure Secret Storage
 
 /// Keychain access result - distinguishes between "no value" and "access denied"
@@ -764,7 +767,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, ObservableObject {
             DispatchQueue.global(qos: .userInitiated).async {
                 let task = Process()
                 task.launchPath = "/bin/bash"
-                task.arguments = ["-c", "cd /usr/local/var/nornicdb && curl -L -o models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -L -o models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf && curl -L -o models/qwen3-0.6b-instruct.gguf https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"]
+                task.arguments = ["-c", "cd /usr/local/var/nornicdb && curl -L -o models/bge-m3.gguf https://huggingface.co/gpustack/bge-m3-GGUF/resolve/main/bge-m3-Q4_K_M.gguf && curl -L -o models/bge-reranker-v2-m3-Q4_K_M.gguf https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/resolve/main/bge-reranker-v2-m3-Q4_K_M.gguf && curl -L -o models/\(defaultQwenHeimdallFileName) \(defaultQwenHeimdallDownloadURL)"]
                 
                 // Create models directory first
                 try? FileManager.default.createDirectory(atPath: "/usr/local/var/nornicdb/models", withIntermediateDirectories: true, attributes: nil)
@@ -844,6 +847,10 @@ enum ServerStatus {
 // MARK: - Config Manager
 
 class ConfigManager: ObservableObject {
+    static let defaultEmbeddingModel = "bge-m3.gguf"
+    static let defaultSearchRerankModel = "bge-reranker-v2-m3-Q4_K_M.gguf"
+    static let defaultHeimdallModel = defaultQwenHeimdallFileName
+
     @Published var embeddingsEnabled: Bool = false
     @Published var kmeansEnabled: Bool = false
     @Published var searchRerankEnabled: Bool = false
@@ -883,10 +890,10 @@ class ConfigManager: ObservableObject {
     @Published var encryptionPassword: String = ""
     @Published var encryptionKeychainAccessDenied: Bool = false  // Track if user denied Keychain access
     
-    @Published var embeddingModel: String = "bge-m3.gguf"
-    @Published var searchRerankModel: String = "bge-reranker-v2-m3-Q4_K_M.gguf"
+    @Published var embeddingModel: String = ConfigManager.defaultEmbeddingModel
+    @Published var searchRerankModel: String = ConfigManager.defaultSearchRerankModel
     @Published var embeddingDimensions: Int = 1024  // Read from config, default 1024 for bge-m3
-    @Published var heimdallModel: String = "qwen3-0.6b-instruct.gguf"
+    @Published var heimdallModel: String = ConfigManager.defaultHeimdallModel
     @Published var availableModels: [String] = []
     
     // Config path matches server's FindConfigFile priority: ~/.nornicdb/config.yaml
@@ -1010,8 +1017,8 @@ class ConfigManager: ObservableObject {
             print("✅ Loaded embeddings enabled: \(embeddingsEnabled)")
             
             if let model = getYAMLString(key: "model", from: embeddingSection) {
-                embeddingModel = model
-                print("✅ Loaded embedding model: \(model)")
+                embeddingModel = normalizeModelName(model, fallback: ConfigManager.defaultEmbeddingModel)
+                print("✅ Loaded embedding model: \(embeddingModel)")
             }
             
             // Check if using Apple Intelligence (provider is "openai" with localhost:11435 URL)
@@ -1039,8 +1046,8 @@ class ConfigManager: ObservableObject {
             searchRerankEnabled = getYAMLBool(key: "enabled", from: searchRerankSection)
             print("✅ Loaded search_rerank enabled: \(searchRerankEnabled)")
             if let model = getYAMLString(key: "model", from: searchRerankSection) {
-                searchRerankModel = model
-                print("✅ Loaded search_rerank model: \(model)")
+                searchRerankModel = normalizeModelName(model, fallback: ConfigManager.defaultSearchRerankModel)
+                print("✅ Loaded search_rerank model: \(searchRerankModel)")
             }
         }
         
@@ -1056,8 +1063,8 @@ class ConfigManager: ObservableObject {
             print("✅ Loaded heimdall enabled: \(heimdallEnabled)")
             
             if let model = getYAMLString(key: "model", from: heimdallSection) {
-                heimdallModel = model
-                print("✅ Loaded heimdall model: \(model)")
+                heimdallModel = normalizeModelName(model, fallback: ConfigManager.defaultHeimdallModel)
+                print("✅ Loaded heimdall model: \(heimdallModel)")
             }
         }
         
@@ -1153,6 +1160,11 @@ class ConfigManager: ObservableObject {
             encryptionEnabled = false
             encryptionPassword = ""
         }
+        
+        // Ensure we always have valid model names in memory for settings/save.
+        embeddingModel = normalizeModelName(embeddingModel, fallback: ConfigManager.defaultEmbeddingModel)
+        searchRerankModel = normalizeModelName(searchRerankModel, fallback: ConfigManager.defaultSearchRerankModel)
+        heimdallModel = normalizeModelName(heimdallModel, fallback: ConfigManager.defaultHeimdallModel)
     }
     
     private func extractStringValue(from text: String, after index: String.Index) -> String? {
@@ -1174,6 +1186,28 @@ class ConfigManager: ObservableObject {
         }
         
         availableModels = files.filter { $0.hasSuffix(".gguf") }.sorted()
+    }
+
+    private func normalizeModelName(_ raw: String, fallback: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return fallback
+        }
+
+        let lower = trimmed.lowercased()
+        switch lower {
+        case "bge-m3":
+            return ConfigManager.defaultEmbeddingModel
+        case "bge-reranker-v2-m3", "bge-reranker-v2-m3.gguf":
+            return ConfigManager.defaultSearchRerankModel
+        case "qwen3-0.6b-instruct":
+            return ConfigManager.defaultHeimdallModel
+        default:
+            if trimmed.hasSuffix(".gguf") {
+                return trimmed
+            }
+            return "\(trimmed).gguf"
+        }
     }
     
     private func extractBoolValue(from text: String, after index: String.Index) -> Bool? {
@@ -1211,7 +1245,7 @@ class ConfigManager: ObservableObject {
         embedding:
           enabled: false
           provider: local
-          model: bge-m3.gguf
+          model: \(ConfigManager.defaultEmbeddingModel)
           url: ""
           dimensions: 1024
         """)
@@ -1227,7 +1261,7 @@ class ConfigManager: ObservableObject {
         search_rerank:
           enabled: false
           provider: local
-          model: bge-reranker-v2-m3-Q4_K_M.gguf
+          model: \(ConfigManager.defaultSearchRerankModel)
           api_url: ""
           api_key: ""
         """)
@@ -1242,7 +1276,7 @@ class ConfigManager: ObservableObject {
         
         heimdall:
           enabled: false
-          model: qwen3-0.6b-instruct.gguf
+          model: \(ConfigManager.defaultHeimdallModel)
         """)
         
         content = ensureSectionExists(in: content, section: "server", defaultContent: """
@@ -1258,7 +1292,12 @@ class ConfigManager: ObservableObject {
         content = updateYAMLValue(in: content, section: "kmeans", key: "enabled", value: kmeansEnabled)
         content = updateYAMLValue(in: content, section: "search_rerank", key: "enabled", value: searchRerankEnabled)
         content = updateYAMLStringValue(in: content, section: "search_rerank", key: "provider", value: "local")
-        content = updateYAMLStringValue(in: content, section: "search_rerank", key: "model", value: searchRerankModel)
+        content = updateYAMLStringValue(
+            in: content,
+            section: "search_rerank",
+            key: "model",
+            value: normalizeModelName(searchRerankModel, fallback: ConfigManager.defaultSearchRerankModel)
+        )
         content = updateYAMLValue(in: content, section: "auto_tlp", key: "enabled", value: autoTLPEnabled)
         content = updateYAMLValue(in: content, section: "heimdall", key: "enabled", value: heimdallEnabled)
         
@@ -1274,11 +1313,21 @@ class ConfigManager: ObservableObject {
             // Use the selected local model
             content = updateYAMLStringValue(in: content, section: "embedding", key: "provider", value: "local")
             content = updateYAMLStringValue(in: content, section: "embedding", key: "url", value: "")
-            content = updateYAMLStringValue(in: content, section: "embedding", key: "model", value: embeddingModel)
+            content = updateYAMLStringValue(
+                in: content,
+                section: "embedding",
+                key: "model",
+                value: normalizeModelName(embeddingModel, fallback: ConfigManager.defaultEmbeddingModel)
+            )
             // Reset dimensions to default (will be auto-detected from model)
             content = updateYAMLIntValue(in: content, section: "embedding", key: "dimensions", value: 1024)
         }
-        content = updateYAMLStringValue(in: content, section: "heimdall", key: "model", value: heimdallModel)
+        content = updateYAMLStringValue(
+            in: content,
+            section: "heimdall",
+            key: "model",
+            value: normalizeModelName(heimdallModel, fallback: ConfigManager.defaultHeimdallModel)
+        )
         
         // Update server settings
         content = updateYAMLStringValue(in: content, section: "server", key: "bolt_port", value: boltPortNumber)
@@ -1531,9 +1580,9 @@ struct SettingsView: View {
     @State private var originalBoltPortNumber: String = "7687"
     @State private var originalHttpPortNumber: String = "7474"
     @State private var originalHostAddress: String = "localhost"
-    @State private var originalEmbeddingModel: String = "bge-m3.gguf"
-    @State private var originalSearchRerankModel: String = "bge-reranker-v2-m3-Q4_K_M.gguf"
-    @State private var originalHeimdallModel: String = "qwen3-0.6b-instruct.gguf"
+    @State private var originalEmbeddingModel: String = ConfigManager.defaultEmbeddingModel
+    @State private var originalSearchRerankModel: String = ConfigManager.defaultSearchRerankModel
+    @State private var originalHeimdallModel: String = ConfigManager.defaultHeimdallModel
     @State private var originalAdminUsername: String = "admin"
     @State private var originalAdminPassword: String = "password"
     @State private var originalJWTSecret: String = ""
@@ -3412,7 +3461,7 @@ struct FirstRunWizard: View {
                             if selectedPreset == .advanced {
                                 ModelDownloadRow(
                                     modelName: "qwen3-0.6b-Instruct (Heimdall)",
-                                    fileName: "qwen3-0.6b-instruct.gguf",
+                                    fileName: defaultQwenHeimdallFileName,
                                     size: "~350MB",
                                     exists: qwenModelExists,
                                     onDownload: { downloadQwenModel() }
@@ -3504,7 +3553,7 @@ struct FirstRunWizard: View {
         
         let bgePath = "\(modelsPath)/bge-m3.gguf"
         let bgeRerankerPath = "\(modelsPath)/bge-reranker-v2-m3-Q4_K_M.gguf"
-        let qwenPath = "\(modelsPath)/qwen3-0.6b-instruct.gguf"
+        let qwenPath = "\(modelsPath)/\(defaultQwenHeimdallFileName)"
         
         bgeModelExists = fileManager.fileExists(atPath: bgePath)
         bgeRerankerModelExists = fileManager.fileExists(atPath: bgeRerankerPath)
@@ -3551,14 +3600,14 @@ struct FirstRunWizard: View {
         DispatchQueue.global(qos: .userInitiated).async {
             let task = Process()
             task.launchPath = "/bin/bash"
-            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/qwen3-0.6b-instruct.gguf https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"]
+            task.arguments = ["-c", "mkdir -p /usr/local/var/nornicdb/models && curl -L -o /usr/local/var/nornicdb/models/\(defaultQwenHeimdallFileName) \(defaultQwenHeimdallDownloadURL)"]
             
             task.launch()
             task.waitUntilExit()
             
             DispatchQueue.main.async {
                 if task.terminationStatus == 0 {
-                    downloadProgress = "Qwen2.5 downloaded successfully!"
+                    downloadProgress = "qwen3-0.6b downloaded successfully!"
                     qwenModelExists = true
                 } else {
                     downloadProgress = "Download failed. You can download manually later."

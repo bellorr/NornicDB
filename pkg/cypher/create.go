@@ -1555,96 +1555,112 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 			}
 		}
 
-		// Apply SET clause after CREATE (supports SET += $props and SET var.prop = value)
+		// Apply SET clause after CREATE (supports chained/mixed SET forms).
 		if setPart != "" {
-			if strings.Contains(setPart, "+=") {
-				if err := e.applySetMergeToCreated(ctx, setPart, combinedNodeVars, edgeVars, result, store); err != nil {
-					return nil, err
+			setPart = collapseChainedSetClauses(setPart)
+			setPartForAssignments := setPart
+			if params := getParamsFromContext(ctx); params != nil && !strings.Contains(setPart, "+=") {
+				setPartForAssignments = e.substituteParams(setPart, params)
+			}
+			assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
+			for _, assignment := range assignments {
+				assignment = strings.TrimSpace(assignment)
+				if assignment == "" {
+					continue
 				}
-			} else {
-				setPartForAssignments := setPart
-				if params := getParamsFromContext(ctx); params != nil {
-					setPartForAssignments = e.substituteParams(setPart, params)
+				if strings.Contains(assignment, "+=") {
+					if err := e.applySetMergeToCreated(ctx, assignment, combinedNodeVars, edgeVars, result, store); err != nil {
+						return nil, err
+					}
+					continue
 				}
-				assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
-				for _, assignment := range assignments {
-					assignment = strings.TrimSpace(assignment)
-					if assignment == "" {
-						continue
-					}
-					eqIdx := strings.Index(assignment, "=")
-					if eqIdx == -1 {
-						// Label assignment: n:Label
-						colonIdx := strings.Index(assignment, ":")
-						if colonIdx > 0 {
-							varName := strings.TrimSpace(assignment[:colonIdx])
-							newLabel := strings.TrimSpace(assignment[colonIdx+1:])
-							if node, exists := combinedNodeVars[varName]; exists {
-								if !containsString(node.Labels, newLabel) {
-									node.Labels = append(node.Labels, newLabel)
-									if err := store.UpdateNode(node); err != nil {
-										return nil, fmt.Errorf("failed to add label: %w", err)
-									}
-									result.Stats.LabelsAdded++
-									e.notifyNodeMutated(string(node.ID))
-								}
-							}
-						}
-						continue
-					}
-					leftSide := strings.TrimSpace(assignment[:eqIdx])
-					rightSide := strings.TrimSpace(assignment[eqIdx+1:])
-					dotIdx := strings.Index(leftSide, ".")
-					value := e.parseValue(rightSide)
-					if dotIdx == -1 {
-						varName := strings.TrimSpace(leftSide)
-						props, err := normalizePropsMap(value, "SET assignment")
-						if err != nil {
-							return nil, err
-						}
+				eqIdx := strings.Index(assignment, "=")
+				if eqIdx == -1 {
+					// Label assignment: n:Label
+					colonIdx := strings.Index(assignment, ":")
+					if colonIdx > 0 {
+						varName := strings.TrimSpace(assignment[:colonIdx])
+						newLabel := strings.TrimSpace(assignment[colonIdx+1:])
 						if node, exists := combinedNodeVars[varName]; exists {
-							node.Properties = cloneStringAnyMap(props)
-							if err := store.UpdateNode(node); err != nil {
-								return nil, fmt.Errorf("failed to replace node properties: %w", err)
+							if !containsString(node.Labels, newLabel) {
+								node.Labels = append(node.Labels, newLabel)
+								if err := store.UpdateNode(node); err != nil {
+									return nil, fmt.Errorf("failed to add label: %w", err)
+								}
+								result.Stats.LabelsAdded++
+								e.notifyNodeMutated(string(node.ID))
 							}
-							result.Stats.PropertiesSet++
-							e.notifyNodeMutated(string(node.ID))
-						} else if edge, exists := edgeVars[varName]; exists {
-							edge.Properties = cloneStringAnyMap(props)
-							if err := store.UpdateEdge(edge); err != nil {
-								return nil, fmt.Errorf("failed to replace edge properties: %w", err)
-							}
-							result.Stats.PropertiesSet++
-						} else {
-							return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 						}
-						continue
 					}
-
-					varName := strings.TrimSpace(leftSide[:dotIdx])
-					propName := strings.TrimSpace(leftSide[dotIdx+1:])
+					continue
+				}
+				leftSide := strings.TrimSpace(assignment[:eqIdx])
+				rightSide := strings.TrimSpace(assignment[eqIdx+1:])
+				dotIdx := strings.Index(leftSide, ".")
+				value := e.parseValue(rightSide)
+				if strings.HasPrefix(rightSide, "$") {
+					paramName := strings.TrimSpace(rightSide[1:])
+					if paramName == "" {
+						return nil, fmt.Errorf("SET assignment requires a valid parameter name after $")
+					}
+					params := getParamsFromContext(ctx)
+					if params == nil {
+						return nil, fmt.Errorf("SET assignment parameter $%s requires parameters to be provided", paramName)
+					}
+					paramValue, exists := params[paramName]
+					if !exists {
+						return nil, fmt.Errorf("SET assignment parameter $%s not found in provided parameters", paramName)
+					}
+					value = normalizePropValue(paramValue)
+				}
+				if dotIdx == -1 {
+					varName := strings.TrimSpace(leftSide)
+					props, err := normalizePropsMap(value, "SET assignment")
+					if err != nil {
+						return nil, err
+					}
 					if node, exists := combinedNodeVars[varName]; exists {
-						if node.Properties == nil {
-							node.Properties = make(map[string]interface{})
-						}
-						node.Properties[propName] = value
+						node.Properties = cloneStringAnyMap(props)
 						if err := store.UpdateNode(node); err != nil {
-							return nil, fmt.Errorf("failed to update node property: %w", err)
+							return nil, fmt.Errorf("failed to replace node properties: %w", err)
 						}
 						result.Stats.PropertiesSet++
 						e.notifyNodeMutated(string(node.ID))
 					} else if edge, exists := edgeVars[varName]; exists {
-						if edge.Properties == nil {
-							edge.Properties = make(map[string]interface{})
-						}
-						edge.Properties[propName] = value
+						edge.Properties = cloneStringAnyMap(props)
 						if err := store.UpdateEdge(edge); err != nil {
-							return nil, fmt.Errorf("failed to update edge property: %w", err)
+							return nil, fmt.Errorf("failed to replace edge properties: %w", err)
 						}
 						result.Stats.PropertiesSet++
 					} else {
 						return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 					}
+					continue
+				}
+
+				varName := strings.TrimSpace(leftSide[:dotIdx])
+				propName := strings.TrimSpace(leftSide[dotIdx+1:])
+				if node, exists := combinedNodeVars[varName]; exists {
+					if node.Properties == nil {
+						node.Properties = make(map[string]interface{})
+					}
+					node.Properties[propName] = value
+					if err := store.UpdateNode(node); err != nil {
+						return nil, fmt.Errorf("failed to update node property: %w", err)
+					}
+					result.Stats.PropertiesSet++
+					e.notifyNodeMutated(string(node.ID))
+				} else if edge, exists := edgeVars[varName]; exists {
+					if edge.Properties == nil {
+						edge.Properties = make(map[string]interface{})
+					}
+					edge.Properties[propName] = value
+					if err := store.UpdateEdge(edge); err != nil {
+						return nil, fmt.Errorf("failed to update edge property: %w", err)
+					}
+					result.Stats.PropertiesSet++
+				} else {
+					return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 				}
 			}
 		}
@@ -2074,6 +2090,7 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	} else {
 		setPart = strings.TrimSpace(normalized[setIdx+4:])
 	}
+	setPart = collapseChainedSetClauses(setPart)
 	setPartForAssignments := setPart
 
 	// Substitute params for simple SET assignments (e.g., n.prop = $value).
@@ -2099,104 +2116,114 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 	result.Stats.NodesCreated = createResult.Stats.NodesCreated
 	result.Stats.RelationshipsCreated = createResult.Stats.RelationshipsCreated
 
-	// Check for property merge operator: n += $properties
-	if strings.Contains(setPart, "+=") {
-		// Handle property merge on created entities
-		err := e.applySetMergeToCreated(ctx, setPart, createdNodes, createdEdges, result, store)
-		if err != nil {
-			return nil, err
+	// Handle regular and SET += assignments in order.
+	assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
+	for _, assignment := range assignments {
+		assignment = strings.TrimSpace(assignment)
+		if assignment == "" {
+			continue
 		}
-	} else {
-		// Handle regular SET assignments
-		// Split SET clause into individual assignments
-		assignments := e.splitSetAssignmentsRespectingBrackets(setPartForAssignments)
-
-		for _, assignment := range assignments {
-			assignment = strings.TrimSpace(assignment)
-			if assignment == "" {
-				continue
+		if strings.Contains(assignment, "+=") {
+			if err := e.applySetMergeToCreated(ctx, assignment, createdNodes, createdEdges, result, store); err != nil {
+				return nil, err
 			}
+			continue
+		}
 
-			// Parse assignment: var.property = value
-			eqIdx := strings.Index(assignment, "=")
-			if eqIdx == -1 {
-				// Could be a label assignment like "n:Label"
-				colonIdx := strings.Index(assignment, ":")
-				if colonIdx > 0 {
-					varName := strings.TrimSpace(assignment[:colonIdx])
-					newLabel := strings.TrimSpace(assignment[colonIdx+1:])
-					if node, exists := createdNodes[varName]; exists {
-						// Add label to existing node
-						if !containsString(node.Labels, newLabel) {
-							node.Labels = append(node.Labels, newLabel)
-							if err := store.UpdateNode(node); err != nil {
-								return nil, fmt.Errorf("failed to add label: %w", err)
-							}
-							result.Stats.LabelsAdded++
-							e.notifyNodeMutated(string(node.ID))
-						}
-					}
-				}
-				continue
-			}
-
-			leftSide := strings.TrimSpace(assignment[:eqIdx])
-			rightSide := strings.TrimSpace(assignment[eqIdx+1:])
-
-			// Parse variable.property
-			dotIdx := strings.Index(leftSide, ".")
-			value := e.parseValue(rightSide)
-			if dotIdx == -1 {
-				varName := strings.TrimSpace(leftSide)
-				props, err := normalizePropsMap(value, "SET assignment")
-				if err != nil {
-					return nil, err
-				}
+		// Parse assignment: var.property = value
+		eqIdx := strings.Index(assignment, "=")
+		if eqIdx == -1 {
+			// Could be a label assignment like "n:Label"
+			colonIdx := strings.Index(assignment, ":")
+			if colonIdx > 0 {
+				varName := strings.TrimSpace(assignment[:colonIdx])
+				newLabel := strings.TrimSpace(assignment[colonIdx+1:])
 				if node, exists := createdNodes[varName]; exists {
-					node.Properties = cloneStringAnyMap(props)
-					if err := store.UpdateNode(node); err != nil {
-						return nil, fmt.Errorf("failed to replace node properties: %w", err)
+					// Add label to existing node
+					if !containsString(node.Labels, newLabel) {
+						node.Labels = append(node.Labels, newLabel)
+						if err := store.UpdateNode(node); err != nil {
+							return nil, fmt.Errorf("failed to add label: %w", err)
+						}
+						result.Stats.LabelsAdded++
+						e.notifyNodeMutated(string(node.ID))
 					}
-					result.Stats.PropertiesSet++
-					e.notifyNodeMutated(string(node.ID))
-				} else if edge, exists := createdEdges[varName]; exists {
-					edge.Properties = cloneStringAnyMap(props)
-					if err := store.UpdateEdge(edge); err != nil {
-						return nil, fmt.Errorf("failed to replace edge properties: %w", err)
-					}
-					result.Stats.PropertiesSet++
-				} else {
-					return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 				}
-				continue
 			}
+			continue
+		}
 
-			varName := strings.TrimSpace(leftSide[:dotIdx])
-			propName := strings.TrimSpace(leftSide[dotIdx+1:])
+		leftSide := strings.TrimSpace(assignment[:eqIdx])
+		rightSide := strings.TrimSpace(assignment[eqIdx+1:])
 
-			// Apply to created node or edge
+		// Parse variable.property
+		dotIdx := strings.Index(leftSide, ".")
+		value := e.parseValue(rightSide)
+		if strings.HasPrefix(rightSide, "$") {
+			paramName := strings.TrimSpace(rightSide[1:])
+			if paramName == "" {
+				return nil, fmt.Errorf("SET assignment requires a valid parameter name after $")
+			}
+			params := getParamsFromContext(ctx)
+			if params == nil {
+				return nil, fmt.Errorf("SET assignment parameter $%s requires parameters to be provided", paramName)
+			}
+			paramValue, exists := params[paramName]
+			if !exists {
+				return nil, fmt.Errorf("SET assignment parameter $%s not found in provided parameters", paramName)
+			}
+			value = normalizePropValue(paramValue)
+		}
+		if dotIdx == -1 {
+			varName := strings.TrimSpace(leftSide)
+			props, err := normalizePropsMap(value, "SET assignment")
+			if err != nil {
+				return nil, err
+			}
 			if node, exists := createdNodes[varName]; exists {
-				if node.Properties == nil {
-					node.Properties = make(map[string]interface{})
-				}
-				node.Properties[propName] = value
+				node.Properties = cloneStringAnyMap(props)
 				if err := store.UpdateNode(node); err != nil {
-					return nil, fmt.Errorf("failed to update node property: %w", err)
+					return nil, fmt.Errorf("failed to replace node properties: %w", err)
 				}
 				result.Stats.PropertiesSet++
 				e.notifyNodeMutated(string(node.ID))
 			} else if edge, exists := createdEdges[varName]; exists {
-				if edge.Properties == nil {
-					edge.Properties = make(map[string]interface{})
-				}
-				edge.Properties[propName] = value
+				edge.Properties = cloneStringAnyMap(props)
 				if err := store.UpdateEdge(edge); err != nil {
-					return nil, fmt.Errorf("failed to update edge property: %w", err)
+					return nil, fmt.Errorf("failed to replace edge properties: %w", err)
 				}
 				result.Stats.PropertiesSet++
 			} else {
 				return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 			}
+			continue
+		}
+
+		varName := strings.TrimSpace(leftSide[:dotIdx])
+		propName := strings.TrimSpace(leftSide[dotIdx+1:])
+
+		// Apply to created node or edge
+		if node, exists := createdNodes[varName]; exists {
+			if node.Properties == nil {
+				node.Properties = make(map[string]interface{})
+			}
+			node.Properties[propName] = value
+			if err := store.UpdateNode(node); err != nil {
+				return nil, fmt.Errorf("failed to update node property: %w", err)
+			}
+			result.Stats.PropertiesSet++
+			e.notifyNodeMutated(string(node.ID))
+		} else if edge, exists := createdEdges[varName]; exists {
+			if edge.Properties == nil {
+				edge.Properties = make(map[string]interface{})
+			}
+			edge.Properties[propName] = value
+			if err := store.UpdateEdge(edge); err != nil {
+				return nil, fmt.Errorf("failed to update edge property: %w", err)
+			}
+			result.Stats.PropertiesSet++
+		} else {
+			return nil, fmt.Errorf("unknown variable in SET clause: %s", varName)
 		}
 	}
 

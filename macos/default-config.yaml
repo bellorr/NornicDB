@@ -73,8 +73,8 @@ embedding:
   # Provider: "local" (GGUF), "ollama", or "openai"
   provider: "local"
   
-  # Model name (depends on provider)
-  model: "bge-m3"
+  # Model filename (GGUF)
+  model: "bge-m3.gguf"
   
   # API URL (for ollama/openai)
   url: "http://localhost:11434"
@@ -120,8 +120,8 @@ heimdall:
   # Enable Heimdall AI assistant
   enabled: false
   
-  # Model for Heimdall (GGUF format) - don't include .gguf extension
-  model: "qwen3-0.6b-instruct"
+  # Model for Heimdall (GGUF format)
+  model: "qwen3-0.6b-instruct.gguf"
   
   # Models directory
   models_dir: "/usr/local/var/nornicdb/models"

@@ -183,6 +183,7 @@ database:
 embedding:
   enabled: true
   provider: "local"
+  model: "bge-m3.gguf"
 
 kmeans:
   enabled: false
@@ -194,6 +195,7 @@ search_rerank:
 
 heimdall:
   enabled: true
+  model: "qwen3-0.6b-instruct.gguf"
 
 auth:
   username: "admin"

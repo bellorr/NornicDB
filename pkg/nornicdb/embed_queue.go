@@ -79,6 +79,8 @@ type EmbedWorkerConfig struct {
 	// Text chunking settings (matches Mimir: MIMIR_EMBEDDINGS_CHUNK_SIZE, MIMIR_EMBEDDINGS_CHUNK_OVERLAP)
 	ChunkSize    int // Max characters per chunk (default: 512)
 	ChunkOverlap int // Characters to overlap between chunks (default: 50)
+	// EmbedBatchSize caps chunks per EmbedBatch call to avoid oversized requests.
+	EmbedBatchSize int // Max chunks per batch request (default: 32)
 
 	// Debounce settings for k-means clustering trigger
 	ClusterDebounceDelay time.Duration // How long to wait after last embedding before triggering k-means (default: 30s)
@@ -106,6 +108,7 @@ func DefaultEmbedWorkerConfig() *EmbedWorkerConfig {
 		MaxRetries:           3,
 		ChunkSize:            512,
 		ChunkOverlap:         50,
+		EmbedBatchSize:       32,
 		ClusterDebounceDelay: 30 * time.Second, // Wait 30s after last embedding before k-means
 		ClusterMinBatchSize:  10,               // Need at least 10 embeddings to trigger k-means
 		PropertiesInclude:    nil,
@@ -127,6 +130,9 @@ func NewEmbedWorker(embedder embed.Embedder, storage storage.Engine, config *Emb
 	// Ensure at least 1 worker
 	if config.NumWorkers < 1 {
 		config.NumWorkers = 1
+	}
+	if config.EmbedBatchSize < 1 {
+		config.EmbedBatchSize = 32
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -587,8 +593,8 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	// Chunk text if needed (no limit on number of chunks per node)
 	chunks := util.ChunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
 
-	// Embed all chunks (all nodes are handled the same way - no special File handling)
-	embeddings, err := ew.embedder.EmbedBatch(ew.ctx, chunks)
+	// Embed chunks in micro-batches to avoid oversized single requests for large files.
+	embeddings, err := ew.embedChunksInBatches(chunks, node.ID)
 	if err != nil {
 		fmt.Printf("⚠️  Failed to embed node %s: %v\n", node.ID, err)
 		ew.addNodeToPendingEmbeddings(node.ID) // Re-queue so another worker can retry
@@ -792,33 +798,70 @@ func (ew *EmbedWorker) addNodeToPendingEmbeddings(nodeID storage.NodeID) {
 	}
 }
 
-// embedWithRetry embeds chunks with retry logic and averages if multiple chunks.
-func (ew *EmbedWorker) embedWithRetry(chunks []string) ([]float32, error) {
-	var allEmbeddings [][]float32
-	var err error
-
-	for attempt := 1; attempt <= ew.config.MaxRetries; attempt++ {
-		allEmbeddings, err = ew.embedder.EmbedBatch(ew.ctx, chunks)
-		if err == nil {
-			break
+// embedChunksInBatches embeds chunks using bounded request sizes.
+// This avoids sending massive single EmbedBatch requests for large files.
+func (ew *EmbedWorker) embedChunksInBatches(chunks []string, nodeID storage.NodeID) ([][]float32, error) {
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+	batchSize := ew.config.EmbedBatchSize
+	if batchSize < 1 {
+		batchSize = 32
+	}
+	allEmbeddings := make([][]float32, 0, len(chunks))
+	for start := 0; start < len(chunks); start += batchSize {
+		end := start + batchSize
+		if end > len(chunks) {
+			end = len(chunks)
 		}
+		batch := chunks[start:end]
+		batchEmbeddings, err := ew.embedBatchWithRetry(batch)
+		if err != nil {
+			return nil, fmt.Errorf("batch %d-%d/%d failed for %s: %w", start+1, end, len(chunks), nodeID, err)
+		}
+		if len(batchEmbeddings) != len(batch) {
+			return nil, fmt.Errorf("embedding count mismatch for %s: got %d, expected %d", nodeID, len(batchEmbeddings), len(batch))
+		}
+		allEmbeddings = append(allEmbeddings, batchEmbeddings...)
+	}
+	return allEmbeddings, nil
+}
 
+// embedBatchWithRetry retries a single micro-batch with backoff.
+func (ew *EmbedWorker) embedBatchWithRetry(chunks []string) ([][]float32, error) {
+	var embeddings [][]float32
+	var err error
+	for attempt := 1; attempt <= ew.config.MaxRetries; attempt++ {
+		type embedResult struct {
+			embeddings [][]float32
+			err        error
+		}
+		resultCh := make(chan embedResult, 1)
+		go func() {
+			embs, embedErr := ew.embedder.EmbedBatch(ew.ctx, chunks)
+			resultCh <- embedResult{embeddings: embs, err: embedErr}
+		}()
+		select {
+		case <-ew.ctx.Done():
+			return nil, ew.ctx.Err()
+		case result := <-resultCh:
+			embeddings, err = result.embeddings, result.err
+		}
+		if err == nil {
+			return embeddings, nil
+		}
 		if attempt < ew.config.MaxRetries {
 			backoff := time.Duration(attempt) * 2 * time.Second
-			fmt.Printf("   ⚠️  Embed attempt %d failed, retrying in %v\n", attempt, backoff)
-			time.Sleep(backoff)
-		} else {
-			return nil, err
+			fmt.Printf("   ⚠️  Embed batch attempt %d failed (batch_size=%d), retrying in %v\n", attempt, len(chunks), backoff)
+			select {
+			case <-ew.ctx.Done():
+				return nil, ew.ctx.Err()
+			case <-time.After(backoff):
+			}
+			continue
 		}
 	}
-
-	// If single chunk, return directly
-	if len(allEmbeddings) == 1 {
-		return allEmbeddings[0], nil
-	}
-
-	// Average multiple chunk embeddings
-	return averageEmbeddings(allEmbeddings), nil
+	return nil, err
 }
 
 // averageEmbeddings computes the element-wise average of multiple embeddings.

@@ -5,6 +5,73 @@
 import SwiftUI
 import AppKit
 
+// MARK: - File Indexer Logger
+
+final class FileIndexerLogger {
+    static let shared = FileIndexerLogger()
+
+    enum Level: String {
+        case info = "INFO"
+        case warning = "WARN"
+        case error = "ERROR"
+    }
+
+    private let queue = DispatchQueue(label: "com.nornicdb.file-indexer.logger")
+    private let iso8601: ISO8601DateFormatter
+    private let logDirectoryURL: URL
+    private let logFileURL: URL
+
+    private init() {
+        self.iso8601 = ISO8601DateFormatter()
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        self.logDirectoryURL = home.appendingPathComponent(".nornicdb/logs", isDirectory: true)
+        self.logFileURL = logDirectoryURL.appendingPathComponent("file-indexer.log")
+        ensureLogFileExists()
+    }
+
+    private func ensureLogFileExists() {
+        queue.sync {
+            do {
+                try FileManager.default.createDirectory(at: logDirectoryURL, withIntermediateDirectories: true)
+                if !FileManager.default.fileExists(atPath: logFileURL.path) {
+                    FileManager.default.createFile(atPath: logFileURL.path, contents: nil)
+                }
+            } catch {
+                print("❌ Failed to initialize file indexer logs: \(error)")
+            }
+        }
+    }
+
+    func log(_ level: Level, _ message: String, metadata: [String: String] = [:]) {
+        queue.async {
+            var line = "[\(self.iso8601.string(from: Date()))] [\(level.rawValue)] \(message)"
+            if !metadata.isEmpty {
+                let details = metadata
+                    .sorted(by: { $0.key < $1.key })
+                    .map { "\($0.key)=\($0.value)" }
+                    .joined(separator: " ")
+                line += " | \(details)"
+            }
+            line += "\n"
+
+            guard let data = line.data(using: .utf8) else { return }
+            do {
+                let handle = try FileHandle(forWritingTo: self.logFileURL)
+                defer { try? handle.close() }
+                try handle.seekToEnd()
+                try handle.write(contentsOf: data)
+            } catch {
+                print("❌ Failed to write file indexer log: \(error)")
+            }
+        }
+    }
+
+    func openLogFile() {
+        ensureLogFileExists()
+        NSWorkspace.shared.open(logFileURL)
+    }
+}
+
 // MARK: - Indexed Folder Model
 
 struct IndexedFolder: Identifiable, Codable {
@@ -130,6 +197,7 @@ class FileWatchManager: ObservableObject {
     private let indexer = FileIndexer()
     private let indexerService = FileIndexerService.shared
     private let config: ConfigManager
+    private let logger = FileIndexerLogger.shared
     
     // Server configuration (from ConfigManager)
     private var serverHost: String { config.hostAddress }
@@ -152,6 +220,9 @@ class FileWatchManager: ObservableObject {
         
         loadSavedFolders()
         setupFileWatching()
+        logger.log(.info, "FileWatchManager initialized", metadata: [
+            "serverBaseURL": serverBaseURL
+        ])
         
         // Check server connection on init
         Task {
@@ -427,7 +498,12 @@ class FileWatchManager: ObservableObject {
         let bodyData = try JSONSerialization.data(withJSONObject: body)
         let (data, response) = try await makeAuthenticatedRequest(to: txCommitEndpoint, method: "POST", body: bodyData)
         
-        guard response.statusCode == 200 else {
+        guard response.statusCode == 200 || response.statusCode == 202 else {
+            logger.log(.error, "Cypher HTTP request failed", metadata: [
+                "status": "\(response.statusCode)",
+                "database": activeDatabaseName,
+                "endpoint": txCommitEndpoint
+            ])
             throw NSError(
                 domain: "FileWatchManager",
                 code: response.statusCode,
@@ -436,6 +512,10 @@ class FileWatchManager: ObservableObject {
         }
         
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            logger.log(.error, "Cypher response parsing failed", metadata: [
+                "database": activeDatabaseName,
+                "endpoint": txCommitEndpoint
+            ])
             throw NSError(
                 domain: "FileWatchManager",
                 code: -1,
@@ -447,6 +527,11 @@ class FileWatchManager: ObservableObject {
             let first = errors[0]
             let code = first["code"] as? String ?? "Unknown"
             let message = first["message"] as? String ?? "Cypher execution failed"
+            logger.log(.error, "Cypher returned Neo4j error", metadata: [
+                "database": activeDatabaseName,
+                "code": code,
+                "message": message
+            ])
             throw NSError(
                 domain: "FileWatchManager",
                 code: -1,
@@ -620,6 +705,7 @@ class FileWatchManager: ObservableObject {
     // MARK: - Indexing
     
     func startIndexing(_ path: String) {
+        logger.log(.info, "Starting folder indexing", metadata: ["path": path])
         // Set up progress tracking
         let progress = IndexingProgress(
             id: path,
@@ -653,8 +739,17 @@ class FileWatchManager: ObservableObject {
             if !canStoreInServer {
                 canStoreInServer = await self.canWriteToServer()
             }
+            if !canStoreInServer {
+                logger.log(.warning, "Indexing running without DB writes (not connected/authenticated)", metadata: [
+                    "path": path
+                ])
+            }
             
             let files = await indexerService.indexFolder(at: path, recursive: true)
+            logger.log(.info, "Folder scan completed", metadata: [
+                "path": path,
+                "candidate_files": "\(files.count)"
+            ])
             
             // Update progress with total
             await MainActor.run {
@@ -683,7 +778,11 @@ class FileWatchManager: ObservableObject {
                         try await storeFileInNornicDB(file, folderPath: path)
                         storedCount += 1
                     } catch {
-                        print("Failed to store file \(file.relativePath): \(error)")
+                        logger.log(.error, "Failed to store indexed file", metadata: [
+                            "relative_path": file.relativePath,
+                            "full_path": file.path,
+                            "error": error.localizedDescription
+                        ])
                         errorCount += 1
                     }
                     
@@ -698,6 +797,13 @@ class FileWatchManager: ObservableObject {
             let finalStoredCount = storedCount
             let finalErrorCount = errorCount
             let totalFileCount = files.count
+            logger.log(finalErrorCount > 0 ? .warning : .info, "Indexing pass completed", metadata: [
+                "path": path,
+                "total_files": "\(totalFileCount)",
+                "stored": "\(finalStoredCount)",
+                "errors": "\(finalErrorCount)",
+                "db_writes_enabled": canStoreInServer ? "true" : "false"
+            ])
             
             // Update progress and folder info
             await MainActor.run {
@@ -807,38 +913,65 @@ class FileWatchManager: ObservableObject {
             }
         }
         
-        // Create or update the File node via Cypher
-        let query = """
-        MERGE (f:File:Node {path: $path})
-        ON CREATE SET f.id = 'file-' + toString(timestamp()) + '-' + substring(randomUUID(), 0, 8)
-        SET 
-            f.name = $name,
-            f.extension = $extension,
-            f.language = $language,
-            f.size_bytes = $size_bytes,
-            f.content = $content,
-            f.type = $content_type,
-            f.indexed_date = datetime(),
-            f.folder_root = $folder_root,
-            f.last_modified = $last_modified
-        RETURN f.id as id
-        """
-        
-        let params: [String: Any] = [
+        let properties: [String: Any] = [
             "path": file.path,
             "name": (file.path as NSString).lastPathComponent,
             "extension": file.fileExtension,
             "language": file.language ?? "unknown",
             "size_bytes": file.size,
             "content": file.content,
-            "content_type": file.contentType == .text ? "text" :
-                           file.contentType == .document ? "document" :
-                           file.contentType == .imageOCR ? "image_ocr" : "image_description",
+            "type": file.contentType == .text ? "text" :
+                    file.contentType == .document ? "document" :
+                    file.contentType == .imageOCR ? "image_ocr" : "image_description",
             "folder_root": folderPath,
             "last_modified": ISO8601DateFormatter().string(from: file.lastModified)
         ]
-        
-        _ = try await executeCypher(query, parameters: params)
+        let params: [String: Any] = [
+            "path": file.path,
+            "node_id": "file-\(UUID().uuidString)",
+            "props": properties
+        ]
+
+        // Prefer explicit update/create flow instead of MERGE.
+        // Some async write paths can surface "failed to create node in MERGE: already exists" under contention.
+        let updateQuery = """
+        MATCH (f:File {path: $path})
+        SET f:Node
+        SET f += $props
+        SET f.indexed_date = datetime()
+        RETURN f.id as id
+        """
+
+        let createQuery = """
+        CREATE (f:File:Node {
+            path: $path,
+            id: $node_id
+        })
+        SET f += $props
+        SET f.indexed_date = datetime()
+        RETURN f.id as id
+        """
+
+        // If we already saw the node in the check query, update directly.
+        if let results = checkJSON["results"] as? [[String: Any]],
+           let data = results.first?["data"] as? [[String: Any]],
+           !data.isEmpty {
+            _ = try await executeCypher(updateQuery, parameters: params)
+            return
+        }
+
+        // Not found in pre-check: try create. If a concurrent write created it first,
+        // retry as update.
+        do {
+            _ = try await executeCypher(createQuery, parameters: params)
+        } catch {
+            let message = error.localizedDescription.lowercased()
+            if message.contains("already exists") || message.contains("constraint") {
+                _ = try await executeCypher(updateQuery, parameters: params)
+            } else {
+                throw error
+            }
+        }
     }
     
     /// Delete all file nodes and their chunks for a folder
@@ -1189,6 +1322,12 @@ struct FileIndexerView: View {
             Text(error)
                 .font(.callout)
             Spacer()
+            Button(action: openIndexerLogs) {
+                Label("Open Logs", systemImage: "doc.text.magnifyingglass")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
             Button(action: { watchManager.error = nil }) {
                 Image(systemName: "xmark.circle.fill")
                     .foregroundColor(.secondary)
@@ -1409,6 +1548,14 @@ struct FileIndexerView: View {
                     }
                 }
                 .buttonStyle(.bordered)
+
+                Button(action: openIndexerLogs) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "doc.text.magnifyingglass")
+                        Text("Open Logs")
+                    }
+                }
+                .buttonStyle(.bordered)
                 
                 Button(action: selectFolder) {
                     HStack(spacing: 4) {
@@ -1527,6 +1674,10 @@ struct FileIndexerView: View {
         if panel.runModal() == .OK, let url = panel.url {
             watchManager.addFolder(url.path)
         }
+    }
+
+    func openIndexerLogs() {
+        FileIndexerLogger.shared.openLogFile()
     }
     
     func formatDate(_ date: Date) -> String {

@@ -66,11 +66,62 @@ func (m *mockEmbedder) GetEmbedCount() int {
 	return m.embedCount
 }
 
+// recordingBatchEmbedder records EmbedBatch call sizes for batching assertions.
+type recordingBatchEmbedder struct {
+	mu         sync.Mutex
+	dims       int
+	model      string
+	batchSizes []int
+}
+
+func newRecordingBatchEmbedder() *recordingBatchEmbedder {
+	return &recordingBatchEmbedder{
+		dims:  1024,
+		model: "recording-model",
+	}
+}
+
+func (m *recordingBatchEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
+	return make([]float32, m.dims), nil
+}
+
+func (m *recordingBatchEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]float32, error) {
+	m.mu.Lock()
+	m.batchSizes = append(m.batchSizes, len(texts))
+	m.mu.Unlock()
+
+	result := make([][]float32, len(texts))
+	for i := range texts {
+		result[i] = make([]float32, m.dims)
+	}
+	return result, nil
+}
+
+func (m *recordingBatchEmbedder) Model() string {
+	return m.model
+}
+
+func (m *recordingBatchEmbedder) Dimensions() int {
+	return m.dims
+}
+
+func (m *recordingBatchEmbedder) MaxBatchSize() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	max := 0
+	for _, sz := range m.batchSizes {
+		if sz > max {
+			max = sz
+		}
+	}
+	return max
+}
+
 // TestCopyNodeForEmbedding tests that the copy function creates independent copies
 func TestCopyNodeForEmbedding(t *testing.T) {
 	t.Run("creates_independent_properties_map", func(t *testing.T) {
 		original := &storage.Node{
-			ID: storage.NodeID("test-node"),
+			ID:     storage.NodeID("test-node"),
 			Labels: []string{"Memory", "Test"},
 			Properties: map[string]any{
 				"content": "test content",
@@ -92,7 +143,7 @@ func TestCopyNodeForEmbedding(t *testing.T) {
 
 	t.Run("copies_embedding", func(t *testing.T) {
 		original := &storage.Node{
-			ID: storage.NodeID("test-node"),
+			ID:              storage.NodeID("test-node"),
 			ChunkEmbeddings: [][]float32{{0.1, 0.2, 0.3}},
 		}
 
@@ -107,7 +158,7 @@ func TestCopyNodeForEmbedding(t *testing.T) {
 
 	t.Run("copies_labels", func(t *testing.T) {
 		original := &storage.Node{
-			ID: storage.NodeID("test-node"),
+			ID:     storage.NodeID("test-node"),
 			Labels: []string{"Label1", "Label2"},
 		}
 
@@ -192,7 +243,7 @@ func TestEmbedWorkerRecentlyProcessed(t *testing.T) {
 
 		// Create a node to trigger cleanup (cleanup happens during processing)
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("trigger-node"),
+			ID:     storage.NodeID("trigger-node"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content": "trigger content",
@@ -234,7 +285,7 @@ func TestEmbedWorkerPersistence(t *testing.T) {
 
 		// Create a node without embedding
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("persist-test"),
+			ID:     storage.NodeID("persist-test"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content": "This is test content for embedding",
@@ -294,7 +345,7 @@ func TestEmbedWorkerPersistence(t *testing.T) {
 
 		// Create a node
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("no-reprocess-test"),
+			ID:     storage.NodeID("no-reprocess-test"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content": "Content for no-reprocess test",
@@ -357,7 +408,7 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 
 		// Create node without embedding
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("needs-embed"),
+			ID:     storage.NodeID("needs-embed"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content": "Content needing embedding",
@@ -382,7 +433,7 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 
 		// Create node WITH embedding
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("has-embed"),
+			ID:              storage.NodeID("has-embed"),
 			Labels:          []string{"Memory"},
 			ChunkEmbeddings: [][]float32{make([]float32, 1024)}, // Pre-existing embedding
 			Properties: map[string]any{
@@ -407,7 +458,7 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 
 		// Create internal node (starts with _)
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("internal-node"),
+			ID:     storage.NodeID("internal-node"),
 			Labels: []string{"_Internal"},
 			Properties: map[string]any{
 				"content": "Internal content",
@@ -431,7 +482,7 @@ func TestEmbedWorkerFindNodeWithoutEmbedding(t *testing.T) {
 
 		// Create node without embedding
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("to-delete"),
+			ID:     storage.NodeID("to-delete"),
 			Labels: []string{"Test"},
 			Properties: map[string]any{
 				"content": "Content to delete",
@@ -880,7 +931,7 @@ func TestLargeContentEmbedding(t *testing.T) {
 		largeContent := strings.Repeat("This is line of code with various tokens and symbols. ", 100)
 
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("large-file-node"),
+			ID:     storage.NodeID("large-file-node"),
 			Labels: []string{"File"},
 			Properties: map[string]any{
 				"content":  largeContent,
@@ -957,6 +1008,53 @@ func TestLargeContentEmbedding(t *testing.T) {
 	})
 }
 
+func TestEmbedWorkerMicroBatching(t *testing.T) {
+	t.Run("large_node_uses_bounded_embed_batch_size", func(t *testing.T) {
+		baseEngine := storage.NewMemoryEngine()
+		engine := storage.NewNamespacedEngine(baseEngine, "test")
+		embedder := newRecordingBatchEmbedder()
+
+		largeContent := strings.Repeat("This content should produce many embedding chunks. ", 700)
+		_, err := engine.CreateNode(&storage.Node{
+			ID:     storage.NodeID("micro-batch-node"),
+			Labels: []string{"File"},
+			Properties: map[string]any{
+				"content": largeContent,
+			},
+		})
+		require.NoError(t, err)
+
+		config := &EmbedWorkerConfig{
+			ScanInterval:   time.Hour,
+			BatchDelay:     10 * time.Millisecond,
+			MaxRetries:     1,
+			ChunkSize:      256,
+			ChunkOverlap:   32,
+			EmbedBatchSize: 8,
+		}
+
+		worker := NewEmbedWorker(embedder, engine, config)
+		worker.Trigger()
+
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if worker.Stats().Processed > 0 {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		worker.Close()
+
+		stats := worker.Stats()
+		require.Equal(t, 1, stats.Processed, "node should be processed")
+		assert.LessOrEqual(t, embedder.MaxBatchSize(), config.EmbedBatchSize, "embed request should respect micro-batch cap")
+
+		node, err := engine.GetNode("micro-batch-node")
+		require.NoError(t, err)
+		assert.NotEmpty(t, node.ChunkEmbeddings, "chunk embeddings should be stored")
+	})
+}
+
 // TestEmbedWorkerConcurrency tests for race conditions
 func TestEmbedWorkerConcurrency(t *testing.T) {
 	t.Run("concurrent_triggers_safe", func(t *testing.T) {
@@ -1020,7 +1118,7 @@ func TestRecentlyProcessedOnlyLogsOnce(t *testing.T) {
 
 		// Create a node that will be marked as recently processed but still found
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("test-skip-logs"),
+			ID:     storage.NodeID("test-skip-logs"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content": "Some content",
@@ -1081,7 +1179,7 @@ func TestNoContentNodeDoesNotCauseInfiniteLoop(t *testing.T) {
 		// This is a truly empty node - no labels, no embeddable properties
 		// Don't set has_embedding as that would prevent node discovery
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("no-content-node"),
+			ID:     storage.NodeID("no-content-node"),
 			Labels: []string{}, // No labels - truly empty
 			Properties: map[string]any{
 				"id":        "123",        // Skipped
@@ -1112,10 +1210,7 @@ func TestNoContentNodeDoesNotCauseInfiniteLoop(t *testing.T) {
 		}()
 
 		// Wait for worker to finish or timeout
-		select {
-		case <-done:
-			// Good - didn't loop infinitely
-		}
+		<-done
 
 		worker.Close()
 
@@ -1156,7 +1251,7 @@ func TestAsyncEngineCacheIntegration(t *testing.T) {
 
 		// Create a node
 		_, err := asyncEngine.CreateNode(&storage.Node{
-			ID: storage.NodeID("async-test"),
+			ID:     storage.NodeID("async-test"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content": "Test content for async cache",
@@ -1220,7 +1315,7 @@ func TestEmbeddingPersistenceVerification(t *testing.T) {
 
 		// Create a node
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("verify-persist"),
+			ID:     storage.NodeID("verify-persist"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content": "Test content for persistence verification",
@@ -1270,7 +1365,7 @@ func TestEmbeddingPersistenceVerification(t *testing.T) {
 
 		// Create a node
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("manual-embed"),
+			ID:     storage.NodeID("manual-embed"),
 			Labels: []string{"Test"},
 			Properties: map[string]any{
 				"content": "test",
@@ -1310,7 +1405,7 @@ func TestRaceConditionPrevention(t *testing.T) {
 
 		// Create a node
 		_, err := engine.CreateNode(&storage.Node{
-			ID: storage.NodeID("race-test"),
+			ID:     storage.NodeID("race-test"),
 			Labels: []string{"Memory"},
 			Properties: map[string]any{
 				"content":     "Test content for race condition",

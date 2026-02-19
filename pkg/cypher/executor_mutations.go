@@ -319,17 +319,16 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	} else {
 		setPart = strings.TrimSpace(normalized[setIdx+4:])
 	}
+	// Neo4j-compatible chained SET support:
+	// MATCH ... SET n += $props SET n.foo = 1
+	// Collapse additional SET keywords into a single assignment list.
+	setPart = collapseChainedSetClauses(setPart)
 	setPartForAssignments := setPart
 
 	// Substitute params for simple SET assignments (e.g., n.prop = $value).
 	// For SET += $props, defer to executeSetMerge which reads params directly.
 	if params := getParamsFromContext(ctx); params != nil && !strings.Contains(setPart, "+=") {
 		setPartForAssignments = e.substituteParams(setPart, params)
-	}
-
-	// Check for property merge operator: n += $properties
-	if strings.Contains(setPart, "+=") {
-		return e.executeSetMerge(ctx, matchResult, setPart, result, cypher, returnIdx)
 	}
 
 	// Split SET clause into individual assignments, respecting brackets
@@ -340,11 +339,107 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		return nil, fmt.Errorf("SET clause requires at least one assignment")
 	}
 
+	colIndex := make(map[string]int, len(matchResult.Columns))
+	for i, col := range matchResult.Columns {
+		colIndex[col] = i
+	}
+
 	var variable string
 	validAssignments := 0
 	for _, assignment := range assignments {
 		assignment = strings.TrimSpace(assignment)
 		if assignment == "" {
+			continue
+		}
+
+		// Support SET property merge in mixed assignment lists:
+		// SET n += $props, n.updated_at = $ts
+		plusEqIdx := strings.Index(assignment, "+=")
+		if plusEqIdx >= 0 {
+			leftVar := strings.TrimSpace(assignment[:plusEqIdx])
+			right := strings.TrimSpace(assignment[plusEqIdx+2:])
+			if leftVar == "" {
+				return nil, fmt.Errorf("SET += requires a variable target")
+			}
+			validAssignments++
+			variable = leftVar
+
+			var propsToMerge map[string]interface{}
+			mapVarName := ""
+			paramMapUsed := false
+			if strings.HasPrefix(right, "{") {
+				propsToMerge = e.parseProperties(right)
+			} else if strings.HasPrefix(right, "$") {
+				paramName := strings.TrimSpace(right[1:])
+				if paramName == "" {
+					return nil, fmt.Errorf("SET += requires a valid parameter name after $")
+				}
+				params := getParamsFromContext(ctx)
+				if params == nil {
+					return nil, fmt.Errorf("SET += parameter $%s requires parameters to be provided", paramName)
+				}
+				paramValue, exists := params[paramName]
+				if !exists {
+					return nil, fmt.Errorf("SET += parameter $%s not found in provided parameters", paramName)
+				}
+				propsMap, err := normalizePropsMap(paramValue, fmt.Sprintf("parameter $%s", paramName))
+				if err != nil {
+					return nil, err
+				}
+				propsToMerge = propsMap
+				paramMapUsed = true
+			} else if isValidIdentifier(right) {
+				mapVarName = right
+			} else {
+				return nil, fmt.Errorf("SET += requires a map or parameter (got: %q)", right)
+			}
+
+			targetIdx, hasTargetIdx := colIndex[leftVar]
+			mapIdx, hasMapIdx := colIndex[mapVarName]
+			for _, row := range matchResult.Rows {
+				propsForRow := propsToMerge
+				if mapVarName != "" && !paramMapUsed {
+					if !hasMapIdx || mapIdx >= len(row) {
+						return nil, fmt.Errorf("SET += requires a map variable in scope (missing %q)", mapVarName)
+					}
+					propsMap, err := normalizePropsMap(row[mapIdx], fmt.Sprintf("variable %s", mapVarName))
+					if err != nil {
+						return nil, err
+					}
+					propsForRow = propsMap
+				}
+
+				updated := false
+				if hasTargetIdx && targetIdx < len(row) {
+					if node, ok := row[targetIdx].(*storage.Node); ok && node != nil {
+						for k, v := range propsForRow {
+							setNodeProperty(node, k, v)
+							result.Stats.PropertiesSet++
+						}
+						if err := store.UpdateNode(node); err == nil {
+							e.notifyNodeMutated(string(node.ID))
+						}
+						updated = true
+					}
+				}
+				if updated {
+					continue
+				}
+
+				for _, val := range row {
+					node, ok := val.(*storage.Node)
+					if !ok || node == nil {
+						continue
+					}
+					for k, v := range propsForRow {
+						setNodeProperty(node, k, v)
+						result.Stats.PropertiesSet++
+					}
+					if err := store.UpdateNode(node); err == nil {
+						e.notifyNodeMutated(string(node.ID))
+					}
+				}
+			}
 			continue
 		}
 
@@ -395,6 +490,21 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		left := strings.TrimSpace(assignment[:eqIdx])
 		right := strings.TrimSpace(assignment[eqIdx+1:])
 		propValue := e.parseValue(right)
+		if strings.HasPrefix(right, "$") {
+			paramName := strings.TrimSpace(right[1:])
+			if paramName == "" {
+				return nil, fmt.Errorf("SET assignment requires a valid parameter name after $")
+			}
+			params := getParamsFromContext(ctx)
+			if params == nil {
+				return nil, fmt.Errorf("SET assignment parameter $%s requires parameters to be provided", paramName)
+			}
+			paramValue, exists := params[paramName]
+			if !exists {
+				return nil, fmt.Errorf("SET assignment parameter $%s not found in provided parameters", paramName)
+			}
+			propValue = normalizePropValue(paramValue)
+		}
 
 		// Extract variable and property (or whole-variable map replacement)
 		parts := strings.SplitN(left, ".", 2)
@@ -493,9 +603,49 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 			}
 			result.Rows = append(result.Rows, newRow)
 		}
+	} else {
+		// Neo4j-compatible default for SET without RETURN: matched row count.
+		result.Columns = []string{"matched"}
+		result.Rows = [][]interface{}{{len(matchResult.Rows)}}
 	}
 
 	return result, nil
+}
+
+// collapseChainedSetClauses rewrites chained SET keywords into comma-separated assignments.
+// Example: "n += $props SET n.x = 1 SET n.y = 2" -> "n += $props, n.x = 1, n.y = 2".
+func collapseChainedSetClauses(setPart string) string {
+	setPart = strings.TrimSpace(setPart)
+	if setPart == "" {
+		return setPart
+	}
+
+	opts := defaultKeywordScanOpts()
+	segments := make([]string, 0, 2)
+	start := 0
+	for {
+		nextSet := keywordIndexFrom(setPart, "SET", start, opts)
+		if nextSet < 0 {
+			break
+		}
+		segment := strings.TrimSpace(setPart[start:nextSet])
+		if segment != "" {
+			segments = append(segments, segment)
+		}
+		start = nextSet + len("SET")
+		for start < len(setPart) && isASCIISpace(setPart[start]) {
+			start++
+		}
+	}
+
+	tail := strings.TrimSpace(setPart[start:])
+	if tail != "" {
+		segments = append(segments, tail)
+	}
+	if len(segments) == 0 {
+		return setPart
+	}
+	return strings.Join(segments, ", ")
 }
 
 // executeSetMerge handles SET n += $properties for property merging.
