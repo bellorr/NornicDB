@@ -978,6 +978,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		featuresConfig = config.Features
 	} else {
 		featuresConfig = &globalConfig.Features
+		config.Features = featuresConfig
 	}
 	if featuresConfig.HeimdallEnabled {
 		log.Println("🛡️  Heimdall AI Assistant initializing asynchronously...")

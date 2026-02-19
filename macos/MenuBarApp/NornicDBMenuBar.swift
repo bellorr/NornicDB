@@ -1567,7 +1567,6 @@ class ConfigManager: ObservableObject {
         let lines = content.components(separatedBy: "\n")
         var result: [String] = []
         var foundSectionHeader = false
-        var sectionHeaderIndex = -1
         var lastKeyInSectionIndex = -1
         var inSection = false
         
@@ -1578,7 +1577,6 @@ class ConfigManager: ObservableObject {
             if trimmed == "\(section):" || line.hasPrefix("\(section):") && !line.hasPrefix(" ") && !line.hasPrefix("\t") {
                 foundSectionHeader = true
                 inSection = true
-                sectionHeaderIndex = index
                 lastKeyInSectionIndex = index // Default to header if no keys
                 continue
             }
@@ -1922,10 +1920,6 @@ struct SettingsView: View {
                 <string>\(config.searchRerankModel)</string>
                 <key>NORNICDB_AUTO_TLP_ENABLED</key>
                 <string>\(config.autoTLPEnabled ? "true" : "false")</string>
-                <key>NORNICDB_HEIMDALL_ENABLED</key>
-                <string>\(config.heimdallEnabled ? "true" : "false")</string>
-                <key>NORNICDB_HEIMDALL_MODEL</key>
-                <string>\(config.heimdallModel)</string>
                 <key>NORNICDB_MODELS_DIR</key>
                 <string>/usr/local/var/nornicdb/models</string>
                 <key>NORNICDB_PLUGINS_DIR</key>
@@ -2890,10 +2884,6 @@ struct FirstRunWizard: View {
                                 <string>\(config.searchRerankModel)</string>
                                 <key>NORNICDB_AUTO_TLP_ENABLED</key>
                                 <string>\(config.autoTLPEnabled ? "true" : "false")</string>
-                                <key>NORNICDB_HEIMDALL_ENABLED</key>
-                                <string>\(config.heimdallEnabled ? "true" : "false")</string>
-                                <key>NORNICDB_HEIMDALL_MODEL</key>
-                                <string>\(config.heimdallModel)</string>
                                 <key>NORNICDB_MODELS_DIR</key>
                                 <string>/usr/local/var/nornicdb/models</string>
                                 <key>NORNICDB_PLUGINS_DIR</key>

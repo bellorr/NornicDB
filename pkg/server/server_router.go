@@ -227,6 +227,10 @@ func (s *Server) registerHeimdallRoutes(mux *http.ServeMux) {
 	// Routes: /api/bifrost/status, /api/bifrost/chat/completions, /api/bifrost/autocomplete, /api/bifrost/events
 	// All Bifrost endpoints require authentication (PermRead minimum)
 	serveHeimdall := func(w http.ResponseWriter, r *http.Request) {
+		if s.config != nil && s.config.Features != nil && !s.config.Features.HeimdallEnabled {
+			s.writeError(w, http.StatusServiceUnavailable, "Heimdall is disabled by configuration", nil)
+			return
+		}
 		handler := s.getHeimdallHandler()
 		if handler == nil {
 			s.writeError(w, http.StatusServiceUnavailable, "Heimdall is initializing, please try again shortly", nil)

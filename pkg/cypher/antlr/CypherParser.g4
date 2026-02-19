@@ -163,6 +163,7 @@ updatingStatement
     | deleteSt
     | setSt
     | removeSt
+    | foreachSt
     ;
 
 deleteSt
@@ -176,6 +177,10 @@ removeSt
 removeItem
     : symbol nodeLabels
     | propertyExpression
+    ;
+
+foreachSt
+    : FOREACH LPAREN symbol IN expression STICK updatingStatement+ RPAREN
     ;
 
 queryCallSt
@@ -342,6 +347,7 @@ atom
     : literal
     | parameter
     | caseExpression
+    | reduceExpression
     | countAll
     | listComprehension
     | patternComprehension
@@ -422,6 +428,10 @@ caseExpression
     : CASE expression? (WHEN expression THEN expression)+ (ELSE expression)? END
     ;
 
+reduceExpression
+    : REDUCE LPAREN symbol ASSIGN expression COMMA symbol IN expression STICK expression RPAREN
+    ;
+
 parameter
     : DOLLAR (symbol | numLit)
     ;
@@ -493,6 +503,8 @@ symbol
     | COLLECT
     | FILTER
     | EXTRACT
+    | REDUCE
+    | FOREACH
     | ANY
     | NONE
     | SINGLE
@@ -592,4 +604,6 @@ reservedWord
     | OF
     | ADD
     | DROP
+    | FOREACH
+    | REDUCE
     ;

@@ -1047,6 +1047,49 @@ func TestHandleSearch_SkipsEmbeddingWhenNoVectorsIndexed(t *testing.T) {
 	require.Equal(t, 0, calls, "expected no query embedding calls when vector index is empty")
 }
 
+func TestTxCommit_VectorQueryNodes_StringInput_UsesConfiguredEmbedder(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	emb := &countingEmbedder{dims: 1024}
+	server.db.SetEmbedder(emb)
+
+	dbName := server.dbManager.DefaultDatabaseName()
+	storageEngine, err := server.dbManager.GetStorage(dbName)
+	require.NoError(t, err)
+	searchSvc, err := server.db.GetOrCreateSearchService(dbName, storageEngine)
+	require.NoError(t, err)
+
+	seedVec := make([]float32, 1024)
+	seedVec[0] = float32(len("seed"))
+	require.NoError(t, searchSvc.IndexNode(&storage.Node{
+		ID:              storage.NodeID("seed-vector-node"),
+		Labels:          []string{"Seed"},
+		Properties:      map[string]interface{}{"name": "seed"},
+		ChunkEmbeddings: [][]float32{seedVec},
+	}))
+
+	resp := makeRequest(t, server, "POST", "/db/"+dbName+"/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{
+				"statement": "CALL db.index.vector.queryNodes('node_embedding_index', 5, 'seed') YIELD node, score RETURN node.id AS id, score LIMIT 1",
+			},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	if errs, ok := payload["errors"].([]interface{}); ok {
+		require.Len(t, errs, 0, "expected no cypher errors for string vector query")
+	}
+
+	emb.mu.Lock()
+	calls := emb.calls
+	emb.mu.Unlock()
+	require.Greater(t, calls, 0, "expected query embedder to be called")
+}
+
 func TestHandleSearchRebuild(t *testing.T) {
 	server, auth := setupTestServer(t)
 	token := getAuthToken(t, auth, "admin")

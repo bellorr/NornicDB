@@ -1078,6 +1078,8 @@ ifeq ($(HOST_OS),darwin)
 		NornicDBMenuBar.swift \
 		FileIndexer.swift \
 		FileIndexerWindow.swift \
+		FileIndexerSupport.swift \
+		FileIndexerFileBrowserView.swift \
 		AppleMLEmbedder.swift \
 		EmbeddingServer.swift \
 		-framework SwiftUI \

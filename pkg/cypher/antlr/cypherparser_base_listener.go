@@ -1,4 +1,4 @@
-// Code generated from CypherParser.g4 by ANTLR 4.13.2. DO NOT EDIT.
+// Code generated from CypherParser.g4 by ANTLR 4.13.1. DO NOT EDIT.
 
 package antlr // CypherParser
 import "github.com/antlr4-go/antlr/v4"
@@ -199,6 +199,12 @@ func (s *BaseCypherParserListener) EnterRemoveItem(ctx *RemoveItemContext) {}
 
 // ExitRemoveItem is called when production removeItem is exited.
 func (s *BaseCypherParserListener) ExitRemoveItem(ctx *RemoveItemContext) {}
+
+// EnterForeachSt is called when production foreachSt is entered.
+func (s *BaseCypherParserListener) EnterForeachSt(ctx *ForeachStContext) {}
+
+// ExitForeachSt is called when production foreachSt is exited.
+func (s *BaseCypherParserListener) ExitForeachSt(ctx *ForeachStContext) {}
 
 // EnterQueryCallSt is called when production queryCallSt is entered.
 func (s *BaseCypherParserListener) EnterQueryCallSt(ctx *QueryCallStContext) {}
@@ -528,6 +534,12 @@ func (s *BaseCypherParserListener) EnterCaseExpression(ctx *CaseExpressionContex
 
 // ExitCaseExpression is called when production caseExpression is exited.
 func (s *BaseCypherParserListener) ExitCaseExpression(ctx *CaseExpressionContext) {}
+
+// EnterReduceExpression is called when production reduceExpression is entered.
+func (s *BaseCypherParserListener) EnterReduceExpression(ctx *ReduceExpressionContext) {}
+
+// ExitReduceExpression is called when production reduceExpression is exited.
+func (s *BaseCypherParserListener) ExitReduceExpression(ctx *ReduceExpressionContext) {}
 
 // EnterParameter is called when production parameter is entered.
 func (s *BaseCypherParserListener) EnterParameter(ctx *ParameterContext) {}

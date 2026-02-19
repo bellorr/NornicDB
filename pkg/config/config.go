@@ -1815,8 +1815,8 @@ func applyEnvVars(config *Config) {
 	if getEnv("NORNICDB_AUTO_TLP_ENABLED", "") == "true" {
 		config.Features.TopologyAutoIntegrationEnabled = true
 	}
-	if getEnv("NORNICDB_HEIMDALL_ENABLED", "") == "true" {
-		config.Features.HeimdallEnabled = true
+	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_ENABLED"); ok {
+		config.Features.HeimdallEnabled = v
 	}
 	if v := getEnv("NORNICDB_HEIMDALL_MODEL", ""); v != "" {
 		config.Features.HeimdallModel = v
@@ -1845,14 +1845,14 @@ func applyEnvVars(config *Config) {
 	if v := getEnvFloat("NORNICDB_HEIMDALL_TEMPERATURE", 0); v > 0 {
 		config.Features.HeimdallTemperature = float32(v)
 	}
-	if getEnv("NORNICDB_HEIMDALL_ANOMALY_DETECTION", "") == "true" {
-		config.Features.HeimdallAnomalyDetection = true
+	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_ANOMALY_DETECTION"); ok {
+		config.Features.HeimdallAnomalyDetection = v
 	}
-	if getEnv("NORNICDB_HEIMDALL_RUNTIME_DIAGNOSIS", "") == "true" {
-		config.Features.HeimdallRuntimeDiagnosis = true
+	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_RUNTIME_DIAGNOSIS"); ok {
+		config.Features.HeimdallRuntimeDiagnosis = v
 	}
-	if getEnv("NORNICDB_HEIMDALL_MEMORY_CURATION", "") == "true" {
-		config.Features.HeimdallMemoryCuration = true
+	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_MEMORY_CURATION"); ok {
+		config.Features.HeimdallMemoryCuration = v
 	}
 	// MCP tools in agentic loop (NORNICDB_HEIMDALL_MCP_ENABLE, NORNICDB_HEIMDALL_MCP_TOOLS)
 	if v := os.Getenv("NORNICDB_HEIMDALL_MCP_ENABLE"); v != "" {
@@ -2582,6 +2582,18 @@ func getEnvBool(key string, defaultVal bool) bool {
 		return val == "true" || val == "1" || val == "yes" || val == "on"
 	}
 	return defaultVal
+}
+
+func lookupEnvBool(key string) (bool, bool) {
+	val, exists := os.LookupEnv(key)
+	if !exists {
+		return false, false
+	}
+	trimmed := strings.TrimSpace(strings.ToLower(val))
+	if trimmed == "" {
+		return false, false
+	}
+	return trimmed == "true" || trimmed == "1" || trimmed == "yes" || trimmed == "on", true
 }
 
 func getEnvDuration(key string, defaultVal time.Duration) time.Duration {

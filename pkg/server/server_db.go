@@ -97,6 +97,13 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 	s.executorsMu.RLock()
 	if executor, ok := s.executors[dbName]; ok {
 		s.executorsMu.RUnlock()
+		// Executors can be created before the embedding model finishes loading.
+		// Ensure cached executors pick up the latest query embedder lazily.
+		if baseExec := s.db.GetCypherExecutor(); baseExec != nil {
+			if emb := baseExec.GetEmbedder(); emb != nil && executor.GetEmbedder() == nil {
+				executor.SetEmbedder(emb)
+			}
+		}
 		return executor, nil
 	}
 	s.executorsMu.RUnlock()
@@ -121,6 +128,14 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 	// This eliminates duplicate search service allocations (major memory optimization)
 	if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storage); err == nil {
 		executor.SetSearchService(searchSvc)
+	}
+
+	// Copy query embedder from the base DB executor so string-input vector procedures
+	// (CALL db.index.vector.queryNodes(..., "text")) work on namespaced executors too.
+	if baseExec := s.db.GetCypherExecutor(); baseExec != nil {
+		if emb := baseExec.GetEmbedder(); emb != nil {
+			executor.SetEmbedder(emb)
+		}
 	}
 
 	// Wire embed queue so nodes mutated via this executor get embeddings (re)generated.

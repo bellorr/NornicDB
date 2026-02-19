@@ -1,4 +1,4 @@
-// Code generated from CypherParser.g4 by ANTLR 4.13.2. DO NOT EDIT.
+// Code generated from CypherParser.g4 by ANTLR 4.13.1. DO NOT EDIT.
 
 package antlr // CypherParser
 import "github.com/antlr4-go/antlr/v4"
@@ -96,6 +96,9 @@ type CypherParserListener interface {
 
 	// EnterRemoveItem is called when entering the removeItem production.
 	EnterRemoveItem(c *RemoveItemContext)
+
+	// EnterForeachSt is called when entering the foreachSt production.
+	EnterForeachSt(c *ForeachStContext)
 
 	// EnterQueryCallSt is called when entering the queryCallSt production.
 	EnterQueryCallSt(c *QueryCallStContext)
@@ -259,6 +262,9 @@ type CypherParserListener interface {
 	// EnterCaseExpression is called when entering the caseExpression production.
 	EnterCaseExpression(c *CaseExpressionContext)
 
+	// EnterReduceExpression is called when entering the reduceExpression production.
+	EnterReduceExpression(c *ReduceExpressionContext)
+
 	// EnterParameter is called when entering the parameter production.
 	EnterParameter(c *ParameterContext)
 
@@ -390,6 +396,9 @@ type CypherParserListener interface {
 
 	// ExitRemoveItem is called when exiting the removeItem production.
 	ExitRemoveItem(c *RemoveItemContext)
+
+	// ExitForeachSt is called when exiting the foreachSt production.
+	ExitForeachSt(c *ForeachStContext)
 
 	// ExitQueryCallSt is called when exiting the queryCallSt production.
 	ExitQueryCallSt(c *QueryCallStContext)
@@ -552,6 +561,9 @@ type CypherParserListener interface {
 
 	// ExitCaseExpression is called when exiting the caseExpression production.
 	ExitCaseExpression(c *CaseExpressionContext)
+
+	// ExitReduceExpression is called when exiting the reduceExpression production.
+	ExitReduceExpression(c *ReduceExpressionContext)
 
 	// ExitParameter is called when exiting the parameter production.
 	ExitParameter(c *ParameterContext)

@@ -71,6 +71,8 @@ CALL       : 'CALL';
 YIELD      : 'YIELD';
 FILTER     : 'FILTER';
 EXTRACT    : 'EXTRACT';
+REDUCE     : 'REDUCE';
+FOREACH    : 'FOREACH';
 COUNT      : 'COUNT';
 SUM        : 'SUM';
 AVG        : 'AVG';

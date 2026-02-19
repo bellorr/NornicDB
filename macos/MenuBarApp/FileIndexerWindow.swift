@@ -5,73 +5,6 @@
 import SwiftUI
 import AppKit
 
-// MARK: - File Indexer Logger
-
-final class FileIndexerLogger {
-    static let shared = FileIndexerLogger()
-
-    enum Level: String {
-        case info = "INFO"
-        case warning = "WARN"
-        case error = "ERROR"
-    }
-
-    private let queue = DispatchQueue(label: "com.nornicdb.file-indexer.logger")
-    private let iso8601: ISO8601DateFormatter
-    private let logDirectoryURL: URL
-    private let logFileURL: URL
-
-    private init() {
-        self.iso8601 = ISO8601DateFormatter()
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        self.logDirectoryURL = home.appendingPathComponent(".nornicdb/logs", isDirectory: true)
-        self.logFileURL = logDirectoryURL.appendingPathComponent("file-indexer.log")
-        ensureLogFileExists()
-    }
-
-    private func ensureLogFileExists() {
-        queue.sync {
-            do {
-                try FileManager.default.createDirectory(at: logDirectoryURL, withIntermediateDirectories: true)
-                if !FileManager.default.fileExists(atPath: logFileURL.path) {
-                    FileManager.default.createFile(atPath: logFileURL.path, contents: nil)
-                }
-            } catch {
-                print("❌ Failed to initialize file indexer logs: \(error)")
-            }
-        }
-    }
-
-    func log(_ level: Level, _ message: String, metadata: [String: String] = [:]) {
-        queue.async {
-            var line = "[\(self.iso8601.string(from: Date()))] [\(level.rawValue)] \(message)"
-            if !metadata.isEmpty {
-                let details = metadata
-                    .sorted(by: { $0.key < $1.key })
-                    .map { "\($0.key)=\($0.value)" }
-                    .joined(separator: " ")
-                line += " | \(details)"
-            }
-            line += "\n"
-
-            guard let data = line.data(using: .utf8) else { return }
-            do {
-                let handle = try FileHandle(forWritingTo: self.logFileURL)
-                defer { try? handle.close() }
-                try handle.seekToEnd()
-                try handle.write(contentsOf: data)
-            } catch {
-                print("❌ Failed to write file indexer log: \(error)")
-            }
-        }
-    }
-
-    func openLogFile() {
-        ensureLogFileExists()
-        NSWorkspace.shared.open(logFileURL)
-    }
-}
-
 // MARK: - Indexed Folder Model
 
 struct IndexedFolder: Identifiable, Codable {
@@ -198,6 +131,8 @@ class FileWatchManager: ObservableObject {
     @Published var authRequired: Bool = false
     @Published var isAuthenticated: Bool = false
     @Published var activeDatabaseName: String = "nornic"
+    @Published var folderFiles: [String: [IndexedFolderFile]] = [:]
+    @Published var loadingFilesForFolders: Set<String> = []
     
     /// Delay between indexing each file (in milliseconds) to reduce system load
     @Published var indexingThrottleMs: Int = 50 {
@@ -837,12 +772,13 @@ class FileWatchManager: ObservableObject {
             let finalStoredCount = storedCount
             let finalErrorCount = errorCount
             let totalFileCount = files.count
+            let finalCanStoreInServer = canStoreInServer
             logger.log(finalErrorCount > 0 ? .warning : .info, "Indexing pass completed", metadata: [
                 "path": path,
                 "total_files": "\(totalFileCount)",
                 "stored": "\(finalStoredCount)",
                 "errors": "\(finalErrorCount)",
-                "db_writes_enabled": canStoreInServer ? "true" : "false"
+                "db_writes_enabled": finalCanStoreInServer ? "true" : "false"
             ])
             
             // Update progress and folder info
@@ -863,7 +799,7 @@ class FileWatchManager: ObservableObject {
                     self.watchedFolders[index].isIndexing = false
                     self.watchedFolders[index].lastSync = Date()
                     
-                    if !canStoreInServer {
+                    if !finalCanStoreInServer {
                         self.watchedFolders[index].error = "Database write skipped: not connected/authenticated. Re-run indexing after connection is green."
                         self.error = "No files were inserted into NornicDB. Connect/authenticate first, then click Refresh on the folder."
                     } else if finalErrorCount > 0 {
@@ -885,7 +821,7 @@ class FileWatchManager: ObservableObject {
                 self.startWatching(path)
                 
                 // Fetch updated stats from server
-                if canStoreInServer {
+                if finalCanStoreInServer {
                     Task {
                         await self.fetchServerStats()
                     }
@@ -937,29 +873,31 @@ class FileWatchManager: ObservableObject {
         // Check if node exists and is already up-to-date
         let checkQuery = """
         MATCH (f:File {path: $path})
-        RETURN f.last_modified as last_modified, f.indexed_date as indexed_date
+        RETURN f.last_modified as last_modified, f.indexed_date as indexed_date, coalesce(f.file_tags, []) as file_tags
         """
         
         let checkJSON = try await executeCypher(checkQuery, parameters: ["path": file.path])
+        var existingFileTags: [String] = []
         if let results = checkJSON["results"] as? [[String: Any]],
            let data = results.first?["data"] as? [[String: Any]],
-           let row = data.first?["row"] as? [Any],
-           let indexedDate = row.last as? String {
-            // If indexed after file was last modified, skip
-            let fileModifiedDate = ISO8601DateFormatter().string(from: file.lastModified)
-            if indexedDate >= fileModifiedDate {
-                print("⏭️  Skipping \(file.path) - already indexed and up-to-date")
-                return
+           let row = data.first?["row"] as? [Any] {
+            if row.count > 2 {
+                existingFileTags = tagsFromAny(row[2])
+            }
+            if row.count > 1, let indexedDate = row[1] as? String {
+                // If indexed after file was last modified, skip
+                let fileModifiedDate = ISO8601DateFormatter().string(from: file.lastModified)
+                if indexedDate >= fileModifiedDate {
+                    print("⏭️  Skipping \(file.path) - already indexed and up-to-date")
+                    return
+                }
             }
         }
-        
+
         // Derive folder name for automatic tagging
         let folderName = (folderPath as NSString).lastPathComponent
-        let folderTag = sanitizeTag(folderName)
-        
-        // Build tags array: folder tag + user-defined tags
-        var allTags = ["File", folderTag]  // Always include File and folder name as tags
-        allTags.append(contentsOf: tags.map { sanitizeTag($0) }.filter { !$0.isEmpty })
+        let folderManagedTags = inheritedTagsForFolder(folderPath, tags: tags)
+        let allTags = uniqueTags(folderManagedTags + existingFileTags)
         
         let properties: [String: Any] = [
             "path": file.path,
@@ -973,6 +911,8 @@ class FileWatchManager: ObservableObject {
                     file.contentType == .imageOCR ? "image_ocr" : "image_description",
             "folder_root": folderPath,
             "folder_name": folderName,
+            "folder_tags": folderManagedTags,
+            "file_tags": existingFileTags,
             "tags": allTags,
             "last_modified": ISO8601DateFormatter().string(from: file.lastModified)
         ]
@@ -1031,26 +971,48 @@ class FileWatchManager: ObservableObject {
         let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
         return String(withUnderscores.unicodeScalars.filter { allowed.contains($0) })
     }
+
+    private func uniqueTags(_ tags: [String]) -> [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for tag in tags {
+            if !tag.isEmpty && !seen.contains(tag) {
+                seen.insert(tag)
+                result.append(tag)
+            }
+        }
+        return result
+    }
+
+    func inheritedTagsForFolder(_ folderPath: String, tags: [String]) -> [String] {
+        let folderName = (folderPath as NSString).lastPathComponent
+        let folderTag = sanitizeTag(folderName)
+        let sanitizedTags = tags.map { sanitizeTag($0) }.filter { !$0.isEmpty }
+        return uniqueTags(["File", folderTag] + sanitizedTags)
+    }
+
+    private func tagsFromAny(_ value: Any?) -> [String] {
+        guard let values = value as? [Any] else { return [] }
+        return values.compactMap { $0 as? String }.map { sanitizeTag($0) }.filter { !$0.isEmpty }
+    }
     
     /// Update tags for all files in a folder
     func updateFolderTags(_ folderPath: String, tags: [String]) async throws {
-        let sanitizedTags = tags.map { sanitizeTag($0) }.filter { !$0.isEmpty }
-        let folderName = (folderPath as NSString).lastPathComponent
-        let folderTag = sanitizeTag(folderName)
-        
-        // Build complete tags array
-        var allTags = ["File", folderTag]
-        allTags.append(contentsOf: sanitizedTags)
+        let folderManagedTags = inheritedTagsForFolder(folderPath, tags: tags)
         
         let query = """
         MATCH (f:File {folder_root: $folder_root})
-        SET f.tags = $tags
+        WITH f, coalesce(f.file_tags, []) AS file_tags
+        SET f.folder_tags = $folder_tags
+        SET f.tags = reduce(acc = [], t IN ($folder_tags + file_tags) |
+            CASE WHEN t IN acc THEN acc ELSE acc + t END
+        )
         RETURN count(f) as updated
         """
         
         let result = try await executeCypher(query, parameters: [
             "folder_root": folderPath,
-            "tags": allTags
+            "folder_tags": folderManagedTags
         ])
         
         if let results = result["results"] as? [[String: Any]],
@@ -1059,6 +1021,7 @@ class FileWatchManager: ObservableObject {
            let count = row.first as? Int {
             print("✅ Updated tags for \(count) files in \(folderPath)")
         }
+        await loadIndexedFiles(for: folderPath)
     }
     
     /// Add a tag to a folder (updates all files)
@@ -1098,6 +1061,133 @@ class FileWatchManager: ObservableObject {
         
         // Update all files in database
         try await updateFolderTags(folderPath, tags: watchedFolders[index].tags)
+    }
+
+    /// Load indexed files for a folder so users can manage file-level tags.
+    @MainActor
+    func loadIndexedFiles(for folderPath: String) async {
+        loadingFilesForFolders.insert(folderPath)
+        defer { loadingFilesForFolders.remove(folderPath) }
+
+        guard let folder = watchedFolders.first(where: { $0.path == folderPath }) else {
+            folderFiles[folderPath] = []
+            return
+        }
+        let defaultInherited = inheritedTagsForFolder(folderPath, tags: folder.tags)
+
+        let query = """
+        MATCH (f:File {folder_root: $folder_root})
+        RETURN f.path as path,
+               f.name as name,
+               f.folder_root as folder_root,
+               coalesce(f.folder_tags, $default_folder_tags) as folder_tags,
+               coalesce(f.file_tags, []) as file_tags,
+               coalesce(f.tags, []) as tags
+        ORDER BY f.path
+        """
+
+        do {
+            let result = try await executeCypher(query, parameters: [
+                "folder_root": folderPath,
+                "default_folder_tags": defaultInherited
+            ])
+
+            let parsed: [IndexedFolderFile]
+            if let results = result["results"] as? [[String: Any]],
+               let data = results.first?["data"] as? [[String: Any]] {
+                parsed = data.compactMap { rowWrapper in
+                    guard let row = rowWrapper["row"] as? [Any], row.count >= 6 else { return nil }
+                    guard let path = row[0] as? String else { return nil }
+                    let name = (row[1] as? String) ?? (path as NSString).lastPathComponent
+                    let inherited = uniqueTags(tagsFromAny(row[3]))
+                    let fileTags = uniqueTags(tagsFromAny(row[4]))
+                    let effective = uniqueTags(tagsFromAny(row[5]).isEmpty ? (inherited + fileTags) : tagsFromAny(row[5]))
+                    let rel = path.hasPrefix(folderPath + "/") ? String(path.dropFirst(folderPath.count + 1)) : (path as NSString).lastPathComponent
+                    return IndexedFolderFile(
+                        path: path,
+                        name: name,
+                        relativePath: rel,
+                        inheritedTags: inherited,
+                        fileTags: fileTags,
+                        effectiveTags: effective
+                    )
+                }
+            } else {
+                parsed = []
+            }
+            folderFiles[folderPath] = parsed
+        } catch {
+            self.error = "Failed to load indexed files: \(error.localizedDescription)"
+            folderFiles[folderPath] = []
+        }
+    }
+
+    /// Add a tag to a specific file. Inherited folder tags are not duplicated in file tags.
+    func addTagToFile(folderPath: String, filePath: String, tag: String) async throws {
+        guard let folder = watchedFolders.first(where: { $0.path == folderPath }) else {
+            throw NSError(domain: "FileWatchManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Folder not found"])
+        }
+        let inherited = inheritedTagsForFolder(folderPath, tags: folder.tags)
+        let sanitized = sanitizeTag(tag)
+        guard !sanitized.isEmpty else { return }
+        guard !inherited.contains(sanitized) else {
+            await loadIndexedFiles(for: folderPath)
+            return
+        }
+
+        let query = """
+        MATCH (f:File {path: $path, folder_root: $folder_root})
+        WITH f, coalesce(f.file_tags, []) AS file_tags
+        SET f.file_tags = reduce(acc = [], t IN (file_tags + [$new_tag]) |
+            CASE WHEN t IN acc THEN acc ELSE acc + t END
+        )
+        SET f.folder_tags = $folder_tags
+        SET f.tags = reduce(acc = [], t IN ($folder_tags + f.file_tags) |
+            CASE WHEN t IN acc THEN acc ELSE acc + t END
+        )
+        RETURN f.path as path
+        """
+
+        _ = try await executeCypher(query, parameters: [
+            "path": filePath,
+            "folder_root": folderPath,
+            "new_tag": sanitized,
+            "folder_tags": inherited
+        ])
+        await loadIndexedFiles(for: folderPath)
+    }
+
+    /// Remove a file-level tag from a specific file. Inherited tags cannot be removed here.
+    func removeTagFromFile(folderPath: String, filePath: String, tag: String) async throws {
+        guard let folder = watchedFolders.first(where: { $0.path == folderPath }) else {
+            throw NSError(domain: "FileWatchManager", code: -1, userInfo: [NSLocalizedDescriptionKey: "Folder not found"])
+        }
+        let inherited = inheritedTagsForFolder(folderPath, tags: folder.tags)
+        let sanitized = sanitizeTag(tag)
+        guard !sanitized.isEmpty else { return }
+        guard !inherited.contains(sanitized) else {
+            await loadIndexedFiles(for: folderPath)
+            return
+        }
+
+        let query = """
+        MATCH (f:File {path: $path, folder_root: $folder_root})
+        WITH f, [t IN coalesce(f.file_tags, []) WHERE t <> $tag] AS file_tags
+        SET f.file_tags = file_tags
+        SET f.folder_tags = $folder_tags
+        SET f.tags = reduce(acc = [], t IN ($folder_tags + file_tags) |
+            CASE WHEN t IN acc THEN acc ELSE acc + t END
+        )
+        RETURN f.path as path
+        """
+
+        _ = try await executeCypher(query, parameters: [
+            "path": filePath,
+            "folder_root": folderPath,
+            "tag": sanitized,
+            "folder_tags": inherited
+        ])
+        await loadIndexedFiles(for: folderPath)
     }
     
     /// Delete all file nodes and their chunks for a folder
@@ -1212,11 +1302,12 @@ struct VectorSearchResult: Identifiable {
     let language: String?
 }
 
+
 // MARK: - File Indexer View
 
 struct FileIndexerView: View {
     @ObservedObject var config: ConfigManager
-    @StateObject private var watchManager: FileWatchManager
+    @StateObject var watchManager: FileWatchManager
     @State private var searchQuery: String = ""
     @State private var searchResults: [VectorSearchResult] = []
     @State private var isSearching: Bool = false
@@ -1230,7 +1321,9 @@ struct FileIndexerView: View {
     // Tag editing state
     @State private var editingTagsForFolder: String? = nil  // Folder path being edited
     @State private var newTagText: String = ""
-    @State private var isUpdatingTags: Bool = false
+    @State var isUpdatingTags: Bool = false
+    @State var expandedFolders: Set<String> = []
+    @State var newFileTagTextByPath: [String: String] = [:]
     
     init(config: ConfigManager) {
         self.config = config
@@ -1783,6 +1876,14 @@ struct FileIndexerView: View {
                     .buttonStyle(.plain)
                     .disabled(folder.isIndexing)
                     .help(folder.isIndexing ? "Cannot edit tags while indexing" : "Manage tags")
+
+                    Button(action: {
+                        toggleFolderFiles(folder)
+                    }) {
+                        Image(systemName: expandedFolders.contains(folder.path) ? "chevron.down.circle" : "chevron.right.circle")
+                    }
+                    .buttonStyle(.plain)
+                    .help("Browse indexed files")
                     
                     Button(action: { watchManager.refreshFolder(folder) }) {
                         Image(systemName: "arrow.clockwise")
@@ -1828,6 +1929,10 @@ struct FileIndexerView: View {
                             .foregroundColor(.secondary)
                     }
                     .padding(.top, 4)
+                }
+
+                if expandedFolders.contains(folder.path) {
+                    folderFilesSection(folder)
                 }
             }
         }

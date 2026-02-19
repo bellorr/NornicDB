@@ -497,6 +497,53 @@ heimdall:
 	}
 }
 
+func TestLoadFromFile_HeimdallEnabledRespected(t *testing.T) {
+	clearEnvVars(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+heimdall:
+  enabled: false
+`), 0o600)
+	if err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.Features.HeimdallEnabled {
+		t.Fatal("expected heimdall.enabled=false from YAML to disable Heimdall")
+	}
+}
+
+func TestLoadFromFile_HeimdallEnabledFalseEnvOverride(t *testing.T) {
+	clearEnvVars(t)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	err := os.WriteFile(path, []byte(`
+heimdall:
+  enabled: true
+`), 0o600)
+	if err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	os.Setenv("NORNICDB_HEIMDALL_ENABLED", "false")
+	defer os.Unsetenv("NORNICDB_HEIMDALL_ENABLED")
+
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if cfg.Features.HeimdallEnabled {
+		t.Fatal("expected NORNICDB_HEIMDALL_ENABLED=false to disable Heimdall")
+	}
+}
+
 // TestLoadFromFile_EmbeddingProperties tests embedding_worker properties_include/exclude and include_labels from YAML.
 func TestLoadFromFile_EmbeddingProperties(t *testing.T) {
 	dir := t.TempDir()
