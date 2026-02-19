@@ -278,30 +278,35 @@ func (e *StorageExecutor) evaluateInOp(node *storage.Node, variable, whereClause
 	left := strings.TrimSpace(whereClause[:inIdx])
 	right := strings.TrimSpace(whereClause[inIdx+4:])
 
-	// If the left side doesn't reference this variable, it's not our concern in this
-	// single-node evaluation context. Treat it as a pass-through.
-	if !containsIdentifierToken(left, variable) {
+	// Keep historical single-node behavior: if this predicate does not reference
+	// the current variable at all, treat it as a pass-through.
+	leftRefsVar := containsIdentifierToken(left, variable)
+	rightRefsVar := containsIdentifierToken(right, variable)
+	if !leftRefsVar && !rightRefsVar {
 		return true
 	}
 
-	// Evaluate left side as an expression so we support:
-	//   - property access: n.id
-	//   - function calls: id(n), elementId(n)
-	//   - other expressions supported by the evaluator
-	actualVal := e.evaluateExpression(left, variable, node)
-	if actualVal == nil {
-		// Neo4j semantics: NULL IN [...] yields NULL (treated as false in WHERE)
+	nodes := map[string]*storage.Node{
+		variable: node,
+	}
+
+	// Evaluate both sides as expressions so we support both:
+	//   n.prop IN ['a', 'b']
+	//   'a' IN n.listProp
+	value := e.evaluateExpressionWithContext(left, nodes, nil)
+	if value == nil {
+		// Neo4j semantics: NULL IN list yields NULL -> false in WHERE
 		return false
 	}
 
-	listVal := e.parseValue(right)
+	listVal := e.evaluateExpressionWithContext(right, nodes, nil)
 	items, ok := toInterfaceSlice(listVal)
 	if !ok {
 		return false
 	}
 
 	for _, item := range items {
-		if e.compareEqual(actualVal, item) {
+		if e.compareEqual(value, item) {
 			return true
 		}
 	}

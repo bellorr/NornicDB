@@ -232,6 +232,21 @@ func TestEvaluateInOpMatch(t *testing.T) {
 	result, err := exec.Execute(ctx, "MATCH (n:InMatch) WHERE n.status IN ['active', 'pending'] RETURN n", nil)
 	require.NoError(t, err)
 	assert.Len(t, result.Rows, 1)
+
+	// IN with literal on the left and list property on the right
+	node2 := &storage.Node{
+		ID:     "in-list-prop",
+		Labels: []string{"InMatch"},
+		Properties: map[string]interface{}{
+			"file_tags": []interface{}{"github", "argoCD"},
+		},
+	}
+	_, err = store.CreateNode(node2)
+	require.NoError(t, err)
+
+	result, err = exec.Execute(ctx, "MATCH (n:InMatch) WHERE 'github' IN n.file_tags RETURN n", nil)
+	require.NoError(t, err)
+	assert.Len(t, result.Rows, 1)
 }
 
 // Test Parser default case in Parse

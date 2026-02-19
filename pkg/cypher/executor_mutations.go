@@ -451,7 +451,17 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 				// This is a label assignment
 				labelVar := strings.TrimSpace(assignment[:colonIdx])
 				labelName := strings.TrimSpace(assignment[colonIdx+1:])
+				// Normalize escaped label identifiers (e.g. `MyLabel`) before validation/storage.
+				if len(labelName) >= 2 && strings.HasPrefix(labelName, "`") && strings.HasSuffix(labelName, "`") {
+					labelName = strings.ReplaceAll(labelName[1:len(labelName)-1], "``", "`")
+				}
 				if labelVar != "" && labelName != "" {
+					if !isValidIdentifier(labelName) {
+						return nil, fmt.Errorf("invalid label name: %q (must be alphanumeric starting with letter or underscore)", labelName)
+					}
+					if containsReservedKeyword(labelName) {
+						return nil, fmt.Errorf("invalid label name: %q (contains reserved keyword)", labelName)
+					}
 					validAssignments++
 					variable = labelVar
 					// Add label to matched nodes

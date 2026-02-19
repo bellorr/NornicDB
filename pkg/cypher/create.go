@@ -1333,125 +1333,125 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 		matchClauses := matchKeywordPattern.Split(matchPart, -1)
 
 		for _, clause := range matchClauses {
-		clause = strings.TrimSpace(clause)
-		if clause == "" {
-			continue
-		}
-
-		// Extract this segment's WHERE (only the first WHERE in this segment)
-		whereForClause := ""
-		if whereIdx := findKeywordIndex(clause, "WHERE"); whereIdx > 0 {
-			whereForClause = strings.TrimSpace(clause[whereIdx+5:])
-			clause = strings.TrimSpace(clause[:whereIdx])
-		}
-
-		// Split by comma but respect parentheses
-		patterns := e.splitNodePatterns(clause)
-		numPatternsInSegment := 0
-		for _, p := range patterns {
-			if strings.TrimSpace(p) != "" {
-				numPatternsInSegment++
-			}
-		}
-		applyWherePerNode := whereForClause != "" && numPatternsInSegment == 1
-		if whereForClause != "" && numPatternsInSegment > 1 {
-			if postFilterWhere != "" {
-				postFilterWhere = postFilterWhere + " AND " + whereForClause
-			} else {
-				postFilterWhere = whereForClause
-			}
-		}
-
-		// Collect ALL matched nodes from this MATCH clause (for cartesian product)
-		for _, pattern := range patterns {
-			pattern = strings.TrimSpace(pattern)
-			if pattern == "" {
+			clause = strings.TrimSpace(clause)
+			if clause == "" {
 				continue
 			}
 
-			nodeInfo := e.parseNodePattern(pattern)
-			if nodeInfo.variable == "" {
-				continue
+			// Extract this segment's WHERE (only the first WHERE in this segment)
+			whereForClause := ""
+			if whereIdx := findKeywordIndex(clause, "WHERE"); whereIdx > 0 {
+				whereForClause = strings.TrimSpace(clause[whereIdx+5:])
+				clause = strings.TrimSpace(clause[:whereIdx])
 			}
 
-			// Check if this variable already exists from previous blocks
-			if existingNode, exists := nodeVars[nodeInfo.variable]; exists {
-				// Already have this variable, use the existing node (single match from prior context)
-				patternMatches = append(patternMatches, struct {
-					variable string
-					nodes    []*storage.Node
-				}{
-					variable: nodeInfo.variable,
-					nodes:    []*storage.Node{existingNode},
-				})
-				continue
+			// Split by comma but respect parentheses
+			patterns := e.splitNodePatterns(clause)
+			numPatternsInSegment := 0
+			for _, p := range patterns {
+				if strings.TrimSpace(p) != "" {
+					numPatternsInSegment++
+				}
+			}
+			applyWherePerNode := whereForClause != "" && numPatternsInSegment == 1
+			if whereForClause != "" && numPatternsInSegment > 1 {
+				if postFilterWhere != "" {
+					postFilterWhere = postFilterWhere + " AND " + whereForClause
+				} else {
+					postFilterWhere = whereForClause
+				}
 			}
 
-			// Find ALL matching nodes for this pattern (for cartesian product)
-			var matchingNodes []*storage.Node
-			if len(nodeInfo.labels) > 0 {
-				matchingNodes, _ = store.GetNodesByLabel(nodeInfo.labels[0])
-			} else {
-				matchingNodes, _ = store.AllNodes()
-			}
+			// Collect ALL matched nodes from this MATCH clause (for cartesian product)
+			for _, pattern := range patterns {
+				pattern = strings.TrimSpace(pattern)
+				if pattern == "" {
+					continue
+				}
 
-			// Filter by additional labels
-			if len(nodeInfo.labels) > 1 {
-				var filtered []*storage.Node
-				for _, node := range matchingNodes {
-					hasAll := true
-					for _, reqLabel := range nodeInfo.labels[1:] {
-						found := false
-						for _, nodeLabel := range node.Labels {
-							if nodeLabel == reqLabel {
-								found = true
+				nodeInfo := e.parseNodePattern(pattern)
+				if nodeInfo.variable == "" {
+					continue
+				}
+
+				// Check if this variable already exists from previous blocks
+				if existingNode, exists := nodeVars[nodeInfo.variable]; exists {
+					// Already have this variable, use the existing node (single match from prior context)
+					patternMatches = append(patternMatches, struct {
+						variable string
+						nodes    []*storage.Node
+					}{
+						variable: nodeInfo.variable,
+						nodes:    []*storage.Node{existingNode},
+					})
+					continue
+				}
+
+				// Find ALL matching nodes for this pattern (for cartesian product)
+				var matchingNodes []*storage.Node
+				if len(nodeInfo.labels) > 0 {
+					matchingNodes, _ = store.GetNodesByLabel(nodeInfo.labels[0])
+				} else {
+					matchingNodes, _ = store.AllNodes()
+				}
+
+				// Filter by additional labels
+				if len(nodeInfo.labels) > 1 {
+					var filtered []*storage.Node
+					for _, node := range matchingNodes {
+						hasAll := true
+						for _, reqLabel := range nodeInfo.labels[1:] {
+							found := false
+							for _, nodeLabel := range node.Labels {
+								if nodeLabel == reqLabel {
+									found = true
+									break
+								}
+							}
+							if !found {
+								hasAll = false
 								break
 							}
 						}
-						if !found {
-							hasAll = false
-							break
+						if hasAll {
+							filtered = append(filtered, node)
 						}
 					}
-					if hasAll {
-						filtered = append(filtered, node)
-					}
+					matchingNodes = filtered
 				}
-				matchingNodes = filtered
-			}
 
-			// Filter by properties
-			if len(nodeInfo.properties) > 0 {
-				var filtered []*storage.Node
-				for _, node := range matchingNodes {
-					if e.nodeMatchesProps(node, nodeInfo.properties) {
-						filtered = append(filtered, node)
+				// Filter by properties
+				if len(nodeInfo.properties) > 0 {
+					var filtered []*storage.Node
+					for _, node := range matchingNodes {
+						if e.nodeMatchesProps(node, nodeInfo.properties) {
+							filtered = append(filtered, node)
+						}
 					}
+					matchingNodes = filtered
 				}
-				matchingNodes = filtered
-			}
 
-			// Apply this segment's WHERE when it applies to this single variable
-			if applyWherePerNode {
-				var filtered []*storage.Node
-				for _, node := range matchingNodes {
-					if e.evaluateWhere(node, nodeInfo.variable, whereForClause) {
-						filtered = append(filtered, node)
+				// Apply this segment's WHERE when it applies to this single variable
+				if applyWherePerNode {
+					var filtered []*storage.Node
+					for _, node := range matchingNodes {
+						if e.evaluateWhere(node, nodeInfo.variable, whereForClause) {
+							filtered = append(filtered, node)
+						}
 					}
+					matchingNodes = filtered
 				}
-				matchingNodes = filtered
-			}
 
-			if len(matchingNodes) > 0 {
-				patternMatches = append(patternMatches, struct {
-					variable string
-					nodes    []*storage.Node
-				}{
-					variable: nodeInfo.variable,
-					nodes:    matchingNodes,
-				})
+				if len(matchingNodes) > 0 {
+					patternMatches = append(patternMatches, struct {
+						variable string
+						nodes    []*storage.Node
+					}{
+						variable: nodeInfo.variable,
+						nodes:    matchingNodes,
+					})
+				}
 			}
-		}
 		}
 
 		// Build cartesian product of all pattern matches
@@ -1581,6 +1581,15 @@ func (e *StorageExecutor) executeMatchCreateBlock(ctx context.Context, block str
 					if colonIdx > 0 {
 						varName := strings.TrimSpace(assignment[:colonIdx])
 						newLabel := strings.TrimSpace(assignment[colonIdx+1:])
+						if len(newLabel) >= 2 && strings.HasPrefix(newLabel, "`") && strings.HasSuffix(newLabel, "`") {
+							newLabel = strings.ReplaceAll(newLabel[1:len(newLabel)-1], "``", "`")
+						}
+						if !isValidIdentifier(newLabel) {
+							return nil, fmt.Errorf("invalid label name: %q (must be alphanumeric starting with letter or underscore)", newLabel)
+						}
+						if containsReservedKeyword(newLabel) {
+							return nil, fmt.Errorf("invalid label name: %q (contains reserved keyword)", newLabel)
+						}
 						if node, exists := combinedNodeVars[varName]; exists {
 							if !containsString(node.Labels, newLabel) {
 								node.Labels = append(node.Labels, newLabel)
@@ -2138,6 +2147,15 @@ func (e *StorageExecutor) executeCreateSet(ctx context.Context, cypher string) (
 			if colonIdx > 0 {
 				varName := strings.TrimSpace(assignment[:colonIdx])
 				newLabel := strings.TrimSpace(assignment[colonIdx+1:])
+				if len(newLabel) >= 2 && strings.HasPrefix(newLabel, "`") && strings.HasSuffix(newLabel, "`") {
+					newLabel = strings.ReplaceAll(newLabel[1:len(newLabel)-1], "``", "`")
+				}
+				if !isValidIdentifier(newLabel) {
+					return nil, fmt.Errorf("invalid label name: %q (must be alphanumeric starting with letter or underscore)", newLabel)
+				}
+				if containsReservedKeyword(newLabel) {
+					return nil, fmt.Errorf("invalid label name: %q (contains reserved keyword)", newLabel)
+				}
 				if node, exists := createdNodes[varName]; exists {
 					// Add label to existing node
 					if !containsString(node.Labels, newLabel) {

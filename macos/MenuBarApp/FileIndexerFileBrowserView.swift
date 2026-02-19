@@ -47,7 +47,11 @@ extension FileIndexerView {
                 }
             }
             .padding(8)
-            .background(Color.black.opacity(0.03))
+            .background(Color(NSColor.windowBackgroundColor).opacity(0.95))
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.secondary.opacity(0.25), lineWidth: 1)
+            )
             .cornerRadius(6)
         }
     }
@@ -61,6 +65,7 @@ extension FileIndexerView {
                     Text(file.name)
                         .font(.caption)
                         .fontWeight(.medium)
+                        .foregroundColor(.primary)
                     Text(file.relativePath)
                         .font(.caption2)
                         .foregroundColor(.secondary)
@@ -86,9 +91,10 @@ extension FileIndexerView {
                         Text(tag)
                             .font(.caption2)
                     }
+                    .foregroundColor(.primary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.blue.opacity(0.2))
+                    .background(Color.accentColor.opacity(0.32))
                     .cornerRadius(4)
                     .help("Inherited from folder. Remove it on the folder, not the file.")
                 }
@@ -107,9 +113,10 @@ extension FileIndexerView {
                             .buttonStyle(.plain)
                         }
                     }
+                    .foregroundColor(.primary)
                     .padding(.horizontal, 6)
                     .padding(.vertical, 2)
-                    .background(Color.green.opacity(0.2))
+                    .background(Color.green.opacity(0.32))
                     .cornerRadius(4)
                 }
             }
@@ -136,7 +143,11 @@ extension FileIndexerView {
             }
         }
         .padding(8)
-        .background(Color.white.opacity(0.45))
+        .background(Color(NSColor.controlBackgroundColor))
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .stroke(Color.secondary.opacity(0.2), lineWidth: 1)
+        )
         .cornerRadius(6)
     }
 

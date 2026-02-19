@@ -587,25 +587,29 @@ class FileWatchManager: ObservableObject {
     }
     
     func removeFolder(_ folder: IndexedFolder) {
-        // Stop watching
-        stopWatching(folder.path)
-        
-        // Delete all nodes from NornicDB in background
         Task {
+            // Stop watching while deletion is in progress to avoid re-index races.
+            stopWatching(folder.path)
+
             do {
                 try await deleteNodesForFolder(folder.path)
             } catch {
                 print("⚠️  Failed to delete nodes for folder \(folder.path): \(error.localizedDescription)")
-                // Continue with removal even if DB cleanup fails
+                await MainActor.run {
+                    self.error = "Failed to remove folder nodes from database: \(error.localizedDescription)"
+                }
+                // Restore watcher so the folder remains functional if deletion failed.
+                startWatching(folder.path)
+                return
             }
-        }
-        
-        // Remove from list
-        DispatchQueue.main.async {
-            self.watchedFolders.removeAll { $0.id == folder.id }
-            self.progressMap.removeValue(forKey: folder.path)
-            self.saveFolders()
-            self.updateStats()
+
+            await MainActor.run {
+                self.watchedFolders.removeAll { $0.id == folder.id }
+                self.progressMap.removeValue(forKey: folder.path)
+                self.folderFiles.removeValue(forKey: folder.path)
+                self.saveFolders()
+                self.updateStats()
+            }
         }
     }
     
@@ -887,16 +891,18 @@ class FileWatchManager: ObservableObject {
         // Check if node exists and is already up-to-date
         let checkQuery = """
         MATCH (f:File {path: $path})
-        RETURN f.last_modified as last_modified, f.indexed_date as indexed_date, coalesce(f.file_tags, []) as file_tags
+        RETURN f.last_modified as last_modified,
+               f.indexed_date as indexed_date,
+               labels(f) as labels
         """
         
         let checkJSON = try await executeCypher(checkQuery, parameters: ["path": file.path])
-        var existingFileTags: [String] = []
+        var existingLabels: [String] = []
         if let results = checkJSON["results"] as? [[String: Any]],
            let data = results.first?["data"] as? [[String: Any]],
            let row = data.first?["row"] as? [Any] {
             if row.count > 2 {
-                existingFileTags = tagsFromAny(row[2])
+                existingLabels = tagsFromAny(row[2])
             }
             if row.count > 1, let indexedDate = row[1] as? String {
                 // If indexed after file was last modified, skip
@@ -911,6 +917,8 @@ class FileWatchManager: ObservableObject {
         // Derive folder name for automatic tagging
         let folderName = (folderPath as NSString).lastPathComponent
         let folderManagedTags = inheritedTagsForFolder(folderPath, tags: tags)
+        let baseLabels = Set(["File", "Node"])
+        let existingFileTags = existingLabels.filter { !folderManagedTags.contains($0) && !baseLabels.contains($0) }
         let allTags = uniqueTags(folderManagedTags + existingFileTags)
         
         let properties: [String: Any] = [
@@ -925,9 +933,6 @@ class FileWatchManager: ObservableObject {
                     file.contentType == .imageOCR ? "image_ocr" : "image_description",
             "folder_root": folderPath,
             "folder_name": folderName,
-            "folder_tags": folderManagedTags,
-            "file_tags": existingFileTags,
-            "tags": allTags,
             "last_modified": ISO8601DateFormatter().string(from: file.lastModified)
         ]
         let params: [String: Any] = [
@@ -938,11 +943,20 @@ class FileWatchManager: ObservableObject {
 
         // Prefer explicit update/create flow instead of MERGE.
         // Some async write paths can surface "failed to create node in MERGE: already exists" under contention.
+        let desiredNodeLabels = desiredLabels(for: allTags)
+        let labelSetClause = setLabelClauses(variable: "f", labels: desiredNodeLabels)
+        let labelRemoveClause = removeLabelClauses(
+            variable: "f",
+            labels: existingLabels.filter { !desiredNodeLabels.contains($0) && $0 != "File" && $0 != "Node" }
+        )
+
         let updateQuery = """
         MATCH (f:File {path: $path})
         SET f:Node
         SET f += $props
         SET f.indexed_date = datetime()
+        \(labelSetClause)
+        \(labelRemoveClause)
         RETURN f.id as id
         """
 
@@ -953,6 +967,7 @@ class FileWatchManager: ObservableObject {
         })
         SET f += $props
         SET f.indexed_date = datetime()
+        \(labelSetClause)
         RETURN f.id as id
         """
 
@@ -981,9 +996,44 @@ class FileWatchManager: ObservableObject {
     /// Sanitize a string to be a valid tag (alphanumeric + underscore)
     private func sanitizeTag(_ tag: String) -> String {
         let trimmed = tag.trimmingCharacters(in: .whitespacesAndNewlines)
-        let withUnderscores = trimmed.replacingOccurrences(of: " ", with: "_")
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
-        return String(withUnderscores.unicodeScalars.filter { allowed.contains($0) })
+        let normalizedSeparators = trimmed
+            .replacingOccurrences(of: " ", with: "_")
+            .replacingOccurrences(of: "-", with: "_")
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_"))
+        let filtered = String(normalizedSeparators.unicodeScalars.filter { allowed.contains($0) })
+
+        // Collapse duplicate underscores and trim leading/trailing underscores.
+        let collapsed = filtered.replacingOccurrences(of: "_+", with: "_", options: .regularExpression)
+        let stripped = collapsed.trimmingCharacters(in: CharacterSet(charactersIn: "_"))
+
+        guard !stripped.isEmpty else { return "" }
+
+        // Keep tags label-safe: first character must be a letter or underscore.
+        if let first = stripped.unicodeScalars.first,
+           CharacterSet.decimalDigits.contains(first) {
+            return "_" + stripped
+        }
+        return stripped
+    }
+
+    private func desiredLabels(for effectiveTags: [String]) -> [String] {
+        uniqueTags(["File", "Node"] + effectiveTags.map { sanitizeTag($0) }.filter { !$0.isEmpty })
+    }
+
+    private func setLabelClauses(variable: String, labels: [String]) -> String {
+        labels
+            .map { sanitizeTag($0) }
+            .filter { !$0.isEmpty }
+            .map { "SET \(variable):\($0)" }
+            .joined(separator: "\n")
+    }
+
+    private func removeLabelClauses(variable: String, labels: [String]) -> String {
+        labels
+            .map { sanitizeTag($0) }
+            .filter { !$0.isEmpty }
+            .map { "REMOVE \(variable):\($0)" }
+            .joined(separator: "\n")
     }
 
     private func uniqueTags(_ tags: [String]) -> [String] {
@@ -1019,13 +1069,15 @@ class FileWatchManager: ObservableObject {
         return values.compactMap { $0 as? String }.map { sanitizeTag($0) }.filter { !$0.isEmpty }
     }
     
-    /// Update tags for all files in a folder
-    func updateFolderTags(_ folderPath: String, tags: [String]) async throws {
-        let folderManagedTags = inheritedTagsForFolder(folderPath, tags: tags)
+    /// Update folder tags for all files in a folder (labels-only).
+    func updateFolderTags(_ folderPath: String, tags: [String], previousTags: [String]? = nil) async throws {
+        let newFolderManagedTags = inheritedTagsForFolder(folderPath, tags: tags)
+        let oldFolderManagedTags = inheritedTagsForFolder(folderPath, tags: previousTags ?? tags)
+        let baseLabels = Set(["File", "Node"])
 
         let fetchQuery = """
         MATCH (f:File {folder_root: $folder_root})
-        RETURN f.path as path, coalesce(f.file_tags, []) as file_tags
+        RETURN f.path as path, labels(f) as labels
         """
         let fetched = try await executeCypher(fetchQuery, parameters: ["folder_root": folderPath])
 
@@ -1035,22 +1087,23 @@ class FileWatchManager: ObservableObject {
             for entry in data {
                 guard let row = entry["row"] as? [Any], row.count >= 2 else { continue }
                 guard let path = row[0] as? String else { continue }
-                let fileTags = uniqueTags(tagsFromAny(row[1]))
-                let effectiveTags = uniqueTags(folderManagedTags + fileTags)
+                let existingLabels = uniqueTags(tagsFromAny(row[1]))
+                let fileSpecificLabels = existingLabels.filter { !oldFolderManagedTags.contains($0) && !baseLabels.contains($0) }
+                let effectiveTags = uniqueTags(newFolderManagedTags + fileSpecificLabels)
+                let desired = desiredLabels(for: effectiveTags)
+                let labelsToRemove = oldFolderManagedTags.filter { !newFolderManagedTags.contains($0) }
+                let addClauses = setLabelClauses(variable: "f", labels: desired)
+                let removeClauses = removeLabelClauses(variable: "f", labels: labelsToRemove)
 
                 let updateQuery = """
                 MATCH (f:File {path: $path, folder_root: $folder_root})
-                SET f.folder_tags = $folder_tags
-                SET f.file_tags = $file_tags
-                SET f.tags = $tags
+                \(addClauses)
+                \(removeClauses)
                 RETURN count(f) as updated
                 """
                 let result = try await executeCypher(updateQuery, parameters: [
                     "path": path,
                     "folder_root": folderPath,
-                    "folder_tags": folderManagedTags,
-                    "file_tags": fileTags,
-                    "tags": effectiveTags,
                 ])
 
                 if let r = result["results"] as? [[String: Any]],
@@ -1074,6 +1127,7 @@ class FileWatchManager: ObservableObject {
         let sanitized = sanitizeTag(tag)
         guard !sanitized.isEmpty else { return }
         
+        let previousTags = watchedFolders[index].tags
         // Add to local folder tags
         if !watchedFolders[index].tags.contains(sanitized) {
             await MainActor.run {
@@ -1082,8 +1136,8 @@ class FileWatchManager: ObservableObject {
             }
         }
         
-        // Update all files in database
-        try await updateFolderTags(folderPath, tags: watchedFolders[index].tags)
+        // Update all files in database (labels-only)
+        try await updateFolderTags(folderPath, tags: watchedFolders[index].tags, previousTags: previousTags)
     }
     
     /// Remove a tag from a folder (updates all files)
@@ -1094,14 +1148,15 @@ class FileWatchManager: ObservableObject {
         
         let sanitized = sanitizeTag(tag)
         
+        let previousTags = watchedFolders[index].tags
         // Remove from local folder tags
         await MainActor.run {
             self.watchedFolders[index].tags.removeAll { $0 == sanitized }
             self.saveFolders()
         }
         
-        // Update all files in database
-        try await updateFolderTags(folderPath, tags: watchedFolders[index].tags)
+        // Update all files in database (labels-only)
+        try await updateFolderTags(folderPath, tags: watchedFolders[index].tags, previousTags: previousTags)
     }
 
     /// Load indexed files for a folder so users can manage file-level tags.
@@ -1121,28 +1176,26 @@ class FileWatchManager: ObservableObject {
         RETURN f.path as path,
                f.name as name,
                f.folder_root as folder_root,
-               coalesce(f.folder_tags, $default_folder_tags) as folder_tags,
-               coalesce(f.file_tags, []) as file_tags,
-               coalesce(f.tags, []) as tags
+               labels(f) as labels
         ORDER BY f.path
         """
 
         do {
             let result = try await executeCypher(query, parameters: [
-                "folder_root": folderPath,
-                "default_folder_tags": defaultInherited
+                "folder_root": folderPath
             ])
 
             let parsed: [IndexedFolderFile]
             if let results = result["results"] as? [[String: Any]],
                let data = results.first?["data"] as? [[String: Any]] {
                 parsed = data.compactMap { rowWrapper in
-                    guard let row = rowWrapper["row"] as? [Any], row.count >= 6 else { return nil }
+                    guard let row = rowWrapper["row"] as? [Any], row.count >= 4 else { return nil }
                     guard let path = row[0] as? String else { return nil }
                     let name = (row[1] as? String) ?? (path as NSString).lastPathComponent
-                    let inherited = uniqueTags(tagsFromAny(row[3]))
-                    let fileTags = uniqueTags(tagsFromAny(row[4]))
-                    let effective = uniqueTags(tagsFromAny(row[5]).isEmpty ? (inherited + fileTags) : tagsFromAny(row[5]))
+                    let inherited = defaultInherited
+                    let labels = uniqueTags(tagsFromAny(row[3]))
+                    let fileTags = labels.filter { !inherited.contains($0) && $0 != "File" && $0 != "Node" }
+                    let effective = uniqueTags(inherited + fileTags)
                     let rel = path.hasPrefix(folderPath + "/") ? String(path.dropFirst(folderPath.count + 1)) : (path as NSString).lastPathComponent
                     return IndexedFolderFile(
                         path: path,
@@ -1179,21 +1232,17 @@ class FileWatchManager: ObservableObject {
         let currentFileTags = folderFiles[folderPath]?.first(where: { $0.path == filePath })?.fileTags ?? []
         let newFileTags = uniqueTags(currentFileTags + [sanitized])
         let effectiveTags = uniqueTags(inherited + newFileTags)
+        let labelSetClause = setLabelClauses(variable: "f", labels: desiredLabels(for: effectiveTags))
 
         let query = """
         MATCH (f:File {path: $path, folder_root: $folder_root})
-        SET f.file_tags = $file_tags
-        SET f.folder_tags = $folder_tags
-        SET f.tags = $tags
+        \(labelSetClause)
         RETURN f.path as path
         """
 
         _ = try await executeCypher(query, parameters: [
             "path": filePath,
             "folder_root": folderPath,
-            "file_tags": newFileTags,
-            "folder_tags": inherited,
-            "tags": effectiveTags,
         ])
         await loadIndexedFiles(for: folderPath)
     }
@@ -1214,21 +1263,19 @@ class FileWatchManager: ObservableObject {
         let currentFileTags = folderFiles[folderPath]?.first(where: { $0.path == filePath })?.fileTags ?? []
         let newFileTags = currentFileTags.filter { $0 != sanitized }
         let effectiveTags = uniqueTags(inherited + newFileTags)
+        let labelSetClause = setLabelClauses(variable: "f", labels: desiredLabels(for: effectiveTags))
+        let removeClause = removeLabelClauses(variable: "f", labels: [sanitized])
 
         let query = """
         MATCH (f:File {path: $path, folder_root: $folder_root})
-        SET f.file_tags = $file_tags
-        SET f.folder_tags = $folder_tags
-        SET f.tags = $tags
+        \(labelSetClause)
+        \(removeClause)
         RETURN f.path as path
         """
 
         _ = try await executeCypher(query, parameters: [
             "path": filePath,
             "folder_root": folderPath,
-            "file_tags": newFileTags,
-            "folder_tags": inherited,
-            "tags": effectiveTags,
         ])
         await loadIndexedFiles(for: folderPath)
     }
@@ -1265,19 +1312,37 @@ class FileWatchManager: ObservableObject {
         
         print("🗑️  Deleting \(fileCount) File nodes and \(chunkCount) FileChunk nodes for folder: \(folderPath)")
         
-        // Delete all File nodes and their associated FileChunk nodes
-        // DETACH DELETE on File removes HAS_CHUNK relationships
-        // Then explicitly delete orphaned FileChunk nodes
+        // Delete all File nodes for this folder root.
+        // This is the primary contract for "trash folder" behavior.
         let deleteQuery = """
         MATCH (f:File {folder_root: $folder_root})
-        OPTIONAL MATCH (f)-[:HAS_CHUNK]->(c)
-        WITH f, collect(c) as chunks
         DETACH DELETE f
-        FOREACH (chunk IN chunks | DETACH DELETE chunk)
+        RETURN count(f) as deleted
         """
         
         _ = try await executeCypher(deleteQuery, parameters: ["folder_root": folderPath])
-        print("✅ Successfully deleted all nodes for folder: \(folderPath)")
+
+        // Defensive verification pass (best effort).
+        let verifyQuery = """
+        MATCH (f:File {folder_root: $folder_root})
+        RETURN count(f) as remaining
+        """
+        let verifyJSON = try await executeCypher(verifyQuery, parameters: ["folder_root": folderPath])
+        var remaining = 0
+        if let results = verifyJSON["results"] as? [[String: Any]],
+           let data = results.first?["data"] as? [[String: Any]],
+           let row = data.first?["row"] as? [Any],
+           let value = row.first as? NSNumber {
+            remaining = value.intValue
+        }
+        if remaining > 0 {
+            throw NSError(
+                domain: "FileWatchManager",
+                code: -1,
+                userInfo: [NSLocalizedDescriptionKey: "Folder delete incomplete: \(remaining) nodes still remain"]
+            )
+        }
+        print("✅ Successfully deleted all File nodes for folder: \(folderPath)")
     }
     
     /// Perform vector search

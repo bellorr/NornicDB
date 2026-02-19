@@ -2219,11 +2219,12 @@ struct SettingsView: View {
                             
                             // Embedding Dimensions selector
                             HStack(spacing: 12) {
-                                Text("Dimensions:")
-                                    .font(.caption)
-                                    .foregroundColor(.secondary)
+                                Text("Dimensions")
+                                    .font(.subheadline)
+                                    .fontWeight(.semibold)
+                                    .foregroundColor(.primary)
                                 
-                                Picker("Dimensions", selection: $config.embeddingDimensions) {
+                                Picker("", selection: $config.embeddingDimensions) {
                                     Text("384").tag(384)
                                     Text("512").tag(512)
                                     Text("768").tag(768)
@@ -2232,9 +2233,18 @@ struct SettingsView: View {
                                     Text("3072").tag(3072)
                                 }
                                 .pickerStyle(.menu)
-                                .frame(width: 80)
+                                .labelsHidden()
+                                .frame(width: 90)
                                 
-                                Text("(must match model output)")
+                                Text("\(config.embeddingDimensions)")
+                                    .font(.caption)
+                                    .monospacedDigit()
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 4)
+                                    .background(Color.secondary.opacity(0.18))
+                                    .cornerRadius(6)
+                                
+                                Text("must match model output")
                                     .font(.caption2)
                                     .foregroundColor(.secondary)
                             }

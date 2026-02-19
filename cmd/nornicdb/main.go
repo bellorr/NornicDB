@@ -249,7 +249,8 @@ func runServe(cmd *cobra.Command, args []string) error {
 	if embeddingProvider == "local" {
 		os.Setenv("NORNICDB_EMBEDDING_GPU_LAYERS", fmt.Sprintf("%d", embeddingGPULayers))
 	}
-	adminPassword, _ := cmd.Flags().GetString("admin-password")
+	adminPasswordFlag, _ := cmd.Flags().GetString("admin-password")
+	adminPasswordFlagChanged := cmd.Flags().Changed("admin-password")
 	mcpEnabled, _ := cmd.Flags().GetBool("mcp-enabled")
 	parallelEnabled, _ := cmd.Flags().GetBool("parallel")
 	parallelWorkers, _ := cmd.Flags().GetInt("parallel-workers")
@@ -566,7 +567,10 @@ func runServe(cmd *cobra.Command, args []string) error {
 
 	// Setup authentication
 	var authenticator *auth.Authenticator
-	if !noAuth {
+	// Keep auth bootstrap behavior explicit: auth is enabled unless --no-auth is set.
+	// Wizard configs may provide username/password without auth.enabled.
+	authEnabled := !noAuth
+	if authEnabled {
 		fmt.Println("🔐 Setting up authentication...")
 		authConfig := auth.DefaultAuthConfig()
 		// Use JWT secret from config (auto-generated if not set)
@@ -590,10 +594,18 @@ func runServe(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("creating authenticator: %w", authErr)
 		}
 
-		// Create admin user with configured username (fallback from auth default)
+		// Create admin user with configured credentials (fallback from auth defaults).
 		adminUsername := authConfig.DefaultAdminUsername
 		if adminUsername == "" {
 			adminUsername = auth.DefaultAuthConfig().DefaultAdminUsername
+		}
+		adminPassword := cfg.Auth.InitialPassword
+		if adminPassword == "" {
+			adminPassword = adminPasswordFlag
+		}
+		// Preserve explicit CLI override when intentionally provided.
+		if adminPasswordFlagChanged && adminPasswordFlag != "" {
+			adminPassword = adminPasswordFlag
 		}
 		_, err := authenticator.CreateUser(adminUsername, adminPassword, []auth.Role{auth.RoleAdmin})
 		if err != nil {
@@ -690,9 +702,20 @@ func runServe(cmd *cobra.Command, args []string) error {
 		fmt.Printf("  • MCP:          http://%s:%d/mcp\n", displayAddr, httpPort)
 	}
 	fmt.Println()
-	if !noAuth {
+	if authEnabled {
+		adminUsername := cfg.Auth.InitialUsername
+		if adminUsername == "" {
+			adminUsername = auth.DefaultAuthConfig().DefaultAdminUsername
+		}
+		adminPassword := cfg.Auth.InitialPassword
+		if adminPassword == "" {
+			adminPassword = adminPasswordFlag
+		}
+		if adminPasswordFlagChanged && adminPasswordFlag != "" {
+			adminPassword = adminPasswordFlag
+		}
 		fmt.Println("Authentication:")
-		fmt.Printf("  • Username: admin\n")
+		fmt.Printf("  • Username: %s\n", adminUsername)
 		fmt.Printf("  • Password: %s\n", adminPassword)
 	}
 	fmt.Println()
