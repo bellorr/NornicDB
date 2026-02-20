@@ -9,7 +9,92 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - See `docs/latest-untagged.md` for the untagged `latest` image changelog.
 
-## [Unreleased] - Changes since v1.0.11-preview
+## [1.0.12-preview] - 2026-02-20
+
+### Added
+
+- **BM25 v2 Fulltext Engine**: Complete rewrite of the fulltext index (`FulltextIndexV2`) with compact uint32/uint16 postings (5–8× memory reduction), top-k score-bound pruning, per-query plan caching, batch index mutations, and O(log n) prefix expansion via sorted lexicon. Now the default engine; opt out with `NORNICDB_SEARCH_BM25_ENGINE=v1`.
+- **BM25-Seeded HNSW Construction**: `LexicalSeedDocIDs` identifies the 2,048 most lexically discriminative documents (256 high-IDF terms × 8 top docs) and inserts them first, establishing a well-connected graph backbone before the remaining corpus. Reduces HNSW build time for 1M embeddings from ~27 min to ~10 min (2.7× speedup) with no change to recall or graph quality. Tunable via `NORNICDB_HNSW_LEXICAL_SEED_MAX_TERMS` and `NORNICDB_HNSW_LEXICAL_SEED_PER_TERM`. The same seed set initialises k-means centroids via `bm25+kmeans++` mode, reducing k-means convergence iterations by ~40%.
+- **Hybrid Cluster Routing**: New `HybridClusterRouter` blends semantic and lexical cluster scores (`w_sem × semantic + w_lex × lexical`) for IVF cluster probe selection, ensuring queries route to the correct cluster even when the query embedding is between two equidistant centroids. Tunable via `NORNICDB_VECTOR_ROUTING_MODE=hybrid`, `_HYBRID_ROUTING_W_SEM`, `_HYBRID_ROUTING_W_LEX`.
+- **Search Result Cache**: LRU cache (default 1,000 entries, 5-minute TTL) for search responses. Cache key incorporates query string, limit, result types, and reranker settings. Automatically invalidated on index mutations.
+- **Stage-2 Reranking**: Two new reranking backends available after initial RRF retrieval:
+  - `LocalReranker`: loads a GGUF cross-encoder model locally (e.g. `bge-reranker-v2-m3`) for accurate query-document relevance scoring.
+  - `LLMReranker`: fail-open LLM-based reranker via Heimdall or any external provider; falls back to original RRF order on error.
+  - Configured via `NORNICDB_SEARCH_RERANK_ENABLED`, `_PROVIDER`, `_MODEL`, `_TOP_N`.
+- **Configurable Embedding Properties**: Control which node properties contribute to embedding text via `NORNICDB_EMBEDDING_PROPERTIES_INCLUDE`, `_EXCLUDE`, and `NORNICDB_EMBEDDING_INCLUDE_LABELS`. Allows domain-specific embedding tuning without code changes.
+- **Search Readiness API**: `IsReady()` and `GetBuildProgress()` endpoints expose index build status and ETA so clients and the UI can show warm-up progress instead of partial results.
+- **Per-Database Config Overrides**: New `/admin/databases/{db}/config` API allows setting embedding and search parameters (model, dimensions, include/exclude properties) per database without server restart.
+- **Per-Database RBAC / Access Control**: New auth primitives — `Role`, `Entitlement`, `Privilege` — with a per-database allowlist stored in the system graph. `DatabaseAccessMode` interface and `RequestRBACContext` propagate identity through the request path. New Web UI page for database access management.
+- **Heimdall Remote LLM Providers**: `GeneratorOpenAI` and `GeneratorOllama` bring OpenAI-compatible and Ollama APIs as first-class Heimdall backends, supplementing local GGUF. Configurable via `NORNICDB_HEIMDALL_PROVIDER`, `_OPENAI_API_KEY`, `_OLLAMA_BASE_URL`.
+- **Heimdall Streaming Agentic Loop**: `GenerateWithTools` implements a native tool-call streaming loop with real-time SSE progress events. The loop autonomously executes MCP memory operations (store/recall/discover) and emits per-step notifications to the client.
+- **Multi-DB Heimdall Router**: Heimdall can now access all configured databases, not just the default, enabling cross-database memory and retrieval operations.
+- **Write Forwarding**: Follower nodes in replication deployments automatically forward write requests to the leader, removing the need for clients to route writes explicitly.
+- **macOS File Browser View**: New file browser tab in the macOS menu bar app for browsing and tagging indexed files directly from the UI.
+- **macOS Folder-Level Tag Inheritance**: Tags applied to a folder node propagate automatically as labels to all descendant file nodes.
+- **BM25 Lexical Index Persistence** *(experimental, gated by `NORNICDB_PERSIST_SEARCH_INDEXES`)*: BM25 index is saved to disk alongside the HNSW and vector indexes to eliminate rebuild time on restart.
+- **VectorFileStore** *(experimental)*: File-backed append-only vector storage keeps only an id→offset map in RAM, reducing in-process memory for large embedding corpora. Only the id→offset map (~80 bytes/vector) lives in RAM; all 4 KB vectors are paged from disk on demand.
+- **HNSW & IVF-HNSW Index Persistence** *(experimental)*: Debounced, non-blocking background saves of both HNSW and IVF-HNSW indexes. Configurable via `NORNICDB_SEARCH_INDEX_PERSIST_DELAY_SEC`.
+- **ANTLR Parser: REDUCE and FOREACH**: ANTLR parser now supports `REDUCE()` accumulator expressions and `FOREACH` iteration clauses.
+- **Orphan Detection Improvement**: Stale vector index entries for deleted nodes are identified and removed during index rebuild, preventing phantom candidates in search results.
+- **`scripts/seed_and_search.py`**: End-to-end benchmark script for seeding a corpus and measuring search latency at scale.
+- **`scripts/convert_search_index_to_msgpack`**: Utility for migrating existing BM25 index files to msgpack format.
+- **`CONTRIBUTORS.md`**: New contributors file.
+
+### Changed
+
+- **Cypher: Transactional Semantics**: `BEGIN` / `COMMIT` now work as a proper multi-statement transaction boundary; queries inside a `BEGIN` block share state and commit atomically.
+- **Cypher: SET Expression Evaluation**: `SET n.x = reduce(acc, x IN list | ...)`, list concatenation, and other runtime expressions are now evaluated inside `SET` rather than stored literally.
+- **Cypher: SET Map Parameter Substitution**: `SET n += $props` correctly expands parameter maps at runtime.
+- **Cypher: WHERE Relationship Patterns**: Complex `WHERE` clauses containing relationship patterns with inline properties are now evaluated correctly.
+- **Cypher: OPTIONAL MATCH Compound Patterns**: Multi-hop `OPTIONAL MATCH` patterns now correctly propagate null bindings for unmatched paths.
+- **Cypher: `toLower()` / `toUpper()` with Parameters**: Function calls where the argument is a parameter reference (e.g. `toLower($name)`) now resolve the parameter before applying the function.
+- **Storage: EmbedMeta Field**: Embedding metadata (`_embeddings_stored_separately`, `_embedding_chunk_count`) moved from raw node properties to a dedicated `EmbedMeta` struct, avoiding property namespace pollution.
+- **Storage: Bounded Embedding Transactions**: Large embedding chunks are written in separate, size-bounded transactions to prevent BadgerDB transaction size limit errors.
+- **Storage: AsyncEngine Count Lock Order**: Fixed lock acquisition order in count queries to eliminate a latent deadlock under concurrent read/write load.
+- **WAL: Snapshot Retention Policies**: Configurable retention period and maximum snapshot count prevent unbounded WAL growth.
+- **WAL: Compact JSON Snapshots**: Snapshot encoding switched to compact JSON, reducing snapshot file size.
+- **WAL: Buffered Atomic Writes**: `writeAtomicRecordV2Bufio` wraps WAL writes in a `bufio.Writer`, reducing syscall count and improving write throughput on spinning or NVMe storage.
+- **WAL: Synchronous Writes for System Commands**: `CREATE DATABASE` and `DROP DATABASE` use synchronous WAL writes to guarantee durability of administrative operations.
+- **Heimdall: Plugin Refactor**: Built-in actions extracted into external plugin packages, reducing Heimdall core size and enabling independent plugin versioning.
+- **Heimdall: RAG Pipeline**: Query embedding is skipped when the query already has an embedding; exponential backoff added for embedding failures; context window handling improved.
+- **macOS: Tag-Safe Labels**: File-indexer tagging updated to store tags as node labels only, with strict label validation across all SET/CREATE mutation paths.
+
+### Fixed
+
+- AsyncEngine lock-order deadlock in concurrent count queries.
+- `SET n += $props` not substituting parameter map values.
+- `WHERE (a)-[r:TYPE {prop: val}]->(b)` patterns incorrectly rejected or returning empty results.
+- `toLower($param)` and `toUpper($param)` returning the literal parameter name.
+- `OPTIONAL MATCH` with multi-hop patterns not propagating null bindings correctly.
+- Pending embedding queue entries not cleaned up on node deletion, causing ghost queue entries.
+- Mimir legacy loader removed — no longer attempts compatibility shim on startup.
+- macOS menu bar: connection reliability, dark mode dimension control visibility, focus handling, folder-trash DB deletion.
+- Windows build target for cross-compilation.
+
+### Performance
+
+- **Sub-10ms graph-RAG retrieval**: full round-trip (embed query → RRF hybrid search → hydrate → HTTP serialize) measured at 7–8 ms in production on million-node datasets.
+- **BM25 indexing**: 3–5× throughput improvement from batch mutations; 5–8× memory reduction from compact postings.
+- **HNSW construction**: 2.7× faster for 1M-embedding corpus with BM25-seeded insertion order; seeded build runs within 13% of the theoretical construction minimum.
+- **Buffered WAL writes**: reduced syscall overhead on write-heavy workloads.
+
+### Web UI (Bifrost)
+
+- Database selector in the search panel — search targets the active database, not just the default.
+- RRF score and per-source rank columns in search results for explainability.
+- Search readiness ETA banner shown while indexes are warming up.
+- Database access management page for configuring per-database RBAC roles.
+- Dynamic role list in the user admin page reflects server-side role changes in real time.
+
+### Technical Details
+
+- **Statistics**: 69 commits, 332 files changed, +34,077 / −13,473 lines.
+- **New packages / files**: `pkg/search/fulltext_index_v2.go`, `pkg/search/vector_file_store.go`, `pkg/search/hybrid_cluster_routing.go`, `pkg/search/local_rerank.go`, `pkg/search/llm_rerank.go`, `pkg/auth/allowlist.go`, `pkg/auth/database_access.go`, `pkg/auth/privileges.go`, `pkg/auth/roles.go`, `pkg/heimdall/generator_openai.go`, `pkg/heimdall/generator_ollama.go`, `pkg/config/dbconfig/`.
+- **Removed**: `pkg/storage/mimir_loader.go` (legacy compatibility shim).
+
+---
+
+## [1.0.11] - 2026-01-27
 
 ### Added
 
@@ -747,7 +832,10 @@ See [CONTRIBUTING.md](docs/CONTRIBUTING.md) and [AGENTS.md](AGENTS.md) for contr
 
 ---
 
-[Unreleased]: https://github.com/orneryd/NornicDB/compare/v1.0.6...HEAD
+[1.0.12-preview]: https://github.com/orneryd/NornicDB/compare/v1.0.11...v1.0.12-preview
+[1.0.11]: https://github.com/orneryd/NornicDB/compare/v1.0.10...v1.0.11
+[1.0.10]: https://github.com/orneryd/NornicDB/compare/v1.0.9...v1.0.10
+[1.0.9]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.9
 [1.0.6]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.6
 [1.0.1]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.1
 [1.0.0]: https://github.com/orneryd/NornicDB/releases/tag/v1.0.0

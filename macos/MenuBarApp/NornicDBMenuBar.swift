@@ -3109,6 +3109,9 @@ struct FirstRunWizard: View {
             }
             .padding()
         }
+        .overlay(alignment: .bottom) {
+            wizardScrollHint
+        }
     }
     
     var securityStep: some View {
@@ -3320,6 +3323,9 @@ struct FirstRunWizard: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .padding()
+        }
+        .overlay(alignment: .bottom) {
+            wizardScrollHint
         }
     }
     
@@ -3632,6 +3638,35 @@ struct FirstRunWizard: View {
                 config.useAppleIntelligence = true
             }
         }
+        .overlay(alignment: .bottom) {
+            wizardScrollHint
+        }
+    }
+
+    private var wizardScrollHint: some View {
+        VStack(spacing: 0) {
+            LinearGradient(
+                colors: [
+                    Color.clear,
+                    Color(NSColor.windowBackgroundColor).opacity(0.94),
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+            .frame(height: 22)
+
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.down")
+                    .font(.caption2)
+                Text("Scroll for more")
+                    .font(.caption2)
+            }
+            .foregroundColor(.secondary)
+            .padding(.bottom, 6)
+            .frame(maxWidth: .infinity)
+            .background(Color(NSColor.windowBackgroundColor).opacity(0.94))
+        }
+        .allowsHitTesting(false)
     }
     
     private func needsModels() -> Bool {
