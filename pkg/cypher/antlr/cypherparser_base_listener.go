@@ -50,6 +50,12 @@ func (s *BaseCypherParserListener) EnterSchemaCommand(ctx *SchemaCommandContext)
 // ExitSchemaCommand is called when production schemaCommand is exited.
 func (s *BaseCypherParserListener) ExitSchemaCommand(ctx *SchemaCommandContext) {}
 
+// EnterPropertyTypeName is called when production propertyTypeName is entered.
+func (s *BaseCypherParserListener) EnterPropertyTypeName(ctx *PropertyTypeNameContext) {}
+
+// ExitPropertyTypeName is called when production propertyTypeName is exited.
+func (s *BaseCypherParserListener) ExitPropertyTypeName(ctx *PropertyTypeNameContext) {}
+
 // EnterRegularQuery is called when production regularQuery is entered.
 func (s *BaseCypherParserListener) EnterRegularQuery(ctx *RegularQueryContext) {}
 

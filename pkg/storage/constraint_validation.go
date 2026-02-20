@@ -4,6 +4,7 @@ package storage
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -332,7 +333,10 @@ const (
 	PropertyTypeFloat    PropertyType = "FLOAT"
 	PropertyTypeBoolean  PropertyType = "BOOLEAN"
 	PropertyTypeDate     PropertyType = "DATE"
-	PropertyTypeDateTime PropertyType = "DATETIME"
+	PropertyTypeDateTime PropertyType = "DATETIME" // Legacy alias for zoned datetime
+	// Neo4j temporal property type constraints.
+	PropertyTypeZonedDateTime PropertyType = "ZONED DATETIME"
+	PropertyTypeLocalDateTime PropertyType = "LOCAL DATETIME"
 )
 
 // ValidatePropertyType checks if a value matches the expected type.
@@ -378,18 +382,73 @@ func ValidatePropertyType(value interface{}, expectedType PropertyType) error {
 		if _, ok := value.(bool); !ok {
 			return fmt.Errorf("expected BOOLEAN, got %T", value)
 		}
-	case PropertyTypeDate, PropertyTypeDateTime:
-		switch value.(type) {
+	case PropertyTypeDate:
+		switch v := value.(type) {
 		case time.Time:
 			return nil
+		case string:
+			if _, err := time.Parse("2006-01-02", strings.TrimSpace(v)); err == nil {
+				return nil
+			}
+			return fmt.Errorf("expected DATE, got %T", value)
 		default:
-			return fmt.Errorf("expected %s, got %T", expectedType, value)
+			return fmt.Errorf("expected DATE, got %T", value)
+		}
+	case PropertyTypeDateTime, PropertyTypeZonedDateTime:
+		switch v := value.(type) {
+		case time.Time:
+			return nil
+		case string:
+			if isZonedDateTimeString(v) {
+				return nil
+			}
+			return fmt.Errorf("expected ZONED DATETIME, got %T", value)
+		default:
+			return fmt.Errorf("expected ZONED DATETIME, got %T", value)
+		}
+	case PropertyTypeLocalDateTime:
+		switch v := value.(type) {
+		case string:
+			if isLocalDateTimeString(v) {
+				return nil
+			}
+			return fmt.Errorf("expected LOCAL DATETIME, got %T", value)
+		default:
+			return fmt.Errorf("expected LOCAL DATETIME, got %T", value)
 		}
 	default:
 		return fmt.Errorf("unknown property type: %s", expectedType)
 	}
 
 	return nil
+}
+
+func isZonedDateTimeString(raw string) bool {
+	s := strings.TrimSpace(strings.Trim(raw, "'\""))
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+	} {
+		if _, err := time.Parse(layout, s); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+func isLocalDateTimeString(raw string) bool {
+	s := strings.TrimSpace(strings.Trim(raw, "'\""))
+	for _, layout := range []string{
+		"2006-01-02T15:04:05.999999999",
+		"2006-01-02T15:04:05",
+		"2006-01-02 15:04:05.999999999",
+		"2006-01-02 15:04:05",
+	} {
+		if _, err := time.Parse(layout, s); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // ValidatePropertyTypeConstraintOnCreation validates existing data against type constraint.

@@ -41,9 +41,9 @@ var (
 	constraintUnnamedForRequireTemporal = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+\(([^)]+)\)\s+IS\s+TEMPORAL(?:\s+NO\s+OVERLAP)?`)
 
 	// Property type constraints
-	constraintNamedForRequireType   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)
-	constraintUnnamedForRequireType = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)
-	constraintOnAssertType          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+::\s*(\w+)`)
+	constraintNamedForRequireType   = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT\s+(\w+)(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)`)
+	constraintUnnamedForRequireType = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+FOR\s+\((\w+):(\w+)\)\s+REQUIRE\s+(\w+)\.(\w+)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)`)
+	constraintOnAssertType          = regexp.MustCompile(`(?i)CREATE\s+CONSTRAINT(?:\s+IF\s+NOT\s+EXISTS)?\s+ON\s+\((\w+):(\w+)\)\s+ASSERT\s+(\w+)\.(\w+)\s+IS\s+(?:::|TYPED)\s*([A-Z]+(?:\s+[A-Z]+)?)`)
 
 	// DROP CONSTRAINT
 	dropConstraintPattern = regexp.MustCompile(`(?i)DROP\s+CONSTRAINT(?:\s+IF\s+EXISTS)?\s+(\w+)`)

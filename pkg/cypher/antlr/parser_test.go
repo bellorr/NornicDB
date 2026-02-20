@@ -113,6 +113,9 @@ func TestANTLRParserBasicQueries(t *testing.T) {
 		// CALL
 		{"call procedure", "CALL db.labels()"},
 		{"call with yield", "CALL db.labels() YIELD label RETURN label"},
+		// Schema type constraints (Neo4j 5)
+		{"constraint typed zoned datetime", "CREATE CONSTRAINT event_ts_type IF NOT EXISTS FOR (e:Event) REQUIRE e.ts IS :: ZONED DATETIME"},
+		{"constraint typed local datetime", "CREATE CONSTRAINT meeting_start_type IF NOT EXISTS FOR (m:Meeting) REQUIRE m.start IS TYPED LOCAL DATETIME"},
 	}
 
 	for _, tt := range queries {

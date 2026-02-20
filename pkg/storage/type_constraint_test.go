@@ -3,6 +3,7 @@ package storage
 
 import (
 	"testing"
+	"time"
 )
 
 // TestValidatePropertyType tests property type validation.
@@ -37,6 +38,14 @@ func TestValidatePropertyType(t *testing.T) {
 		{"null integer", nil, PropertyTypeInteger, false},
 		{"null float", nil, PropertyTypeFloat, false},
 		{"null boolean", nil, PropertyTypeBoolean, false},
+
+		// Temporal type tests (Neo4j semantics)
+		{"zoned datetime valid RFC3339", "2025-11-27T10:30:00Z", PropertyTypeZonedDateTime, false},
+		{"zoned datetime valid offset", "2025-11-27T10:30:00+02:00", PropertyTypeZonedDateTime, false},
+		{"zoned datetime invalid local format", "2025-11-27T10:30:00", PropertyTypeZonedDateTime, true},
+		{"local datetime valid", "2025-11-27T10:30:00", PropertyTypeLocalDateTime, false},
+		{"local datetime invalid zoned format", "2025-11-27T10:30:00Z", PropertyTypeLocalDateTime, true},
+		{"legacy datetime alias accepts time.Time", time.Now(), PropertyTypeDateTime, false},
 	}
 
 	for _, tt := range tests {

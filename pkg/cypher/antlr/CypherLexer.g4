@@ -153,6 +153,7 @@ IF         : 'IF';
 TRANSACTIONS: 'TRANSACTIONS';
 ROWS       : 'ROWS';
 ASSERT     : 'ASSERT';
+TYPED      : 'TYPED';
 KEY        : 'KEY';
 NODE       : 'NODE';
 SHORTESTPATH: 'shortestPath';

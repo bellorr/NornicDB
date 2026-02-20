@@ -57,17 +57,19 @@ FOR (n:FactVersion) REQUIRE n.asserted_by IS NOT NULL;
 
 // Type constraints
 CREATE CONSTRAINT fact_version_valid_from_type IF NOT EXISTS 
-FOR (n:FactVersion) REQUIRE n.valid_from IS :: DATETIME;
+FOR (n:FactVersion) REQUIRE n.valid_from IS :: ZONED DATETIME;
 
 CREATE CONSTRAINT fact_version_valid_to_type IF NOT EXISTS 
-FOR (n:FactVersion) REQUIRE n.valid_to IS :: DATETIME;
+FOR (n:FactVersion) REQUIRE n.valid_to IS :: ZONED DATETIME;
 
 CREATE CONSTRAINT fact_version_asserted_at_type IF NOT EXISTS 
-FOR (n:FactVersion) REQUIRE n.asserted_at IS :: DATETIME;
+FOR (n:FactVersion) REQUIRE n.asserted_at IS :: ZONED DATETIME;
 
-// Temporal no-overlap constraint (NornicDB extension)
-CREATE CONSTRAINT fact_version_temporal_no_overlap IF NOT EXISTS
-FOR (n:FactVersion) REQUIRE (n.fact_key, n.valid_from, n.valid_to) IS TEMPORAL NO OVERLAP;
+// Temporal integrity (supported today): one version start per fact_key.
+// Note: full temporal no-overlap must be enforced in write/query logic unless
+// the engine adds native TEMPORAL NO OVERLAP constraint support.
+CREATE CONSTRAINT fact_version_fact_key_valid_from_node_key IF NOT EXISTS
+FOR (n:FactVersion) REQUIRE (n.fact_key, n.valid_from) IS NODE KEY;
 
 // ----------------------------------------------------------------------------
 // MutationEvent Constraints
@@ -95,7 +97,7 @@ FOR (n:MutationEvent) REQUIRE n.event_id IS UNIQUE;
 
 // Type constraints
 CREATE CONSTRAINT mutation_event_timestamp_type IF NOT EXISTS 
-FOR (n:MutationEvent) REQUIRE n.timestamp IS :: DATETIME;
+FOR (n:MutationEvent) REQUIRE n.timestamp IS :: ZONED DATETIME;
 
 CREATE CONSTRAINT mutation_event_op_type_string IF NOT EXISTS 
 FOR (n:MutationEvent) REQUIRE n.op_type IS :: STRING;

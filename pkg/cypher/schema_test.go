@@ -325,6 +325,40 @@ func TestCreateNodeKeyConstraint(t *testing.T) {
 	}
 }
 
+func TestCanonicalBootstrapFactVersionConstraints(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	queries := []string{
+		"CREATE CONSTRAINT fact_version_valid_from_type IF NOT EXISTS FOR (n:FactVersion) REQUIRE n.valid_from IS :: ZONED DATETIME",
+		"CREATE CONSTRAINT fact_version_valid_to_type IF NOT EXISTS FOR (n:FactVersion) REQUIRE n.valid_to IS :: ZONED DATETIME",
+		"CREATE CONSTRAINT fact_version_asserted_at_type IF NOT EXISTS FOR (n:FactVersion) REQUIRE n.asserted_at IS :: ZONED DATETIME",
+		"CREATE CONSTRAINT fact_version_fact_key_valid_from_node_key IF NOT EXISTS FOR (n:FactVersion) REQUIRE (n.fact_key, n.valid_from) IS NODE KEY",
+	}
+
+	for _, query := range queries {
+		if _, err := exec.Execute(ctx, query, nil); err != nil {
+			t.Fatalf("Failed to execute canonical bootstrap constraint query %q: %v", query, err)
+		}
+	}
+
+	allConstraints := store.GetSchema().GetAllConstraints()
+	if len(allConstraints) != 1 {
+		t.Fatalf("Expected 1 standard constraint (NODE KEY), got %d", len(allConstraints))
+	}
+
+	if allConstraints[0].Type != storage.ConstraintNodeKey {
+		t.Fatalf("Expected NODE KEY constraint, got %s", allConstraints[0].Type)
+	}
+
+	propertyTypeConstraints := store.GetSchema().GetAllPropertyTypeConstraints()
+	if len(propertyTypeConstraints) != 3 {
+		t.Fatalf("Expected 3 property type constraints, got %d", len(propertyTypeConstraints))
+	}
+}
+
 func TestCreateTemporalConstraint(t *testing.T) {
 	baseStore := storage.NewMemoryEngine()
 	store := storage.NewNamespacedEngine(baseStore, "test")
@@ -371,6 +405,55 @@ func TestCreateTypeConstraint(t *testing.T) {
 	_, err = exec.Execute(ctx, "CREATE (:User {age: 'thirty'})", nil)
 	if err == nil {
 		t.Fatal("Expected type constraint violation, got nil")
+	}
+}
+
+func TestCreateTypeConstraintWithTypedKeyword(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE CONSTRAINT event_ts_type IF NOT EXISTS FOR (e:Event) REQUIRE e.ts IS TYPED ZONED DATETIME", nil)
+	if err != nil {
+		t.Fatalf("Failed to create type constraint with TYPED syntax: %v", err)
+	}
+}
+
+func TestTemporalTypeConstraintSemantics_ZonedVsLocal(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	exec := NewStorageExecutor(store)
+	ctx := context.Background()
+
+	_, err := exec.Execute(ctx, "CREATE CONSTRAINT event_ts_zoned IF NOT EXISTS FOR (e:Event) REQUIRE e.ts IS :: ZONED DATETIME", nil)
+	if err != nil {
+		t.Fatalf("Failed to create zoned datetime type constraint: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:Event {ts: datetime('2025-11-27T10:30:00Z')})", nil)
+	if err != nil {
+		t.Fatalf("Expected zoned datetime value to satisfy zoned constraint, got: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:Event {ts: localdatetime()})", nil)
+	if err == nil {
+		t.Fatal("Expected localdatetime() to violate ZONED DATETIME constraint")
+	}
+
+	_, err = exec.Execute(ctx, "CREATE CONSTRAINT meeting_local_type IF NOT EXISTS FOR (m:Meeting) REQUIRE m.start IS :: LOCAL DATETIME", nil)
+	if err != nil {
+		t.Fatalf("Failed to create local datetime type constraint: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:Meeting {start: localdatetime()})", nil)
+	if err != nil {
+		t.Fatalf("Expected localdatetime() to satisfy LOCAL DATETIME constraint, got: %v", err)
+	}
+
+	_, err = exec.Execute(ctx, "CREATE (:Meeting {start: datetime('2025-11-27T10:30:00Z')})", nil)
+	if err == nil {
+		t.Fatal("Expected zoned datetime to violate LOCAL DATETIME constraint")
 	}
 }
 

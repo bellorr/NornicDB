@@ -62,8 +62,12 @@ schemaCommand
     | CREATE FULLTEXT INDEX name? (IF NOT EXISTS)? (FOR nodePattern)? ON? EACH? LBRACK expressionChain RBRACK
     | CREATE VECTOR INDEX name? (IF NOT EXISTS)? (FOR nodePattern)? ON? parenExpressionChain? (OPTIONS mapLit)?
     | DROP CONSTRAINT name? (IF EXISTS)?
-    | CREATE CONSTRAINT name? (IF NOT EXISTS)? (FOR nodePattern)? REQUIRE expression (IS UNIQUE | IS NOT NULL_W)
-    | CREATE CONSTRAINT name? (IF NOT EXISTS)? ON? nodePattern? ASSERT (expression | parenExpressionChain) IS (UNIQUE | NOT NULL_W | NODE KEY)
+    | CREATE CONSTRAINT name? (IF NOT EXISTS)? (FOR nodePattern)? REQUIRE expression (IS UNIQUE | IS NOT NULL_W | IS COLON COLON propertyTypeName | IS TYPED propertyTypeName)
+    | CREATE CONSTRAINT name? (IF NOT EXISTS)? ON? nodePattern? ASSERT (expression | parenExpressionChain) IS (UNIQUE | NOT NULL_W | NODE KEY | COLON COLON propertyTypeName | TYPED propertyTypeName)
+    ;
+
+propertyTypeName
+    : name (name)?
     ;
 
 regularQuery
@@ -543,6 +547,7 @@ symbol
     | NULL_W
     | UNIQUE
     | REQUIRE
+    | TYPED
     | IF
     | EACH
     | ALL
@@ -593,6 +598,7 @@ reservedWord
     | DO
     | FOR
     | REQUIRE
+    | TYPED
     | UNIQUE
     | CASE
     | WHEN

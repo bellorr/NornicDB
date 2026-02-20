@@ -573,8 +573,10 @@ func parsePropertyType(typeName string) (storage.PropertyType, error) {
 		return storage.PropertyTypeBoolean, nil
 	case "DATE":
 		return storage.PropertyTypeDate, nil
-	case "DATETIME":
-		return storage.PropertyTypeDateTime, nil
+	case "DATETIME", "ZONED DATETIME", "ZONEDDATETIME":
+		return storage.PropertyTypeZonedDateTime, nil
+	case "LOCAL DATETIME", "LOCALDATETIME":
+		return storage.PropertyTypeLocalDateTime, nil
 	default:
 		return "", fmt.Errorf("unsupported property type: %s", typeName)
 	}

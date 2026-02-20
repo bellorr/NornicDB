@@ -22,6 +22,9 @@ type CypherParserListener interface {
 	// EnterSchemaCommand is called when entering the schemaCommand production.
 	EnterSchemaCommand(c *SchemaCommandContext)
 
+	// EnterPropertyTypeName is called when entering the propertyTypeName production.
+	EnterPropertyTypeName(c *PropertyTypeNameContext)
+
 	// EnterRegularQuery is called when entering the regularQuery production.
 	EnterRegularQuery(c *RegularQueryContext)
 
@@ -321,6 +324,9 @@ type CypherParserListener interface {
 
 	// ExitSchemaCommand is called when exiting the schemaCommand production.
 	ExitSchemaCommand(c *SchemaCommandContext)
+
+	// ExitPropertyTypeName is called when exiting the propertyTypeName production.
+	ExitPropertyTypeName(c *PropertyTypeNameContext)
 
 	// ExitRegularQuery is called when exiting the regularQuery production.
 	ExitRegularQuery(c *RegularQueryContext)
