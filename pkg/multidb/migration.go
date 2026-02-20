@@ -240,27 +240,23 @@ func (m *DatabaseManager) performMigration(engine storage.Engine) error {
 	// If we fail mid-migration, we must not lose any existing data.
 	createdNodes := make([]storage.NodeID, 0, len(unprefixedNodes))
 	for _, node := range unprefixedNodes {
-		// Copy properties and ensure db property is set for migrated nodes
+		// Copy properties without injecting metadata keys.
+		// Namespace isolation is provided by prefixed IDs, not user properties.
 		properties := make(map[string]any)
 		for k, v := range node.Properties {
 			properties[k] = v
 		}
-		// Add db property to mark this node as belonging to the default database
-		// This helps with queries that filter by db property
-		if _, exists := properties["db"]; !exists {
-			properties["db"] = defaultDB
-		}
 
 		// Create new node with prefixed ID
 		newNode := &storage.Node{
-			ID:           storage.NodeID(defaultDB + ":" + string(node.ID)),
-			Labels:       node.Labels,
-			Properties:   properties,
-			CreatedAt:    node.CreatedAt,
-			UpdatedAt:    node.UpdatedAt,
-			DecayScore:   node.DecayScore,
-			LastAccessed: node.LastAccessed,
-			AccessCount:  node.AccessCount,
+			ID:              storage.NodeID(defaultDB + ":" + string(node.ID)),
+			Labels:          node.Labels,
+			Properties:      properties,
+			CreatedAt:       node.CreatedAt,
+			UpdatedAt:       node.UpdatedAt,
+			DecayScore:      node.DecayScore,
+			LastAccessed:    node.LastAccessed,
+			AccessCount:     node.AccessCount,
 			ChunkEmbeddings: node.ChunkEmbeddings,
 		}
 
@@ -313,54 +309,6 @@ func (m *DatabaseManager) performMigration(engine storage.Engine) error {
 	}
 
 	log.Printf("✅ Legacy migration complete: created %d nodes and %d edges in %q", len(createdNodes), len(createdEdges), defaultDB)
-
-	return nil
-}
-
-// ensureDefaultDatabaseProperty ensures all nodes in the default database have a db property.
-//
-// This is a post-migration step that adds the db property to nodes that were migrated
-// or created before the db property was standard. The db property helps with queries
-// that filter by database name, though the namespace prefix is what actually provides isolation.
-//
-// This function is idempotent - it only updates nodes that don't have the db property.
-func (m *DatabaseManager) ensureDefaultDatabaseProperty() error {
-	defaultDB := m.config.DefaultDatabase
-
-	// Get namespaced engine for default database
-	defaultEngine := storage.NewNamespacedEngine(m.inner, defaultDB)
-
-	// Get all nodes in default database
-	allNodes, err := defaultEngine.AllNodes()
-	if err != nil {
-		return fmt.Errorf("failed to get nodes from default database: %w", err)
-	}
-
-	// Update nodes that don't have db property
-	updated := 0
-	for _, node := range allNodes {
-		// Check if node has db property
-		if _, exists := node.Properties["db"]; !exists {
-			// Add db property
-			if node.Properties == nil {
-				node.Properties = make(map[string]any)
-			}
-			node.Properties["db"] = defaultDB
-
-			// Update the node
-			if err := defaultEngine.UpdateNode(node); err != nil {
-				// Log but continue - some nodes might fail to update
-				continue
-			}
-			updated++
-		}
-	}
-
-	// If we updated any nodes, log it (but don't fail)
-	if updated > 0 {
-		// This is a best-effort operation - namespace prefix provides the actual isolation
-		// The db property is just for convenience in queries
-	}
 
 	return nil
 }

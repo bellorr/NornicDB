@@ -408,8 +408,8 @@ func TestMigration_CustomDefaultDatabase(t *testing.T) {
 	assert.Equal(t, "legacy-node", string(retrieved.ID))
 }
 
-// TestMigration_AddsDbProperty verifies that migrated nodes get the db property set
-func TestMigration_AddsDbProperty(t *testing.T) {
+// TestMigration_DoesNotInjectDbProperty verifies migration keeps user properties clean.
+func TestMigration_DoesNotInjectDbProperty(t *testing.T) {
 	inner := newLegacyTestEngine()
 
 	// Create unprefixed node (simulating pre-multi-db data)
@@ -447,14 +447,13 @@ func TestMigration_AddsDbProperty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "legacy-node", string(retrieved.ID))
 
-	// Verify db property was added during migration
-	dbValue, exists := retrieved.Properties["db"]
-	require.True(t, exists, "migrated node should have db property")
-	assert.Equal(t, "nornic", dbValue, "db property should be set to default database name")
+	// Verify migration does not inject db metadata into user properties.
+	_, exists := retrieved.Properties["db"]
+	assert.False(t, exists, "migrated node should not have injected db property")
 }
 
-// TestEnsureDefaultDatabaseProperty verifies that ensureDefaultDatabaseProperty adds db property
-func TestEnsureDefaultDatabaseProperty(t *testing.T) {
+// TestMigration_NewNodesDoNotRequireDbProperty verifies default-db nodes work without db metadata.
+func TestMigration_NewNodesDoNotRequireDbProperty(t *testing.T) {
 	inner := newLegacyTestEngine()
 
 	config := &Config{
@@ -483,16 +482,11 @@ func TestEnsureDefaultDatabaseProperty(t *testing.T) {
 	_, err = store.CreateNode(node)
 	require.NoError(t, err)
 
-	// Call ensureDefaultDatabaseProperty
-	err = manager.ensureDefaultDatabaseProperty()
-	require.NoError(t, err)
-
 	// Retrieve the node
 	retrieved, err := store.GetNode(storage.NodeID("test-node"))
 	require.NoError(t, err)
 
-	// Verify db property was added
-	dbValue, exists := retrieved.Properties["db"]
-	require.True(t, exists, "node should have db property after ensureDefaultDatabaseProperty")
-	assert.Equal(t, "nornic", dbValue, "db property should be set to default database name")
+	// Verify no db property injection is required.
+	_, exists := retrieved.Properties["db"]
+	assert.False(t, exists, "node should not have injected db property")
 }

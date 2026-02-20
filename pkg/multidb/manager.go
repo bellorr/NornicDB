@@ -199,14 +199,6 @@ func NewDatabaseManager(inner storage.Engine, config *Config) (*DatabaseManager,
 	// queries against the default database don't show system internals.
 	m.cleanupLeakedSystemNodes()
 
-	// Ensure all nodes in default database have db property
-	// This is idempotent and helps with queries that filter by db property
-	// Runs on every startup to catch any nodes that might have been created without the property
-	if err := m.ensureDefaultDatabaseProperty(); err != nil {
-		// Log but don't fail - this is a best-effort operation
-		// The namespace prefix is what actually provides isolation
-	}
-
 	return m, nil
 }
 
