@@ -536,6 +536,69 @@ func (m *Model) Close() error {
 }
 
 // ============================================================================
+// RERANKER (Stage-2 search reranking)
+// ============================================================================
+
+// RerankerModel wraps a model for reranking (query, document) pairs.
+//
+// Note: yzma does not currently expose a dedicated reranker/logit API here,
+// so we approximate relevance with embedding cosine similarity.
+type RerankerModel struct {
+	model *Model
+}
+
+// LoadRerankerModel loads a GGUF model for reranking.
+func LoadRerankerModel(opts Options) (*RerankerModel, error) {
+	model, err := LoadModel(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &RerankerModel{model: model}, nil
+}
+
+// Score returns a relevance score in [0,1] for a (query, document) pair.
+//
+// Implementation detail:
+//   - Computes normalized embeddings for query and document
+//   - Uses cosine similarity
+//   - Maps from [-1,1] to [0,1]
+func (r *RerankerModel) Score(ctx context.Context, query, document string) (float32, error) {
+	if r == nil || r.model == nil {
+		return 0, fmt.Errorf("reranker model not loaded")
+	}
+
+	qVec, err := r.model.Embed(ctx, query)
+	if err != nil {
+		return 0, err
+	}
+	dVec, err := r.model.Embed(ctx, document)
+	if err != nil {
+		return 0, err
+	}
+	if len(qVec) == 0 || len(dVec) == 0 {
+		return 0, fmt.Errorf("reranker returned empty embedding")
+	}
+
+	cos := vector.CosineSimilarity(qVec, dVec)
+	if cos > 1 {
+		cos = 1
+	}
+	if cos < -1 {
+		cos = -1
+	}
+
+	return float32((cos + 1.0) / 2.0), nil
+}
+
+// Close releases reranker resources.
+func (r *RerankerModel) Close() error {
+	if r == nil || r.model == nil {
+		return nil
+	}
+	return r.model.Close()
+}
+
+// ============================================================================
 // TEXT GENERATION (for Heimdall SLM)
 // ============================================================================
 
