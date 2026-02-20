@@ -113,7 +113,6 @@ Features:
 	serveCmd.Flags().Int("http-port", getEnvInt("NORNICDB_HTTP_PORT", 7474), "HTTP API port")
 	serveCmd.Flags().String("address", getEnvStr("NORNICDB_ADDRESS", "127.0.0.1"), "Bind address (127.0.0.1 for localhost only, 0.0.0.0 for all interfaces)")
 	serveCmd.Flags().String("data-dir", getEnvStr("NORNICDB_DATA_DIR", "./data"), "Data directory")
-	serveCmd.Flags().String("load-export", getEnvStr("NORNICDB_LOAD_EXPORT", ""), "Load data from Mimir export directory on startup")
 	serveCmd.Flags().String("embedding-provider", getEnvStr("NORNICDB_EMBEDDING_PROVIDER", "local"), "Embedding provider: local, ollama, openai")
 	serveCmd.Flags().String("embedding-url", getEnvStr("NORNICDB_EMBEDDING_API_URL", "http://localhost:11434"), "Embedding API URL (ollama/openai)")
 	serveCmd.Flags().String("embedding-key", getEnvStr("NORNICDB_EMBEDDING_API_KEY", ""), "Embeddings API Key (openai)")
@@ -171,17 +170,6 @@ Features:
 	initCmd.Flags().String("data-dir", "./data", "Data directory")
 	rootCmd.AddCommand(initCmd)
 
-	// Import command
-	importCmd := &cobra.Command{
-		Use:   "import [directory]",
-		Short: "Import data from Mimir export directory",
-		Args:  cobra.ExactArgs(1),
-		RunE:  runImport,
-	}
-	importCmd.Flags().String("data-dir", "./data", "Data directory")
-	importCmd.Flags().String("embedding-url", "http://localhost:11434", "Embedding API URL")
-	rootCmd.AddCommand(importCmd)
-
 	// Shell command (interactive Cypher REPL)
 	shellCmd := &cobra.Command{
 		Use:   "shell",
@@ -233,7 +221,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 	httpPort, _ := cmd.Flags().GetInt("http-port")
 	address, _ := cmd.Flags().GetString("address")
 	dataDir, _ := cmd.Flags().GetString("data-dir")
-	loadExport, _ := cmd.Flags().GetString("load-export")
 	embeddingProvider, _ := cmd.Flags().GetString("embedding-provider")
 	embeddingURL, _ := cmd.Flags().GetString("embedding-url")
 	embeddingKey, _ := cmd.Flags().GetString("embedding-key")
@@ -539,27 +526,6 @@ func runServe(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Load data if specified
-	if loadExport != "" {
-		fmt.Printf("📥 Loading data from %s...\n", loadExport)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		result, err := db.LoadFromExport(ctx, loadExport)
-		if err != nil {
-			return fmt.Errorf("loading export: %w", err)
-		}
-		fmt.Printf("   ✅ Loaded %d nodes, %d edges, %d embeddings\n",
-			result.NodesLoaded, result.EdgesLoaded, result.EmbeddingsLoaded)
-
-		// Build search indexes
-		fmt.Println("🔍 Building search indexes...")
-		if err := db.BuildSearchIndexes(ctx); err != nil {
-			return fmt.Errorf("building indexes: %w", err)
-		}
-		fmt.Println("   ✅ Search indexes ready")
-	}
-
 	// Use system namespace storage directly for auth bootstrap.
 	// Server.New() initializes the shared DatabaseManager once for runtime usage.
 	storageEngine := db.GetBaseStorageForManager()
@@ -823,56 +789,7 @@ http_port: 7474
 	fmt.Println()
 	fmt.Println("Next steps:")
 	fmt.Println("  1. Start the server:  nornicdb serve --data-dir", dataDir)
-	fmt.Println("  2. Load data:         nornicdb import ./export-dir --data-dir", dataDir)
-
-	return nil
-}
-
-func runImport(cmd *cobra.Command, args []string) error {
-	exportDir := args[0]
-	dataDir, _ := cmd.Flags().GetString("data-dir")
-	embeddingURL, _ := cmd.Flags().GetString("embedding-url")
-
-	fmt.Printf("📥 Importing data from %s\n", exportDir)
-
-	// Verify export directory exists
-	if _, err := os.Stat(exportDir); os.IsNotExist(err) {
-		return fmt.Errorf("export directory not found: %s", exportDir)
-	}
-
-	// Configure and open database
-	config := nornicdb.DefaultConfig()
-	config.Database.DataDir = dataDir
-	config.Memory.EmbeddingAPIURL = embeddingURL
-
-	db, err := nornicdb.Open(dataDir, config)
-	if err != nil {
-		return fmt.Errorf("opening database: %w", err)
-	}
-	defer db.Close()
-
-	// Load data
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	startTime := time.Now()
-	result, err := db.LoadFromExport(ctx, exportDir)
-	if err != nil {
-		return fmt.Errorf("loading export: %w", err)
-	}
-	loadDuration := time.Since(startTime)
-
-	fmt.Printf("✅ Loaded %d nodes, %d edges, %d embeddings in %v\n",
-		result.NodesLoaded, result.EdgesLoaded, result.EmbeddingsLoaded, loadDuration)
-
-	// Build search indexes
-	fmt.Println("🔍 Building search indexes...")
-	startTime = time.Now()
-	if err := db.BuildSearchIndexes(ctx); err != nil {
-		return fmt.Errorf("building indexes: %w", err)
-	}
-	indexDuration := time.Since(startTime)
-	fmt.Printf("✅ Search indexes built in %v\n", indexDuration)
+	fmt.Println("  2. Load data:         use Cypher/Bolt ingestion")
 
 	return nil
 }

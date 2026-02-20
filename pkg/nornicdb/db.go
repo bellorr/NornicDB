@@ -1534,36 +1534,6 @@ func (db *DB) getOrCreateEmbedderForDB(dbName string) (embed.Embedder, error) {
 	return newEmbedder, nil
 }
 
-// LoadFromExport loads data from a Mimir JSON export directory.
-// This loads nodes, relationships, and embeddings from the exported files.
-func (db *DB) LoadFromExport(ctx context.Context, exportDir string) (*LoadResult, error) {
-	db.mu.Lock()
-	defer db.mu.Unlock()
-
-	if db.closed {
-		return nil, ErrClosed
-	}
-
-	// Use the storage loader
-	result, err := storage.LoadFromMimirExport(db.storage, exportDir)
-	if err != nil {
-		return nil, fmt.Errorf("loading export: %w", err)
-	}
-
-	return &LoadResult{
-		NodesLoaded:      result.NodesImported,
-		EdgesLoaded:      result.EdgesImported,
-		EmbeddingsLoaded: result.EmbeddingsLoaded,
-	}, nil
-}
-
-// LoadResult holds the result of a data load operation.
-type LoadResult struct {
-	NodesLoaded      int `json:"nodes_loaded"`
-	EdgesLoaded      int `json:"edges_loaded"`
-	EmbeddingsLoaded int `json:"embeddings_loaded"`
-}
-
 // BuildSearchIndexes builds the search indexes from loaded data.
 // Call this after loading data to enable search functionality.
 func (db *DB) BuildSearchIndexes(ctx context.Context) error {

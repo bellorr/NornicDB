@@ -512,29 +512,6 @@ func TestHybridSearch(t *testing.T) {
 	})
 }
 
-func TestLoadFromExport(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("load_from_nonexistent_directory", func(t *testing.T) {
-		db, err := Open(t.TempDir(), nil)
-		require.NoError(t, err)
-		defer db.Close()
-
-		_, err = db.LoadFromExport(ctx, "/nonexistent/path/to/export")
-		assert.Error(t, err, "Should error for nonexistent directory")
-	})
-
-	t.Run("load_from_export_closed_db", func(t *testing.T) {
-		db, err := Open(t.TempDir(), nil)
-		require.NoError(t, err)
-		db.Close()
-
-		_, err = db.LoadFromExport(ctx, "./testdata")
-		assert.Error(t, err, "Should error on closed DB")
-		assert.Equal(t, ErrClosed, err)
-	})
-}
-
 func TestBuildSearchIndexes(t *testing.T) {
 	ctx := context.Background()
 
