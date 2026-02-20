@@ -45,69 +45,54 @@ func (e *StorageExecutor) handleBegin() (*ExecuteResult, error) {
 		return nil, fmt.Errorf("transaction already active")
 	}
 
-	// Unwrap AsyncEngine, WALEngine, and NamespacedEngine to get underlying engine for transactions
+	// Unwrap engine wrappers (Async/WAL/Namespaced) recursively.
 	engine := e.storage
-	if asyncEngine, ok := engine.(*storage.AsyncEngine); ok {
-		engine = asyncEngine.GetEngine()
-	}
-	if walEngine, ok := engine.(*storage.WALEngine); ok {
-		engine = walEngine.GetEngine()
-	}
-	// Unwrap NamespacedEngine to get the underlying engine (transactions work on the base engine)
-	if namespacedEngine, ok := engine.(*storage.NamespacedEngine); ok {
-		engine = namespacedEngine.GetInnerEngine()
+	visited := map[storage.Engine]bool{}
+	for engine != nil && !visited[engine] {
+		visited[engine] = true
+		if asyncEngine, ok := engine.(*storage.AsyncEngine); ok {
+			engine = asyncEngine.GetEngine()
+			continue
+		}
+		if walEngine, ok := engine.(*storage.WALEngine); ok {
+			engine = walEngine.GetEngine()
+			continue
+		}
+		if namespacedEngine, ok := engine.(*storage.NamespacedEngine); ok {
+			engine = namespacedEngine.GetInnerEngine()
+			continue
+		}
+		break
 	}
 
-	// Start transaction based on engine type
-	// Both BadgerEngine and MemoryEngine (which wraps BadgerEngine) use BadgerTransaction
-	switch eng := engine.(type) {
-	case *storage.BadgerEngine:
-		tx, err := eng.BeginTransaction()
-		if err != nil {
-			return nil, fmt.Errorf("failed to start transaction: %w", err)
-		}
-		txCtx := &TransactionContext{
-			tx:     tx,
-			engine: eng,
-			active: true,
-			txID:   tx.ID,
-		}
-		if wal, dbName := e.resolveWALAndDatabase(); wal != nil {
-			walSeq, walErr := wal.AppendTxBegin(dbName, tx.ID, nil)
-			if walErr != nil {
-				_ = tx.Rollback()
-				return nil, fmt.Errorf("failed to write WAL tx begin: %w", walErr)
-			}
-			txCtx.wal = wal
-			txCtx.walSeqStart = walSeq
-			txCtx.database = dbName
-		}
-		e.txContext = txCtx
-	case *storage.MemoryEngine:
-		tx, err := eng.BeginTransaction()
-		if err != nil {
-			return nil, fmt.Errorf("failed to start transaction: %w", err)
-		}
-		txCtx := &TransactionContext{
-			tx:     tx,
-			engine: eng,
-			active: true,
-			txID:   tx.ID,
-		}
-		if wal, dbName := e.resolveWALAndDatabase(); wal != nil {
-			walSeq, walErr := wal.AppendTxBegin(dbName, tx.ID, nil)
-			if walErr != nil {
-				_ = tx.Rollback()
-				return nil, fmt.Errorf("failed to write WAL tx begin: %w", walErr)
-			}
-			txCtx.wal = wal
-			txCtx.walSeqStart = walSeq
-			txCtx.database = dbName
-		}
-		e.txContext = txCtx
-	default:
+	// Start transaction for any engine that supports BeginTransaction.
+	txEngine, ok := engine.(interface {
+		BeginTransaction() (*storage.BadgerTransaction, error)
+	})
+	if !ok {
 		return nil, fmt.Errorf("engine does not support transactions")
 	}
+	tx, err := txEngine.BeginTransaction()
+	if err != nil {
+		return nil, fmt.Errorf("failed to start transaction: %w", err)
+	}
+	txCtx := &TransactionContext{
+		tx:     tx,
+		engine: engine,
+		active: true,
+		txID:   tx.ID,
+	}
+	if wal, dbName := e.resolveWALAndDatabase(); wal != nil {
+		walSeq, walErr := wal.AppendTxBegin(dbName, tx.ID, nil)
+		if walErr != nil {
+			_ = tx.Rollback()
+			return nil, fmt.Errorf("failed to write WAL tx begin: %w", walErr)
+		}
+		txCtx.wal = wal
+		txCtx.walSeqStart = walSeq
+		txCtx.database = dbName
+	}
+	e.txContext = txCtx
 
 	return &ExecuteResult{
 		Columns: []string{"status"},
@@ -221,9 +206,19 @@ func (e *StorageExecutor) executeInTransaction(ctx context.Context, cypher strin
 		return nil, fmt.Errorf("unknown transaction type")
 	}
 
-	// Create a transactional wrapper that routes writes through the transaction
-	// This ensures all operations within the transaction are atomic and can be rolled back
-	txWrapper := &transactionStorageWrapper{tx: tx, underlying: e.storage}
+	// Create a transactional wrapper that routes writes through the transaction.
+	// IMPORTANT: carry namespace info so writes remain correctly prefixed in multi-db.
+	engines := e.resolveImplicitTxEngines()
+	separator := ":"
+	if engines.namespace == "" {
+		separator = ""
+	}
+	txWrapper := &transactionStorageWrapper{
+		tx:         tx,
+		underlying: e.storage,
+		namespace:  engines.namespace,
+		separator:  separator,
+	}
 
 	// Pass the wrapper through context (same pattern as implicit transactions)
 	// This is thread-safe and allows getStorage() to automatically use the transaction

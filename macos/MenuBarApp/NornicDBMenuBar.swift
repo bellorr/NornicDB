@@ -3610,7 +3610,7 @@ struct FirstRunWizard: View {
                     HStack(spacing: 6) {
                         Image(systemName: "checkmark.circle.fill")
                             .foregroundColor(.green)
-                        Text("Access at http://localhost:7687")
+                        Text("Access at http://localhost:7474")
                             .font(.caption)
                     }
                 }

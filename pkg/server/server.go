@@ -638,6 +638,11 @@ type Server struct {
 	executorsMu sync.RWMutex
 	executors   map[string]*cypher.StorageExecutor
 
+	// Explicit HTTP transaction sessions keyed by tx ID.
+	// Each session holds its own executor so BEGIN/COMMIT/ROLLBACK state is isolated.
+	explicitTxMu sync.RWMutex
+	explicitTx   map[string]*explicitTransaction
+
 	// Per-database access control (Neo4j-aligned). When auth disabled, Full is used.
 	// When auth enabled, allowlistStore (if set) provides allowlist-based mode per principal.
 	databaseAccessMode    auth.DatabaseAccessMode
@@ -966,6 +971,7 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		basicAuthCache: auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
 		searchServices: make(map[string]*search.Service),
 		executors:      make(map[string]*cypher.StorageExecutor),
+		explicitTx:     make(map[string]*explicitTransaction),
 	}
 
 	// ==========================================================================

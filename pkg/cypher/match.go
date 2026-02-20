@@ -392,7 +392,9 @@ func (e *StorageExecutor) executeMatch(ctx context.Context, cypher string) (*Exe
 	// FAST PATH: For simple node count queries like "MATCH (n) RETURN count(n)" or "MATCH (n:Label) RETURN count(n)"
 	// Use O(1) NodeCount() instead of loading all nodes into memory.
 	// This optimization ONLY applies to simple node patterns (not relationships - those are handled above)
-	if hasAggregation && whereIdx == -1 && len(returnItems) == 1 {
+	// IMPORTANT: Do NOT use this fast path when pattern properties are present, since
+	// property predicates require value-level filtering (not just label cardinality).
+	if hasAggregation && whereIdx == -1 && len(returnItems) == 1 && len(nodePattern.properties) == 0 {
 		upperExpr := strings.ToUpper(strings.TrimSpace(returnItems[0].expr))
 		// Check for COUNT(*) or COUNT(variable) - not COUNT(n.property)
 		if strings.HasPrefix(upperExpr, "COUNT(") && strings.HasSuffix(upperExpr, ")") {

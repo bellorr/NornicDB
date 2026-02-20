@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/auth"
@@ -109,42 +110,9 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 	s.executorsMu.RUnlock()
 
 	// Get namespaced storage for this database
-	// This returns a NamespacedEngine that automatically prefixes all keys
-	// with the database name, ensuring complete data isolation
-	storage, err := s.dbManager.GetStorage(dbName)
+	executor, err := s.newExecutorForDatabase(dbName)
 	if err != nil {
 		return nil, err
-	}
-
-	// Create executor scoped to this database
-	// The executor will only see data in the namespaced storage
-	executor := cypher.NewStorageExecutor(storage)
-
-	// Set DatabaseManager for system commands (CREATE/DROP/SHOW DATABASE)
-	// Wrap DatabaseManager to implement the interface expected by executor
-	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db, server: s})
-
-	// Reuse DB's cached search service instead of creating a new one
-	// This eliminates duplicate search service allocations (major memory optimization)
-	if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storage); err == nil {
-		executor.SetSearchService(searchSvc)
-	}
-
-	// Copy query embedder from the base DB executor so string-input vector procedures
-	// (CALL db.index.vector.queryNodes(..., "text")) work on namespaced executors too.
-	if baseExec := s.db.GetCypherExecutor(); baseExec != nil {
-		if emb := baseExec.GetEmbedder(); emb != nil {
-			executor.SetEmbedder(emb)
-		}
-	}
-
-	// Wire embed queue so nodes mutated via this executor get embeddings (re)generated.
-	// The default-database executor is wired in db.SetEmbedder; per-database executors
-	// (used by /db/{dbName}/tx/commit) must be wired here or new nodes would never be enqueued.
-	if q := s.db.GetEmbedQueue(); q != nil {
-		executor.SetNodeMutatedCallback(func(nodeID string) {
-			q.Enqueue(nodeID)
-		})
 	}
 
 	// Cache the executor (write lock for cache update)
@@ -156,6 +124,42 @@ func (s *Server) getExecutorForDatabase(dbName string) (*cypher.StorageExecutor,
 	}
 	s.executors[dbName] = executor
 	s.executorsMu.Unlock()
+
+	return executor, nil
+}
+
+// newExecutorForDatabase creates a fresh executor scoped to a single database.
+// Unlike getExecutorForDatabase, this does not cache the executor and is intended
+// for per-transaction session state (explicit HTTP transactions).
+func (s *Server) newExecutorForDatabase(dbName string) (*cypher.StorageExecutor, error) {
+	// This returns a NamespacedEngine that automatically prefixes all keys
+	// with the database name, ensuring complete data isolation.
+	storageEngine, err := s.dbManager.GetStorage(dbName)
+	if err != nil {
+		return nil, err
+	}
+
+	executor := cypher.NewStorageExecutor(storageEngine)
+	executor.SetDatabaseManager(&databaseManagerAdapter{manager: s.dbManager, db: s.db, server: s})
+
+	// Reuse DB's cached search service instead of creating a new one.
+	if searchSvc, err := s.db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
+		executor.SetSearchService(searchSvc)
+	}
+
+	// Copy query embedder from the base DB executor so string-input vector procedures work.
+	if baseExec := s.db.GetCypherExecutor(); baseExec != nil {
+		if emb := baseExec.GetEmbedder(); emb != nil {
+			executor.SetEmbedder(emb)
+		}
+	}
+
+	// Wire embed queue callback for per-database executor mutations.
+	if q := s.db.GetEmbedQueue(); q != nil {
+		executor.SetNodeMutatedCallback(func(nodeID string) {
+			q.Enqueue(nodeID)
+		})
+	}
 
 	return executor, nil
 }
@@ -562,6 +566,16 @@ type TransactionResponse struct {
 // TransactionInfo holds transaction state.
 type TransactionInfo struct {
 	Expires string `json:"expires"` // RFC1123 format
+}
+
+// explicitTransaction stores state for a multi-request HTTP transaction.
+// The contained executor owns BEGIN/COMMIT/ROLLBACK state for this tx only.
+type explicitTransaction struct {
+	id       string
+	dbName   string
+	executor *cypher.StorageExecutor
+	expires  time.Time
+	mu       sync.Mutex
 }
 
 // QueryResult is a single query result.
@@ -1246,20 +1260,95 @@ func (s *Server) generateBookmark() string {
 
 // Transaction management (explicit transactions)
 //
-// NornicDB implements a simplified transaction model where each request is
-// treated as an implicit transaction. Explicit multi-request transactions
-// are supported through the transaction ID endpoints, but each statement
-// within a transaction is executed immediately (no deferred commit).
+// Explicit HTTP transactions are bound to a per-tx executor instance:
+//   1) open transaction => BEGIN on dedicated executor
+//   2) execute in tx    => run statements on the same executor/tx context
+//   3) commit           => optional final statements, then COMMIT
+//   4) rollback         => ROLLBACK and discard tx session
 //
-// This design provides:
-//   - Simplicity: No complex transaction state management
-//   - Performance: No transaction overhead for single-request operations
-//   - Compatibility: Works with Neo4j drivers that expect transaction support
-//
-// Future enhancements may include:
-//   - Deferred commit for explicit transactions
-//   - Transaction isolation levels
-//   - Long-running transaction support
+// This ensures rollback semantics are real (writes are not persisted on rollback)
+// and keeps implicit transaction behavior unchanged.
+
+func (s *Server) transactionCommitURL(dbName, txID string) string {
+	host := s.config.Address
+	if host == "0.0.0.0" {
+		host = "localhost"
+	}
+	return fmt.Sprintf("http://%s:%d/db/%s/tx/%s/commit", host, s.config.Port, dbName, txID)
+}
+
+func (s *Server) saveExplicitTransaction(tx *explicitTransaction) {
+	s.explicitTxMu.Lock()
+	defer s.explicitTxMu.Unlock()
+	s.explicitTx[tx.id] = tx
+}
+
+func (s *Server) getExplicitTransaction(txID string) *explicitTransaction {
+	s.explicitTxMu.RLock()
+	defer s.explicitTxMu.RUnlock()
+	return s.explicitTx[txID]
+}
+
+func (s *Server) deleteExplicitTransaction(txID string) {
+	s.explicitTxMu.Lock()
+	defer s.explicitTxMu.Unlock()
+	delete(s.explicitTx, txID)
+}
+
+func (s *Server) appendStatementResult(response *TransactionResponse, result *cypher.ExecuteResult) {
+	qr := QueryResult{
+		Columns: result.Columns,
+		Data:    make([]ResultRow, len(result.Rows)),
+	}
+	for i, row := range result.Rows {
+		convertedRow := s.convertRowToNeo4jFormat(row)
+		qr.Data[i] = ResultRow{Row: convertedRow, Meta: s.generateRowMeta(convertedRow)}
+	}
+	response.Results = append(response.Results, qr)
+	if result.Metadata != nil {
+		if receipt, ok := result.Metadata["receipt"]; ok && receipt != nil {
+			response.Receipt = receipt
+		}
+	}
+}
+
+func (s *Server) executeTxStatements(
+	ctx context.Context,
+	claims *auth.JWTClaims,
+	dbName string,
+	executor *cypher.StorageExecutor,
+	statements []StatementRequest,
+	response *TransactionResponse,
+) {
+	for _, stmt := range statements {
+		if isMutationQuery(stmt.Statement) {
+			if claims == nil {
+				response.Errors = append(response.Errors, QueryError{
+					Code:    "Neo.ClientError.Security.Forbidden",
+					Message: "Write permission required",
+				})
+				continue
+			}
+			if !s.getResolvedAccess(claims, dbName).Write {
+				response.Errors = append(response.Errors, QueryError{
+					Code:    "Neo.ClientError.Security.Forbidden",
+					Message: fmt.Sprintf("Write on database '%s' is not allowed.", dbName),
+				})
+				continue
+			}
+		}
+
+		result, err := executor.Execute(ctx, stmt.Statement, stmt.Parameters)
+		if err != nil {
+			response.Errors = append(response.Errors, QueryError{
+				Code:    "Neo.ClientError.Statement.SyntaxError",
+				Message: err.Error(),
+			})
+			continue
+		}
+		s.appendStatementResult(response, result)
+	}
+}
 
 func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, dbName string) {
 	claims := getClaims(r)
@@ -1274,25 +1363,20 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 	// Generate transaction ID
 	txID := fmt.Sprintf("%d", time.Now().UnixNano())
 
-	host := s.config.Address
-	if host == "0.0.0.0" {
-		host = "localhost"
-	}
-
 	var req TransactionRequest
 	_ = s.readJSON(r, &req) // Optional body
 
 	response := TransactionResponse{
 		Results: make([]QueryResult, 0),
 		Errors:  make([]QueryError, 0),
-		Commit:  fmt.Sprintf("http://%s:%d/db/%s/tx/%s/commit", host, s.config.Port, dbName, txID),
+		Commit:  s.transactionCommitURL(dbName, txID),
 		Transaction: &TransactionInfo{
 			Expires: time.Now().Add(30 * time.Second).Format(time.RFC1123),
 		},
 	}
 
-	// Get executor for the specified database
-	executor, err := s.getExecutorForDatabase(dbName)
+	// Create isolated executor for this transaction session.
+	executor, err := s.newExecutorForDatabase(dbName)
 	if err != nil {
 		response.Errors = append(response.Errors, QueryError{
 			Code:    "Neo.ClientError.Database.DatabaseNotFound",
@@ -1302,64 +1386,68 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	// Execute any provided statements (with per-DB write check for mutations)
-	if len(req.Statements) > 0 {
-		for _, stmt := range req.Statements {
-			if isMutationQuery(stmt.Statement) {
-				if claims == nil {
-					response.Errors = append(response.Errors, QueryError{
-						Code:    "Neo.ClientError.Security.Forbidden",
-						Message: "Write permission required",
-					})
-					continue
-				}
-				if !s.getResolvedAccess(claims, dbName).Write {
-					response.Errors = append(response.Errors, QueryError{
-						Code:    "Neo.ClientError.Security.Forbidden",
-						Message: fmt.Sprintf("Write on database '%s' is not allowed.", dbName),
-					})
-					continue
-				}
-			}
-			result, err := executor.Execute(r.Context(), stmt.Statement, stmt.Parameters)
-			if err != nil {
-				response.Errors = append(response.Errors, QueryError{
-					Code:    "Neo.ClientError.Statement.SyntaxError",
-					Message: err.Error(),
-				})
-				continue
-			}
-
-			qr := QueryResult{
-				Columns: result.Columns,
-				Data:    make([]ResultRow, len(result.Rows)),
-			}
-			for i, row := range result.Rows {
-				convertedRow := s.convertRowToNeo4jFormat(row)
-				qr.Data[i] = ResultRow{Row: convertedRow, Meta: s.generateRowMeta(convertedRow)}
-			}
-			response.Results = append(response.Results, qr)
-		}
+	// Start explicit transaction context inside executor.
+	if _, err := executor.Execute(r.Context(), "BEGIN", nil); err != nil {
+		response.Errors = append(response.Errors, QueryError{
+			Code:    "Neo.ClientError.Transaction.TransactionStartFailed",
+			Message: err.Error(),
+		})
+		s.writeJSON(w, http.StatusInternalServerError, response)
+		return
 	}
 
-	// For transaction open, 201 Created is correct (creating transaction resource)
-	// But if mutations are included with async writes, add consistency header
-	if s.db.IsAsyncWritesEnabled() && len(req.Statements) > 0 {
-		for _, stmt := range req.Statements {
-			if isMutationQuery(stmt.Statement) {
-				w.Header().Set("X-NornicDB-Consistency", "eventual")
-				break
-			}
-		}
+	// Store tx session before executing any optional open-time statements.
+	s.saveExplicitTransaction(&explicitTransaction{
+		id:       txID,
+		dbName:   dbName,
+		executor: executor,
+		expires:  time.Now().Add(30 * time.Second),
+	})
+
+	if len(req.Statements) > 0 {
+		tx := s.getExplicitTransaction(txID)
+		tx.mu.Lock()
+		s.executeTxStatements(r.Context(), claims, dbName, tx.executor, req.Statements, &response)
+		tx.expires = time.Now().Add(30 * time.Second)
+		tx.mu.Unlock()
 	}
 
 	s.writeJSON(w, http.StatusCreated, response)
 }
 
 func (s *Server) handleExecuteInTransaction(w http.ResponseWriter, r *http.Request, dbName, txID string) {
-	// Execute statements in open transaction
-	// For simplified implementation, treat as immediate execution
-	s.handleImplicitTransaction(w, r, dbName)
+	claims := getClaims(r)
+	if !s.getDatabaseAccessMode(claims).CanAccessDatabase(dbName) {
+		s.writeNeo4jError(w, http.StatusForbidden, "Neo.ClientError.Security.Forbidden",
+			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
+		return
+	}
+
+	tx := s.getExplicitTransaction(txID)
+	if tx == nil || tx.dbName != dbName {
+		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
+		return
+	}
+
+	var req TransactionRequest
+	_ = s.readJSON(r, &req)
+
+	response := TransactionResponse{
+		Results: make([]QueryResult, 0),
+		Errors:  make([]QueryError, 0),
+		Commit:  s.transactionCommitURL(dbName, txID),
+		Transaction: &TransactionInfo{
+			Expires: tx.expires.Format(time.RFC1123),
+		},
+	}
+
+	tx.mu.Lock()
+	s.executeTxStatements(r.Context(), claims, dbName, tx.executor, req.Statements, &response)
+	tx.expires = time.Now().Add(30 * time.Second)
+	response.Transaction.Expires = tx.expires.Format(time.RFC1123)
+	tx.mu.Unlock()
+
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request, dbName, txID string) {
@@ -1381,75 +1469,42 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		LastBookmarks: []string{s.generateBookmark()},
 	}
 
-	// Get executor for the specified database
-	executor, err := s.getExecutorForDatabase(dbName)
-	if err != nil {
-		response.Errors = append(response.Errors, QueryError{
-			Code:    "Neo.ClientError.Database.DatabaseNotFound",
-			Message: fmt.Sprintf("Database '%s' not found: %v", dbName, err),
-		})
-		s.writeJSON(w, http.StatusNotFound, response)
+	tx := s.getExplicitTransaction(txID)
+	if tx == nil || tx.dbName != dbName {
+		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
 		return
 	}
 
-	// Execute any final statements (with per-DB write check for mutations)
-	for _, stmt := range req.Statements {
-		if isMutationQuery(stmt.Statement) {
-			if claims == nil {
-				response.Errors = append(response.Errors, QueryError{
-					Code:    "Neo.ClientError.Security.Forbidden",
-					Message: "Write permission required",
-				})
-				continue
-			}
-			if !s.getResolvedAccess(claims, dbName).Write {
-				response.Errors = append(response.Errors, QueryError{
-					Code:    "Neo.ClientError.Security.Forbidden",
-					Message: fmt.Sprintf("Write on database '%s' is not allowed.", dbName),
-				})
-				continue
-			}
-		}
-		result, err := executor.Execute(r.Context(), stmt.Statement, stmt.Parameters)
-		if err != nil {
-			response.Errors = append(response.Errors, QueryError{
-				Code:    "Neo.ClientError.Statement.SyntaxError",
-				Message: err.Error(),
-			})
-			continue
-		}
+	tx.mu.Lock()
+	defer tx.mu.Unlock()
+	s.deleteExplicitTransaction(txID)
 
-		// Extract receipt from result metadata if present (for mutations)
-		if result.Metadata != nil {
-			if receipt, ok := result.Metadata["receipt"]; ok && receipt != nil {
+	// Execute optional final statements in transaction context first.
+	s.executeTxStatements(r.Context(), claims, dbName, tx.executor, req.Statements, &response)
+	if len(response.Errors) > 0 {
+		_, _ = tx.executor.Execute(r.Context(), "ROLLBACK", nil)
+		s.writeJSON(w, http.StatusOK, response)
+		return
+	}
+
+	commitResult, err := tx.executor.Execute(r.Context(), "COMMIT", nil)
+	if err != nil {
+		response.Errors = append(response.Errors, QueryError{
+			Code:    "Neo.ClientError.Transaction.TransactionCommitFailed",
+			Message: err.Error(),
+		})
+		s.writeJSON(w, http.StatusOK, response)
+		return
+	}
+	if commitResult != nil {
+		if commitResult.Metadata != nil {
+			if receipt, ok := commitResult.Metadata["receipt"]; ok && receipt != nil {
 				response.Receipt = receipt
 			}
 		}
-
-		qr := QueryResult{
-			Columns: result.Columns,
-			Data:    make([]ResultRow, len(result.Rows)),
-		}
-		for i, row := range result.Rows {
-			convertedRow := s.convertRowToNeo4jFormat(row)
-			qr.Data[i] = ResultRow{Row: convertedRow, Meta: s.generateRowMeta(convertedRow)}
-		}
-		response.Results = append(response.Results, qr)
 	}
 
-	// For commits with async writes and mutations, use 202 Accepted
-	status := http.StatusOK
-	if s.db.IsAsyncWritesEnabled() && len(req.Statements) > 0 {
-		for _, stmt := range req.Statements {
-			if isMutationQuery(stmt.Statement) {
-				status = http.StatusAccepted
-				w.Header().Set("X-NornicDB-Consistency", "eventual")
-				break
-			}
-		}
-	}
-
-	s.writeJSON(w, status, response)
+	s.writeJSON(w, http.StatusOK, response)
 }
 
 func (s *Server) handleRollbackTransaction(w http.ResponseWriter, r *http.Request, dbName, txID string) {
@@ -1459,7 +1514,18 @@ func (s *Server) handleRollbackTransaction(w http.ResponseWriter, r *http.Reques
 			fmt.Sprintf("Access to database '%s' is not allowed.", dbName))
 		return
 	}
-	// Rollback transaction (for simplified implementation, just acknowledge)
+
+	tx := s.getExplicitTransaction(txID)
+	if tx == nil || tx.dbName != dbName {
+		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
+		return
+	}
+
+	tx.mu.Lock()
+	_, _ = tx.executor.Execute(r.Context(), "ROLLBACK", nil)
+	tx.mu.Unlock()
+	s.deleteExplicitTransaction(txID)
+
 	response := TransactionResponse{
 		Results: make([]QueryResult, 0),
 		Errors:  make([]QueryError, 0),

@@ -121,6 +121,45 @@ func makeRequest(t *testing.T, server *Server, method, path string, body interfa
 	return recorder
 }
 
+func extractCountFromTxResponse(t *testing.T, resp *httptest.ResponseRecorder) int64 {
+	t.Helper()
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+
+	results, ok := payload["results"].([]interface{})
+	require.True(t, ok)
+	require.Greater(t, len(results), 0)
+
+	firstResult, ok := results[0].(map[string]interface{})
+	require.True(t, ok)
+
+	data, ok := firstResult["data"].([]interface{})
+	require.True(t, ok)
+	require.Greater(t, len(data), 0)
+
+	firstRow, ok := data[0].(map[string]interface{})
+	require.True(t, ok)
+
+	row, ok := firstRow["row"].([]interface{})
+	require.True(t, ok)
+	require.Greater(t, len(row), 0)
+
+	rawCount, ok := row[0].(float64)
+	require.True(t, ok)
+	return int64(rawCount)
+}
+
+func assertTxResponseHasNoErrors(t *testing.T, resp *httptest.ResponseRecorder) {
+	t.Helper()
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+	errorsRaw, ok := payload["errors"].([]interface{})
+	if !ok {
+		return
+	}
+	require.Len(t, errorsRaw, 0, "expected no transaction errors, got: %v", errorsRaw)
+}
+
 type countingEmbedder struct {
 	mu sync.Mutex
 
@@ -811,6 +850,122 @@ func TestRollbackTransaction(t *testing.T) {
 	if rollbackResp.Code != http.StatusOK {
 		t.Errorf("expected status 200 for rollback, got %d", rollbackResp.Code)
 	}
+}
+
+func TestExplicitTransactionRollbackRevertsCreate(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
+		"statements": []map[string]interface{}{},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusCreated, openResp.Code, openResp.Body.String())
+
+	var openResult map[string]interface{}
+	require.NoError(t, json.NewDecoder(openResp.Body).Decode(&openResult))
+	commitURL, ok := openResult["commit"].(string)
+	require.True(t, ok)
+	parts := strings.Split(commitURL, "/")
+	txID := parts[len(parts)-2]
+
+	execResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s", txID), map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "CREATE (n:Test {name: 'Transaction Test'})"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, execResp.Code, execResp.Body.String())
+	assertTxResponseHasNoErrors(t, execResp)
+
+	rollbackResp := makeRequest(t, server, "DELETE", fmt.Sprintf("/db/nornic/tx/%s", txID), nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rollbackResp.Code, rollbackResp.Body.String())
+
+	verifyResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n:Test {name: 'Transaction Test'}) RETURN count(n) AS cnt"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, verifyResp.Code, verifyResp.Body.String())
+	require.Equal(t, int64(0), extractCountFromTxResponse(t, verifyResp))
+}
+
+func TestImplicitTransactionSingleStatementRollsBackOnError(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	resp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{
+				"statement": `
+CREATE (n:ImplicitRollback {id: 1})
+WITH n
+CREAT (m:ImplicitRollback {id: 2})
+RETURN n
+`,
+			},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, resp.Code, resp.Body.String())
+
+	var txResp map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&txResp))
+	errorsList, ok := txResp["errors"].([]interface{})
+	require.True(t, ok)
+	require.Greater(t, len(errorsList), 0)
+
+	verifyResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n:ImplicitRollback) RETURN count(n) AS cnt"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, verifyResp.Code, verifyResp.Body.String())
+	require.Equal(t, int64(0), extractCountFromTxResponse(t, verifyResp))
+}
+
+func TestExplicitTransactionCommitPersistsCreate(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
+		"statements": []map[string]interface{}{},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusCreated, openResp.Code, openResp.Body.String())
+
+	var openResult map[string]interface{}
+	require.NoError(t, json.NewDecoder(openResp.Body).Decode(&openResult))
+	commitURL, ok := openResult["commit"].(string)
+	require.True(t, ok)
+	parts := strings.Split(commitURL, "/")
+	txID := parts[len(parts)-2]
+
+	execResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s", txID), map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "CREATE (n:TxCommitVerify {name: 'commit survives'})"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, execResp.Code, execResp.Body.String())
+	assertTxResponseHasNoErrors(t, execResp)
+
+	commitResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s/commit", txID), map[string]interface{}{
+		"statements": []map[string]interface{}{},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, commitResp.Code, commitResp.Body.String())
+	assertTxResponseHasNoErrors(t, commitResp)
+
+	verifyResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n:TxCommitVerify {name: 'commit survives'}) RETURN count(n) AS cnt"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, verifyResp.Code, verifyResp.Body.String())
+	require.Equal(t, int64(1), extractCountFromTxResponse(t, verifyResp))
+
+	cleanupResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n:TxCommitVerify {name: 'commit survives'}) DETACH DELETE n"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, cleanupResp.Code, cleanupResp.Body.String())
+	assertTxResponseHasNoErrors(t, cleanupResp)
 }
 
 // =============================================================================
