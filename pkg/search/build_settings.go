@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/vmihailenco/msgpack/v5"
 )
 
@@ -86,7 +87,7 @@ func saveSearchBuildSettings(path string, snap searchBuildSettingsSnapshot) erro
 func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
 	dimensions := s.VectorIndexDimensions()
 	hcfg := HNSWConfigFromEnv()
-	maxIter := envInt("NORNICDB_KMEANS_MAX_ITERATIONS", 5)
+	maxIter := envutil.GetInt("NORNICDB_KMEANS_MAX_ITERATIONS", 5)
 	if maxIter < 5 {
 		maxIter = 5
 	}

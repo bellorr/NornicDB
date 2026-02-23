@@ -484,64 +484,64 @@ func LoadFromEnv() *Config {
 	config := DefaultConfig()
 
 	// Core settings
-	config.Mode = ReplicationMode(getEnv("NORNICDB_CLUSTER_MODE", string(ModeStandalone)))
-	config.NodeID = getEnv("NORNICDB_CLUSTER_NODE_ID", generateNodeID())
-	config.BindAddr = getEnv("NORNICDB_CLUSTER_BIND_ADDR", "0.0.0.0:7000")
-	config.AdvertiseAddr = getEnv("NORNICDB_CLUSTER_ADVERTISE_ADDR", config.BindAddr)
-	config.DataDir = getEnv("NORNICDB_CLUSTER_DATA_DIR", "./data/replication")
-	config.ReplicationSecret = getEnv("NORNICDB_CLUSTER_REPLICATION_SECRET", "")
+	config.Mode = ReplicationMode(envutil.Get("NORNICDB_CLUSTER_MODE", string(ModeStandalone)))
+	config.NodeID = envutil.Get("NORNICDB_CLUSTER_NODE_ID", generateNodeID())
+	config.BindAddr = envutil.Get("NORNICDB_CLUSTER_BIND_ADDR", "0.0.0.0:7000")
+	config.AdvertiseAddr = envutil.Get("NORNICDB_CLUSTER_ADVERTISE_ADDR", config.BindAddr)
+	config.DataDir = envutil.Get("NORNICDB_CLUSTER_DATA_DIR", "./data/replication")
+	config.ReplicationSecret = envutil.Get("NORNICDB_CLUSTER_REPLICATION_SECRET", "")
 
 	// HA Standby settings
-	config.HAStandby.Role = getEnv("NORNICDB_CLUSTER_HA_ROLE", "")
-	config.HAStandby.PeerAddr = getEnv("NORNICDB_CLUSTER_HA_PEER_ADDR", "")
-	config.HAStandby.SyncMode = SyncMode(getEnv("NORNICDB_CLUSTER_HA_SYNC_MODE", string(SyncAsync)))
+	config.HAStandby.Role = envutil.Get("NORNICDB_CLUSTER_HA_ROLE", "")
+	config.HAStandby.PeerAddr = envutil.Get("NORNICDB_CLUSTER_HA_PEER_ADDR", "")
+	config.HAStandby.SyncMode = SyncMode(envutil.Get("NORNICDB_CLUSTER_HA_SYNC_MODE", string(SyncAsync)))
 	config.HAStandby.HeartbeatInterval = getEnvDurationMs("NORNICDB_CLUSTER_HA_HEARTBEAT_MS", 1000)
-	config.HAStandby.FailoverTimeout = getEnvDuration("NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT", 30*time.Second)
-	config.HAStandby.AutoFailover = getEnvBool("NORNICDB_CLUSTER_HA_AUTO_FAILOVER", true)
-	config.HAStandby.WALBatchSize = getEnvInt("NORNICDB_CLUSTER_HA_WAL_BATCH_SIZE", 1000)
-	config.HAStandby.WALBatchTimeout = getEnvDuration("NORNICDB_CLUSTER_HA_WAL_BATCH_TIMEOUT", 10*time.Millisecond)
-	config.HAStandby.ReconnectInterval = getEnvDuration("NORNICDB_CLUSTER_HA_RECONNECT_INTERVAL", 5*time.Second)
-	config.HAStandby.MaxReconnectBackoff = getEnvDuration("NORNICDB_CLUSTER_HA_MAX_RECONNECT_BACKOFF", 30*time.Second)
+	config.HAStandby.FailoverTimeout = envutil.GetDuration("NORNICDB_CLUSTER_HA_FAILOVER_TIMEOUT", 30*time.Second)
+	config.HAStandby.AutoFailover = envutil.GetBoolLoose("NORNICDB_CLUSTER_HA_AUTO_FAILOVER", true)
+	config.HAStandby.WALBatchSize = envutil.GetInt("NORNICDB_CLUSTER_HA_WAL_BATCH_SIZE", 1000)
+	config.HAStandby.WALBatchTimeout = envutil.GetDuration("NORNICDB_CLUSTER_HA_WAL_BATCH_TIMEOUT", 10*time.Millisecond)
+	config.HAStandby.ReconnectInterval = envutil.GetDuration("NORNICDB_CLUSTER_HA_RECONNECT_INTERVAL", 5*time.Second)
+	config.HAStandby.MaxReconnectBackoff = envutil.GetDuration("NORNICDB_CLUSTER_HA_MAX_RECONNECT_BACKOFF", 30*time.Second)
 
 	// Raft settings
-	config.Raft.ClusterID = getEnv("NORNICDB_CLUSTER_RAFT_CLUSTER_ID", "nornicdb")
-	config.Raft.Bootstrap = getEnvBool("NORNICDB_CLUSTER_RAFT_BOOTSTRAP", false)
-	config.Raft.Peers = parsePeers(getEnv("NORNICDB_CLUSTER_RAFT_PEERS", ""))
-	config.Raft.ElectionTimeout = getEnvDuration("NORNICDB_CLUSTER_RAFT_ELECTION_TIMEOUT", 1*time.Second)
-	config.Raft.HeartbeatTimeout = getEnvDuration("NORNICDB_CLUSTER_RAFT_HEARTBEAT_TIMEOUT", 100*time.Millisecond)
-	config.Raft.LeaderLeaseTimeout = getEnvDuration("NORNICDB_CLUSTER_RAFT_LEADER_LEASE_TIMEOUT", 500*time.Millisecond)
-	config.Raft.SnapshotInterval = getEnvInt("NORNICDB_CLUSTER_RAFT_SNAPSHOT_INTERVAL", 300)
-	config.Raft.SnapshotThreshold = uint64(getEnvInt("NORNICDB_CLUSTER_RAFT_SNAPSHOT_THRESHOLD", 10000))
-	config.Raft.TrailingLogs = uint64(getEnvInt("NORNICDB_CLUSTER_RAFT_TRAILING_LOGS", 10000))
-	config.Raft.MaxAppendEntries = uint64(getEnvInt("NORNICDB_CLUSTER_RAFT_MAX_APPEND_ENTRIES", 64))
-	config.Raft.CommitTimeout = getEnvDuration("NORNICDB_CLUSTER_RAFT_COMMIT_TIMEOUT", 50*time.Millisecond)
-	config.Raft.MaxInflightLogs = getEnvInt("NORNICDB_CLUSTER_RAFT_MAX_INFLIGHT_LOGS", 512)
-	config.Raft.SnapshotRetain = getEnvInt("NORNICDB_CLUSTER_RAFT_SNAPSHOT_RETAIN", 3)
+	config.Raft.ClusterID = envutil.Get("NORNICDB_CLUSTER_RAFT_CLUSTER_ID", "nornicdb")
+	config.Raft.Bootstrap = envutil.GetBoolLoose("NORNICDB_CLUSTER_RAFT_BOOTSTRAP", false)
+	config.Raft.Peers = parsePeers(envutil.Get("NORNICDB_CLUSTER_RAFT_PEERS", ""))
+	config.Raft.ElectionTimeout = envutil.GetDuration("NORNICDB_CLUSTER_RAFT_ELECTION_TIMEOUT", 1*time.Second)
+	config.Raft.HeartbeatTimeout = envutil.GetDuration("NORNICDB_CLUSTER_RAFT_HEARTBEAT_TIMEOUT", 100*time.Millisecond)
+	config.Raft.LeaderLeaseTimeout = envutil.GetDuration("NORNICDB_CLUSTER_RAFT_LEADER_LEASE_TIMEOUT", 500*time.Millisecond)
+	config.Raft.SnapshotInterval = envutil.GetInt("NORNICDB_CLUSTER_RAFT_SNAPSHOT_INTERVAL", 300)
+	config.Raft.SnapshotThreshold = uint64(envutil.GetInt("NORNICDB_CLUSTER_RAFT_SNAPSHOT_THRESHOLD", 10000))
+	config.Raft.TrailingLogs = uint64(envutil.GetInt("NORNICDB_CLUSTER_RAFT_TRAILING_LOGS", 10000))
+	config.Raft.MaxAppendEntries = uint64(envutil.GetInt("NORNICDB_CLUSTER_RAFT_MAX_APPEND_ENTRIES", 64))
+	config.Raft.CommitTimeout = envutil.GetDuration("NORNICDB_CLUSTER_RAFT_COMMIT_TIMEOUT", 50*time.Millisecond)
+	config.Raft.MaxInflightLogs = envutil.GetInt("NORNICDB_CLUSTER_RAFT_MAX_INFLIGHT_LOGS", 512)
+	config.Raft.SnapshotRetain = envutil.GetInt("NORNICDB_CLUSTER_RAFT_SNAPSHOT_RETAIN", 3)
 
 	// Multi-region settings
-	config.MultiRegion.RegionID = getEnv("NORNICDB_CLUSTER_REGION_ID", "")
-	config.MultiRegion.RemoteRegions = parseRemoteRegions(getEnv("NORNICDB_CLUSTER_REMOTE_REGIONS", ""))
-	config.MultiRegion.CrossRegionSyncMode = SyncMode(getEnv("NORNICDB_CLUSTER_CROSS_REGION_MODE", string(SyncAsync)))
-	config.MultiRegion.CrossRegionBatchSize = getEnvInt("NORNICDB_CLUSTER_CROSS_REGION_BATCH_SIZE", 100)
-	config.MultiRegion.CrossRegionBatchTimeout = getEnvDuration("NORNICDB_CLUSTER_CROSS_REGION_BATCH_TIMEOUT", 100*time.Millisecond)
-	config.MultiRegion.ConflictStrategy = getEnv("NORNICDB_CLUSTER_CONFLICT_STRATEGY", "last_write_wins")
+	config.MultiRegion.RegionID = envutil.Get("NORNICDB_CLUSTER_REGION_ID", "")
+	config.MultiRegion.RemoteRegions = parseRemoteRegions(envutil.Get("NORNICDB_CLUSTER_REMOTE_REGIONS", ""))
+	config.MultiRegion.CrossRegionSyncMode = SyncMode(envutil.Get("NORNICDB_CLUSTER_CROSS_REGION_MODE", string(SyncAsync)))
+	config.MultiRegion.CrossRegionBatchSize = envutil.GetInt("NORNICDB_CLUSTER_CROSS_REGION_BATCH_SIZE", 100)
+	config.MultiRegion.CrossRegionBatchTimeout = envutil.GetDuration("NORNICDB_CLUSTER_CROSS_REGION_BATCH_TIMEOUT", 100*time.Millisecond)
+	config.MultiRegion.ConflictStrategy = envutil.Get("NORNICDB_CLUSTER_CONFLICT_STRATEGY", "last_write_wins")
 	// Copy Raft config for local cluster
 	config.MultiRegion.LocalCluster = config.Raft
 
 	// Consistency settings
-	config.Consistency.DefaultWriteConsistency = ConsistencyLevel(getEnv("NORNICDB_CLUSTER_WRITE_CONSISTENCY", string(ConsistencyQuorum)))
-	config.Consistency.DefaultReadConsistency = ConsistencyLevel(getEnv("NORNICDB_CLUSTER_READ_CONSISTENCY", string(ConsistencyOne)))
+	config.Consistency.DefaultWriteConsistency = ConsistencyLevel(envutil.Get("NORNICDB_CLUSTER_WRITE_CONSISTENCY", string(ConsistencyQuorum)))
+	config.Consistency.DefaultReadConsistency = ConsistencyLevel(envutil.Get("NORNICDB_CLUSTER_READ_CONSISTENCY", string(ConsistencyOne)))
 
 	// TLS settings (STRONGLY RECOMMENDED for production)
-	config.TLS.Enabled = getEnvBool("NORNICDB_CLUSTER_TLS_ENABLED", false)
-	config.TLS.CertFile = getEnv("NORNICDB_CLUSTER_TLS_CERT_FILE", "")
-	config.TLS.KeyFile = getEnv("NORNICDB_CLUSTER_TLS_KEY_FILE", "")
-	config.TLS.CAFile = getEnv("NORNICDB_CLUSTER_TLS_CA_FILE", "")
-	config.TLS.VerifyClient = getEnvBool("NORNICDB_CLUSTER_TLS_VERIFY_CLIENT", true) // Default to secure
-	config.TLS.InsecureSkipVerify = getEnvBool("NORNICDB_CLUSTER_TLS_INSECURE_SKIP_VERIFY", false)
-	config.TLS.ServerName = getEnv("NORNICDB_CLUSTER_TLS_SERVER_NAME", "")
-	config.TLS.MinVersion = getEnv("NORNICDB_CLUSTER_TLS_MIN_VERSION", "1.2")
-	config.TLS.CipherSuites = parseCSV(getEnv("NORNICDB_CLUSTER_TLS_CIPHER_SUITES", ""))
+	config.TLS.Enabled = envutil.GetBoolLoose("NORNICDB_CLUSTER_TLS_ENABLED", false)
+	config.TLS.CertFile = envutil.Get("NORNICDB_CLUSTER_TLS_CERT_FILE", "")
+	config.TLS.KeyFile = envutil.Get("NORNICDB_CLUSTER_TLS_KEY_FILE", "")
+	config.TLS.CAFile = envutil.Get("NORNICDB_CLUSTER_TLS_CA_FILE", "")
+	config.TLS.VerifyClient = envutil.GetBoolLoose("NORNICDB_CLUSTER_TLS_VERIFY_CLIENT", true) // Default to secure
+	config.TLS.InsecureSkipVerify = envutil.GetBoolLoose("NORNICDB_CLUSTER_TLS_INSECURE_SKIP_VERIFY", false)
+	config.TLS.ServerName = envutil.Get("NORNICDB_CLUSTER_TLS_SERVER_NAME", "")
+	config.TLS.MinVersion = envutil.Get("NORNICDB_CLUSTER_TLS_MIN_VERSION", "1.2")
+	config.TLS.CipherSuites = parseCSV(envutil.Get("NORNICDB_CLUSTER_TLS_CIPHER_SUITES", ""))
 
 	return config
 }
@@ -658,26 +658,8 @@ func (c *Config) String() string {
 		c.Mode, c.NodeID, c.BindAddr)
 }
 
-// Helper functions
-
-func getEnv(key, defaultVal string) string {
-	return envutil.Get(key, defaultVal)
-}
-
-func getEnvInt(key string, defaultVal int) int {
-	return envutil.GetInt(key, defaultVal)
-}
-
-func getEnvBool(key string, defaultVal bool) bool {
-	return envutil.GetBoolLoose(key, defaultVal)
-}
-
-func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
-	return envutil.GetDuration(key, defaultVal)
-}
-
 func getEnvDurationMs(key string, defaultMs int) time.Duration {
-	ms := getEnvInt(key, defaultMs)
+	ms := envutil.GetInt(key, defaultMs)
 	return time.Duration(ms) * time.Millisecond
 }
 

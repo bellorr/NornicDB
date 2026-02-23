@@ -799,7 +799,7 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 	}
 
 	// Cluster count: env override, else 0 = auto from dataset size at trigger time (sqrt(n/2), clamped).
-	envK := envInt("NORNICDB_KMEANS_NUM_CLUSTERS", 0)
+	envK := envutil.GetInt("NORNICDB_KMEANS_NUM_CLUSTERS", 0)
 	if envK > 0 {
 		numClusters = envK
 	} else if numClusters <= 0 {
@@ -809,7 +809,7 @@ func (s *Service) EnableClustering(gpuManager *gpu.Manager, numClusters int) {
 
 	// Max iterations is a cap; clustering stops when assignments stop changing (early convergence).
 	// Default 5 prioritizes startup/build speed; override via NORNICDB_KMEANS_MAX_ITERATIONS.
-	maxIter := envInt("NORNICDB_KMEANS_MAX_ITERATIONS", 5)
+	maxIter := envutil.GetInt("NORNICDB_KMEANS_MAX_ITERATIONS", 5)
 	if maxIter < 5 {
 		maxIter = 5
 	}
@@ -1024,7 +1024,7 @@ func (s *Service) TriggerClustering(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) {
+	if envutil.GetBoolStrict("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) {
 		if err := s.rebuildClusterHNSWIndexes(ctx, clusterIndex); err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -1060,8 +1060,8 @@ func (s *Service) rebuildClusterHNSWIndexes(ctx context.Context, clusterIndex *g
 	}
 	vectorLookup := s.getVectorLookup()
 
-	minClusterSize := envInt("NORNICDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE", 200)
-	maxClusters := envInt("NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS", 1024)
+	minClusterSize := envutil.GetInt("NORNICDB_VECTOR_IVF_HNSW_MIN_CLUSTER_SIZE", 200)
+	maxClusters := envutil.GetInt("NORNICDB_VECTOR_IVF_HNSW_MAX_CLUSTERS", 1024)
 	numClusters := clusterIndex.NumClusters()
 	if numClusters <= 0 {
 		return fmt.Errorf("no clusters")
@@ -1728,7 +1728,7 @@ func (s *Service) allowLiveHNSWUpdatesLocked() bool {
 	}
 	// Keep search latency prioritized for large indexes by deferring live mutations.
 	// Set < 0 to force-enable live updates for all sizes.
-	maxN := envInt("NORNICDB_HNSW_LIVE_UPDATE_MAX_N", 50000)
+	maxN := envutil.GetInt("NORNICDB_HNSW_LIVE_UPDATE_MAX_N", 50000)
 	if maxN < 0 {
 		return true
 	}
@@ -2159,7 +2159,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 			s.setBuildPhase("idle")
 		}
 	}()
-	if sec := envInt("NORNICDB_SEARCH_BUILD_PROGRESS_LOG_SEC", 15); sec > 0 {
+	if sec := envutil.GetInt("NORNICDB_SEARCH_BUILD_PROGRESS_LOG_SEC", 15); sec > 0 {
 		interval := time.Duration(sec) * time.Second
 		ticker := time.NewTicker(interval)
 		stop := make(chan struct{})
@@ -3091,8 +3091,8 @@ func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchP
 	var strategyName string
 
 	gpuEnabled := s.gpuManager != nil && s.gpuManager.IsEnabled() && s.gpuEmbeddingIndex != nil
-	gpuMinN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 5000)
-	gpuMaxN := envInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 15000)
+	gpuMinN := envutil.GetInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 5000)
+	gpuMaxN := envutil.GetInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 15000)
 
 	// Prefer GPU brute-force (exact) when enabled and within configured thresholds.
 	// This path is exact and typically highest-throughput within its tuned N range.
@@ -3123,7 +3123,7 @@ func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchP
 				SetClusterSelector(s.selectHybridClusters)
 			strategyName = "GPU k-means (cluster routing)"
 		} else {
-			if envBool("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) && !gpuEnabled {
+			if envutil.GetBoolStrict("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) && !gpuEnabled {
 				s.clusterHNSWMu.RLock()
 				hasClusterHNSW := len(s.clusterHNSW) > 0
 				s.clusterHNSWMu.RUnlock()
@@ -3325,11 +3325,11 @@ func (s *Service) hnswLexicalSeedNodeSet(ft bm25Index) map[string]struct{} {
 	if ft == nil {
 		return nil
 	}
-	maxTerms := envInt("NORNICDB_HNSW_LEXICAL_SEED_MAX_TERMS", 256)
+	maxTerms := envutil.GetInt("NORNICDB_HNSW_LEXICAL_SEED_MAX_TERMS", 256)
 	if maxTerms <= 0 {
 		maxTerms = 256
 	}
-	perTerm := envInt("NORNICDB_HNSW_LEXICAL_SEED_PER_TERM", 8)
+	perTerm := envutil.GetInt("NORNICDB_HNSW_LEXICAL_SEED_PER_TERM", 8)
 	if perTerm <= 0 {
 		perTerm = 8
 	}
@@ -3368,7 +3368,7 @@ func (s *Service) ensureHNSWMaintenance() {
 		minRebuildInterval := envDurationSec("NORNICDB_HNSW_MIN_REBUILD_INTERVAL_SEC", 60)
 		rebuildRatio := envFloat("NORNICDB_HNSW_TOMBSTONE_REBUILD_RATIO", 0.50)
 		maxOverhead := envFloat("NORNICDB_HNSW_MAX_TOMBSTONE_OVERHEAD_FACTOR", 2.0)
-		enabled := envBool("NORNICDB_HNSW_REBUILD_ENABLED", true)
+		enabled := envutil.GetBoolStrict("NORNICDB_HNSW_REBUILD_ENABLED", true)
 
 		ticker := time.NewTicker(interval)
 		go func() {
@@ -3401,7 +3401,7 @@ func (s *Service) maybeRebuildHNSW(ctx context.Context, tombstoneRatioThreshold,
 		return nil
 	}
 	deferredMutations := s.hnswDeferredMutations.Load()
-	deferredThreshold := int64(envInt("NORNICDB_HNSW_DEFERRED_REBUILD_THRESHOLD", 10000))
+	deferredThreshold := int64(envutil.GetInt("NORNICDB_HNSW_DEFERRED_REBUILD_THRESHOLD", 10000))
 	rebuildForDeferred := deferredThreshold > 0 && deferredMutations >= deferredThreshold
 
 	s.hnswMu.RLock()
@@ -3518,10 +3518,6 @@ func (s *Service) maybeRebuildHNSW(ctx context.Context, tombstoneRatioThreshold,
 	return nil
 }
 
-func envBool(key string, fallback bool) bool {
-	return envutil.GetBoolStrict(key, fallback)
-}
-
 func envFloat(key string, fallback float64) float64 {
 	raw, ok := os.LookupEnv(key)
 	if !ok || raw == "" {
@@ -3564,10 +3560,6 @@ func bm25SettingsEquivalent(saved, current, currentFormat string) bool {
 	}
 	// Treat BM25 format 1.0.0 and current V2 format as equivalent for rebuild gating.
 	return savedKV["format"] == "1.0.0" && currentKV["format"] == currentFormat && currentFormat == bm25V2FormatVersion
-}
-
-func envInt(key string, fallback int) int {
-	return envutil.GetInt(key, fallback)
 }
 
 func envDurationMs(key string, fallbackMs int) time.Duration {
@@ -4201,7 +4193,7 @@ func (s *Service) fullTextSearchOnly(ctx context.Context, query string, opts *Se
 }
 
 func (s *Service) maybeLogSearchTiming(query string, resp *SearchResponse, elapsed time.Duration, cacheHit bool) {
-	if !envBool(EnvSearchLogTimings, false) || resp == nil {
+	if !envutil.GetBoolStrict(EnvSearchLogTimings, false) || resp == nil {
 		return
 	}
 	totalMs := int(elapsed.Milliseconds())

@@ -6,6 +6,8 @@ import (
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/orneryd/nornicdb/pkg/envutil"
 )
 
 const (
@@ -469,11 +471,11 @@ type bm25QueryPlan struct {
 }
 
 func (f *FulltextIndexV2) expandAndWeightTermsLocked(queryTerms []string) []weightedTermPostings {
-	maxPrefixExpansions := envInt("NORNICDB_BM25_PREFIX_MAX_EXPANSIONS", 32)
+	maxPrefixExpansions := envutil.GetInt("NORNICDB_BM25_PREFIX_MAX_EXPANSIONS", 32)
 	if maxPrefixExpansions < 0 {
 		maxPrefixExpansions = 0
 	}
-	minPrefixLen := envInt("NORNICDB_BM25_PREFIX_MIN_LEN", 3)
+	minPrefixLen := envutil.GetInt("NORNICDB_BM25_PREFIX_MIN_LEN", 3)
 	if minPrefixLen < 1 {
 		minPrefixLen = 1
 	}

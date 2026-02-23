@@ -1816,7 +1816,7 @@ func applyEnvVars(config *Config) {
 	if getEnv("NORNICDB_AUTO_TLP_ENABLED", "") == "true" {
 		config.Features.TopologyAutoIntegrationEnabled = true
 	}
-	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_ENABLED"); ok {
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_HEIMDALL_ENABLED"); ok {
 		config.Features.HeimdallEnabled = v
 	}
 	if v := getEnv("NORNICDB_HEIMDALL_MODEL", ""); v != "" {
@@ -1846,13 +1846,13 @@ func applyEnvVars(config *Config) {
 	if v := getEnvFloat("NORNICDB_HEIMDALL_TEMPERATURE", 0); v > 0 {
 		config.Features.HeimdallTemperature = float32(v)
 	}
-	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_ANOMALY_DETECTION"); ok {
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_HEIMDALL_ANOMALY_DETECTION"); ok {
 		config.Features.HeimdallAnomalyDetection = v
 	}
-	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_RUNTIME_DIAGNOSIS"); ok {
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_HEIMDALL_RUNTIME_DIAGNOSIS"); ok {
 		config.Features.HeimdallRuntimeDiagnosis = v
 	}
-	if v, ok := lookupEnvBool("NORNICDB_HEIMDALL_MEMORY_CURATION"); ok {
+	if v, ok := envutil.LookupBoolLoose("NORNICDB_HEIMDALL_MEMORY_CURATION"); ok {
 		config.Features.HeimdallMemoryCuration = v
 	}
 	// MCP tools in agentic loop (NORNICDB_HEIMDALL_MCP_ENABLE, NORNICDB_HEIMDALL_MCP_TOOLS)
@@ -2566,10 +2566,6 @@ func getEnvFloat(key string, defaultVal float64) float64 {
 
 func getEnvBool(key string, defaultVal bool) bool {
 	return envutil.GetBoolLoose(key, defaultVal)
-}
-
-func lookupEnvBool(key string) (bool, bool) {
-	return envutil.LookupBoolLoose(key)
 }
 
 func getEnvDuration(key string, defaultVal time.Duration) time.Duration {

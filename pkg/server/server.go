@@ -184,6 +184,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/config/dbconfig"
 	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/embed"
+	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/orneryd/nornicdb/pkg/graphql"
 	"github.com/orneryd/nornicdb/pkg/heimdall"
 	"github.com/orneryd/nornicdb/pkg/localllm"
@@ -536,7 +537,7 @@ func DefaultConfig() *Config {
 		// Pprof disabled by default (security: profiling endpoints expose internals)
 		// Override via:
 		//   NORNICDB_ENABLE_PPROF=true
-		EnablePprof: getEnvBool("NORNICDB_ENABLE_PPROF", false),
+		EnablePprof: envutil.GetBoolStrict("NORNICDB_ENABLE_PPROF", false),
 
 		// HTTP/2 always enabled (backwards compatible with HTTP/1.1)
 		// MaxConcurrentStreams: 250 matches Go's internal default

@@ -17,6 +17,7 @@ import (
 	"sort"
 	"sync"
 
+	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -473,8 +474,8 @@ func (v *VectorFileStore) compactIfNeededLocked() (bool, error) {
 	if v.closed || v.file == nil {
 		return false, nil
 	}
-	minObsolete := int64(envInt("NORNICDB_VECTOR_VFS_COMPACT_MIN_OBSOLETE", 50000))
-	minSizeMB := int64(envInt("NORNICDB_VECTOR_VFS_COMPACT_MIN_SIZE_MB", 256))
+	minObsolete := int64(envutil.GetInt("NORNICDB_VECTOR_VFS_COMPACT_MIN_OBSOLETE", 50000))
+	minSizeMB := int64(envutil.GetInt("NORNICDB_VECTOR_VFS_COMPACT_MIN_SIZE_MB", 256))
 	deadRatioThreshold := envFloat("NORNICDB_VECTOR_VFS_COMPACT_DEAD_RATIO", 0.30)
 	if minObsolete < 1 {
 		minObsolete = 1

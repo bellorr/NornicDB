@@ -6,6 +6,8 @@ import (
 	"os"
 	"sort"
 	"strings"
+
+	"github.com/orneryd/nornicdb/pkg/envutil"
 )
 
 type queryTextContextKey struct{}
@@ -47,7 +49,7 @@ func (s *Service) rebuildClusterLexicalProfiles() {
 		return
 	}
 
-	topTerms := envInt("NORNICDB_VECTOR_HYBRID_ROUTING_LEX_TOP_TERMS", 64)
+	topTerms := envutil.GetInt("NORNICDB_VECTOR_HYBRID_ROUTING_LEX_TOP_TERMS", 64)
 	if topTerms < 8 {
 		topTerms = 8
 	}
@@ -248,11 +250,11 @@ func (s *Service) applyBM25SeedHints() {
 	if !clusterIndex.IsClustered() && clusterIndex.Count() == 0 {
 		return
 	}
-	maxTerms := envInt("NORNICDB_KMEANS_SEED_MAX_TERMS", 256)
+	maxTerms := envutil.GetInt("NORNICDB_KMEANS_SEED_MAX_TERMS", 256)
 	if maxTerms < 16 {
 		maxTerms = 16
 	}
-	perTerm := envInt("NORNICDB_KMEANS_SEED_DOCS_PER_TERM", 1)
+	perTerm := envutil.GetInt("NORNICDB_KMEANS_SEED_DOCS_PER_TERM", 1)
 	if perTerm < 1 {
 		perTerm = 1
 	}

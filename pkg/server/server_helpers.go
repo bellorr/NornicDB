@@ -13,7 +13,6 @@ import (
 
 	"github.com/orneryd/nornicdb/pkg/audit"
 	"github.com/orneryd/nornicdb/pkg/auth"
-	"github.com/orneryd/nornicdb/pkg/envutil"
 )
 
 // =============================================================================
@@ -420,8 +419,3 @@ func (s *Server) logAudit(r *http.Request, userID, eventType string, success boo
 	})
 }
 
-// getEnvBool reads a boolean environment variable.
-// Returns defaultValue if the variable is not set or cannot be parsed.
-func getEnvBool(key string, defaultValue bool) bool {
-	return envutil.GetBoolStrict(key, defaultValue)
-}

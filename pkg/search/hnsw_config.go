@@ -55,16 +55,16 @@ func HNSWConfigFromEnv() HNSWConfig {
 	config := presetDefaults(preset)
 
 	// Apply advanced overrides if set
-	if m := getEnvInt("NORNICDB_VECTOR_HNSW_M", 0); m > 0 {
+	if m := envutil.GetInt("NORNICDB_VECTOR_HNSW_M", 0); m > 0 {
 		config.M = m
 		config.LevelMultiplier = 1.0 / math.Log(float64(m))
 	}
 
-	if efConstruction := getEnvInt("NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION", 0); efConstruction > 0 {
+	if efConstruction := envutil.GetInt("NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION", 0); efConstruction > 0 {
 		config.EfConstruction = efConstruction
 	}
 
-	if efSearch := getEnvInt("NORNICDB_VECTOR_HNSW_EF_SEARCH", 0); efSearch > 0 {
+	if efSearch := envutil.GetInt("NORNICDB_VECTOR_HNSW_EF_SEARCH", 0); efSearch > 0 {
 		config.EfSearch = efSearch
 	}
 
@@ -113,8 +113,4 @@ func presetDefaults(preset HNSWQualityPreset) HNSWConfig {
 	}
 }
 
-// getEnvInt reads an integer environment variable.
-func getEnvInt(key string, defaultVal int) int {
-	return envutil.GetInt(key, defaultVal)
-}
 

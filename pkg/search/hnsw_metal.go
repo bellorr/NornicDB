@@ -3,6 +3,7 @@
 package search
 
 import (
+	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/simd"
 )
@@ -18,7 +19,7 @@ func (h *HNSWIndex) batchScoreCandidatesMetal(normalizedQuery []float32, candida
 	// To avoid throughput regressions, Metal scoring is opt-in via threshold:
 	//   - NORNICDB_VECTOR_HNSW_METAL_MIN_CANDIDATES <= 0 disables Metal
 	//   - Otherwise, Metal is only used when len(candidateIDs) >= threshold
-	threshold := envInt("NORNICDB_VECTOR_HNSW_METAL_MIN_CANDIDATES", 0)
+	threshold := envutil.GetInt("NORNICDB_VECTOR_HNSW_METAL_MIN_CANDIDATES", 0)
 	if threshold <= 0 || !simd.MetalAvailable() || len(candidateIDs) < threshold {
 		// Fall back to CPU for small batches or when Metal unavailable
 		return h.batchScoreCandidatesCPU(normalizedQuery, candidateIDs, minSim32)
