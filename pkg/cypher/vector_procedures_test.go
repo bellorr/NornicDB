@@ -3,11 +3,14 @@ package cypher
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/orneryd/nornicdb/pkg/vectorspace"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -399,15 +402,16 @@ func TestVectorIndexQueryNodesWithProcedure(t *testing.T) {
 		}
 		exec.SetEmbedder(mockEmbedder)
 
-		longQuery := strings.Repeat("a", 1200)
-		result, err := exec.Execute(ctx, "CALL db.index.vector.queryNodes('test_idx', 5, $q) YIELD node, score", map[string]interface{}{
-			"q": longQuery,
+		longQuery := loadLargeDocQuery(t)
+		result, err := exec.Execute(ctx, "CALL db.index.vector.queryNodes('test_idx', 5, $queryText) YIELD node, score", map[string]interface{}{
+			"queryText": longQuery,
 		})
 		require.NoError(t, err)
 		assert.NotNil(t, result)
 
 		require.GreaterOrEqual(t, mockEmbedder.calls, 2, "expected embedding to run on multiple query chunks")
-		require.LessOrEqual(t, mockEmbedder.maxLen, 512, "expected no embedding call on the full long query")
+		require.Greater(t, mockEmbedder.maxLen, 0)
+		require.LessOrEqual(t, mockEmbedder.maxTokens, 512, "expected no embedding call on chunks > 512 tokens")
 	})
 }
 
@@ -425,8 +429,9 @@ func (m *mockQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, 
 type failingOnLongQueryEmbedder struct {
 	embedding []float32
 
-	calls  int
-	maxLen int
+	calls     int
+	maxLen    int
+	maxTokens int
 }
 
 func (m *failingOnLongQueryEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -434,10 +439,24 @@ func (m *failingOnLongQueryEmbedder) Embed(ctx context.Context, text string) ([]
 	if len(text) > m.maxLen {
 		m.maxLen = len(text)
 	}
-	if len(text) > 512 {
-		return nil, fmt.Errorf("simulated tokenizer overflow for len=%d", len(text))
+	tok := util.CountApproxTokens(text)
+	if tok > m.maxTokens {
+		m.maxTokens = tok
+	}
+	if tok > 512 {
+		return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", tok)
 	}
 	return m.embedding, nil
+}
+
+func loadLargeDocQuery(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	query := string(data)
+	require.Greater(t, util.CountApproxTokens(query), 512)
+	return query
 }
 
 // TestVectorSearchQueryModes tests all three query modes:
@@ -941,14 +960,17 @@ func TestCallDbIndexVectorQueryRelationships(t *testing.T) {
 		}
 		exec.SetEmbedder(mockEmbedder)
 
-		longQuery := strings.Repeat("a", 1200)
-		result, err := exec.Execute(ctx, fmt.Sprintf("CALL db.index.vector.queryRelationships('rel_long_text_idx', 5, '%s') YIELD relationship, score", longQuery), nil)
+		longQuery := loadLargeDocQuery(t)
+		result, err := exec.Execute(ctx, "CALL db.index.vector.queryRelationships('rel_long_text_idx', 5, $queryText) YIELD relationship, score", map[string]interface{}{
+			"queryText": longQuery,
+		})
 		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Greater(t, len(result.Rows), 0, "Should find relationships when long string is chunk-embedded")
 
 		require.GreaterOrEqual(t, mockEmbedder.calls, 2, "expected embedding to run on multiple query chunks")
-		require.LessOrEqual(t, mockEmbedder.maxLen, 512, "expected no embedding call on the full long query")
+		require.Greater(t, mockEmbedder.maxLen, 0)
+		require.LessOrEqual(t, mockEmbedder.maxTokens, 512, "expected no embedding call on chunks > 512 tokens")
 	})
 
 	t.Run("no_index_scenario", func(t *testing.T) {

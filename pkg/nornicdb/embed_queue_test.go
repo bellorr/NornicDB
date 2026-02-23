@@ -740,9 +740,9 @@ func TestChunkText(t *testing.T) {
 
 		assert.Greater(t, len(chunks), 1, "Should create multiple chunks")
 
-		// Verify each chunk is within size limit (with some tolerance for word boundaries)
+		// Verify each chunk is within token size limit (with small boundary tolerance)
 		for _, chunk := range chunks {
-			assert.LessOrEqual(t, len(chunk), 150, "Chunk should be close to chunk size")
+			assert.LessOrEqual(t, util.CountApproxTokens(chunk), 110, "Chunk should be near token chunk size")
 		}
 	})
 
@@ -873,10 +873,10 @@ func (a *Application) Stop(ctx context.Context) error {
 	return nil
 }
 `
-		// Test with realistic chunk settings (512 chars, 50 overlap)
-		chunks := util.ChunkText(largeContent, 512, 50)
+		// Use a smaller token size here to force multi-chunk behavior in test.
+		chunks := util.ChunkText(largeContent, 128, 16)
 
-		t.Logf("Large content: %d chars, chunked into %d pieces", len(largeContent), len(chunks))
+		t.Logf("Large content: %d tokens, chunked into %d pieces", util.CountApproxTokens(largeContent), len(chunks))
 
 		assert.Greater(t, len(chunks), 1, "Large content should produce multiple chunks")
 		// No cap on chunks per node - number depends only on content length and chunk size
@@ -884,13 +884,13 @@ func (a *Application) Stop(ctx context.Context) error {
 		// Verify all content is preserved (approximately - overlap means some duplication)
 		totalChunkLength := 0
 		for i, chunk := range chunks {
-			totalChunkLength += len(chunk)
-			t.Logf("  Chunk %d: %d chars", i+1, len(chunk))
+			totalChunkLength += util.CountApproxTokens(chunk)
+			t.Logf("  Chunk %d: %d tokens", i+1, util.CountApproxTokens(chunk))
 			assert.NotEmpty(t, chunk, "No empty chunks allowed")
 		}
 
 		// Total should be >= original (due to overlap) but not excessively more
-		assert.GreaterOrEqual(t, totalChunkLength, len(largeContent)-100,
+		assert.GreaterOrEqual(t, totalChunkLength, util.CountApproxTokens(largeContent)-20,
 			"Chunks should cover all content")
 	})
 
@@ -902,20 +902,20 @@ func (a *Application) Stop(ctx context.Context) error {
 		}
 		veryLargeContent := sb.String()
 
-		t.Logf("Very large content: %d chars (%.1f KB)", len(veryLargeContent), float64(len(veryLargeContent))/1024)
+		t.Logf("Very large content: %d tokens", util.CountApproxTokens(veryLargeContent))
 
 		chunks := util.ChunkText(veryLargeContent, 512, 50)
 
 		t.Logf("Chunked into %d pieces", len(chunks))
 
-		// Verify no empty chunks and reasonable sizes
+		// Verify no empty chunks and reasonable token sizes
 		for _, chunk := range chunks {
 			assert.NotEmpty(t, chunk)
-			assert.LessOrEqual(t, len(chunk), 1024, "Chunks should not be excessively large")
+			assert.LessOrEqual(t, util.CountApproxTokens(chunk), 560, "Chunks should not exceed token budget by much")
 		}
 
 		// Verify we can reconstruct approximately
-		assert.Greater(t, len(chunks), 50, "Should have many chunks for large content")
+		assert.Greater(t, len(chunks), 30, "Should have many chunks for large content")
 	})
 }
 

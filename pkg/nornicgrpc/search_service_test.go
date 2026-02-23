@@ -3,6 +3,8 @@ package nornicgrpc
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	gen "github.com/orneryd/nornicdb/pkg/nornicgrpc/gen"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -127,6 +130,7 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 	var (
 		mu       sync.Mutex
 		embedMax int
+		tokenMax int
 		embeds   int
 	)
 
@@ -138,10 +142,13 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 			if len(query) > embedMax {
 				embedMax = len(query)
 			}
+			if tok := util.CountApproxTokens(query); tok > tokenMax {
+				tokenMax = tok
+			}
 			mu.Unlock()
 
-			if len(query) > 512 {
-				return nil, fmt.Errorf("simulated tokenizer overflow for len=%d", len(query))
+			if util.CountApproxTokens(query) > 512 {
+				return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", util.CountApproxTokens(query))
 			}
 			return []float32{0.1, 0.2}, nil
 		},
@@ -149,11 +156,16 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// Construct a long query with markers spaced so chunking isolates them.
-	longQuery := strings.Repeat("a", 100) + "ONE" +
-		strings.Repeat("a", 500) + "TWO" +
-		strings.Repeat("a", 500) + "THREE" +
-		strings.Repeat("a", 200)
+	// Load a real large document as the base query text to validate chunking
+	// behavior on natural content instead of synthetic repeated characters.
+	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	base := string(data)
+	// Keep marker tokens so the stub searcher can return deterministic per-chunk
+	// results for fusion assertions.
+	longQuery := base + "\nONE\n" + base + "\nTWO\n" + base + "\nTHREE\n" + base
+	require.Greater(t, util.CountApproxTokens(longQuery), 512)
 
 	resp, err := svc.SearchText(context.Background(), &gen.SearchTextRequest{
 		Query: longQuery,
@@ -167,19 +179,22 @@ func TestService_SearchText_ChunksLongQueryAndFusesAcrossChunks(t *testing.T) {
 	mu.Lock()
 	gotEmbeds := embeds
 	gotEmbedMax := embedMax
+	gotTokenMax := tokenMax
 	mu.Unlock()
 	require.GreaterOrEqual(t, gotEmbeds, 2, "expected multiple chunk embeddings")
-	require.LessOrEqual(t, gotEmbedMax, 512, "expected no embedding call on the full long query")
+	require.Greater(t, gotEmbedMax, 0)
+	require.LessOrEqual(t, gotTokenMax, 512, "expected no embedding call on query chunks > 512 tokens")
 
 	st.mu.Lock()
 	qs := append([]string(nil), st.queries...)
 	st.mu.Unlock()
 	require.GreaterOrEqual(t, len(qs), 2, "expected multiple per-chunk searches")
-	maxQ := 0
+	maxQTokens := 0
 	for _, q := range qs {
-		if len(q) > maxQ {
-			maxQ = len(q)
+		tok := util.CountApproxTokens(q)
+		if tok > maxQTokens {
+			maxQTokens = tok
 		}
 	}
-	require.LessOrEqual(t, maxQ, 512, "expected no search call on the full long query")
+	require.LessOrEqual(t, maxQTokens, 512, "expected no search call on query chunks > 512 tokens")
 }

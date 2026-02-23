@@ -76,9 +76,9 @@ type EmbedWorkerConfig struct {
 	BatchDelay   time.Duration // Delay between processing nodes (default: 500ms)
 	MaxRetries   int           // Max retry attempts per node (default: 3)
 
-	// Text chunking settings (matches Mimir: MIMIR_EMBEDDINGS_CHUNK_SIZE, MIMIR_EMBEDDINGS_CHUNK_OVERLAP)
-	ChunkSize    int // Max characters per chunk (default: 512)
-	ChunkOverlap int // Characters to overlap between chunks (default: 50)
+	// Text chunking settings.
+	ChunkSize    int // Max tokens per chunk (default: 512)
+	ChunkOverlap int // Tokens to overlap between chunks (default: 50)
 	// EmbedBatchSize caps chunks per EmbedBatch call to avoid oversized requests.
 	EmbedBatchSize int // Max chunks per batch request (default: 32)
 
@@ -590,7 +590,7 @@ func (ew *EmbedWorker) processNextBatch() bool {
 	}
 	text := buildEmbeddingText(node.Properties, node.Labels, opts)
 
-	// Chunk text if needed (no limit on number of chunks per node)
+	// Chunk text if needed (no limit on number of chunks per node).
 	chunks := util.ChunkText(text, ew.config.ChunkSize, ew.config.ChunkOverlap)
 
 	// Embed chunks in micro-batches to avoid oversized single requests for large files.

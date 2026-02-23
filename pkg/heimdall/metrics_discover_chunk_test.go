@@ -3,11 +3,13 @@ package heimdall
 import (
 	"context"
 	"fmt"
-	"strings"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -28,9 +30,10 @@ func (s *stubQueryDB) EdgeCount() (int64, error) {
 type testEmbedder struct {
 	mu sync.Mutex
 
-	failIfLenGreater int
-	calls            int
-	maxLen           int
+	failIfTokensGreater int
+	calls               int
+	maxLen              int
+	maxTokens           int
 }
 
 func (e *testEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -39,11 +42,15 @@ func (e *testEmbedder) Embed(ctx context.Context, text string) ([]float32, error
 	if len(text) > e.maxLen {
 		e.maxLen = len(text)
 	}
-	fail := e.failIfLenGreater > 0 && len(text) > e.failIfLenGreater
+	tokens := util.CountApproxTokens(text)
+	if tokens > e.maxTokens {
+		e.maxTokens = tokens
+	}
+	fail := e.failIfTokensGreater > 0 && tokens > e.failIfTokensGreater
 	e.mu.Unlock()
 
 	if fail {
-		return nil, fmt.Errorf("simulated tokenizer overflow for len=%d", len(text))
+		return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", tokens)
 	}
 	return []float32{0.1, 0.2}, nil
 }
@@ -87,12 +94,22 @@ func (s *testSearcher) GetNode(ctx context.Context, nodeID string) (*NodeData, e
 	return nil, nil
 }
 
+func loadLargeDocQuery(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	query := string(data)
+	require.Greater(t, util.CountApproxTokens(query), 512)
+	return query
+}
+
 func TestQueryExecutor_Discover_ChunksLongQueriesForVectorSearch(t *testing.T) {
-	emb := &testEmbedder{failIfLenGreater: 512}
+	emb := &testEmbedder{failIfTokensGreater: 512}
 	searcher := &testSearcher{}
 	exec := NewQueryExecutorWithSearch(&stubQueryDB{}, searcher, emb, 5*time.Second)
 
-	longQuery := strings.Repeat("a", 1200)
+	longQuery := loadLargeDocQuery(t)
 	res, err := exec.Discover(context.Background(), longQuery, nil, 10, 1)
 	require.NoError(t, err)
 	require.Equal(t, "vector", res.Method)
@@ -100,10 +117,10 @@ func TestQueryExecutor_Discover_ChunksLongQueriesForVectorSearch(t *testing.T) {
 
 	emb.mu.Lock()
 	calls := emb.calls
-	maxLen := emb.maxLen
+	maxTokens := emb.maxTokens
 	emb.mu.Unlock()
 	require.GreaterOrEqual(t, calls, 2, "expected multiple chunk embeddings")
-	require.LessOrEqual(t, maxLen, 512, "expected no embedding call on the full long query")
+	require.LessOrEqual(t, maxTokens, 512, "expected no embedding call on query chunks > 512 tokens")
 
 	searcher.mu.Lock()
 	hybridCalls := append([]string(nil), searcher.hybridCalls...)
@@ -112,11 +129,12 @@ func TestQueryExecutor_Discover_ChunksLongQueriesForVectorSearch(t *testing.T) {
 	require.GreaterOrEqual(t, len(hybridCalls), 2, "expected multiple per-chunk hybrid searches")
 	require.Empty(t, searchCalls, "expected no text-only fallback when chunked vector search succeeds")
 
-	maxQ := 0
+	maxQTokens := 0
 	for _, q := range hybridCalls {
-		if len(q) > maxQ {
-			maxQ = len(q)
+		tok := util.CountApproxTokens(q)
+		if tok > maxQTokens {
+			maxQTokens = tok
 		}
 	}
-	require.LessOrEqual(t, maxQ, 512, "expected no hybrid search call on the full long query")
+	require.LessOrEqual(t, maxQTokens, 512, "expected no hybrid search call on query chunks > 512 tokens")
 }

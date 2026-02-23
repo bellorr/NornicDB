@@ -248,11 +248,33 @@ func (e *StorageExecutor) parseVectorQueryParams(cypher string) (indexName strin
 		return "", 0, nil, fmt.Errorf("missing parameters")
 	}
 
-	// Find matching closing parenthesis
+	// Find matching closing parenthesis (while respecting quoted strings).
 	parenContent := rest[parenIdx+1:]
 	depth := 1
 	endIdx := -1
+	inQuote := false
+	quoteChar := rune(0)
+	escaped := false
 	for i, c := range parenContent {
+		if inQuote {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == quoteChar {
+				inQuote = false
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			inQuote = true
+			quoteChar = c
+			continue
+		}
 		if c == '(' || c == '[' {
 			depth++
 		} else if c == ')' || c == ']' {
@@ -313,14 +335,37 @@ func (e *StorageExecutor) parseVectorQueryParams(cypher string) (indexName strin
 	return indexName, k, input, nil
 }
 
-// splitParamsCarefully splits comma-separated parameters while respecting brackets
+// splitParamsCarefully splits comma-separated parameters while respecting
+// brackets and quoted strings.
 func splitParamsCarefully(params string) []string {
 	var result []string
 	var current strings.Builder
 	depth := 0
+	inQuote := false
+	quoteChar := rune(0)
+	escaped := false
 
 	for _, c := range params {
-		if c == '[' || c == '(' || c == '{' {
+		if inQuote {
+			current.WriteRune(c)
+			if escaped {
+				escaped = false
+				continue
+			}
+			if c == '\\' {
+				escaped = true
+				continue
+			}
+			if c == quoteChar {
+				inQuote = false
+			}
+			continue
+		}
+		if c == '\'' || c == '"' {
+			inQuote = true
+			quoteChar = c
+			current.WriteRune(c)
+		} else if c == '[' || c == '(' || c == '{' {
 			depth++
 			current.WriteRune(c)
 		} else if c == ']' || c == ')' || c == '}' {

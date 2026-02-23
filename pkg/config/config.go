@@ -311,8 +311,8 @@ type ServerConfig struct {
 //   - NORNICDB_EMBED_SCAN_INTERVAL: How often to scan for unembedded nodes (default: 15m)
 //   - NORNICDB_EMBED_BATCH_DELAY: Delay between processing nodes (default: 500ms)
 //   - NORNICDB_EMBED_MAX_RETRIES: Max retry attempts per node (default: 3)
-//   - NORNICDB_EMBED_CHUNK_SIZE: Max characters per chunk (default: 512)
-//   - NORNICDB_EMBED_CHUNK_OVERLAP: Characters to overlap between chunks (default: 50)
+//   - NORNICDB_EMBED_CHUNK_SIZE: Max tokens per chunk (default: 512)
+//   - NORNICDB_EMBED_CHUNK_OVERLAP: Tokens to overlap between chunks (default: 50)
 //   - NORNICDB_EMBED_WORKER_NUM_WORKERS: Number of concurrent embedding workers (default: 1)
 //   - NORNICDB_EMBEDDING_PROPERTIES_INCLUDE: Comma-separated property keys to use for embedding text (empty = all)
 //   - NORNICDB_EMBEDDING_PROPERTIES_EXCLUDE: Comma-separated property keys to exclude from embedding text
@@ -327,9 +327,9 @@ type EmbeddingWorkerConfig struct {
 	BatchDelay time.Duration
 	// MaxRetries is the max retry attempts per node
 	MaxRetries int
-	// ChunkSize is max characters per chunk (matches MIMIR_EMBEDDINGS_CHUNK_SIZE)
+	// ChunkSize is max tokens per chunk.
 	ChunkSize int
-	// ChunkOverlap is characters to overlap between chunks (matches MIMIR_EMBEDDINGS_CHUNK_OVERLAP)
+	// ChunkOverlap is tokens to overlap between chunks.
 	ChunkOverlap int
 	// PropertiesInclude: if non-empty, only these property keys are used when building embedding text.
 	// Enables "embed only content" or "embed only title,description". Empty = use all (subject to PropertiesExclude).

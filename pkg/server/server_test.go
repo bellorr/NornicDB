@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -21,6 +22,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/auth"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -160,14 +162,26 @@ func assertTxResponseHasNoErrors(t *testing.T, resp *httptest.ResponseRecorder) 
 	require.Len(t, errorsRaw, 0, "expected no transaction errors, got: %v", errorsRaw)
 }
 
+func loadLargeDocQuery(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	query := string(data)
+	require.Greater(t, util.CountApproxTokens(query), 512)
+	return query
+}
+
 type countingEmbedder struct {
 	mu sync.Mutex
 
-	failIfLenGreater int
-	dims             int
+	failIfLenGreater    int
+	failIfTokensGreater int
+	dims                int
 
-	calls  int
-	maxLen int
+	calls     int
+	maxLen    int
+	maxTokens int
 }
 
 func (e *countingEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -176,12 +190,18 @@ func (e *countingEmbedder) Embed(ctx context.Context, text string) ([]float32, e
 	if len(text) > e.maxLen {
 		e.maxLen = len(text)
 	}
-	fail := e.failIfLenGreater > 0 && len(text) > e.failIfLenGreater
+	tokens := util.CountApproxTokens(text)
+	if tokens > e.maxTokens {
+		e.maxTokens = tokens
+	}
+	failByLen := e.failIfLenGreater > 0 && len(text) > e.failIfLenGreater
+	failByTokens := e.failIfTokensGreater > 0 && tokens > e.failIfTokensGreater
+	fail := failByLen || failByTokens
 	dims := e.dims
 	e.mu.Unlock()
 
 	if fail {
-		return nil, fmt.Errorf("text too long: len=%d", len(text))
+		return nil, fmt.Errorf("text too long: len=%d tokens=%d", len(text), tokens)
 	}
 	if dims <= 0 {
 		dims = 1024
@@ -1136,8 +1156,8 @@ func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
 	// Simulate a local embedder that fails on long inputs (token buffer overflow, etc.).
 	// The search endpoint should chunk the query and only embed chunk-sized strings.
 	emb := &countingEmbedder{
-		failIfLenGreater: 512,
-		dims:             1024,
+		failIfTokensGreater: 512,
+		dims:                1024,
 	}
 	server.db.SetEmbedder(emb)
 
@@ -1158,7 +1178,7 @@ func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
 	}))
 	require.Greater(t, searchSvc.EmbeddingCount(), 0)
 
-	longQuery := strings.Repeat("a", 1200)
+	longQuery := loadLargeDocQuery(t)
 	resp := makeRequest(t, server, "POST", "/nornicdb/search", map[string]interface{}{
 		"query": longQuery,
 		"limit": 10,
@@ -1167,11 +1187,11 @@ func TestHandleSearch_ChunksLongQueriesForVectorSearch(t *testing.T) {
 
 	emb.mu.Lock()
 	calls := emb.calls
-	maxLen := emb.maxLen
+	maxTokens := emb.maxTokens
 	emb.mu.Unlock()
 
 	require.GreaterOrEqual(t, calls, 2, "expected query embedding to run on multiple chunks")
-	require.LessOrEqual(t, maxLen, 512, "expected no embedding call on the full query")
+	require.LessOrEqual(t, maxTokens, 512, "expected no embedding call on chunks > 512 tokens")
 }
 
 func TestHandleSearch_SkipsEmbeddingWhenNoVectorsIndexed(t *testing.T) {

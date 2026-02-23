@@ -4,13 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/embed"
+	"github.com/orneryd/nornicdb/pkg/util"
 	"github.com/stretchr/testify/require"
 )
 
@@ -22,6 +24,7 @@ type chunkingTestEmbedder struct {
 	embedCalls     int
 	embedBatchCall int
 	maxTextLen     int
+	maxTokens      int
 }
 
 func (e *chunkingTestEmbedder) Embed(ctx context.Context, text string) ([]float32, error) {
@@ -30,12 +33,15 @@ func (e *chunkingTestEmbedder) Embed(ctx context.Context, text string) ([]float3
 	if len(text) > e.maxTextLen {
 		e.maxTextLen = len(text)
 	}
+	if tok := util.CountApproxTokens(text); tok > e.maxTokens {
+		e.maxTokens = tok
+	}
 	dims := e.dims
 	e.mu.Unlock()
 
-	// Simulate a tokenizer limit (e.g., llama.cpp fixed buffer).
-	if len(text) > 512 {
-		return nil, fmt.Errorf("simulated tokenizer overflow for len=%d", len(text))
+	// Simulate a tokenizer limit.
+	if util.CountApproxTokens(text) > 512 {
+		return nil, fmt.Errorf("simulated tokenizer overflow for tokens=%d", util.CountApproxTokens(text))
 	}
 	if dims <= 0 {
 		dims = 4
@@ -52,6 +58,9 @@ func (e *chunkingTestEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 		if len(t) > e.maxTextLen {
 			e.maxTextLen = len(t)
 		}
+		if tok := util.CountApproxTokens(t); tok > e.maxTokens {
+			e.maxTokens = tok
+		}
 	}
 	dims := e.dims
 	e.mu.Unlock()
@@ -61,8 +70,8 @@ func (e *chunkingTestEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 	}
 	out := make([][]float32, len(texts))
 	for i, t := range texts {
-		if len(t) > 512 {
-			return nil, fmt.Errorf("chunk too long: len=%d", len(t))
+		if util.CountApproxTokens(t) > 512 {
+			return nil, fmt.Errorf("chunk too long: tokens=%d", util.CountApproxTokens(t))
 		}
 		vec := make([]float32, dims)
 		vec[0] = 1
@@ -73,6 +82,16 @@ func (e *chunkingTestEmbedder) EmbedBatch(ctx context.Context, texts []string) (
 
 func (e *chunkingTestEmbedder) Dimensions() int { return e.dims }
 func (e *chunkingTestEmbedder) Model() string   { return "chunking-test-embedder" }
+
+func loadLargeDocQuery(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join("..", "..", "docs", "plans", "sharding-base-plan.md")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	query := string(data)
+	require.Greater(t, util.CountApproxTokens(query), 512)
+	return query
+}
 
 func TestDB_EmbedQuery_ShortQuery_UsesEmbed(t *testing.T) {
 	emb := &chunkingTestEmbedder{dims: 4}
@@ -95,7 +114,7 @@ func TestDB_EmbedQuery_LongQuery_UsesEmbedBatchOnChunks(t *testing.T) {
 	emb := &chunkingTestEmbedder{dims: 4}
 	db := &DB{embedQueue: &EmbedQueue{embedder: emb}}
 
-	longQuery := strings.Repeat("a", 1200)
+	longQuery := loadLargeDocQuery(t)
 	vec, err := db.EmbedQuery(context.Background(), longQuery)
 	require.NoError(t, err)
 	require.Len(t, vec, 4)
@@ -104,11 +123,13 @@ func TestDB_EmbedQuery_LongQuery_UsesEmbedBatchOnChunks(t *testing.T) {
 	embedCalls := emb.embedCalls
 	batchCalls := emb.embedBatchCall
 	maxLen := emb.maxTextLen
+	maxTokens := emb.maxTokens
 	emb.mu.Unlock()
 
 	require.Equal(t, 0, embedCalls, "expected long query path to avoid single-text embedding")
 	require.Equal(t, 1, batchCalls, "expected long query path to batch-embed chunks once")
-	require.LessOrEqual(t, maxLen, 512, "expected all embedded chunks to be <= 512 characters")
+	require.Greater(t, maxLen, 0)
+	require.LessOrEqual(t, maxTokens, 512, "expected all embedded chunks to be <= 512 tokens")
 }
 
 func TestDB_EmbedQueryForDB_NoResolver_ReturnsSameAsEmbedQuery(t *testing.T) {

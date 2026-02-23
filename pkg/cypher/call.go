@@ -740,7 +740,7 @@ func (e *StorageExecutor) executeCall(ctx context.Context, cypher string) (*Exec
 	case strings.Contains(upper, "DB.INDEX.FULLTEXT.QUERYRELATIONSHIPS"):
 		result, err = e.callDbIndexFulltextQueryRelationships(cypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.QUERYRELATIONSHIPS"):
-		result, err = e.callDbIndexVectorQueryRelationships(cypher)
+		result, err = e.callDbIndexVectorQueryRelationships(ctx, cypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.CREATENODEINDEX"):
 		result, err = e.callDbIndexVectorCreateNodeIndex(ctx, cypher)
 	case strings.Contains(upper, "DB.INDEX.VECTOR.CREATERELATIONSHIPINDEX"):

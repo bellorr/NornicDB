@@ -219,7 +219,7 @@ tasks    - Query tasks by status/priority
 ### Embedding Layer (`pkg/embed`)
 
 - **Pull-based worker** - Processes nodes without embeddings
-- **Chunking** - 512 chars with 50 char overlap
+- **Chunking** - 512 tokens with 50 token overlap
 - **LRU Cache** - 10K entries, 450,000x speedup for repeated queries
 - **Providers** - Ollama, OpenAI, Local GGUF
 

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
+	"github.com/orneryd/nornicdb/pkg/util"
 )
 
 // =============================================================================
@@ -392,7 +393,7 @@ func TestHandleDiscover_ChunksLongQueryForEmbedding(t *testing.T) {
 	server := NewServer(db, cfg)
 	ctx := context.Background()
 
-	longQuery := strings.Repeat("a", 600) // >512 chars, should chunk
+	longQuery := strings.Repeat("a ", 650) // >512 tokens, should chunk
 	_, err = server.handleDiscover(ctx, map[string]interface{}{
 		"query": longQuery,
 		"limit": 10,
@@ -411,8 +412,8 @@ func TestHandleDiscover_ChunksLongQueryForEmbedding(t *testing.T) {
 		t.Errorf("expected query to be chunked into multiple parts, got %d", len(embedder.batchTexts))
 	}
 	for i, c := range embedder.batchTexts {
-		if len(c) > 512 {
-			t.Errorf("expected chunk %d to be <= 512 chars, got %d", i, len(c))
+		if util.CountApproxTokens(c) > 520 {
+			t.Errorf("expected chunk %d to be <= ~512 tokens, got %d", i, util.CountApproxTokens(c))
 		}
 	}
 }

@@ -139,9 +139,7 @@ func (e *StorageExecutor) callDbIndexFulltextQueryRelationships(cypher string) (
 // callDbIndexVectorQueryRelationships searches relationships using vector similarity - Neo4j db.index.vector.queryRelationships()
 // Syntax: CALL db.index.vector.queryRelationships('indexName', k, queryInput)
 // queryInput can be: [0.1, 0.2, ...] OR 'search text' OR $param
-func (e *StorageExecutor) callDbIndexVectorQueryRelationships(cypher string) (*ExecuteResult, error) {
-	ctx := context.Background()
-
+func (e *StorageExecutor) callDbIndexVectorQueryRelationships(ctx context.Context, cypher string) (*ExecuteResult, error) {
 	// Parse parameters from: CALL db.index.vector.queryRelationships('indexName', k, queryInput)
 	// queryInput can be: [0.1, 0.2, ...] OR 'search text' OR $param
 	indexName, k, input, err := e.parseVectorQueryParams(cypher)
