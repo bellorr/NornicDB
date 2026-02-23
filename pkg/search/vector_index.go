@@ -106,7 +106,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 
@@ -447,22 +446,13 @@ func (v *VectorIndex) Save(path string) error {
 	}
 	v.mu.RUnlock()
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
 	snap := vectorIndexSnapshot{
 		Version:    vectorIndexFormatVersion,
 		Dimensions: dimensions,
 		Vectors:    vectors,
 		RawVectors: rawVectors,
 	}
-	return msgpack.NewEncoder(file).Encode(&snap)
+	return writeMsgpackSnapshot(path, &snap)
 }
 
 // Load replaces the vector index with the one stored at path (msgpack format).

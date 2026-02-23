@@ -95,9 +95,10 @@ package replication
 import (
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/orneryd/nornicdb/pkg/envutil"
 )
 
 // ReplicationMode defines how the node participates in replication.
@@ -660,36 +661,19 @@ func (c *Config) String() string {
 // Helper functions
 
 func getEnv(key, defaultVal string) string {
-	if val := os.Getenv(key); val != "" {
-		return val
-	}
-	return defaultVal
+	return envutil.Get(key, defaultVal)
 }
 
 func getEnvInt(key string, defaultVal int) int {
-	if val := os.Getenv(key); val != "" {
-		if i, err := strconv.Atoi(val); err == nil {
-			return i
-		}
-	}
-	return defaultVal
+	return envutil.GetInt(key, defaultVal)
 }
 
 func getEnvBool(key string, defaultVal bool) bool {
-	if val := os.Getenv(key); val != "" {
-		val = strings.ToLower(val)
-		return val == "true" || val == "1" || val == "yes" || val == "on"
-	}
-	return defaultVal
+	return envutil.GetBoolLoose(key, defaultVal)
 }
 
 func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
-	if val := os.Getenv(key); val != "" {
-		if d, err := time.ParseDuration(val); err == nil {
-			return d
-		}
-	}
-	return defaultVal
+	return envutil.GetDuration(key, defaultVal)
 }
 
 func getEnvDurationMs(key string, defaultMs int) time.Duration {

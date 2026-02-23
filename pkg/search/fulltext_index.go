@@ -5,7 +5,6 @@ import (
 	"errors"
 	"math"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -98,15 +97,6 @@ func (f *FulltextIndex) Save(path string) error {
 	version := f.version
 	f.mu.RUnlock()
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
 	snap := fulltextIndexSnapshot{
 		Version:       fulltextIndexFormatVersion,
 		Documents:     documents,
@@ -115,7 +105,7 @@ func (f *FulltextIndex) Save(path string) error {
 		AvgDocLength:  avgDocLength,
 		DocCount:      docCount,
 	}
-	if err := msgpack.NewEncoder(file).Encode(&snap); err != nil {
+	if err := writeMsgpackSnapshot(path, &snap); err != nil {
 		return err
 	}
 	f.markPersisted(version)
@@ -129,17 +119,6 @@ func (f *FulltextIndex) SaveNoCopy(path string) error {
 	f.mu.RLock()
 	version := f.version
 
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		f.mu.RUnlock()
-		return err
-	}
-	file, err := os.Create(path)
-	if err != nil {
-		f.mu.RUnlock()
-		return err
-	}
-	defer file.Close()
-
 	snap := fulltextIndexSnapshot{
 		Version:       fulltextIndexFormatVersion,
 		Documents:     f.documents,
@@ -148,7 +127,7 @@ func (f *FulltextIndex) SaveNoCopy(path string) error {
 		AvgDocLength:  f.avgDocLength,
 		DocCount:      f.docCount,
 	}
-	err = msgpack.NewEncoder(file).Encode(&snap)
+	err := writeMsgpackSnapshot(path, &snap)
 	f.mu.RUnlock()
 	if err != nil {
 		return err

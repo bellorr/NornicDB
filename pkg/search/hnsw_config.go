@@ -3,9 +3,9 @@ package search
 
 import (
 	"math"
-	"os"
-	"strconv"
 	"strings"
+
+	"github.com/orneryd/nornicdb/pkg/envutil"
 )
 
 // HNSWQualityPreset defines quality presets for HNSW tuning.
@@ -73,7 +73,7 @@ func HNSWConfigFromEnv() HNSWConfig {
 
 // getQualityPreset returns the quality preset from environment variable.
 func getQualityPreset() HNSWQualityPreset {
-	quality := strings.ToLower(os.Getenv("NORNICDB_VECTOR_ANN_QUALITY"))
+	quality := strings.ToLower(envutil.Get("NORNICDB_VECTOR_ANN_QUALITY", ""))
 	switch quality {
 	case "fast":
 		return QualityFast
@@ -115,11 +115,6 @@ func presetDefaults(preset HNSWQualityPreset) HNSWConfig {
 
 // getEnvInt reads an integer environment variable.
 func getEnvInt(key string, defaultVal int) int {
-	if val := os.Getenv(key); val != "" {
-		if i, err := strconv.Atoi(val); err == nil {
-			return i
-		}
-	}
-	return defaultVal
+	return envutil.GetInt(key, defaultVal)
 }
 

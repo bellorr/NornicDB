@@ -2,10 +2,9 @@ package search
 
 import (
 	"errors"
-	"math"
 	"log"
+	"math"
 	"os"
-	"path/filepath"
 	"sort"
 
 	"github.com/vmihailenco/msgpack/v5"
@@ -98,15 +97,7 @@ func (f *FulltextIndexV2) SaveNoCopy(path string) error {
 }
 
 func saveBM25V2Snapshot(path string, snap bm25V2Snapshot, onSuccess func()) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	file, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	if err := msgpack.NewEncoder(file).Encode(&snap); err != nil {
+	if err := writeMsgpackSnapshot(path, &snap); err != nil {
 		return err
 	}
 	onSuccess()

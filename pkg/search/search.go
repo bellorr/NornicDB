@@ -106,6 +106,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/orneryd/nornicdb/pkg/envutil"
 	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/math/vector"
 	"github.com/orneryd/nornicdb/pkg/storage"
@@ -3518,15 +3519,7 @@ func (s *Service) maybeRebuildHNSW(ctx context.Context, tombstoneRatioThreshold,
 }
 
 func envBool(key string, fallback bool) bool {
-	raw, ok := os.LookupEnv(key)
-	if !ok || raw == "" {
-		return fallback
-	}
-	v, err := strconv.ParseBool(raw)
-	if err != nil {
-		return fallback
-	}
-	return v
+	return envutil.GetBoolStrict(key, fallback)
 }
 
 func envFloat(key string, fallback float64) float64 {
@@ -3574,15 +3567,7 @@ func bm25SettingsEquivalent(saved, current, currentFormat string) bool {
 }
 
 func envInt(key string, fallback int) int {
-	raw, ok := os.LookupEnv(key)
-	if !ok || raw == "" {
-		return fallback
-	}
-	v, err := strconv.Atoi(raw)
-	if err != nil {
-		return fallback
-	}
-	return v
+	return envutil.GetInt(key, fallback)
 }
 
 func envDurationMs(key string, fallbackMs int) time.Duration {
