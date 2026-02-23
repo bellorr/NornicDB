@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"runtime/pprof"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +46,86 @@ func (c *cypherQueryExecutor) Execute(ctx context.Context, query string, params 
 		Columns: result.Columns,
 		Rows:    result.Rows,
 	}, nil
+}
+
+// txCapableCypherQueryExecutor provides session-scoped explicit transaction support.
+// It mirrors the runtime behavior where each Bolt connection has isolated tx state.
+type txCapableCypherQueryExecutor struct {
+	store storage.Engine
+
+	mu     sync.Mutex
+	inTx   bool
+	txExec *cypher.StorageExecutor
+}
+
+func newTxCapableCypherQueryExecutor(store storage.Engine) *txCapableCypherQueryExecutor {
+	return &txCapableCypherQueryExecutor{store: store}
+}
+
+func (e *txCapableCypherQueryExecutor) NewSessionExecutor() QueryExecutor {
+	return newTxCapableCypherQueryExecutor(e.store)
+}
+
+func (e *txCapableCypherQueryExecutor) Execute(ctx context.Context, query string, params map[string]any) (*QueryResult, error) {
+	e.mu.Lock()
+	activeExec := e.txExec
+	e.mu.Unlock()
+
+	if activeExec != nil {
+		result, err := activeExec.Execute(ctx, query, params)
+		if err != nil {
+			return nil, err
+		}
+		return &QueryResult{Columns: result.Columns, Rows: result.Rows, Metadata: result.Metadata}, nil
+	}
+
+	exec := cypher.NewStorageExecutor(e.store)
+	result, err := exec.Execute(ctx, query, params)
+	if err != nil {
+		return nil, err
+	}
+	return &QueryResult{Columns: result.Columns, Rows: result.Rows, Metadata: result.Metadata}, nil
+}
+
+func (e *txCapableCypherQueryExecutor) BeginTransaction(ctx context.Context, metadata map[string]any) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.inTx {
+		return nil
+	}
+	exec := cypher.NewStorageExecutor(e.store)
+	if _, err := exec.Execute(ctx, "BEGIN", nil); err != nil {
+		return err
+	}
+	e.txExec = exec
+	e.inTx = true
+	return nil
+}
+
+func (e *txCapableCypherQueryExecutor) CommitTransaction(ctx context.Context) error {
+	e.mu.Lock()
+	exec := e.txExec
+	e.txExec = nil
+	e.inTx = false
+	e.mu.Unlock()
+	if exec == nil {
+		return nil
+	}
+	_, err := exec.Execute(ctx, "COMMIT", nil)
+	return err
+}
+
+func (e *txCapableCypherQueryExecutor) RollbackTransaction(ctx context.Context) error {
+	e.mu.Lock()
+	exec := e.txExec
+	e.txExec = nil
+	e.inTx = false
+	e.mu.Unlock()
+	if exec == nil {
+		return nil
+	}
+	_, err := exec.Execute(ctx, "ROLLBACK", nil)
+	return err
 }
 
 // TestBoltCypherIntegration tests the full stack: Bolt server + Cypher executor.
@@ -279,6 +360,93 @@ func TestBoltCypherIntegration(t *testing.T) {
 		}
 		ReadSuccess(t, conn)
 	})
+
+}
+
+func TestBoltExplicitTransactionRollbackRevertsCreate(t *testing.T) {
+	baseStore := storage.NewMemoryEngine()
+	store := storage.NewNamespacedEngine(baseStore, "test")
+	executor := newTxCapableCypherQueryExecutor(store)
+
+	config := &Config{
+		Port:            0,
+		MaxConnections:  10,
+		ReadBufferSize:  8192,
+		WriteBufferSize: 8192,
+	}
+
+	server := New(config, executor)
+	defer server.Close()
+
+	go func() {
+		if err := server.ListenAndServe(); err != nil {
+			t.Logf("Server error: %v", err)
+		}
+	}()
+	time.Sleep(100 * time.Millisecond)
+
+	port := server.listener.Addr().(*net.TCPAddr).Port
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", port))
+	if err != nil {
+		t.Fatalf("Failed to connect: %v", err)
+	}
+	defer conn.Close()
+
+	PerformHandshakeWithTesting(t, conn)
+	SendHello(t, conn, nil)
+	ReadSuccess(t, conn)
+
+	// Cleanup old test data outside transaction.
+	if err := SendRun(t, conn, "MATCH (n:Test {name: 'Transaction Test'}) DETACH DELETE n", nil, nil); err != nil {
+		t.Fatalf("cleanup RUN failed: %v", err)
+	}
+	ReadSuccess(t, conn)
+	if err := SendPull(t, conn, nil); err != nil {
+		t.Fatalf("cleanup PULL failed: %v", err)
+	}
+	ReadSuccess(t, conn)
+
+	// Begin explicit transaction.
+	if err := SendBegin(t, conn, nil); err != nil {
+		t.Fatalf("BEGIN failed: %v", err)
+	}
+	ReadSuccess(t, conn)
+
+	// Create node in transaction.
+	if err := SendRun(t, conn, "CREATE (n:Test {name: 'Transaction Test'})", nil, nil); err != nil {
+		t.Fatalf("create RUN failed: %v", err)
+	}
+	ReadSuccess(t, conn)
+	SendPull(t, conn, nil)
+	ReadSuccess(t, conn)
+
+	// Roll back explicit transaction.
+	if err := SendRollback(t, conn); err != nil {
+		t.Fatalf("ROLLBACK failed: %v", err)
+	}
+	ReadSuccess(t, conn)
+
+	// Verify node is no longer visible after rollback.
+	if err := SendRun(t, conn, "MATCH (n:Test {name: 'Transaction Test'}) RETURN n", nil, nil); err != nil {
+		t.Fatalf("post-rollback match RUN failed: %v", err)
+	}
+	ReadSuccess(t, conn)
+	SendPull(t, conn, nil)
+	seenAfterRollback := false
+	for {
+		msgType, err := ReadMessageType(t, conn)
+		if err != nil {
+			t.Fatalf("failed to read post-rollback MATCH response: %v", err)
+		}
+		if msgType == MsgRecord {
+			seenAfterRollback = true
+		} else if msgType == MsgSuccess {
+			break
+		}
+	}
+	if seenAfterRollback {
+		t.Fatal("expected no node after rollback, but query returned a record")
+	}
 }
 
 // TestBoltServerStress tests the server under load.

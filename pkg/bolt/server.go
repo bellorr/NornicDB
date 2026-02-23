@@ -258,6 +258,12 @@ type QueryExecutor interface {
 	Execute(ctx context.Context, query string, params map[string]any) (*QueryResult, error)
 }
 
+// SessionExecutorFactory creates per-connection executors.
+// Use this when executor implementations keep session-local state (e.g., explicit tx IDs).
+type SessionExecutorFactory interface {
+	NewSessionExecutor() QueryExecutor
+}
+
 // TransactionalExecutor extends QueryExecutor with transaction support.
 //
 // If the executor implements this interface, the Bolt server will use
@@ -803,20 +809,23 @@ func (s *Server) handleConnection(conn net.Conn) {
 		executor:   s.executor,
 		messageBuf: make([]byte, 0, 4096), // Pre-allocate 4KB message buffer
 	}
+	if factory, ok := s.executor.(SessionExecutorFactory); ok {
+		session.executor = factory.NewSessionExecutor()
+	}
 
 	// Enable deferred flush mode for Neo4j-style write batching
-	if deferrable, ok := s.executor.(DeferrableExecutor); ok {
+	if deferrable, ok := session.executor.(DeferrableExecutor); ok {
 		deferrable.SetDeferFlush(true)
 	}
 
 	// Ensure cleanup on session end
 	defer func() {
 		// Flush any pending writes
-		if flushable, ok := s.executor.(FlushableExecutor); ok {
+		if flushable, ok := session.executor.(FlushableExecutor); ok {
 			flushable.Flush()
 		}
 		// Disable deferred flush mode
-		if deferrable, ok := s.executor.(DeferrableExecutor); ok {
+		if deferrable, ok := session.executor.(DeferrableExecutor); ok {
 			deferrable.SetDeferFlush(false)
 		}
 	}()
@@ -878,10 +887,10 @@ type Session struct {
 	flushPending bool
 
 	// Query metadata for Neo4j driver compatibility
-	queryId          int64          // Query ID counter for qid field
-	lastQueryIsWrite bool           // Was last query a write operation
-	lastQueryDatabase string        // Effective database for last RUN
-	lastRunMetadata  map[string]any // Metadata from last RUN message (bookmarks, tx_timeout, etc.)
+	queryId           int64          // Query ID counter for qid field
+	lastQueryIsWrite  bool           // Was last query a write operation
+	lastQueryDatabase string         // Effective database for last RUN
+	lastRunMetadata   map[string]any // Metadata from last RUN message (bookmarks, tx_timeout, etc.)
 
 	// Transaction sequence for this session's last committed transaction
 	lastTxSequence int64 // Sequence number of last committed transaction in this session
@@ -1745,7 +1754,7 @@ func (s *Session) handleBegin(data []byte) error {
 	if txExec, ok := s.executor.(TransactionalExecutor); ok {
 		ctx := context.Background()
 		if err := txExec.BeginTransaction(ctx, metadata); err != nil {
-			return s.sendFailure("Neo.TransactionError.Begin", err.Error())
+			return s.sendFailure("Neo.ClientError.Transaction.TransactionStartFailed", err.Error())
 		}
 	}
 
@@ -1770,7 +1779,7 @@ func (s *Session) handleCommit(data []byte) error {
 		if err := txExec.CommitTransaction(ctx); err != nil {
 			s.inTransaction = false
 			s.txMetadata = nil
-			return s.sendFailure("Neo.TransactionError.Commit", err.Error())
+			return s.sendFailure("Neo.ClientError.Transaction.TransactionCommitFailed", err.Error())
 		}
 	}
 
@@ -1956,7 +1965,7 @@ func (s *Session) handleRollback(data []byte) error {
 			// Rollback failed, but we still clear state
 			s.inTransaction = false
 			s.txMetadata = nil
-			if err := s.sendFailure("Neo.TransactionError.Rollback", err.Error()); err != nil {
+			if err := s.sendFailure("Neo.ClientError.Transaction.TransactionRollbackFailed", err.Error()); err != nil {
 				return err
 			}
 			return s.flushIfPending()

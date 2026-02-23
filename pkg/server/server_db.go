@@ -2,11 +2,11 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/orneryd/nornicdb/pkg/auth"
@@ -14,6 +14,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/multidb"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/txsession"
 )
 
 // =============================================================================
@@ -566,16 +567,6 @@ type TransactionResponse struct {
 // TransactionInfo holds transaction state.
 type TransactionInfo struct {
 	Expires string `json:"expires"` // RFC1123 format
-}
-
-// explicitTransaction stores state for a multi-request HTTP transaction.
-// The contained executor owns BEGIN/COMMIT/ROLLBACK state for this tx only.
-type explicitTransaction struct {
-	id       string
-	dbName   string
-	executor *cypher.StorageExecutor
-	expires  time.Time
-	mu       sync.Mutex
 }
 
 // QueryResult is a single query result.
@@ -1277,24 +1268,6 @@ func (s *Server) transactionCommitURL(dbName, txID string) string {
 	return fmt.Sprintf("http://%s:%d/db/%s/tx/%s/commit", host, s.config.Port, dbName, txID)
 }
 
-func (s *Server) saveExplicitTransaction(tx *explicitTransaction) {
-	s.explicitTxMu.Lock()
-	defer s.explicitTxMu.Unlock()
-	s.explicitTx[tx.id] = tx
-}
-
-func (s *Server) getExplicitTransaction(txID string) *explicitTransaction {
-	s.explicitTxMu.RLock()
-	defer s.explicitTxMu.RUnlock()
-	return s.explicitTx[txID]
-}
-
-func (s *Server) deleteExplicitTransaction(txID string) {
-	s.explicitTxMu.Lock()
-	defer s.explicitTxMu.Unlock()
-	delete(s.explicitTx, txID)
-}
-
 func (s *Server) appendStatementResult(response *TransactionResponse, result *cypher.ExecuteResult) {
 	qr := QueryResult{
 		Columns: result.Columns,
@@ -1316,7 +1289,7 @@ func (s *Server) executeTxStatements(
 	ctx context.Context,
 	claims *auth.JWTClaims,
 	dbName string,
-	executor *cypher.StorageExecutor,
+	session *txsession.Session,
 	statements []StatementRequest,
 	response *TransactionResponse,
 ) {
@@ -1338,7 +1311,7 @@ func (s *Server) executeTxStatements(
 			}
 		}
 
-		result, err := executor.Execute(ctx, stmt.Statement, stmt.Parameters)
+		result, err := s.txSessions.ExecuteInSession(ctx, session, stmt.Statement, stmt.Parameters)
 		if err != nil {
 			response.Errors = append(response.Errors, QueryError{
 				Code:    "Neo.ClientError.Statement.SyntaxError",
@@ -1360,56 +1333,45 @@ func (s *Server) handleOpenTransaction(w http.ResponseWriter, r *http.Request, d
 		return
 	}
 
-	// Generate transaction ID
-	txID := fmt.Sprintf("%d", time.Now().UnixNano())
-
 	var req TransactionRequest
 	_ = s.readJSON(r, &req) // Optional body
 
-	response := TransactionResponse{
-		Results: make([]QueryResult, 0),
-		Errors:  make([]QueryError, 0),
-		Commit:  s.transactionCommitURL(dbName, txID),
-		Transaction: &TransactionInfo{
-			Expires: time.Now().Add(30 * time.Second).Format(time.RFC1123),
-		},
-	}
-
-	// Create isolated executor for this transaction session.
-	executor, err := s.newExecutorForDatabase(dbName)
+	txSession, err := s.txSessions.Open(r.Context(), dbName)
 	if err != nil {
-		response.Errors = append(response.Errors, QueryError{
-			Code:    "Neo.ClientError.Database.DatabaseNotFound",
-			Message: fmt.Sprintf("Database '%s' not found: %v", dbName, err),
-		})
-		s.writeJSON(w, http.StatusNotFound, response)
-		return
-	}
-
-	// Start explicit transaction context inside executor.
-	if _, err := executor.Execute(r.Context(), "BEGIN", nil); err != nil {
-		response.Errors = append(response.Errors, QueryError{
-			Code:    "Neo.ClientError.Transaction.TransactionStartFailed",
-			Message: err.Error(),
-		})
+		if errors.Is(err, multidb.ErrDatabaseNotFound) {
+			response := TransactionResponse{
+				Results: make([]QueryResult, 0),
+				Errors: []QueryError{{
+					Code:    "Neo.ClientError.Database.DatabaseNotFound",
+					Message: fmt.Sprintf("Database '%s' not found", dbName),
+				}},
+			}
+			s.writeJSON(w, http.StatusNotFound, response)
+			return
+		}
+		response := TransactionResponse{
+			Results: make([]QueryResult, 0),
+			Errors: []QueryError{{
+				Code:    "Neo.ClientError.Transaction.TransactionStartFailed",
+				Message: err.Error(),
+			}},
+		}
 		s.writeJSON(w, http.StatusInternalServerError, response)
 		return
 	}
 
-	// Store tx session before executing any optional open-time statements.
-	s.saveExplicitTransaction(&explicitTransaction{
-		id:       txID,
-		dbName:   dbName,
-		executor: executor,
-		expires:  time.Now().Add(30 * time.Second),
-	})
+	response := TransactionResponse{
+		Results: make([]QueryResult, 0),
+		Errors:  make([]QueryError, 0),
+		Commit:  s.transactionCommitURL(dbName, txSession.ID),
+		Transaction: &TransactionInfo{
+			Expires: txSession.Expires.Format(time.RFC1123),
+		},
+	}
 
 	if len(req.Statements) > 0 {
-		tx := s.getExplicitTransaction(txID)
-		tx.mu.Lock()
-		s.executeTxStatements(r.Context(), claims, dbName, tx.executor, req.Statements, &response)
-		tx.expires = time.Now().Add(30 * time.Second)
-		tx.mu.Unlock()
+		s.executeTxStatements(r.Context(), claims, dbName, txSession, req.Statements, &response)
+		response.Transaction.Expires = txSession.Expires.Format(time.RFC1123)
 	}
 
 	s.writeJSON(w, http.StatusCreated, response)
@@ -1423,8 +1385,8 @@ func (s *Server) handleExecuteInTransaction(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	tx := s.getExplicitTransaction(txID)
-	if tx == nil || tx.dbName != dbName {
+	tx, ok := s.txSessions.Get(txID)
+	if !ok || tx == nil || tx.Database != dbName {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
 		return
 	}
@@ -1437,15 +1399,12 @@ func (s *Server) handleExecuteInTransaction(w http.ResponseWriter, r *http.Reque
 		Errors:  make([]QueryError, 0),
 		Commit:  s.transactionCommitURL(dbName, txID),
 		Transaction: &TransactionInfo{
-			Expires: tx.expires.Format(time.RFC1123),
+			Expires: tx.Expires.Format(time.RFC1123),
 		},
 	}
 
-	tx.mu.Lock()
-	s.executeTxStatements(r.Context(), claims, dbName, tx.executor, req.Statements, &response)
-	tx.expires = time.Now().Add(30 * time.Second)
-	response.Transaction.Expires = tx.expires.Format(time.RFC1123)
-	tx.mu.Unlock()
+	s.executeTxStatements(r.Context(), claims, dbName, tx, req.Statements, &response)
+	response.Transaction.Expires = tx.Expires.Format(time.RFC1123)
 
 	s.writeJSON(w, http.StatusOK, response)
 }
@@ -1469,25 +1428,21 @@ func (s *Server) handleCommitTransaction(w http.ResponseWriter, r *http.Request,
 		LastBookmarks: []string{s.generateBookmark()},
 	}
 
-	tx := s.getExplicitTransaction(txID)
-	if tx == nil || tx.dbName != dbName {
+	tx, ok := s.txSessions.Get(txID)
+	if !ok || tx == nil || tx.Database != dbName {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
 		return
 	}
 
-	tx.mu.Lock()
-	defer tx.mu.Unlock()
-	s.deleteExplicitTransaction(txID)
-
 	// Execute optional final statements in transaction context first.
-	s.executeTxStatements(r.Context(), claims, dbName, tx.executor, req.Statements, &response)
+	s.executeTxStatements(r.Context(), claims, dbName, tx, req.Statements, &response)
 	if len(response.Errors) > 0 {
-		_, _ = tx.executor.Execute(r.Context(), "ROLLBACK", nil)
+		_ = s.txSessions.RollbackAndDelete(r.Context(), tx)
 		s.writeJSON(w, http.StatusOK, response)
 		return
 	}
 
-	commitResult, err := tx.executor.Execute(r.Context(), "COMMIT", nil)
+	commitResult, err := s.txSessions.CommitAndDelete(r.Context(), tx)
 	if err != nil {
 		response.Errors = append(response.Errors, QueryError{
 			Code:    "Neo.ClientError.Transaction.TransactionCommitFailed",
@@ -1515,16 +1470,13 @@ func (s *Server) handleRollbackTransaction(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	tx := s.getExplicitTransaction(txID)
-	if tx == nil || tx.dbName != dbName {
+	tx, ok := s.txSessions.Get(txID)
+	if !ok || tx == nil || tx.Database != dbName {
 		s.writeNeo4jError(w, http.StatusNotFound, "Neo.ClientError.Request.Invalid", "transaction not found")
 		return
 	}
 
-	tx.mu.Lock()
-	_, _ = tx.executor.Execute(r.Context(), "ROLLBACK", nil)
-	tx.mu.Unlock()
-	s.deleteExplicitTransaction(txID)
+	_ = s.txSessions.RollbackAndDelete(r.Context(), tx)
 
 	response := TransactionResponse{
 		Results: make([]QueryResult, 0),

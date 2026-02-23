@@ -151,6 +151,23 @@ func extractCountFromTxResponse(t *testing.T, resp *httptest.ResponseRecorder) i
 	return int64(rawCount)
 }
 
+func extractRowsLenFromTxResponse(t *testing.T, resp *httptest.ResponseRecorder) int {
+	t.Helper()
+	var payload map[string]interface{}
+	require.NoError(t, json.NewDecoder(resp.Body).Decode(&payload))
+
+	results, ok := payload["results"].([]interface{})
+	require.True(t, ok)
+	require.Greater(t, len(results), 0)
+
+	firstResult, ok := results[0].(map[string]interface{})
+	require.True(t, ok)
+
+	data, ok := firstResult["data"].([]interface{})
+	require.True(t, ok)
+	return len(data)
+}
+
 func assertTxResponseHasNoErrors(t *testing.T, resp *httptest.ResponseRecorder) {
 	t.Helper()
 	var payload map[string]interface{}
@@ -906,6 +923,51 @@ func TestExplicitTransactionRollbackRevertsCreate(t *testing.T) {
 	}, "Bearer "+token)
 	require.Equal(t, http.StatusOK, verifyResp.Code, verifyResp.Body.String())
 	require.Equal(t, int64(0), extractCountFromTxResponse(t, verifyResp))
+}
+
+func TestExplicitTransactionRollbackRevertsNodeQuery(t *testing.T) {
+	server, auth := setupTestServer(t)
+	token := getAuthToken(t, auth, "admin")
+
+	// Cleanup outside explicit transaction.
+	cleanupResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n:Test {name: 'Transaction Test'}) DETACH DELETE n"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, cleanupResp.Code, cleanupResp.Body.String())
+
+	openResp := makeRequest(t, server, "POST", "/db/nornic/tx", map[string]interface{}{
+		"statements": []map[string]interface{}{},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusCreated, openResp.Code, openResp.Body.String())
+
+	var openResult map[string]interface{}
+	require.NoError(t, json.NewDecoder(openResp.Body).Decode(&openResult))
+	commitURL, ok := openResult["commit"].(string)
+	require.True(t, ok)
+	parts := strings.Split(commitURL, "/")
+	txID := parts[len(parts)-2]
+
+	execResp := makeRequest(t, server, "POST", fmt.Sprintf("/db/nornic/tx/%s", txID), map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "CREATE (n:Test {name: 'Transaction Test'})"},
+			{"statement": "MATCH (n:Test {name: 'Transaction Test'}) RETURN n"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, execResp.Code, execResp.Body.String())
+	assertTxResponseHasNoErrors(t, execResp)
+
+	rollbackResp := makeRequest(t, server, "DELETE", fmt.Sprintf("/db/nornic/tx/%s", txID), nil, "Bearer "+token)
+	require.Equal(t, http.StatusOK, rollbackResp.Code, rollbackResp.Body.String())
+
+	verifyResp := makeRequest(t, server, "POST", "/db/nornic/tx/commit", map[string]interface{}{
+		"statements": []map[string]interface{}{
+			{"statement": "MATCH (n:Test {name: 'Transaction Test'}) RETURN n"},
+		},
+	}, "Bearer "+token)
+	require.Equal(t, http.StatusOK, verifyResp.Code, verifyResp.Body.String())
+	require.Equal(t, 0, extractRowsLenFromTxResponse(t, verifyResp))
 }
 
 func TestImplicitTransactionSingleStatementRollsBackOnError(t *testing.T) {

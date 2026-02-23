@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -21,12 +22,14 @@ import (
 	"github.com/orneryd/nornicdb/pkg/bolt"
 	"github.com/orneryd/nornicdb/pkg/cache"
 	"github.com/orneryd/nornicdb/pkg/config"
+	"github.com/orneryd/nornicdb/pkg/cypher"
 	"github.com/orneryd/nornicdb/pkg/decay"
 	"github.com/orneryd/nornicdb/pkg/gpu"
 	"github.com/orneryd/nornicdb/pkg/nornicdb"
 	"github.com/orneryd/nornicdb/pkg/pool"
 	"github.com/orneryd/nornicdb/pkg/server"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/txsession"
 	"github.com/orneryd/nornicdb/ui"
 )
 
@@ -636,7 +639,7 @@ func runServe(cmd *cobra.Command, args []string) error {
 	}
 
 	// Create query executor adapter
-	queryExecutor := &DBQueryExecutor{db: db}
+	queryExecutor := NewDBQueryExecutor(db)
 	boltServer := bolt.New(boltConfig, queryExecutor)
 	// Wire per-database access from HTTP server so Bolt enforces same policy (allowlist + principal roles)
 	boltServer.SetDatabaseAccessModeResolver(httpServer.GetDatabaseAccessModeForRoles)
@@ -716,10 +719,90 @@ func runServe(cmd *cobra.Command, args []string) error {
 // DBQueryExecutor adapts nornicdb.DB to bolt.QueryExecutor interface.
 type DBQueryExecutor struct {
 	db *nornicdb.DB
+
+	txMu     sync.Mutex
+	txID     string
+	txDBName string
+	txMgr    *txsession.Manager
+}
+
+func NewDBQueryExecutor(db *nornicdb.DB) *DBQueryExecutor {
+	txDBName := defaultBoltDatabaseName(db)
+	exec := &DBQueryExecutor{
+		db:       db,
+		txDBName: txDBName,
+	}
+	exec.txMgr = txsession.NewManager(30*time.Second, func(dbName string) (*cypher.StorageExecutor, error) {
+		return newTxScopedExecutor(db, dbName)
+	})
+	return exec
+}
+
+func defaultBoltDatabaseName(db *nornicdb.DB) string {
+	if db == nil {
+		return "nornic"
+	}
+	if namespaced, ok := db.GetStorage().(interface{ Namespace() string }); ok {
+		if ns := strings.TrimSpace(namespaced.Namespace()); ns != "" {
+			return ns
+		}
+	}
+	return "nornic"
+}
+
+func newTxScopedExecutor(db *nornicdb.DB, dbName string) (*cypher.StorageExecutor, error) {
+	if db == nil {
+		return nil, fmt.Errorf("database is not initialized")
+	}
+
+	storageEngine := db.GetStorage()
+	executor := cypher.NewStorageExecutor(storageEngine)
+
+	// Keep query embedding and search behavior consistent with the base DB executor.
+	if baseExec := db.GetCypherExecutor(); baseExec != nil {
+		if embedder := baseExec.GetEmbedder(); embedder != nil {
+			executor.SetEmbedder(embedder)
+		}
+	}
+	if searchSvc, err := db.GetOrCreateSearchService(dbName, storageEngine); err == nil {
+		executor.SetSearchService(searchSvc)
+	}
+
+	if q := db.GetEmbedQueue(); q != nil {
+		executor.SetNodeMutatedCallback(func(nodeID string) {
+			q.Enqueue(nodeID)
+		})
+	}
+
+	return executor, nil
+}
+
+func (e *DBQueryExecutor) NewSessionExecutor() bolt.QueryExecutor {
+	return NewDBQueryExecutor(e.db)
 }
 
 // Execute runs a Cypher query against the database.
 func (e *DBQueryExecutor) Execute(ctx context.Context, query string, params map[string]any) (*bolt.QueryResult, error) {
+	e.txMu.Lock()
+	txID := e.txID
+	e.txMu.Unlock()
+
+	if txID != "" {
+		txSession, ok := e.txMgr.Get(txID)
+		if !ok || txSession == nil {
+			return nil, fmt.Errorf("transaction not found")
+		}
+		result, err := e.txMgr.ExecuteInSession(ctx, txSession, query, params)
+		if err != nil {
+			return nil, err
+		}
+		return &bolt.QueryResult{
+			Columns:  result.Columns,
+			Rows:     result.Rows,
+			Metadata: result.Metadata,
+		}, nil
+	}
+
 	result, err := e.db.ExecuteCypher(ctx, query, params)
 	if err != nil {
 		return nil, err
@@ -730,6 +813,55 @@ func (e *DBQueryExecutor) Execute(ctx context.Context, query string, params map[
 		Rows:     result.Rows,
 		Metadata: result.Metadata,
 	}, nil
+}
+
+func (e *DBQueryExecutor) BeginTransaction(ctx context.Context, metadata map[string]any) error {
+	e.txMu.Lock()
+	defer e.txMu.Unlock()
+	if e.txID != "" {
+		return fmt.Errorf("transaction already active")
+	}
+
+	session, err := e.txMgr.Open(ctx, e.txDBName)
+	if err != nil {
+		return err
+	}
+	e.txID = session.ID
+	return nil
+}
+
+func (e *DBQueryExecutor) CommitTransaction(ctx context.Context) error {
+	e.txMu.Lock()
+	txID := e.txID
+	e.txID = ""
+	e.txMu.Unlock()
+	if txID == "" {
+		return nil
+	}
+
+	session, ok := e.txMgr.Get(txID)
+	if !ok || session == nil {
+		return fmt.Errorf("transaction not found")
+	}
+
+	_, err := e.txMgr.CommitAndDelete(ctx, session)
+	return err
+}
+
+func (e *DBQueryExecutor) RollbackTransaction(ctx context.Context) error {
+	e.txMu.Lock()
+	txID := e.txID
+	e.txID = ""
+	e.txMu.Unlock()
+	if txID == "" {
+		return nil
+	}
+
+	session, ok := e.txMgr.Get(txID)
+	if !ok || session == nil {
+		return nil
+	}
+	return e.txMgr.RollbackAndDelete(ctx, session)
 }
 
 func runInit(cmd *cobra.Command, args []string) error {

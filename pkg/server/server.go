@@ -193,6 +193,7 @@ import (
 	"github.com/orneryd/nornicdb/pkg/qdrantgrpc"
 	"github.com/orneryd/nornicdb/pkg/search"
 	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/orneryd/nornicdb/pkg/txsession"
 )
 
 // Errors for HTTP operations.
@@ -638,10 +639,8 @@ type Server struct {
 	executorsMu sync.RWMutex
 	executors   map[string]*cypher.StorageExecutor
 
-	// Explicit HTTP transaction sessions keyed by tx ID.
-	// Each session holds its own executor so BEGIN/COMMIT/ROLLBACK state is isolated.
-	explicitTxMu sync.RWMutex
-	explicitTx   map[string]*explicitTransaction
+	// Explicit transaction sessions shared across transports.
+	txSessions *txsession.Manager
 
 	// Per-database access control (Neo4j-aligned). When auth disabled, Full is used.
 	// When auth enabled, allowlistStore (if set) provides allowlist-based mode per principal.
@@ -971,8 +970,8 @@ func New(db *nornicdb.DB, authenticator *auth.Authenticator, config *Config) (*S
 		basicAuthCache: auth.NewBasicAuthCache(auth.DefaultAuthCacheEntries, auth.DefaultAuthCacheTTL),
 		searchServices: make(map[string]*search.Service),
 		executors:      make(map[string]*cypher.StorageExecutor),
-		explicitTx:     make(map[string]*explicitTransaction),
 	}
+	s.txSessions = txsession.NewManager(30*time.Second, s.newExecutorForDatabase)
 
 	// ==========================================================================
 	// Heimdall - AI Assistant for Database Management
