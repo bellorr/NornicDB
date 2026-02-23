@@ -122,4 +122,65 @@ Source: [How ByteDance Solved Billion-Scale Vector Search Problem with Apache Do
   - Compressed ANN mode (IVF/PQ-like) with explicit profile configs
   - Large-scale memory/recall benchmark publication
 
+### Phase 3 Detail: What This Looks Like in Practice
+
+Goal: keep usable recall while cutting RAM enough to run 10M-1B vectors on materially smaller instances.
+
+- **Core architecture:**
+  - Keep a small coarse routing structure in memory (IVF-style centroid lists).
+  - Store compressed vector codes (PQ-style sub-quantized codes) instead of full float32 vectors for ANN candidate search.
+  - Re-rank top candidates using original vectors when needed (exact or higher-precision pass).
+  - Preserve current high-recall HNSW path as a profile option; do not force one index mode for every workload.
+
+- **Proposed profile set (explicit and opinionated):**
+  - `hnsw_high_recall`
+    - Best recall, highest memory cost.
+    - Use for latency-critical and precision-critical applications.
+  - `ivf_pq_balanced`
+    - Default for large datasets.
+    - Large memory reduction with modest recall tradeoff.
+  - `ivf_pq_memory_saver`
+    - Aggressive compression for constrained hardware.
+    - Lower memory and cost, higher recall/latency tradeoff.
+  - `disk_optimized`
+    - Minimal resident memory, higher tail latency.
+    - For very large corpora with infrequent query bursts.
+
+- **Representative target envelope (to validate, not promise):**
+  - `hnsw_high_recall`: memory baseline 1.0x, recall@10 near-max.
+  - `ivf_pq_balanced`: ~3x-8x lower memory, recall@10 drop <= 2-5 points.
+  - `ivf_pq_memory_saver`: ~8x-20x lower memory, recall@10 drop <= 5-12 points.
+  - `disk_optimized`: RAM floor mode, recall depends on rerank budget.
+
+- **Example config shape (conceptual):**
+  - `search.vector.profile = "ivf_pq_balanced"`
+  - `search.vector.ivf_lists = 4096`
+  - `search.vector.pq_segments = 16`
+  - `search.vector.pq_bits = 8`
+  - `search.vector.rerank_topk = 200`
+  - `search.vector.fallback_exact_threshold = 3000`
+
+- **Execution flow for lower hardware cost:**
+  - Apply metadata/type filters first.
+  - Route into small IVF candidate partitions.
+  - Score compressed codes (fast and memory-light).
+  - Re-rank only a bounded candidate set with full vectors.
+  - If filtered candidate pool is small, skip ANN and do exact scan directly.
+
+- **Acceptance criteria before defaulting to compressed mode:**
+  - No major recall regression on reference workloads:
+    - `recall@10` and `recall@50` within agreed SLO by workload class.
+  - Significant memory savings:
+    - At least 3x reduction on balanced profile in large-corpus tests.
+  - Stable latency envelope:
+    - p95 and p99 within target for interactive workloads.
+  - Deterministic reproducibility:
+    - Published benchmark harness, dataset characteristics, and config manifests.
+
+- **Why this helps "less hardware":**
+  - ANN memory footprint is the primary scaling limiter at high vector counts.
+  - Compression reduces bytes/vector so more corpus fits in RAM.
+  - Better fit in memory reduces node count and instance size requirements.
+  - Bounded rerank keeps quality predictable without restoring full-memory cost.
+
 If you want, I can turn this into a concrete NornicDB engineering RFC with package-level changes (`pkg/search`, `pkg/cypher` planner, config knobs, test matrix, and benchmark acceptance criteria).
