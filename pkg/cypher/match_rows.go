@@ -520,22 +520,10 @@ func (e *StorageExecutor) executeMatchUnwind(ctx context.Context, cypher string)
 	for _, node := range nodes {
 		// Evaluate the UNWIND expression in the context of this node
 		nodeMap := map[string]*storage.Node{nodePattern.variable: node}
-		listVal := e.evaluateExpressionWithContext(unwindExpr, nodeMap, nil)
-
-		// Convert to list
-		var items []interface{}
-		switch v := listVal.(type) {
-		case nil:
+		listVal := e.resolveUnwindValueFromExpr(ctx, unwindExpr, nodeMap)
+		items := coerceToUnwindItems(listVal)
+		if len(items) == 0 {
 			continue // null produces no rows
-		case []interface{}:
-			items = v
-		case []string:
-			items = make([]interface{}, len(v))
-			for i, s := range v {
-				items[i] = s
-			}
-		default:
-			items = []interface{}{listVal}
 		}
 
 		// Create a row for each item

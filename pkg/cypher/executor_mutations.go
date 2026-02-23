@@ -310,13 +310,16 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 		return nil, err
 	}
 
-	// Parse SET clause: SET n.property = value or SET n += $properties
-	// "SET " is 4 characters, so setIdx + 4 skips past "SET "
-	var setPart string
-	if returnIdx > 0 {
-		setPart = strings.TrimSpace(normalized[setIdx+4 : returnIdx])
-	} else {
-		setPart = strings.TrimSpace(normalized[setIdx+4:])
+	// Parse SET clause: SET n.property = value or SET n += $properties.
+	// If additional clauses follow SET (e.g., UNWIND/WITH/RETURN), split them out
+	// so they are not consumed as part of assignment expressions.
+	setTail := strings.TrimSpace(normalized[setIdx+4:]) // Skip "SET "
+	postSetIdx := firstPostSetClauseIndex(setTail)
+	setPart := setTail
+	trailingPart := ""
+	if postSetIdx >= 0 {
+		setPart = strings.TrimSpace(setTail[:postSetIdx])
+		trailingPart = strings.TrimSpace(setTail[postSetIdx:])
 	}
 	// Neo4j-compatible chained SET support:
 	// MATCH ... SET n += $props SET n.foo = 1
@@ -600,9 +603,30 @@ func (e *StorageExecutor) executeSet(ctx context.Context, cypher string) (*Execu
 	}
 	_ = variable // silence unused warning
 
+	// If SET is followed by additional pipeline clauses (e.g. UNWIND/WITH), rerun
+	// the post-mutation read pipeline as MATCH ... <trailing clauses>.
+	if trailingPart != "" && !strings.HasPrefix(strings.ToUpper(trailingPart), "RETURN ") {
+		if strings.HasPrefix(strings.ToUpper(trailingPart), "UNWIND ") {
+			return e.executeSetTrailingUnwind(ctx, trailingPart, matchResult, result)
+		}
+		followQuery := strings.TrimSpace(matchSegment + " " + trailingPart)
+		followResult, err := e.executeMatch(ctx, followQuery)
+		if err != nil {
+			return nil, err
+		}
+		result.Columns = followResult.Columns
+		result.Rows = followResult.Rows
+		return result, nil
+	}
+
 	// Handle RETURN
-	if returnIdx > 0 {
-		returnPart := strings.TrimSpace(cypher[returnIdx+6:])
+	if returnIdx > 0 || strings.HasPrefix(strings.ToUpper(trailingPart), "RETURN ") {
+		returnPart := trailingPart
+		if returnPart == "" {
+			returnPart = strings.TrimSpace(cypher[returnIdx+6:])
+		} else {
+			returnPart = strings.TrimSpace(returnPart[len("RETURN "):])
+		}
 		returnItems := e.parseReturnItems(returnPart)
 		result.Columns = make([]string, len(returnItems))
 		for i, item := range returnItems {
@@ -694,6 +718,207 @@ func collapseChainedSetClauses(setPart string) string {
 		return setPart
 	}
 	return strings.Join(segments, ", ")
+}
+
+// firstPostSetClauseIndex returns the first index of a clause keyword that can
+// legally follow a SET assignment list. Returns -1 when none are present.
+func firstPostSetClauseIndex(setTail string) int {
+	opts := defaultKeywordScanOpts()
+	first := -1
+	for _, kw := range []string{"UNWIND", "WITH", "RETURN", "ORDER BY", "LIMIT", "SKIP"} {
+		if idx := keywordIndexFrom(setTail, kw, 0, opts); idx >= 0 {
+			if first == -1 || idx < first {
+				first = idx
+			}
+		}
+	}
+	return first
+}
+
+// executeSetTrailingUnwind handles MATCH ... SET ... UNWIND ... RETURN by applying
+// UNWIND and RETURN projection directly on mutated MATCH rows, so SET changes are
+// visible within the same query.
+func (e *StorageExecutor) executeSetTrailingUnwind(ctx context.Context, trailingPart string, matchResult *ExecuteResult, result *ExecuteResult) (*ExecuteResult, error) {
+	unwindPart := strings.TrimSpace(trailingPart)
+	if !strings.HasPrefix(strings.ToUpper(unwindPart), "UNWIND ") {
+		return nil, fmt.Errorf("UNWIND clause expected")
+	}
+	unwindPart = strings.TrimSpace(unwindPart[len("UNWIND "):])
+
+	asIdx := findKeywordIndex(unwindPart, "AS")
+	if asIdx <= 0 {
+		return nil, fmt.Errorf("UNWIND requires AS clause (e.g., UNWIND [1,2,3] AS x)")
+	}
+
+	unwindExpr := strings.TrimSpace(unwindPart[:asIdx])
+	afterAs := strings.TrimSpace(unwindPart[asIdx+2:])
+	if afterAs == "" {
+		return nil, fmt.Errorf("UNWIND requires a variable after AS")
+	}
+
+	returnIdx := findKeywordIndex(afterAs, "RETURN")
+	if returnIdx <= 0 {
+		return nil, fmt.Errorf("UNWIND in SET query requires RETURN clause")
+	}
+
+	unwindVar := strings.TrimSpace(afterAs[:returnIdx])
+	if fields := strings.Fields(unwindVar); len(fields) > 0 {
+		unwindVar = fields[0]
+	}
+	if unwindVar == "" {
+		return nil, fmt.Errorf("UNWIND requires a non-empty AS variable")
+	}
+
+	returnClause := strings.TrimSpace(afterAs[returnIdx+6:])
+	returnItems := e.parseReturnItems(returnClause)
+	result.Columns = make([]string, len(returnItems))
+	for i, item := range returnItems {
+		if item.alias != "" {
+			result.Columns[i] = item.alias
+		} else {
+			result.Columns[i] = item.expr
+		}
+	}
+
+	colIndex := make(map[string]int, len(matchResult.Columns))
+	for i, col := range matchResult.Columns {
+		colIndex[col] = i
+	}
+
+	for _, row := range matchResult.Rows {
+		nodeVars := make(map[string]*storage.Node, len(matchResult.Columns))
+		for i, col := range matchResult.Columns {
+			if i < len(row) {
+				if node, ok := row[i].(*storage.Node); ok && node != nil {
+					nodeVars[col] = node
+				}
+			}
+		}
+
+		listVal := e.resolveUnwindValueFromExpr(ctx, unwindExpr, nodeVars)
+		items := coerceToUnwindItems(listVal)
+		for _, itemVal := range items {
+			newRow := make([]interface{}, len(returnItems))
+			for i, ret := range returnItems {
+				expr := strings.TrimSpace(ret.expr)
+				switch {
+				case expr == unwindVar:
+					newRow[i] = itemVal
+				case strings.Contains(expr, "."):
+					parts := strings.SplitN(expr, ".", 2)
+					if len(parts) == 2 {
+						if node, ok := nodeVars[parts[0]]; ok && node != nil {
+							newRow[i] = node.Properties[parts[1]]
+							break
+						}
+					}
+					newRow[i] = e.evaluateExpressionWithContext(expr, nodeVars, make(map[string]*storage.Edge))
+				default:
+					if idx, ok := colIndex[expr]; ok && idx < len(row) {
+						newRow[i] = row[idx]
+						break
+					}
+					if node, ok := nodeVars[expr]; ok {
+						newRow[i] = node
+						break
+					}
+					newRow[i] = e.evaluateExpressionWithContext(expr, nodeVars, make(map[string]*storage.Edge))
+				}
+			}
+			result.Rows = append(result.Rows, newRow)
+		}
+	}
+
+	return result, nil
+}
+
+func (e *StorageExecutor) resolveUnwindValueFromExpr(ctx context.Context, unwindExpr string, nodeVars map[string]*storage.Node) interface{} {
+	expr := normalizeUnwindExpression(unwindExpr)
+	if strings.HasPrefix(expr, "$") {
+		paramName := strings.TrimSpace(expr[1:])
+		if paramName != "" {
+			if params := getParamsFromContext(ctx); params != nil {
+				if v, ok := params[paramName]; ok {
+					return v
+				}
+			}
+		}
+	}
+	return e.evaluateExpressionWithContext(expr, nodeVars, nil)
+}
+
+// normalizeUnwindExpression removes syntactic wrapper parentheses around a valid
+// UNWIND expression, e.g. "($vals)" -> "$vals", while preserving inner
+// expression content for evaluation.
+func normalizeUnwindExpression(expr string) string {
+	trimmed := strings.TrimSpace(expr)
+	for hasOuterParens(trimmed) {
+		trimmed = strings.TrimSpace(trimmed[1 : len(trimmed)-1])
+	}
+	return trimmed
+}
+
+func hasOuterParens(s string) bool {
+	if len(s) < 2 || s[0] != '(' || s[len(s)-1] != ')' {
+		return false
+	}
+	depth := 0
+	inSingle := false
+	inDouble := false
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		switch ch {
+		case '\'':
+			if !inDouble {
+				inSingle = !inSingle
+			}
+		case '"':
+			if !inSingle {
+				inDouble = !inDouble
+			}
+		case '(':
+			if !inSingle && !inDouble {
+				depth++
+			}
+		case ')':
+			if !inSingle && !inDouble {
+				depth--
+				if depth == 0 && i < len(s)-1 {
+					return false
+				}
+			}
+		}
+	}
+	return depth == 0 && !inSingle && !inDouble
+}
+
+func coerceToUnwindItems(listVal interface{}) []interface{} {
+	switch v := listVal.(type) {
+	case nil:
+		return nil
+	case []interface{}:
+		return v
+	case []string:
+		out := make([]interface{}, len(v))
+		for i, s := range v {
+			out[i] = s
+		}
+		return out
+	case []int:
+		out := make([]interface{}, len(v))
+		for i, n := range v {
+			out[i] = n
+		}
+		return out
+	case []int64:
+		out := make([]interface{}, len(v))
+		for i, n := range v {
+			out[i] = n
+		}
+		return out
+	default:
+		return []interface{}{listVal}
+	}
 }
 
 func extractWithAliases(querySegment string) []string {
