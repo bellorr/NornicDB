@@ -583,8 +583,8 @@ func TestHNSWIndex_VectorLookupOnly(t *testing.T) {
 	}
 	require.NoError(t, idx.Save(path))
 
-	// Load with lookup-only: no vector copy in RAM.
-	loaded, err := LoadHNSWIndexWithLookupOnly(path, lookup)
+	// Load: graph-only now always uses lookup mode (no vector copy in RAM).
+	loaded, err := LoadHNSWIndex(path, lookup)
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 	assert.Equal(t, 4, loaded.GetDimensions())

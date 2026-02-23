@@ -561,7 +561,8 @@ func (h *HNSWIndex) Save(path string) error {
 type VectorLookup func(id string) ([]float32, bool)
 
 // LoadHNSWIndex loads an HNSW index from path (msgpack format) and returns it.
-// For graph-only format (1.1.0), vectorLookup must be non-nil so vectors can be populated from the vector index.
+// For graph-only format (1.1.0), vectorLookup must be non-nil and vectors are
+// resolved by ID at search time (no in-memory vector copy in HNSW).
 // For legacy full format (1.0.0), vectorLookup is ignored. If the file does not exist or decode fails,
 // returns (nil, nil) so the caller can rebuild. Returns an error only for unexpected I/O (e.g. permission denied).
 func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
@@ -609,89 +610,22 @@ func LoadHNSWIndex(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
 	}
 
 	if snap.Version == hnswIndexFormatVersionGraphOnly {
-		// Populate vectors and vecOff from the vector index (same order as internalToID).
+		// Keep graph-only in lookup mode to avoid duplicating vector storage in RAM.
 		if vectorLookup == nil {
 			h.mu.Unlock()
 			return nil, nil
 		}
-		dims := snap.Dimensions
-		vectors := make([]float32, 0, len(snap.InternalToID)*dims)
 		vecOff := make([]int32, len(snap.InternalToID))
-		for i, id := range snap.InternalToID {
-			vec, ok := vectorLookup(id)
-			if !ok || len(vec) != dims {
-				h.mu.Unlock()
-				return nil, nil
-			}
-			vecOff[i] = int32(len(vectors))
-			vectors = append(vectors, vec...)
+		for i := range vecOff {
+			vecOff[i] = -1
 		}
+		h.vectorLookup = vectorLookup
 		h.vecOff = vecOff
-		h.vectors = vectors
 	} else {
 		// Legacy full snapshot.
 		h.vecOff = snap.VecOff
 		h.vectors = snap.Vectors
 	}
-	h.mu.Unlock()
-	return h, nil
-}
-
-// LoadHNSWIndexWithLookupOnly loads a graph-only HNSW file and sets the vector lookup
-// without populating h.vectors (vecOff = -1 for all nodes). Saves one full vector copy in RAM;
-// use when the canonical store is file-backed. For legacy full format, falls back to LoadHNSWIndex.
-func LoadHNSWIndexWithLookupOnly(path string, vectorLookup VectorLookup) (*HNSWIndex, error) {
-	if vectorLookup == nil {
-		return LoadHNSWIndex(path, vectorLookup)
-	}
-	file, err := os.Open(path)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return nil, nil
-		}
-		return nil, err
-	}
-	defer file.Close()
-
-	var snap hnswIndexSnapshot
-	if err := msgpack.NewDecoder(file).Decode(&snap); err != nil {
-		return nil, nil
-	}
-	if snap.Dimensions <= 0 || snap.InternalToID == nil {
-		return nil, nil
-	}
-	if snap.Version != hnswIndexFormatVersionGraphOnly {
-		// Legacy format: fall back to normal load (vectors come from file).
-		return LoadHNSWIndex(path, vectorLookup)
-	}
-
-	config := snap.Config
-	if config.M == 0 {
-		config = DefaultHNSWConfig()
-	}
-	h := NewHNSWIndex(snap.Dimensions, config)
-	h.mu.Lock()
-	h.nodeLevel = snap.NodeLevel
-	h.neighborsArena = snap.NeighborsArena
-	h.neighborsOff = snap.NeighborsOff
-	h.neighborCountsArena = snap.NeighborCountsAr
-	h.neighborCountsOff = snap.NeighborCountsOff
-	h.idToInternal = snap.IDToInternal
-	h.internalToID = snap.InternalToID
-	h.deleted = snap.Deleted
-	h.liveCount = snap.LiveCount
-	h.entryPoint = snap.EntryPoint
-	h.hasEntryPoint = snap.HasEntryPoint
-	h.maxLevel = snap.MaxLevel
-	if h.idToInternal == nil {
-		h.idToInternal = make(map[string]uint32)
-	}
-	h.vectorLookup = vectorLookup
-	vecOff := make([]int32, len(snap.InternalToID))
-	for i := range vecOff {
-		vecOff[i] = -1
-	}
-	h.vecOff = vecOff
 	h.mu.Unlock()
 	return h, nil
 }
@@ -720,8 +654,8 @@ func SaveIVFHNSW(hnswPath string, clusterHNSW map[int]*HNSWIndex) error {
 	return nil
 }
 
-// LoadIVFHNSWCluster loads one cluster's HNSW index from hnsw_ivf/cid and populates
-// vectors from vectorLookup. Returns (nil, nil) if the file is missing or invalid (caller can build).
+// LoadIVFHNSWCluster loads one cluster's HNSW index from hnsw_ivf/cid in lookup mode
+// (no vector copy in HNSW RAM). Returns (nil, nil) if the file is missing or invalid (caller can build).
 // hnswPath is the full path to the single HNSW file (e.g. data/search/dbname/hnsw).
 func LoadIVFHNSWCluster(hnswPath string, clusterID int, vectorLookup VectorLookup) (*HNSWIndex, error) {
 	if hnswPath == "" || vectorLookup == nil {

@@ -2340,14 +2340,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		dimensions := s.VectorIndexDimensions()
 		var loaded *HNSWIndex
 		var err error
-		s.mu.RLock()
-		useLookupOnly := s.vectorFileStore != nil
-		s.mu.RUnlock()
-		if useLookupOnly {
-			loaded, err = LoadHNSWIndexWithLookupOnly(hnswPath, vectorLookup)
-		} else {
-			loaded, err = LoadHNSWIndex(hnswPath, vectorLookup)
-		}
+		// Graph-only HNSW loads in lookup mode to avoid duplicating vectors in RAM
+		// (canonical vectors remain in vector index / file store).
+		loaded, err = LoadHNSWIndex(hnswPath, vectorLookup)
 		if forceHNSWRebuild {
 			hnswWarmupReason = "settings changed"
 			log.Printf("📇 HNSW on-disk index ignored due to settings change; rebuilding")

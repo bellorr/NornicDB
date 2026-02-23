@@ -143,7 +143,7 @@ func loadSearchProfileDiskFixture(tb testing.TB) (*Service, []float32) {
 	svc.mu.Unlock()
 
 	if _, err := os.Stat(hnswPath); err == nil {
-		loaded, err := LoadHNSWIndexWithLookupOnly(hnswPath, svc.getVectorLookup())
+		loaded, err := LoadHNSWIndex(hnswPath, svc.getVectorLookup())
 		require.NoError(tb, err)
 		if loaded != nil {
 			svc.hnswMu.Lock()
