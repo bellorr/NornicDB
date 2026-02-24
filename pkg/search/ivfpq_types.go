@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	ivfpqBundleFormatVersion = 1
+	ivfpqBundleFormatVersion = 2
 )
 
 // IVFPQProfile is the concrete runtime profile used to build/query compressed ANN.
@@ -38,8 +38,31 @@ type ivfpqCodebook struct {
 }
 
 type ivfpqList struct {
-	IDs   []string
-	Codes [][]byte
+	IDs      []string
+	CodeSize int
+	Codes    []byte
+}
+
+func (l *ivfpqList) appendCode(code []byte) {
+	if l == nil || len(code) == 0 {
+		return
+	}
+	if l.CodeSize <= 0 {
+		l.CodeSize = len(code)
+	}
+	l.Codes = append(l.Codes, code...)
+}
+
+func (l *ivfpqList) codeAt(idx int) ([]byte, bool) {
+	if l == nil || l.CodeSize <= 0 || idx < 0 {
+		return nil, false
+	}
+	start := idx * l.CodeSize
+	end := start + l.CodeSize
+	if start < 0 || end > len(l.Codes) {
+		return nil, false
+	}
+	return l.Codes[start:end], true
 }
 
 // IVFPQIndex stores a compressed IVF/PQ ANN structure.

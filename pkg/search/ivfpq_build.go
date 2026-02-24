@@ -48,6 +48,9 @@ func BuildIVFPQFromVectorStore(ctx context.Context, vfs *VectorFileStore, profil
 	}
 
 	lists := make([]ivfpqList, profile.IVFLists)
+	for i := range lists {
+		lists[i].CodeSize = profile.PQSegments
+	}
 	vectorCount := 0
 	if err := vfs.IterateChunked(4096, func(ids []string, vecs [][]float32) error {
 		if err := ctx.Err(); err != nil {
@@ -57,7 +60,7 @@ func BuildIVFPQFromVectorStore(ctx context.Context, vfs *VectorFileStore, profil
 			listID := nearestCentroidIndexNormalized(vecs[i], centroidNorm)
 			code := encodePQResidual(vecs[i], centroids[listID], codebooks)
 			lists[listID].IDs = append(lists[listID].IDs, ids[i])
-			lists[listID].Codes = append(lists[listID].Codes, code)
+			lists[listID].appendCode(code)
 			vectorCount++
 		}
 		return nil

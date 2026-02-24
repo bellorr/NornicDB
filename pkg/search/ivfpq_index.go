@@ -52,8 +52,16 @@ func (i *IVFPQIndex) SearchApprox(ctx context.Context, query []float32, k int, m
 		}
 		list := i.lists[lid]
 		base := float64(vector.DotProduct(queryNorm, centroidNorm[lid]))
-		for idx := range list.IDs {
-			score := base + ivfpqResidualScore(scratch.lut, list.Codes[idx])
+		codeSize := list.CodeSize
+		if codeSize <= 0 {
+			continue
+		}
+		maxCodes := len(list.Codes) / codeSize
+		if len(list.IDs) < maxCodes {
+			maxCodes = len(list.IDs)
+		}
+		for idx := 0; idx < maxCodes; idx++ {
+			score := base + ivfpqResidualScoreAt(scratch.lut, list.Codes, idx*codeSize, codeSize)
 			if score < minSimilarity {
 				continue
 			}
@@ -112,6 +120,18 @@ func ivfpqResidualScore(lut [][]float32, code []byte) float64 {
 	}
 	for seg := 0; seg < segCount; seg++ {
 		score += lut[seg][int(code[seg])]
+	}
+	return float64(score)
+}
+
+func ivfpqResidualScoreAt(lut [][]float32, codes []byte, offset, codeSize int) float64 {
+	var score float32
+	segCount := len(lut)
+	if codeSize < segCount {
+		segCount = codeSize
+	}
+	for seg := 0; seg < segCount; seg++ {
+		score += lut[seg][int(codes[offset+seg])]
 	}
 	return float64(score)
 }
