@@ -365,6 +365,14 @@ func TestLoadFromEnv_EmbeddingWorkerNumWorkers(t *testing.T) {
 	}
 }
 
+func TestLoadDefaults_EmbeddingWorkerChunkSize(t *testing.T) {
+	clearEnvVars(t)
+	cfg := LoadDefaults()
+	if cfg.EmbeddingWorker.ChunkSize != 8192 {
+		t.Fatalf("expected default chunk size 8192, got %d", cfg.EmbeddingWorker.ChunkSize)
+	}
+}
+
 // TestLoadDefaults_HeimdallMCPDefaults tests that Heimdall MCP defaults are set correctly.
 func TestLoadDefaults_HeimdallMCPDefaults(t *testing.T) {
 	cfg := LoadDefaults()

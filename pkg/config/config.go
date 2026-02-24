@@ -312,7 +312,7 @@ type ServerConfig struct {
 //   - NORNICDB_EMBED_SCAN_INTERVAL: How often to scan for unembedded nodes (default: 15m)
 //   - NORNICDB_EMBED_BATCH_DELAY: Delay between processing nodes (default: 500ms)
 //   - NORNICDB_EMBED_MAX_RETRIES: Max retry attempts per node (default: 3)
-//   - NORNICDB_EMBED_CHUNK_SIZE: Max tokens per chunk (default: 512)
+//   - NORNICDB_EMBED_CHUNK_SIZE: Max tokens per chunk (default: 8192)
 //   - NORNICDB_EMBED_CHUNK_OVERLAP: Tokens to overlap between chunks (default: 50)
 //   - NORNICDB_EMBED_WORKER_NUM_WORKERS: Number of concurrent embedding workers (default: 1)
 //   - NORNICDB_EMBEDDING_PROPERTIES_INCLUDE: Comma-separated property keys to use for embedding text (empty = all)
@@ -1275,7 +1275,7 @@ func LoadDefaults() *Config {
 	config.EmbeddingWorker.ScanInterval = 15 * time.Minute
 	config.EmbeddingWorker.BatchDelay = 500 * time.Millisecond
 	config.EmbeddingWorker.MaxRetries = 3
-	config.EmbeddingWorker.ChunkSize = 512
+	config.EmbeddingWorker.ChunkSize = 8192
 	config.EmbeddingWorker.ChunkOverlap = 50
 	config.EmbeddingWorker.PropertiesInclude = nil
 	config.EmbeddingWorker.PropertiesExclude = nil
