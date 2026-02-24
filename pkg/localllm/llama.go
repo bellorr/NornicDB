@@ -216,6 +216,11 @@ int get_n_embd(struct llama_model* model) {
     return llama_model_n_embd(model);
 }
 
+// Get model training context size from metadata.
+int get_n_ctx_train(struct llama_model* model) {
+    return llama_model_n_ctx_train(model);
+}
+
 // Free resources
 void free_ctx(struct llama_context* ctx) { if (ctx) llama_free(ctx); }
 void free_model(struct llama_model* model) { if (model) llama_model_free(model); }
@@ -535,6 +540,7 @@ type Model struct {
 	model     *C.struct_llama_model
 	ctx       *C.struct_llama_context
 	dims      int
+	maxTokens int
 	modelDesc string
 	mu        sync.Mutex
 }
@@ -543,8 +549,8 @@ type Model struct {
 //
 // Fields:
 //   - ModelPath: Path to .gguf model file
-//   - ContextSize: Max context size for tokenization (default: 512)
-//   - BatchSize: Batch size for processing (default: 512)
+//   - ContextSize: Max context size for tokenization (default: auto from model cap, up to 8192 for embedding)
+//   - BatchSize: Batch size for processing (default: match effective context size)
 //   - Threads: CPU threads for inference (default: NumCPU/2, min 4)
 //   - GPULayers: GPU layer offload (-1=auto/all, 0=CPU only, N=N layers)
 type Options struct {
@@ -554,6 +560,12 @@ type Options struct {
 	Threads     int
 	GPULayers   int
 }
+
+const (
+	// defaultEmbeddingContextCap is the automatic context cap for embedding models.
+	// bge-m3 GGUF supports 8192 tokens; we cap auto-defaults there and still clamp to model metadata.
+	defaultEmbeddingContextCap = 8192
+)
 
 // DefaultOptions returns options optimized for embedding generation.
 //
@@ -582,11 +594,43 @@ func DefaultOptions(modelPath string) Options {
 
 	return Options{
 		ModelPath:   modelPath,
-		ContextSize: 512, // Enough for most embedding inputs
-		BatchSize:   512, // Matches context for efficient processing
+		ContextSize: 0, // Auto: resolved from model metadata (capped by defaultEmbeddingContextCap)
+		BatchSize:   0, // Auto: match effective context size
 		Threads:     threads,
 		GPULayers:   -1, // Auto: offload all layers to GPU
 	}
+}
+
+func resolveEmbeddingContextAndBatch(opts Options, modelCtxTrain int) (ctxSize, batchSize int) {
+	if opts.ContextSize > 0 {
+		ctxSize = opts.ContextSize
+	} else if modelCtxTrain > 0 {
+		ctxSize = modelCtxTrain
+		if ctxSize > defaultEmbeddingContextCap {
+			ctxSize = defaultEmbeddingContextCap
+		}
+	} else {
+		ctxSize = defaultEmbeddingContextCap
+	}
+	if modelCtxTrain > 0 && ctxSize > modelCtxTrain {
+		ctxSize = modelCtxTrain
+	}
+	if ctxSize < 1 {
+		ctxSize = 1
+	}
+
+	if opts.BatchSize > 0 {
+		batchSize = opts.BatchSize
+	} else {
+		batchSize = ctxSize
+	}
+	if batchSize < 1 {
+		batchSize = 1
+	}
+	if batchSize > ctxSize {
+		batchSize = ctxSize
+	}
+	return ctxSize, batchSize
 }
 
 // LoadModel loads a GGUF model for embedding generation.
@@ -623,17 +667,23 @@ func LoadModel(opts Options) (*Model, error) {
 	if model == nil {
 		return nil, fmt.Errorf("failed to load model: %s", opts.ModelPath)
 	}
-
-	ctx := C.create_context(model, C.int(opts.ContextSize), C.int(opts.BatchSize), C.int(opts.Threads))
+	modelCtxTrain := int(C.get_n_ctx_train(model))
+	ctxSize, batchSize := resolveEmbeddingContextAndBatch(opts, modelCtxTrain)
+	ctx := C.create_context(model, C.int(ctxSize), C.int(batchSize), C.int(opts.Threads))
 	if ctx == nil {
 		C.free_model(model)
 		return nil, fmt.Errorf("failed to create context for: %s", opts.ModelPath)
+	}
+	effectiveCtx := int(C.get_ctx_size(ctx))
+	if effectiveCtx <= 0 {
+		effectiveCtx = ctxSize
 	}
 
 	return &Model{
 		model:     model,
 		ctx:       ctx,
 		dims:      int(C.get_n_embd(model)),
+		maxTokens: effectiveCtx,
 		modelDesc: opts.ModelPath, // Use path as description
 	}, nil
 }
@@ -688,10 +738,17 @@ func (m *Model) Embed(ctx context.Context, text string) ([]float32, error) {
 	// Tokenize
 	cText := C.CString(text)
 	defer C.free(unsafe.Pointer(cText))
-
-	tokens := make([]C.int, 512)
-	n := C.tokenize(m.model, cText, C.int(len(text)), &tokens[0], 512)
+	tokenCap := m.maxTokens
+	if tokenCap < 1 {
+		tokenCap = defaultEmbeddingContextCap
+	}
+	tokens := make([]C.int, tokenCap)
+	n := C.tokenize(m.model, cText, C.int(len(text)), &tokens[0], C.int(tokenCap))
 	if n < 0 {
+		required := -int(n)
+		if required > tokenCap {
+			return nil, fmt.Errorf("tokenization overflow: requires %d tokens, limit %d", required, tokenCap)
+		}
 		return nil, fmt.Errorf("tokenization failed for text of length %d", len(text))
 	}
 	if n == 0 {
@@ -730,9 +787,17 @@ func (m *Model) EmbedRaw(ctx context.Context, text string) ([]float32, error) {
 	}
 	cText := C.CString(text)
 	defer C.free(unsafe.Pointer(cText))
-	tokens := make([]C.int, 512)
-	n := C.tokenize(m.model, cText, C.int(len(text)), &tokens[0], 512)
+	tokenCap := m.maxTokens
+	if tokenCap < 1 {
+		tokenCap = defaultEmbeddingContextCap
+	}
+	tokens := make([]C.int, tokenCap)
+	n := C.tokenize(m.model, cText, C.int(len(text)), &tokens[0], C.int(tokenCap))
 	if n < 0 {
+		required := -int(n)
+		if required > tokenCap {
+			return nil, fmt.Errorf("tokenization overflow: requires %d tokens, limit %d", required, tokenCap)
+		}
 		return nil, fmt.Errorf("tokenization failed for text of length %d", len(text))
 	}
 	if n == 0 {
@@ -789,6 +854,9 @@ func (m *Model) EmbedBatch(ctx context.Context, texts []string) ([][]float32, er
 //   - E5-large: 1024 dimensions
 //   - Jina-v2-base-code: 768 dimensions
 func (m *Model) Dimensions() int { return m.dims }
+
+// MaxTokens returns the effective tokenizer/input limit for this model context.
+func (m *Model) MaxTokens() int { return m.maxTokens }
 
 // ModelDescription returns a human-readable description of the loaded model.
 func (m *Model) ModelDescription() string { return m.modelDesc }

@@ -15,6 +15,8 @@ import (
 
 var errNotSupported = errors.New("local GGUF embeddings not supported: build with CGO on linux/darwin/windows (with -tags=cuda for Windows)")
 
+const defaultEmbeddingContextCap = 8192
+
 // Model wraps a GGUF model for embedding generation.
 // This is a stub that returns errors on unsupported platforms.
 type Model struct{}
@@ -39,8 +41,8 @@ func DefaultOptions(modelPath string) Options {
 	}
 	return Options{
 		ModelPath:   modelPath,
-		ContextSize: 512,
-		BatchSize:   512,
+		ContextSize: 0,
+		BatchSize:   0,
 		Threads:     threads,
 		GPULayers:   -1,
 	}
@@ -68,6 +70,9 @@ func (m *Model) EmbedBatch(ctx context.Context, texts []string) ([][]float32, er
 
 // Dimensions returns 0 on unsupported platforms.
 func (m *Model) Dimensions() int { return 0 }
+
+// MaxTokens returns the default capability cap on unsupported platforms.
+func (m *Model) MaxTokens() int { return defaultEmbeddingContextCap }
 
 // Close is a no-op on unsupported platforms.
 func (m *Model) Close() error { return nil }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -25,11 +26,11 @@ func TestDefaultOptions(t *testing.T) {
 	if opts.ModelPath != "/tmp/test.gguf" {
 		t.Errorf("ModelPath = %q, want /tmp/test.gguf", opts.ModelPath)
 	}
-	if opts.ContextSize != 512 {
-		t.Errorf("ContextSize = %d, want 512", opts.ContextSize)
+	if opts.ContextSize != 0 {
+		t.Errorf("ContextSize = %d, want 0 (auto)", opts.ContextSize)
 	}
-	if opts.BatchSize != 512 {
-		t.Errorf("BatchSize = %d, want 512", opts.BatchSize)
+	if opts.BatchSize != 0 {
+		t.Errorf("BatchSize = %d, want 0 (auto)", opts.BatchSize)
 	}
 	if opts.Threads < 1 {
 		t.Errorf("Threads = %d, want >= 1", opts.Threads)
@@ -39,6 +40,63 @@ func TestDefaultOptions(t *testing.T) {
 	}
 	if opts.GPULayers != -1 {
 		t.Errorf("GPULayers = %d, want -1 (auto)", opts.GPULayers)
+	}
+}
+
+func TestResolveEmbeddingContextAndBatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		opts      Options
+		trainCtx  int
+		wantCtx   int
+		wantBatch int
+	}{
+		{
+			name:      "auto uses train context capped",
+			opts:      Options{},
+			trainCtx:  8192,
+			wantCtx:   8192,
+			wantBatch: 8192,
+		},
+		{
+			name:      "auto clamps to smaller model context",
+			opts:      Options{},
+			trainCtx:  4096,
+			wantCtx:   4096,
+			wantBatch: 4096,
+		},
+		{
+			name:      "explicit context clamps to model context",
+			opts:      Options{ContextSize: 12000, BatchSize: 12000},
+			trainCtx:  8192,
+			wantCtx:   8192,
+			wantBatch: 8192,
+		},
+		{
+			name:      "batch clamps to effective context",
+			opts:      Options{ContextSize: 6000, BatchSize: 7000},
+			trainCtx:  0,
+			wantCtx:   6000,
+			wantBatch: 6000,
+		},
+		{
+			name:      "fallback when train context unknown",
+			opts:      Options{},
+			trainCtx:  0,
+			wantCtx:   defaultEmbeddingContextCap,
+			wantBatch: defaultEmbeddingContextCap,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCtx, gotBatch := resolveEmbeddingContextAndBatch(tt.opts, tt.trainCtx)
+			if gotCtx != tt.wantCtx {
+				t.Fatalf("ctx=%d want=%d", gotCtx, tt.wantCtx)
+			}
+			if gotBatch != tt.wantBatch {
+				t.Fatalf("batch=%d want=%d", gotBatch, tt.wantBatch)
+			}
+		})
 	}
 }
 
@@ -82,6 +140,9 @@ func TestModel_Integration(t *testing.T) {
 	if len(vec) != model.Dimensions() {
 		t.Errorf("Embedding length = %d, want %d", len(vec), model.Dimensions())
 	}
+	if model.MaxTokens() < 1 {
+		t.Fatalf("MaxTokens = %d, want > 0", model.MaxTokens())
+	}
 
 	// Verify normalization
 	var sumSq float32
@@ -90,6 +151,15 @@ func TestModel_Integration(t *testing.T) {
 	}
 	if sumSq < 0.99 || sumSq > 1.01 {
 		t.Errorf("Embedding not normalized: sum of squares = %f", sumSq)
+	}
+
+	// Regression guard: verify we can tokenize/embed beyond legacy 512-token limit
+	// when the model context supports it.
+	if model.MaxTokens() > 640 {
+		longText := strings.Repeat("embedding token ", 640)
+		if _, err := model.Embed(ctx, longText); err != nil {
+			t.Fatalf("Embed longText failed with MaxTokens=%d: %v", model.MaxTokens(), err)
+		}
 	}
 }
 

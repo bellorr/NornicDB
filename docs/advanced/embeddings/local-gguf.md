@@ -443,10 +443,8 @@ func NewLocalGGUF(config *Config) (*LocalGGUFEmbedder, error) {
     
     opts := localllm.DefaultOptions(modelPath)
     
-    // Use config dimensions if provided, otherwise auto-detect
-    if config.Dimensions > 0 {
-        opts.ContextSize = 512 // Good default for embeddings
-    }
+    // Optional: override context size explicitly if you need a smaller window
+    // opts.ContextSize = 4096
     
     model, err := localllm.LoadModel(opts)
     if err != nil {

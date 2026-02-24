@@ -223,8 +223,8 @@ type Model struct {
 //
 // Fields:
 //   - ModelPath: Path to .gguf model file
-//   - ContextSize: Max context size for tokenization (default: 512)
-//   - BatchSize: Batch size for processing (default: 512)
+//   - ContextSize: Max context size for tokenization (default: 8192)
+//   - BatchSize: Batch size for processing (default: 8192)
 //   - Threads: CPU threads for inference (default: NumCPU/2, min 4)
 //   - GPULayers: GPU layer offload (-1=auto/all, 0=CPU only, N=N layers)
 //
@@ -266,8 +266,8 @@ func DefaultOptions(modelPath string) Options {
 
 	return Options{
 		ModelPath:   modelPath,
-		ContextSize: 512, // Enough for most embedding inputs
-		BatchSize:   512, // Matches context for efficient processing
+		ContextSize: 8192, // Cap to bge-m3 context length
+		BatchSize:   8192, // Matches context for efficient processing
 		Threads:     threads,
 		GPULayers:   -1, // Auto: offload all layers to GPU
 	}
