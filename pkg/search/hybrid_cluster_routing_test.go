@@ -4,11 +4,35 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"reflect"
 	"testing"
 
 	"github.com/orneryd/nornicdb/pkg/storage"
 	"github.com/stretchr/testify/require"
 )
+
+type seedOverrideFulltext struct {
+	*FulltextIndex
+	seedIDs []string
+}
+
+func (s *seedOverrideFulltext) LexicalSeedDocIDs(maxTerms, perTerm int) []string {
+	return append([]string(nil), s.seedIDs...)
+}
+
+func preferredSeedsForTest(t *testing.T, ci interface{}) []int {
+	t.Helper()
+	v := reflect.ValueOf(ci)
+	require.Equal(t, reflect.Ptr, v.Kind())
+	elem := v.Elem()
+	field := elem.FieldByName("preferredSeedIndices")
+	require.True(t, field.IsValid(), "preferredSeedIndices field must exist")
+	out := make([]int, field.Len())
+	for i := 0; i < field.Len(); i++ {
+		out[i] = int(field.Index(i).Int())
+	}
+	return out
+}
 
 func TestEnableClustering_DefaultMaxIterationsIsFive(t *testing.T) {
 	t.Setenv("NORNICDB_KMEANS_MAX_ITERATIONS", "")
@@ -52,6 +76,42 @@ func TestSelectHybridClusters_UsesLexicalSignal(t *testing.T) {
 	out := svc.selectHybridClusters(withQueryText(context.Background(), "beta auth"), []float32{1, 0}, 1)
 	require.Len(t, out, 1)
 	require.Equal(t, semSecond, out[0], "lexical signal should override semantic top cluster when weighted higher")
+}
+
+func TestApplyBM25SeedHints_AppliesPreferredSeedsWhenAvailable(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.EnableClustering(nil, 2)
+	require.NotNil(t, svc.clusterIndex)
+
+	require.NoError(t, svc.clusterIndex.Add("doc-a", []float32{1, 0}))
+	require.NoError(t, svc.clusterIndex.Add("doc-b", []float32{0, 1}))
+
+	svc.fulltextIndex = &seedOverrideFulltext{
+		FulltextIndex: NewFulltextIndex(),
+		seedIDs:       []string{"doc-b", "missing-id"},
+	}
+
+	svc.applyBM25SeedHints()
+
+	require.Equal(t, []int{1}, preferredSeedsForTest(t, svc.clusterIndex))
+}
+
+func TestApplyBM25SeedHints_NoSeedsIsNoOp(t *testing.T) {
+	svc := NewServiceWithDimensions(storage.NewMemoryEngine(), 2)
+	svc.EnableClustering(nil, 2)
+	require.NotNil(t, svc.clusterIndex)
+
+	require.NoError(t, svc.clusterIndex.Add("doc-a", []float32{1, 0}))
+	require.NoError(t, svc.clusterIndex.Add("doc-b", []float32{0, 1}))
+
+	svc.fulltextIndex = &seedOverrideFulltext{
+		FulltextIndex: NewFulltextIndex(),
+		seedIDs:       nil,
+	}
+
+	svc.applyBM25SeedHints()
+
+	require.Empty(t, preferredSeedsForTest(t, svc.clusterIndex))
 }
 
 func BenchmarkSelectHybridClusters(b *testing.B) {

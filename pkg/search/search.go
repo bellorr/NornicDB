@@ -465,6 +465,11 @@ type Service struct {
 	clusterHNSWMu sync.RWMutex
 	clusterHNSW   map[int]*HNSWIndex
 
+	// Optional compressed ANN index (IVF/PQ), active only when
+	// NORNICDB_VECTOR_ANN_QUALITY=compressed and readiness checks pass.
+	ivfpqMu    sync.RWMutex
+	ivfpqIndex *IVFPQIndex
+
 	// Optional lexical profiles per cluster for hybrid lexical-semantic routing.
 	// Built from BM25-indexable text and used to bias cluster routing.
 	clusterLexicalMu       sync.RWMutex
@@ -1359,68 +1364,127 @@ func (s *Service) runPersist() {
 	if ftPath == "" && vPath == "" && hnswPath == "" {
 		return
 	}
-	// BM25: skip full rewrite during BuildIndexes checkpoints (avoids rewriting a multi-GB file every 50k nodes).
-	// Vector store is append-only (.vec); we only rewrite small .meta at checkpoint. BM25 is written once at end of build.
-	if ftPath != "" && !s.buildInProgress.Load() {
-		if !s.fulltextIndex.IsDirty() {
-			log.Printf("📇 Background persist: BM25 skip (unchanged)")
-		} else {
-			log.Printf("📇 Persist: saving BM25 to %s...", ftPath)
-			if err := s.fulltextIndex.Save(ftPath); err != nil {
-				log.Printf("⚠️ Background persist: failed to save BM25 index to %s: %v", ftPath, err)
-			} else {
-				log.Printf("📇 Background persist: BM25 index saved to %s", ftPath)
-			}
-		}
-	}
-	if vPath != "" {
-		if vfs != nil {
-			log.Printf("📇 Persist: syncing %s.vec and saving %s.meta...", vPath, vPath)
-			_ = vfs.Sync()
-			if err := vfs.Save(); err != nil {
-				log.Printf("⚠️ Background persist: failed to save vector file store to %s: %v", vPath, err)
-			} else {
-				log.Printf("📇 Background persist: vector file store synced; meta saved to %s.meta", vPath)
-			}
-			// Keep .vec and .meta: they are the canonical persisted format. Next startup loads them via VectorFileStore.
-		} else {
-			log.Printf("⚠️ Persist: vector file store unavailable; skipping vector persist")
-		}
-	}
-	// Only persist HNSW when we use HNSW strategy (N >= NSmallMax). Do not build on shutdown to avoid long hangs.
-	if hnswPath != "" {
-		vecCount := s.EmbeddingCount()
-		if vecCount < NSmallMax {
-			log.Printf("📇 Background persist: HNSW skip (vector count %d < %d)", vecCount, NSmallMax)
-		} else {
-			s.hnswMu.RLock()
-			idx := s.hnswIndex
-			s.hnswMu.RUnlock()
-			if idx == nil {
-				log.Printf("📇 Background persist: HNSW skip (index not built yet; will be built during warmup or when k-means completes)")
-			} else {
-				if err := idx.Save(hnswPath); err != nil {
-					log.Printf("⚠️ Background persist: failed to save HNSW index to %s: %v", hnswPath, err)
-				} else {
-					log.Printf("📇 Background persist: HNSW index saved to %s", hnswPath)
-				}
-			}
-		}
-	}
-	// When IVF-HNSW is the strategy, persist per-cluster HNSW and centroids (same dir as hnsw, in hnsw_ivf/).
-	if hnswPath != "" {
-		s.clusterHNSWMu.RLock()
-		clusterHNSW := s.clusterHNSW
-		s.clusterHNSWMu.RUnlock()
-		if len(clusterHNSW) > 0 {
-			if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
-				log.Printf("⚠️ Background persist: failed to save IVF-HNSW clusters to %s: %v", hnswPath, err)
-			} else {
-				log.Printf("📇 Background persist: IVF-HNSW clusters saved to %s (%d clusters)", hnswPath, len(clusterHNSW))
-			}
-		}
+	for _, writer := range s.persistWriters(ftPath, vPath, hnswPath, vfs) {
+		writer.run()
 	}
 	s.persistSearchBuildSettings(ftPath, vPath, hnswPath)
+}
+
+type persistWriter struct {
+	name string
+	run  func()
+}
+
+func (s *Service) persistWriters(fulltextPath, vectorPath, hnswPath string, vfs *VectorFileStore) []persistWriter {
+	return []persistWriter{
+		{
+			name: "bm25",
+			run: func() {
+				s.persistBM25Background(fulltextPath)
+			},
+		},
+		{
+			name: "vector_store",
+			run: func() {
+				s.persistVectorStoreBackground(vectorPath, vfs)
+			},
+		},
+		{
+			name: "hnsw",
+			run: func() {
+				s.persistHNSWBackground(hnswPath)
+			},
+		},
+		{
+			name: "ivf_hnsw",
+			run: func() {
+				s.persistIVFHNSWBackground(hnswPath)
+			},
+		},
+		{
+			name: "ivfpq",
+			run: func() {
+				s.persistIVFPQBackground(vectorPath, hnswPath)
+			},
+		},
+	}
+}
+
+func (s *Service) persistBM25Background(fulltextPath string) {
+	// BM25: skip full rewrite during BuildIndexes checkpoints (avoids rewriting a multi-GB file every 50k nodes).
+	// Vector store is append-only (.vec); we only rewrite small .meta at checkpoint. BM25 is written once at end of build.
+	if fulltextPath == "" || s.buildInProgress.Load() {
+		return
+	}
+	if !s.fulltextIndex.IsDirty() {
+		log.Printf("📇 Background persist: BM25 skip (unchanged)")
+		return
+	}
+	log.Printf("📇 Persist: saving BM25 to %s...", fulltextPath)
+	if err := s.fulltextIndex.Save(fulltextPath); err != nil {
+		log.Printf("⚠️ Background persist: failed to save BM25 index to %s: %v", fulltextPath, err)
+		return
+	}
+	log.Printf("📇 Background persist: BM25 index saved to %s", fulltextPath)
+}
+
+func (s *Service) persistVectorStoreBackground(vectorPath string, vfs *VectorFileStore) {
+	if vectorPath == "" {
+		return
+	}
+	if vfs == nil {
+		log.Printf("⚠️ Persist: vector file store unavailable; skipping vector persist")
+		return
+	}
+	log.Printf("📇 Persist: syncing %s.vec and saving %s.meta...", vectorPath, vectorPath)
+	_ = vfs.Sync()
+	if err := vfs.Save(); err != nil {
+		log.Printf("⚠️ Background persist: failed to save vector file store to %s: %v", vectorPath, err)
+		return
+	}
+	log.Printf("📇 Background persist: vector file store synced; meta saved to %s.meta", vectorPath)
+}
+
+func (s *Service) persistHNSWBackground(hnswPath string) {
+	// Only persist HNSW when we use HNSW strategy (N >= NSmallMax). Do not build on shutdown to avoid long hangs.
+	if hnswPath == "" {
+		return
+	}
+	vecCount := s.EmbeddingCount()
+	if vecCount < NSmallMax {
+		log.Printf("📇 Background persist: HNSW skip (vector count %d < %d)", vecCount, NSmallMax)
+		return
+	}
+	s.hnswMu.RLock()
+	idx := s.hnswIndex
+	s.hnswMu.RUnlock()
+	if idx == nil {
+		log.Printf("📇 Background persist: HNSW skip (index not built yet; will be built during warmup or when k-means completes)")
+		return
+	}
+	if err := idx.Save(hnswPath); err != nil {
+		log.Printf("⚠️ Background persist: failed to save HNSW index to %s: %v", hnswPath, err)
+		return
+	}
+	log.Printf("📇 Background persist: HNSW index saved to %s", hnswPath)
+}
+
+func (s *Service) persistIVFHNSWBackground(hnswPath string) {
+	// When IVF-HNSW is the strategy, persist per-cluster HNSW and centroids (same dir as hnsw, in hnsw_ivf/).
+	if hnswPath == "" {
+		return
+	}
+	s.clusterHNSWMu.RLock()
+	clusterHNSW := s.clusterHNSW
+	s.clusterHNSWMu.RUnlock()
+	if len(clusterHNSW) == 0 {
+		return
+	}
+	if err := SaveIVFHNSW(hnswPath, clusterHNSW); err != nil {
+		log.Printf("⚠️ Background persist: failed to save IVF-HNSW clusters to %s: %v", hnswPath, err)
+		return
+	}
+	log.Printf("📇 Background persist: IVF-HNSW clusters saved to %s (%d clusters)", hnswPath, len(clusterHNSW))
 }
 
 // PersistIndexesToDisk writes the current BM25, vector, HNSW, and IVF-HNSW (per-cluster) indexes to disk immediately.
@@ -1632,6 +1696,9 @@ func (s *Service) maybeAutoSetVectorDimensions(dimensions int) {
 	s.clusterHNSWMu.Lock()
 	s.clusterHNSW = nil
 	s.clusterHNSWMu.Unlock()
+	s.ivfpqMu.Lock()
+	s.ivfpqIndex = nil
+	s.ivfpqMu.Unlock()
 	s.clearClusterLexicalProfiles()
 
 	s.hnswMu.Lock()
@@ -1674,6 +1741,9 @@ func (s *Service) ClearVectorIndex() {
 	s.clusterHNSWMu.Lock()
 	s.clusterHNSW = nil
 	s.clusterHNSWMu.Unlock()
+	s.ivfpqMu.Lock()
+	s.ivfpqIndex = nil
+	s.ivfpqMu.Unlock()
 	s.clearClusterLexicalProfiles()
 
 	// Also clear HNSW index if it exists (frees memory from tombstones).
@@ -2209,6 +2279,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	forceVectorRebuild := false
 	forceHNSWRebuild := false
 	forceRoutingRebuild := false
+	forceStrategyRebuild := false
 	hnswLoadedFromDisk := false
 	hnswWarmupReason := ""
 
@@ -2224,6 +2295,7 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		forceVectorRebuild = savedSettings.Vector != currentSettings.Vector
 		forceHNSWRebuild = savedSettings.HNSW != currentSettings.HNSW
 		forceRoutingRebuild = savedSettings.Routing != currentSettings.Routing
+		forceStrategyRebuild = savedSettings.Strategy != currentSettings.Strategy
 		if forceFulltextRebuild {
 			log.Printf("📇 BuildIndexes: BM25 settings changed; forcing BM25 rebuild")
 		}
@@ -2235,6 +2307,9 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 		}
 		if forceRoutingRebuild {
 			log.Printf("📇 BuildIndexes: routing/k-means settings changed; forcing routing artifact rebuild")
+		}
+		if forceStrategyRebuild {
+			log.Printf("📇 BuildIndexes: strategy settings changed; forcing compressed ANN artifact rebuild")
 		}
 	}
 
@@ -2285,6 +2360,11 @@ func (s *Service) BuildIndexes(ctx context.Context) error {
 	if forceRoutingRebuild {
 		forceHNSWRebuild = true
 		s.clearClusterLexicalProfiles()
+	}
+	if forceStrategyRebuild {
+		s.ivfpqMu.Lock()
+		s.ivfpqIndex = nil
+		s.ivfpqMu.Unlock()
 	}
 
 	// When both paths are set and both indexes have content, skip the full iteration.
@@ -2626,45 +2706,11 @@ func (s *Service) warmupVectorPipeline(ctx context.Context) {
 	log.Printf("🔍 Warming up vector search pipeline (%d vectors)...", n)
 	start := time.Now()
 
-	// When clustering is enabled and we have enough embeddings, restore or run k-means and build IVF-HNSW.
-	// If centroids are persisted (from previous IVF-HNSW save), load them and skip k-means so warmup is fast.
-	if s.IsClusteringEnabled() && n >= s.GetMinEmbeddingsForClustering() {
-		s.mu.RLock()
-		clusterIndex := s.clusterIndex
-		hnswPath := s.hnswIndexPath
-		s.mu.RUnlock()
-		// Backfill cluster index from vector store so k-means sees full count (same as TriggerClustering).
-		s.ensureClusterIndexBackfilled(n)
-		// Skip k-means only on initial load when we have persisted IVF-HNSW cluster files.
-		// Centroids and idToCluster are derived from hnsw_ivf/ cluster files + vectors (graph-only).
-		// The re-cluster timer still runs later and will re-run k-means when enabled.
-		restoredFromDisk := false
-		if clusterIndex != nil && hnswPath != "" && s.EmbeddingCount() > 0 {
-			vectorLookup := s.getVectorLookup()
-			if vectorLookup != nil {
-				centroids, idToCluster, deriveErr := DeriveIVFCentroidsFromClusters(hnswPath, vectorLookup)
-				if len(centroids) > 0 && len(idToCluster) > 0 {
-					if err := clusterIndex.RestoreClusteringState(centroids, idToCluster); err == nil {
-						if err := s.rebuildClusterHNSWIndexes(ctx, clusterIndex); err == nil {
-							s.rebuildClusterLexicalProfiles()
-							log.Printf("🔍 IVF-HNSW restored from disk (%d clusters); skipping k-means", len(centroids))
-							restoredFromDisk = true
-						}
-					}
-				} else if !restoredFromDisk {
-					log.Printf("[IVF-HNSW] ⚠️ Could not restore from hnsw_ivf (path=%q); running k-means. deriveErr=%v centroids=%d idToCluster=%d",
-						hnswPath, deriveErr, len(centroids), len(idToCluster))
-				}
-			}
+	if err := s.warmupClusteredStrategy(ctx, n); err != nil {
+		if ctx.Err() != nil {
+			return
 		}
-		if !restoredFromDisk {
-			if err := s.TriggerClustering(ctx); err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				log.Printf("⚠️ Clustering during warmup failed (will use global HNSW): %v", err)
-			}
-		}
+		log.Printf("⚠️ Clustering during warmup failed (will use global HNSW): %v", err)
 	}
 
 	if _, err := s.getOrCreateVectorPipeline(ctx); err != nil {
@@ -2672,6 +2718,55 @@ func (s *Service) warmupVectorPipeline(ctx context.Context) {
 		return
 	}
 	log.Printf("🔍 Vector search pipeline ready in %v", time.Since(start))
+}
+
+func (s *Service) warmupClusteredStrategy(ctx context.Context, vectorCount int) error {
+	// When clustering is enabled and we have enough embeddings, restore or run k-means and build IVF-HNSW.
+	// If centroids are persisted (from previous IVF-HNSW save), load them and skip k-means so warmup is fast.
+	if !s.IsClusteringEnabled() || vectorCount < s.GetMinEmbeddingsForClustering() {
+		return nil
+	}
+	s.mu.RLock()
+	clusterIndex := s.clusterIndex
+	hnswPath := s.hnswIndexPath
+	s.mu.RUnlock()
+	// Backfill cluster index from vector store so k-means sees full count (same as TriggerClustering).
+	s.ensureClusterIndexBackfilled(vectorCount)
+	if s.tryRestoreClusteredWarmupFromDisk(ctx, clusterIndex, hnswPath) {
+		return nil
+	}
+	if err := s.TriggerClustering(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Service) tryRestoreClusteredWarmupFromDisk(ctx context.Context, clusterIndex *gpu.ClusterIndex, hnswPath string) bool {
+	// Skip k-means only on initial load when we have persisted IVF-HNSW cluster files.
+	// Centroids and idToCluster are derived from hnsw_ivf/ cluster files + vectors (graph-only).
+	// The re-cluster timer still runs later and will re-run k-means when enabled.
+	if clusterIndex == nil || hnswPath == "" || s.EmbeddingCount() == 0 {
+		return false
+	}
+	vectorLookup := s.getVectorLookup()
+	if vectorLookup == nil {
+		return false
+	}
+	centroids, idToCluster, deriveErr := DeriveIVFCentroidsFromClusters(hnswPath, vectorLookup)
+	if len(centroids) == 0 || len(idToCluster) == 0 {
+		log.Printf("[IVF-HNSW] ⚠️ Could not restore from hnsw_ivf (path=%q); running k-means. deriveErr=%v centroids=%d idToCluster=%d",
+			hnswPath, deriveErr, len(centroids), len(idToCluster))
+		return false
+	}
+	if err := clusterIndex.RestoreClusteringState(centroids, idToCluster); err != nil {
+		return false
+	}
+	if err := s.rebuildClusterHNSWIndexes(ctx, clusterIndex); err != nil {
+		return false
+	}
+	s.rebuildClusterLexicalProfiles()
+	log.Printf("🔍 IVF-HNSW restored from disk (%d clusters); skipping k-means", len(centroids))
+	return true
 }
 
 // Search performs hybrid search with automatic fallback.
@@ -2857,6 +2952,9 @@ func (s *Service) rrfHybridSearch(ctx context.Context, query string, embedding [
 	case *IVFHNSWCandidateGen:
 		searchMethod = "rrf_hybrid_ivf_hnsw"
 		message = "RRF (IVF-HNSW vector + BM25)"
+	case *IVFPQCandidateGen:
+		searchMethod = "rrf_hybrid_ivfpq"
+		message = "RRF (IVFPQ compressed vector + BM25)"
 	}
 	if opts.MMREnabled && len(embedding) > 0 {
 		fusedResults = s.applyMMR(ctx, fusedResults, embedding, opts.Limit, opts.MMRLambda, seenOrphans)
@@ -3086,10 +3184,85 @@ func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchP
 	vi := s.vectorIndex
 	s.mu.RUnlock()
 
-	// Auto strategy: choose candidate generator based on dataset size and clustering
-	var candidateGen CandidateGenerator
-	var strategyName string
+	strategy, err := s.resolveVectorStrategy(ctx, vectorCount, dimensions, vfs)
+	if err != nil {
+		return nil, err
+	}
 
+	log.Printf("🔍 Vector search strategy: %s (N=%d vectors)", strategy.name, vectorCount)
+
+	exactScorer := s.resolveVectorExactScorer(strategy.scorerPolicy, vi, vfs)
+
+	s.vectorPipeline = NewVectorSearchPipeline(strategy.candidateGen, exactScorer)
+	return s.vectorPipeline, nil
+}
+
+type exactScorerPolicy string
+
+const (
+	exactScorerPolicyIdentity exactScorerPolicy = "identity"
+	exactScorerPolicyCPU      exactScorerPolicy = "cpu"
+)
+
+type vectorStrategyDescriptor struct {
+	name         string
+	candidateGen CandidateGenerator
+	scorerPolicy exactScorerPolicy
+}
+
+func (s *Service) resolveVectorStrategy(ctx context.Context, vectorCount, dimensions int, vfs *VectorFileStore) (*vectorStrategyDescriptor, error) {
+	if ANNQualityFromEnv() == ANNQualityCompressed {
+		return s.resolveCompressedVectorStrategy(ctx, vectorCount, dimensions, vfs)
+	}
+	return s.resolveStandardVectorStrategy(ctx, vectorCount, dimensions, vfs)
+}
+
+func (s *Service) resolveCompressedVectorStrategy(ctx context.Context, vectorCount, dimensions int, vfs *VectorFileStore) (*vectorStrategyDescriptor, error) {
+	profile := ResolveCompressedANNProfile(vectorCount, dimensions, vfs != nil && vfs.Count() > 0)
+	if !profile.Active {
+		for _, diag := range profile.Diagnostics {
+			log.Printf("[IVFPQ] ⏭️ compressed mode inactive | code=%s reason=%s", diag.Code, diag.Message)
+		}
+		strategy, err := s.resolveStandardVectorStrategy(ctx, vectorCount, dimensions, vfs)
+		if err != nil {
+			return nil, err
+		}
+		strategy.name = "compressed-disabled -> " + strategy.name
+		return strategy, nil
+	}
+
+	idx, err := s.getOrBuildIVFPQIndex(ctx, ivfpqProfileFromCompressed(profile), vfs)
+	if err != nil {
+		log.Printf("[IVFPQ] ⚠️ compressed build/load failed, falling back to standard path: %v", err)
+		strategy, fallbackErr := s.resolveStandardVectorStrategy(ctx, vectorCount, dimensions, vfs)
+		if fallbackErr != nil {
+			return nil, fallbackErr
+		}
+		strategy.name = "compressed-fallback -> " + strategy.name
+		return strategy, nil
+	}
+	return &vectorStrategyDescriptor{
+		name:         fmt.Sprintf("IVFPQ compressed (lists=%d segments=%d bits=%d nprobe=%d)", profile.IVFLists, profile.PQSegments, profile.PQBits, profile.NProbe),
+		candidateGen: NewIVFPQCandidateGen(idx, profile.NProbe),
+		scorerPolicy: exactScorerPolicyCPU,
+	}, nil
+}
+
+func ivfpqProfileFromCompressed(profile CompressedANNProfile) IVFPQProfile {
+	return IVFPQProfile{
+		Dimensions:          profile.Dimensions,
+		IVFLists:            profile.IVFLists,
+		PQSegments:          profile.PQSegments,
+		PQBits:              profile.PQBits,
+		NProbe:              profile.NProbe,
+		RerankTopK:          profile.RerankTopK,
+		TrainingSampleMax:   profile.TrainingSampleMax,
+		KMeansMaxIterations: profile.KMeansMaxIterations,
+	}
+}
+
+func (s *Service) resolveStandardVectorStrategy(ctx context.Context, vectorCount, dimensions int, vfs *VectorFileStore) (*vectorStrategyDescriptor, error) {
+	// Auto strategy: choose candidate generator based on dataset size and clustering
 	gpuEnabled := s.gpuManager != nil && s.gpuManager.IsEnabled() && s.gpuEmbeddingIndex != nil
 	gpuMinN := envutil.GetInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 5000)
 	gpuMaxN := envutil.GetInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 15000)
@@ -3097,79 +3270,100 @@ func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchP
 	// Prefer GPU brute-force (exact) when enabled and within configured thresholds.
 	// This path is exact and typically highest-throughput within its tuned N range.
 	if gpuEnabled && vectorCount >= gpuMinN && vectorCount <= gpuMaxN {
-		candidateGen = NewGPUBruteForceCandidateGen(s.gpuEmbeddingIndex)
-		strategyName = "GPU brute-force"
-	} else if vectorCount < NSmallMax {
+		return &vectorStrategyDescriptor{
+			name:         "GPU brute-force",
+			candidateGen: NewGPUBruteForceCandidateGen(s.gpuEmbeddingIndex),
+			scorerPolicy: exactScorerPolicyIdentity,
+		}, nil
+	}
+	if vectorCount < NSmallMax {
 		// Small dataset: use brute-force on CPU (exact) when vectors are in memory;
 		// when using file-backed store, do direct file-store scan (no HNSW build).
 		if vfs != nil {
-			candidateGen = NewFileStoreBruteForceCandidateGen(vfs)
-			strategyName = "CPU brute-force (file store scan)"
-		} else {
-			candidateGen = NewBruteForceCandidateGen(s.vectorIndex)
-			strategyName = "CPU brute-force"
+			return &vectorStrategyDescriptor{
+				name:         "CPU brute-force (file store scan)",
+				candidateGen: NewFileStoreBruteForceCandidateGen(vfs),
+				scorerPolicy: exactScorerPolicyCPU,
+			}, nil
 		}
-	} else if s.clusterIndex != nil && s.clusterIndex.IsClustered() {
-		// If clustering is enabled and clusters are built, use centroid routing on CPU
-		// (GPU subset scoring when GPU is enabled but full brute is out-of-range, else IVF-HNSW when available,
-		// else CPU k-means candidate generation).
-		numClustersToSearch := 3 // Default: search 3 nearest clusters
+		return &vectorStrategyDescriptor{
+			name:         "CPU brute-force",
+			candidateGen: NewBruteForceCandidateGen(s.vectorIndex),
+			scorerPolicy: exactScorerPolicyCPU,
+		}, nil
+	}
+	if s.clusterIndex != nil && s.clusterIndex.IsClustered() {
+		return s.resolveClusteredVectorStrategy(vectorCount, gpuEnabled, gpuMaxN)
+	}
+	// Large dataset: use HNSW (lazy-initialize if needed)
+	hnswIndex, err := s.getOrCreateHNSWIndex(ctx, dimensions)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create HNSW index: %w", err)
+	}
+	return &vectorStrategyDescriptor{
+		name:         "HNSW",
+		candidateGen: NewHNSWCandidateGen(hnswIndex),
+		scorerPolicy: exactScorerPolicyCPU,
+	}, nil
+}
 
-		// When GPU is enabled but full brute-force is not selected (e.g. N too large),
-		// still use k-means centroids to route and score only the cluster subset.
-		// ScoreSubset uses GPU when possible and falls back to CPU gracefully.
-		if gpuEnabled && vectorCount > gpuMaxN {
-			candidateGen = NewGPUKMeansCandidateGen(s.clusterIndex, numClustersToSearch).
-				SetClusterSelector(s.selectHybridClusters)
-			strategyName = "GPU k-means (cluster routing)"
-		} else {
-			if envutil.GetBoolStrict("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) && !gpuEnabled {
-				s.clusterHNSWMu.RLock()
-				hasClusterHNSW := len(s.clusterHNSW) > 0
-				s.clusterHNSWMu.RUnlock()
-				if hasClusterHNSW {
-					candidateGen = NewIVFHNSWCandidateGen(s.clusterIndex, func(clusterID int) *HNSWIndex {
-						s.clusterHNSWMu.RLock()
-						defer s.clusterHNSWMu.RUnlock()
-						return s.clusterHNSW[clusterID]
-					}, numClustersToSearch).
-						SetClusterSelector(s.selectHybridClusters)
-					strategyName = "IVF-HNSW (per-cluster HNSW)"
-				}
-			}
-			if candidateGen == nil {
-				candidateGen = NewKMeansCandidateGen(s.clusterIndex, s.vectorIndex, numClustersToSearch).
-					SetClusterSelector(s.selectHybridClusters)
-				strategyName = "CPU k-means (cluster routing)"
-			}
-		}
-	} else {
-		// Large dataset: use HNSW (lazy-initialize if needed)
-		hnswIndex, err := s.getOrCreateHNSWIndex(ctx, dimensions)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create HNSW index: %w", err)
-		}
-		candidateGen = NewHNSWCandidateGen(hnswIndex)
-		strategyName = "HNSW"
+func (s *Service) resolveClusteredVectorStrategy(vectorCount int, gpuEnabled bool, gpuMaxN int) (*vectorStrategyDescriptor, error) {
+	// If clustering is enabled and clusters are built, use centroid routing on CPU
+	// (GPU subset scoring when GPU is enabled but full brute is out-of-range, else IVF-HNSW when available,
+	// else CPU k-means candidate generation).
+	numClustersToSearch := 3 // Default: search 3 nearest clusters
+	// When GPU is enabled but full brute-force is not selected (e.g. N too large),
+	// still use k-means centroids to route and score only the cluster subset.
+	// ScoreSubset uses GPU when possible and falls back to CPU gracefully.
+	if gpuEnabled && vectorCount > gpuMaxN {
+		return &vectorStrategyDescriptor{
+			name: "GPU k-means (cluster routing)",
+			candidateGen: NewGPUKMeansCandidateGen(s.clusterIndex, numClustersToSearch).
+				SetClusterSelector(s.selectHybridClusters),
+			scorerPolicy: exactScorerPolicyIdentity,
+		}, nil
 	}
 
-	log.Printf("🔍 Vector search strategy: %s (N=%d vectors)", strategyName, vectorCount)
+	if envutil.GetBoolStrict("NORNICDB_VECTOR_IVF_HNSW_ENABLED", false) && !gpuEnabled {
+		s.clusterHNSWMu.RLock()
+		hasClusterHNSW := len(s.clusterHNSW) > 0
+		s.clusterHNSWMu.RUnlock()
+		if hasClusterHNSW {
+			gen := NewIVFHNSWCandidateGen(s.clusterIndex, func(clusterID int) *HNSWIndex {
+				s.clusterHNSWMu.RLock()
+				defer s.clusterHNSWMu.RUnlock()
+				return s.clusterHNSW[clusterID]
+			}, numClustersToSearch).
+				SetClusterSelector(s.selectHybridClusters)
+			return &vectorStrategyDescriptor{
+				name:         "IVF-HNSW (per-cluster HNSW)",
+				candidateGen: gen,
+				scorerPolicy: exactScorerPolicyCPU,
+			}, nil
+		}
+	}
 
+	gen := NewKMeansCandidateGen(s.clusterIndex, s.vectorIndex, numClustersToSearch).
+		SetClusterSelector(s.selectHybridClusters)
+	return &vectorStrategyDescriptor{
+		name:         "CPU k-means (cluster routing)",
+		candidateGen: gen,
+		scorerPolicy: exactScorerPolicyCPU,
+	}, nil
+}
+
+func (s *Service) resolveVectorExactScorer(policy exactScorerPolicy, vi *VectorIndex, vfs *VectorFileStore) ExactScorer {
 	// Exact scoring defaults to SIMD CPU scoring.
-	var exactScorer ExactScorer
-	switch candidateGen.(type) {
-	case *GPUBruteForceCandidateGen, *GPUKMeansCandidateGen:
-		exactScorer = &IdentityExactScorer{}
+	switch policy {
+	case exactScorerPolicyIdentity:
+		return &IdentityExactScorer{}
 	default:
 		var getter VectorGetter = vi
 		if vfs != nil {
-			getter = &vectorLookupGetter{lookup: s.getVectorLookup()}
+			getter = vfs
 		}
-		exactScorer = NewCPUExactScorer(getter)
+		return NewCPUExactScorer(getter)
 	}
-
-	s.vectorPipeline = NewVectorSearchPipeline(candidateGen, exactScorer)
-	return s.vectorPipeline, nil
 }
 
 // getOrCreateHNSWIndex returns the HNSW index, creating it if needed.
@@ -4086,6 +4280,9 @@ func (s *Service) vectorSearchOnly(ctx context.Context, embedding []float32, opt
 	case *IVFHNSWCandidateGen:
 		searchMethod = "vector_ivf_hnsw"
 		message = "IVF-HNSW (centroid routing + per-cluster HNSW)"
+	case *IVFPQCandidateGen:
+		searchMethod = "vector_ivfpq"
+		message = "IVFPQ compressed ANN"
 	case *GPUBruteForceCandidateGen:
 		searchMethod = "vector_gpu_brute"
 		message = "GPU brute-force vector search (exact)"

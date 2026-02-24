@@ -245,6 +245,9 @@ func (c *CPUExactScorer) ScoreCandidates(ctx context.Context, query []float32, c
 		return nil, nil
 	}
 	normalizedQuery := vector.Normalize(query)
+	if vfs, ok := c.getter.(*VectorFileStore); ok {
+		return vfs.scoreCandidatesDot(ctx, normalizedQuery, candidates)
+	}
 	scored := make([]ScoredCandidate, 0, len(candidates))
 
 	for _, cand := range candidates {
@@ -429,18 +432,23 @@ func (p *VectorSearchPipeline) Search(ctx context.Context, query []float32, k in
 		return nil, fmt.Errorf("exact scoring failed: %w", err)
 	}
 
-	// Stage 3: Filter by minSimilarity
-	filtered := make([]ScoredCandidate, 0, len(scored))
+	// Stage 3+4: Since scored is descending, apply threshold and top-k in one pass.
+	if k <= 0 {
+		k = len(scored)
+	}
+	limit := k
+	if limit > len(scored) {
+		limit = len(scored)
+	}
+	filtered := make([]ScoredCandidate, 0, limit)
 	for _, s := range scored {
-		if s.Score >= minSimilarity {
-			filtered = append(filtered, s)
+		if s.Score < minSimilarity {
+			break
+		}
+		filtered = append(filtered, s)
+		if len(filtered) >= k {
+			break
 		}
 	}
-
-	// Stage 4: Top-k
-	if len(filtered) > k {
-		filtered = filtered[:k]
-	}
-
 	return filtered, nil
 }

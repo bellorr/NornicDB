@@ -18,6 +18,7 @@ const (
 	vectorSettingsSchemaVersion      = "1"
 	hnswSettingsSchemaVersion        = "1"
 	routingSettingsSchemaVersion     = "1"
+	strategySettingsSchemaVersion    = "1"
 )
 
 // searchBuildSettingsSnapshot tracks the index-build settings that influence
@@ -29,6 +30,7 @@ type searchBuildSettingsSnapshot struct {
 	Vector        string `msgpack:"vector"`
 	HNSW          string `msgpack:"hnsw"`
 	Routing       string `msgpack:"routing,omitempty"`
+	Strategy      string `msgpack:"strategy,omitempty"`
 }
 
 func searchBuildSettingsPath(fulltextPath, vectorPath, hnswPath string) string {
@@ -85,8 +87,41 @@ func saveSearchBuildSettings(path string, snap searchBuildSettingsSnapshot) erro
 }
 
 func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
+	return searchBuildSettingsSnapshot{
+		FormatVersion: searchBuildSettingsFormatVersion,
+		SavedAtUnix:   time.Now().Unix(),
+		BM25:          s.composeBM25BuildSettings(),
+		Vector:        s.composeVectorBuildSettings(),
+		HNSW:          s.composeHNSWBuildSettings(),
+		Routing:       s.composeRoutingBuildSettings(),
+		Strategy:      s.composeStrategyBuildSettings(),
+	}
+}
+
+func (s *Service) composeBM25BuildSettings() string {
+	return fmt.Sprintf("schema=%s;format=%s;props=%s",
+		bm25SettingsSchemaVersion,
+		s.currentBM25FormatVersion(),
+		strings.Join(SearchableProperties, ","))
+}
+
+func (s *Service) composeVectorBuildSettings() string {
 	dimensions := s.VectorIndexDimensions()
+	return fmt.Sprintf("schema=%s;format=%s;dimensions=%d",
+		vectorSettingsSchemaVersion,
+		vectorIndexFormatVersion,
+		dimensions)
+}
+
+func (s *Service) composeHNSWBuildSettings() string {
 	hcfg := HNSWConfigFromEnv()
+	return fmt.Sprintf("schema=%s;format=%s;m=%d;efc=%d;efs=%d",
+		hnswSettingsSchemaVersion,
+		hnswIndexFormatVersionGraphOnly,
+		hcfg.M, hcfg.EfConstruction, hcfg.EfSearch)
+}
+
+func (s *Service) composeRoutingBuildSettings() string {
 	maxIter := envutil.GetInt("NORNICDB_KMEANS_MAX_ITERATIONS", 5)
 	if maxIter < 5 {
 		maxIter = 5
@@ -98,31 +133,38 @@ func (s *Service) currentSearchBuildSettings() searchBuildSettingsSnapshot {
 	if routingMode == "" {
 		routingMode = "hybrid"
 	}
-	seedMode := strings.TrimSpace(strings.ToLower(os.Getenv("NORNICDB_KMEANS_SEED_MODE")))
-	if seedMode == "" {
-		seedMode = "bm25+kmeans++"
-	}
 	wSem := envFloat("NORNICDB_VECTOR_HYBRID_ROUTING_W_SEM", 0.7)
 	wLex := envFloat("NORNICDB_VECTOR_HYBRID_ROUTING_W_LEX", 0.3)
-	return searchBuildSettingsSnapshot{
-		FormatVersion: searchBuildSettingsFormatVersion,
-		SavedAtUnix:   time.Now().Unix(),
-		BM25: fmt.Sprintf("schema=%s;format=%s;props=%s",
-			bm25SettingsSchemaVersion,
-			s.currentBM25FormatVersion(),
-			strings.Join(SearchableProperties, ",")),
-		Vector: fmt.Sprintf("schema=%s;format=%s;dimensions=%d",
-			vectorSettingsSchemaVersion,
-			vectorIndexFormatVersion,
-			dimensions),
-		HNSW: fmt.Sprintf("schema=%s;format=%s;m=%d;efc=%d;efs=%d",
-			hnswSettingsSchemaVersion,
-			hnswIndexFormatVersionGraphOnly,
-			hcfg.M, hcfg.EfConstruction, hcfg.EfSearch),
-		Routing: fmt.Sprintf("schema=%s;mode=%s;w_sem=%.4f;w_lex=%.4f;lex_profile=%s;kmeans_max_iter=%d;kmeans_seed=%s",
-			routingSettingsSchemaVersion,
-			routingMode, wSem, wLex, routingSettingsSchemaVersion, maxIter, seedMode),
+	return fmt.Sprintf("schema=%s;mode=%s;w_sem=%.4f;w_lex=%.4f;lex_profile=%s;kmeans_max_iter=%d",
+		routingSettingsSchemaVersion,
+		routingMode, wSem, wLex, routingSettingsSchemaVersion, maxIter)
+}
+
+func (s *Service) composeStrategyBuildSettings() string {
+	if ANNQualityFromEnv() != ANNQualityCompressed {
+		return ""
 	}
+	s.mu.RLock()
+	dimensions := s.VectorIndexDimensions()
+	vectorCount := s.embeddingCountLocked()
+	vfsReady := s.vectorFileStore != nil && s.vectorFileStore.Count() > 0
+	s.mu.RUnlock()
+	profile := ResolveCompressedANNProfile(vectorCount, dimensions, vfsReady)
+	return fmt.Sprintf("schema=%s;quality=%s;active=%t;dims=%d;lists=%d;segments=%d;bits=%d;nprobe=%d;rerank_topk=%d;train_max=%d;kmeans_max_iter=%d;seed_max_terms=%d;seed_docs_per_term=%d;routing=%s",
+		strategySettingsSchemaVersion,
+		profile.Quality,
+		profile.Active,
+		profile.Dimensions,
+		profile.IVFLists,
+		profile.PQSegments,
+		profile.PQBits,
+		profile.NProbe,
+		profile.RerankTopK,
+		profile.TrainingSampleMax,
+		profile.KMeansMaxIterations,
+		profile.SeedMaxTerms,
+		profile.SeedDocsPerTerm,
+		profile.RoutingMode)
 }
 
 func (s *Service) currentBM25FormatVersion() string {

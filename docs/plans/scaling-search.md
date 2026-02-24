@@ -133,6 +133,9 @@ Goal: keep usable recall while cutting RAM enough to run 10M-1B vectors on mater
   - Preserve current high-recall HNSW path as a profile option; do not force one index mode for every workload.
 
 - **Proposed profile set (explicit and opinionated):**
+  - Activation switch: `NORNICDB_VECTOR_ANN_QUALITY=compressed`
+    - `fast|balanced|accurate` keep current HNSW/IVF-HNSW behavior.
+    - `compressed` enables the Phase 3 compressed ANN path.
   - `hnsw_high_recall`
     - Best recall, highest memory cost.
     - Use for latency-critical and precision-critical applications.
@@ -153,12 +156,17 @@ Goal: keep usable recall while cutting RAM enough to run 10M-1B vectors on mater
   - `disk_optimized`: RAM floor mode, recall depends on rerank budget.
 
 - **Example config shape (conceptual):**
-  - `search.vector.profile = "ivf_pq_balanced"`
-  - `search.vector.ivf_lists = 4096`
-  - `search.vector.pq_segments = 16`
-  - `search.vector.pq_bits = 8`
-  - `search.vector.rerank_topk = 200`
-  - `search.vector.fallback_exact_threshold = 3000`
+  - Existing ANN/HNSW/IVF knobs remain first-class and are directly reused where semantically compatible.
+  - New compressed-only knobs are introduced only where there is no equivalent existing control.
+  - Environment example:
+    - `NORNICDB_VECTOR_ANN_QUALITY=compressed`
+    - `NORNICDB_KMEANS_NUM_CLUSTERS=4096` (reused for IVF list defaults/routing)
+    - `NORNICDB_KMEANS_SEED_MAX_TERMS=256` (reused for seeded training candidate pool)
+    - `NORNICDB_KMEANS_SEED_DOCS_PER_TERM=1` (reused for seeded training candidate cap)
+    - `NORNICDB_VECTOR_PQ_SEGMENTS=16` (new, compressed-specific)
+    - `NORNICDB_VECTOR_PQ_BITS=8` (new, compressed-specific)
+    - `NORNICDB_VECTOR_IVFPQ_NPROBE=16` (new, compressed-specific)
+    - `NORNICDB_VECTOR_IVFPQ_RERANK_TOPK=200` (new, compressed-specific)
 
 - **Execution flow for lower hardware cost:**
   - Apply metadata/type filters first.
@@ -166,6 +174,12 @@ Goal: keep usable recall while cutting RAM enough to run 10M-1B vectors on mater
   - Score compressed codes (fast and memory-light).
   - Re-rank only a bounded candidate set with full vectors.
   - If filtered candidate pool is small, skip ANN and do exact scan directly.
+
+- **Config contract (important):**
+  - Existing HNSW/IVF controls are not treated as legacy fallback controls.
+  - In `compressed` mode, shared knobs are consumed directly by Phase 3.
+  - Compressed-specific flags only cover new capabilities (PQ/code/rerank/probe).
+  - This keeps one coherent configuration model across ANN modes.
 
 - **Acceptance criteria before defaulting to compressed mode:**
   - No major recall regression on reference workloads:
@@ -184,3 +198,14 @@ Goal: keep usable recall while cutting RAM enough to run 10M-1B vectors on mater
   - Bounded rerank keeps quality predictable without restoring full-memory cost.
 
 If you want, I can turn this into a concrete NornicDB engineering RFC with package-level changes (`pkg/search`, `pkg/cypher` planner, config knobs, test matrix, and benchmark acceptance criteria).
+
+### Phase 3 Implementation Status (Current)
+
+- Compressed ANN (`NORNICDB_VECTOR_ANN_QUALITY=compressed`) is implemented end-to-end in the search pipeline (profile resolution, build/query runtime, persistence, warmup/load-or-rebuild, and strategy fingerprint compatibility).
+- Benchmark matrix (`BenchmarkANNQueryPipelineChunked`) is in place and exercised across full/half/quarter/eighth corpus slices.
+- Latest `count=3` query snapshot (Apple M3 Max, `benchtime=2s`):
+  - `full_n=12000`: HNSW ~`5611 ns/op`, IVFPQ ~`66767 ns/op`
+  - `half_n=6000`: HNSW ~`5608 ns/op`, IVFPQ ~`69922 ns/op`
+  - `quarter_n=3000`: HNSW ~`5647 ns/op`, IVFPQ ~`49235 ns/op`
+  - `eighth_n=1500`: HNSW ~`5673 ns/op`, IVFPQ ~`34773 ns/op`
+- Relative to early Phase 3 baseline at `full_n=12000`, compressed IVFPQ query latency improved from ~`127826 ns/op` to ~`66767 ns/op` (~`1.91x` faster) while maintaining bounded query memory pressure (~`5.23-5.29 MiB` heap delta in current runs).

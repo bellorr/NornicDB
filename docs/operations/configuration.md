@@ -290,14 +290,18 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | **K-means clustering** | | |
 | `NORNICDB_KMEANS_NUM_CLUSTERS` | (auto) | Number of clusters. Unset or 0 = **auto** from dataset size at run time (√(n/2), clamped 10–8192). Set to a positive value to fix K (e.g. `500`). |
 | `NORNICDB_KMEANS_MAX_ITERATIONS` | `5` | Max k-means iterations (early stop when stable). Minimum is clamped to 5. |
-| `NORNICDB_KMEANS_SEED_MODE` | `bm25+kmeans++` | K-means seed strategy: `bm25+kmeans++` (BM25-informed first seed, then k-means++) or `none` (plain k-means++). |
-| `NORNICDB_KMEANS_SEED_MAX_TERMS` | `256` | Max BM25 high-IDF terms used to build seed candidates. |
-| `NORNICDB_KMEANS_SEED_DOCS_PER_TERM` | `1` | Max seed docs selected per term. |
+| `NORNICDB_KMEANS_SEED_MAX_TERMS` | `256` | Max BM25 high-IDF terms used to build seed candidates when always-on lexical seeding is attempted. |
+| `NORNICDB_KMEANS_SEED_DOCS_PER_TERM` | `1` | Max seed docs selected per term when always-on lexical seeding is attempted. |
 | **HNSW index (quality preset)** | | |
-| `NORNICDB_VECTOR_ANN_QUALITY` | `fast` | Preset: `fast` \| `balanced` \| `accurate`. See table below. |
+| `NORNICDB_VECTOR_ANN_QUALITY` | `fast` | Preset: `fast` \| `balanced` \| `accurate` \| `compressed`. See tables below. |
 | `NORNICDB_VECTOR_HNSW_M` | (preset) | Max connections per node (e.g. 16 or 32). Overrides preset. |
 | `NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION` | (preset) | Candidate list size during index build. Overrides preset. |
 | `NORNICDB_VECTOR_HNSW_EF_SEARCH` | (preset) | Candidate list size during search; higher = better recall, slower. Overrides preset. |
+| `NORNICDB_VECTOR_PQ_SEGMENTS` | `16` | Compressed mode only. Number of PQ segments (`dimensions` must be divisible by this). |
+| `NORNICDB_VECTOR_PQ_BITS` | `8` | Compressed mode only. Bits per PQ code (currently clamped to 4-8). |
+| `NORNICDB_VECTOR_IVFPQ_NPROBE` | `16` | Compressed mode only. Number of IVF lists probed per query. |
+| `NORNICDB_VECTOR_IVFPQ_RERANK_TOPK` | `200` | Compressed mode only. Max candidates sent to exact rerank. |
+| `NORNICDB_VECTOR_IVFPQ_TRAINING_SAMPLE_MAX` | `200000` | Compressed mode only. Maximum vectors sampled for IVFPQ training. |
 | **HNSW Metal (GPU)** | | |
 | `NORNICDB_VECTOR_HNSW_METAL_MIN_CANDIDATES` | `0` | If greater than 0, use Metal for HNSW search when candidate count meets threshold. `0` = disabled. |
 | **HNSW maintenance** | | |
@@ -318,6 +322,126 @@ So the switch from CPU brute-force to HNSW happens at **5000 vectors**. If you s
 | `accurate` | 32 | 400 | 200 | Higher recall, slower search. |
 
 To reduce latency (e.g. if search is ~4s), try `NORNICDB_VECTOR_ANN_QUALITY=fast` or lower `NORNICDB_VECTOR_HNSW_EF_SEARCH` (e.g. `50`). Ensure you have ≥ 5000 vectors so the pipeline uses HNSW instead of CPU brute-force.
+
+### Compressed ANN mode (IVFPQ)
+
+`NORNICDB_VECTOR_ANN_QUALITY=compressed` enables the compressed ANN path designed to reduce memory footprint at large scale.
+
+How it works:
+
+1. Build/load an IVF/PQ index (coarse lists + compressed codes).
+2. Probe a bounded number of lists (`nprobe`) for approximate candidates.
+3. Score candidates in compressed space.
+4. Re-rank a bounded top window using exact vectors for result quality.
+
+This mode is integrated end-to-end: build, persist, startup load/rebuild, search query path, and compatibility checks.
+
+**Safety behavior:**
+
+- If compressed mode prerequisites are not satisfied for a run (for example, invalid dimensions/segments combination or insufficient vectors for current profile), NornicDB logs a clear diagnostic and safely falls back to the standard path instead of failing the service.
+
+**Quick enable (environment):**
+
+```bash
+export NORNICDB_VECTOR_ANN_QUALITY=compressed
+export NORNICDB_VECTOR_PQ_SEGMENTS=16
+export NORNICDB_VECTOR_PQ_BITS=8
+export NORNICDB_VECTOR_IVFPQ_NPROBE=16
+export NORNICDB_VECTOR_IVFPQ_RERANK_TOPK=200
+export NORNICDB_VECTOR_IVFPQ_TRAINING_SAMPLE_MAX=200000
+```
+
+**Tuning guidance (compressed mode):**
+
+- Increase `NORNICDB_VECTOR_IVFPQ_NPROBE` to improve recall (usually increases latency).
+- Increase `NORNICDB_VECTOR_IVFPQ_RERANK_TOPK` to improve final quality consistency (usually increases latency and exact-score IO).
+- Increase `NORNICDB_VECTOR_PQ_SEGMENTS` or `NORNICDB_VECTOR_PQ_BITS` to improve compressed-space fidelity (increases memory/build cost).
+- Keep `NORNICDB_VECTOR_PQ_SEGMENTS` a divisor of embedding dimensions.
+
+#### Tradeoff snapshot (latest benchmark matrix)
+
+Reference run: `BenchmarkANNQueryPipelineChunked`, `benchtime=2s`, `count=3`, Apple M3 Max.
+
+Latency (ns/op), averaged:
+
+```text
+Query Latency vs Dataset Size (ns/op)
+Scale: 1 block ~= 2,000 ns
+
+N=1500
+HNSW   5,630  |███
+IVFPQ 25,539  |█████████████
+
+N=3000
+HNSW   5,628  |███
+IVFPQ 40,833  |████████████████████
+
+N=6000
+HNSW   5,805  |███
+IVFPQ 44,748  |██████████████████████
+
+N=12000
+HNSW   5,849  |███
+IVFPQ 54,432  |███████████████████████████
+```
+
+Memory tradeoff (current implementation):
+
+1) **Per-query working-set memory** (`heap delta`, MiB), averaged from the same runs:
+
+| Dataset size | HNSW heap delta | IVFPQ heap delta |
+|---:|---:|---:|
+| `1500` | `1.56` | `1.81` |
+| `3000` | `1.57` | `2.33` |
+| `6000` | `1.57` | `2.33` |
+| `12000` | `1.58` | `2.33` |
+
+```text
+Query Heap Delta vs Dataset Size (MiB)
+Scale: 1 block ~= 0.25 MiB
+
+N=1500
+HNSW   1.56 MiB |██████
+IVFPQ  1.81 MiB |███████
+
+N=3000
+HNSW   1.57 MiB |██████
+IVFPQ  2.33 MiB |█████████
+
+N=6000
+HNSW   1.57 MiB |██████
+IVFPQ  2.33 MiB |█████████
+
+N=12000
+HNSW   1.58 MiB |██████
+IVFPQ  2.33 MiB |█████████
+```
+
+Per-query memory summary:
+
+- HNSW path: ~`1.56-1.59 MiB`
+- Compressed IVFPQ path: ~`1.81-2.40 MiB`
+
+2) **Index-size economics** (how many embeddings fit per node):
+
+Reference run: `BenchmarkANNQualityMatrixChunked/full_n=12000` (same hardware family).
+
+| Metric | HNSW | Compressed IVFPQ |
+|---|---:|---:|
+| Build-time index heap (`heap_build_mib`) | `3.61 MiB` | `1.08 MiB` |
+| Relative embeddings per same index-heap budget | `1.0x` | `~3.34x` |
+
+Current compressed profile internals (benchmark profile: `dims=32`, `PQ segments=16`):
+
+- Raw float32 vector payload: `32 * 4 = 128 bytes/vector`
+- Compressed code payload (current IVFPQ accounting): `16 + 2 = 18 bytes/vector`
+- Payload ratio: `~7.1x` smaller compressed representation
+
+Interpretation (current state only):
+
+- Compressed ANN currently trades higher query latency for better index memory economics.
+- In current measurements, compressed mode supports roughly `3.34x` more embeddings per equivalent in-memory index budget on this benchmark shape.
+- Use compressed mode when your primary objective is ANN scale economics and predictable bounded candidate behavior; use `fast|balanced|accurate` when lowest query latency is the primary objective.
 
 ### Search timing diagnostics
 

@@ -7,6 +7,7 @@
 package search
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -48,7 +49,18 @@ type VectorFileStore struct {
 	idToOff           map[string]int64
 	buildIndexedCount int64 // last checkpoint count; persisted in .meta for resume
 	obsoleteCount     int64 // approximate number of stale records in .vec from updates/deletes
+	scoreScratchPool  sync.Pool
 	closed            bool
+}
+
+type vfsCandidateOffset struct {
+	id     string
+	vecOff int64
+}
+
+type vfsScoreScratch struct {
+	offsets []vfsCandidateOffset
+	batch   []byte
 }
 
 // Has reports whether id is present in the id→offset map.
@@ -86,6 +98,14 @@ func NewVectorFileStore(vecBasePath string, dimensions int) (*VectorFileStore, e
 			return f.Sync()
 		},
 		writeRecord: writeVectorRecord,
+	}
+	v.scoreScratchPool = sync.Pool{
+		New: func() any {
+			return &vfsScoreScratch{
+				offsets: make([]vfsCandidateOffset, 0, 256),
+				batch:   make([]byte, 0, 64*1024),
+			}
+		},
 	}
 
 	// Open or create .vec file
@@ -214,24 +234,148 @@ func (v *VectorFileStore) GetVector(id string) ([]float32, bool) {
 	if !ok || v.closed || v.file == nil {
 		return nil, false
 	}
-	// Read record at offset: idLen (4), id (idLen), vector (dim*4)
+	// Read record at offset with a one-read fast path:
+	// [idLen(4)][id][vector(dim*4)].
 	buf := make([]byte, 4+v.dimensions*4+256)
-	if _, err := v.file.ReadAt(buf[:4], off); err != nil {
+	if _, err := v.file.ReadAt(buf, off); err != nil && err != io.EOF {
 		return nil, false
 	}
 	idLen := binary.LittleEndian.Uint32(buf[:4])
 	recSize := 4 + int(idLen) + v.dimensions*4
 	if recSize > len(buf) {
 		buf = make([]byte, recSize)
-	}
-	if _, err := v.file.ReadAt(buf[:recSize], off); err != nil {
-		return nil, false
+		if _, err := v.file.ReadAt(buf, off); err != nil {
+			return nil, false
+		}
 	}
 	vec := make([]float32, v.dimensions)
 	for i := 0; i < v.dimensions; i++ {
 		vec[i] = math.Float32frombits(binary.LittleEndian.Uint32(buf[4+int(idLen)+i*4:]))
 	}
 	return vec, true
+}
+
+// scoreCandidatesDot scores candidate IDs directly from the vector file without
+// allocating a []float32 per candidate. This reduces query-path allocation pressure
+// for large rerank windows.
+func (v *VectorFileStore) scoreCandidatesDot(ctx context.Context, normalizedQuery []float32, candidates []Candidate) ([]ScoredCandidate, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	v.mu.RLock()
+	defer v.mu.RUnlock()
+	if v.closed || v.file == nil {
+		return nil, nil
+	}
+	dims := v.dimensions
+	if dims <= 0 {
+		return nil, nil
+	}
+	if len(normalizedQuery) < dims {
+		dims = len(normalizedQuery)
+	}
+	if dims <= 0 {
+		return nil, nil
+	}
+
+	scratch := v.getScoreScratch(len(candidates), 64*1024)
+	defer v.putScoreScratch(scratch)
+	offsets := scratch.offsets[:0]
+	for _, cand := range candidates {
+		off, ok := v.idToOff[cand.ID]
+		if !ok {
+			continue
+		}
+		offsets = append(offsets, vfsCandidateOffset{
+			id:     cand.ID,
+			vecOff: off + int64(4+len(cand.ID)),
+		})
+	}
+	if len(offsets) == 0 {
+		return nil, nil
+	}
+	sort.Slice(offsets, func(i, j int) bool { return offsets[i].vecOff < offsets[j].vecOff })
+
+	scored := make([]ScoredCandidate, 0, len(candidates))
+	vecBytes := dims * 4
+	maxBatchBytes := 64 * 1024
+	if vecBytes > maxBatchBytes {
+		maxBatchBytes = vecBytes
+	}
+	batch := scratch.batch[:maxBatchBytes]
+	for i := 0; i < len(offsets); {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		start := offsets[i].vecOff
+		end := start + int64(vecBytes)
+		j := i + 1
+		for j < len(offsets) {
+			nextEnd := offsets[j].vecOff + int64(vecBytes)
+			if nextEnd-start > int64(maxBatchBytes) {
+				break
+			}
+			end = nextEnd
+			j++
+		}
+		batchLen := int(end - start)
+		n, err := v.file.ReadAt(batch[:batchLen], start)
+		if err != nil && err != io.EOF {
+			i = j
+			continue
+		}
+		limit := n
+		for k := i; k < j; k++ {
+			localOff := int(offsets[k].vecOff - start)
+			if localOff < 0 || localOff+vecBytes > limit {
+				continue
+			}
+			var score float32
+			vecBuf := batch[localOff : localOff+vecBytes]
+			for d := 0; d < dims; d++ {
+				value := math.Float32frombits(binary.LittleEndian.Uint32(vecBuf[d*4 : d*4+4]))
+				score += normalizedQuery[d] * value
+			}
+			scored = append(scored, ScoredCandidate{ID: offsets[k].id, Score: float64(score)})
+		}
+		i = j
+	}
+	sort.Slice(scored, func(i, j int) bool { return scored[i].Score > scored[j].Score })
+	return scored, nil
+}
+
+func (v *VectorFileStore) getScoreScratch(offsetCap, batchCap int) *vfsScoreScratch {
+	if v.scoreScratchPool.New == nil {
+		v.scoreScratchPool = sync.Pool{
+			New: func() any { return &vfsScoreScratch{} },
+		}
+	}
+	s, _ := v.scoreScratchPool.Get().(*vfsScoreScratch)
+	if s == nil {
+		s = &vfsScoreScratch{}
+	}
+	if cap(s.offsets) < offsetCap {
+		s.offsets = make([]vfsCandidateOffset, 0, offsetCap)
+	} else {
+		s.offsets = s.offsets[:0]
+	}
+	if cap(s.batch) < batchCap {
+		s.batch = make([]byte, batchCap)
+	} else {
+		s.batch = s.batch[:batchCap]
+	}
+	return s
+}
+
+func (v *VectorFileStore) putScoreScratch(s *vfsScoreScratch) {
+	if s == nil || v.scoreScratchPool.New == nil {
+		return
+	}
+	s.offsets = s.offsets[:0]
+	v.scoreScratchPool.Put(s)
 }
 
 // Count returns the number of vectors in the store.

@@ -386,6 +386,32 @@ export NORNICDB_VECTOR_GPU_BRUTE_MIN_N=20000
 export NORNICDB_VECTOR_GPU_BRUTE_MAX_N=250000
 ```
 
+### Compressed ANN profile (`quality=compressed`)
+
+NornicDB also supports a compressed ANN profile for large-scale memory economics:
+
+```bash
+export NORNICDB_VECTOR_ANN_QUALITY=compressed
+```
+
+When enabled, the query path uses IVF/PQ compressed candidate generation with bounded exact reranking. If compressed prerequisites are not satisfied for a run, the service logs diagnostics and falls back safely.
+
+High-level tradeoff (latest benchmark snapshot, averaged):
+
+```text
+Dataset size ->      1500      3000      6000      12000
+HNSW latency      ~5.63us   ~5.63us   ~5.81us   ~5.85us
+IVFPQ latency    ~25.5us   ~40.8us   ~44.7us   ~54.4us
+```
+
+```text
+Dataset size ->        1500      3000      6000      12000
+HNSW heap delta      ~1.56MiB  ~1.57MiB  ~1.57MiB  ~1.58MiB
+IVFPQ heap delta     ~1.81MiB  ~2.33MiB  ~2.33MiB  ~2.33MiB
+```
+
+Use this profile when memory-scaled ANN operation is more important than lowest-latency single-query performance. For full knobs and operational tuning, see `docs/operations/configuration.md` ("Compressed ANN mode (IVFPQ)").
+
 ### Dimensions
 
 | Dimensions | Speed | Quality | Model Examples |

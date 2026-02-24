@@ -1,8 +1,11 @@
 package search
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"time"
 
 	"github.com/vmihailenco/msgpack/v5"
 )
@@ -18,4 +21,56 @@ func writeMsgpackSnapshot(path string, snapshot any) error {
 	}
 	defer file.Close()
 	return msgpack.NewEncoder(file).Encode(snapshot)
+}
+
+// writeMsgpackSnapshots writes multiple msgpack snapshots under one directory.
+// Filenames are deterministic (sorted keys) to keep persistence behavior stable.
+func writeMsgpackSnapshots(dir string, snapshots map[string]any) error {
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	names := make([]string, 0, len(snapshots))
+	for name := range snapshots {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := writeMsgpackSnapshot(filepath.Join(dir, name), snapshots[name]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// writeMsgpackSnapshotsAtomic swaps a full snapshot bundle into place using
+// directory rename operations. This is intended for multipart snapshot sets
+// (e.g. codebooks + postings + metadata) that must move together.
+func writeMsgpackSnapshotsAtomic(dir string, snapshots map[string]any) error {
+	parent := filepath.Dir(dir)
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		return err
+	}
+	tmpDir := filepath.Join(parent, fmt.Sprintf(".tmp-%d", time.Now().UnixNano()))
+	backupDir := filepath.Join(parent, fmt.Sprintf(".bak-%d", time.Now().UnixNano()))
+
+	if err := writeMsgpackSnapshots(tmpDir, snapshots); err != nil {
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+
+	if _, err := os.Stat(dir); err == nil {
+		if err := os.Rename(dir, backupDir); err != nil {
+			_ = os.RemoveAll(tmpDir)
+			return err
+		}
+	}
+	if err := os.Rename(tmpDir, dir); err != nil {
+		_ = os.Rename(backupDir, dir)
+		_ = os.RemoveAll(tmpDir)
+		return err
+	}
+	if _, err := os.Stat(backupDir); err == nil {
+		_ = os.RemoveAll(backupDir)
+	}
+	return nil
 }

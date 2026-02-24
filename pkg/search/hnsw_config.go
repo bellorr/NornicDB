@@ -3,7 +3,6 @@ package search
 
 import (
 	"math"
-	"strings"
 
 	"github.com/orneryd/nornicdb/pkg/envutil"
 )
@@ -28,7 +27,7 @@ const (
 // HNSWConfigFromEnv loads HNSW configuration from environment variables.
 //
 // Environment Variables:
-//   - NORNICDB_VECTOR_ANN_QUALITY: Quality preset (fast|balanced|accurate, default: fast)
+//   - NORNICDB_VECTOR_ANN_QUALITY: Quality preset (fast|balanced|accurate|compressed, default: fast)
 //   - NORNICDB_VECTOR_HNSW_M: Max connections per node (default: based on preset)
 //   - NORNICDB_VECTOR_HNSW_EF_CONSTRUCTION: Candidate list size during construction (default: based on preset)
 //   - NORNICDB_VECTOR_HNSW_EF_SEARCH: Candidate list size during search (default: based on preset)
@@ -37,6 +36,8 @@ const (
 //   - fast: M=16, efConstruction=100, efSearch=50 (faster, lower recall)
 //   - balanced: M=16, efConstruction=200, efSearch=100 (good balance)
 //   - accurate: M=32, efConstruction=400, efSearch=200 (slower, higher recall)
+//   - compressed: parsed at ANN quality layer; maps to fast HNSW defaults until
+//     compressed ANN strategy routing is active
 //
 // Example:
 //
@@ -73,18 +74,23 @@ func HNSWConfigFromEnv() HNSWConfig {
 
 // getQualityPreset returns the quality preset from environment variable.
 func getQualityPreset() HNSWQualityPreset {
-	quality := strings.ToLower(envutil.Get("NORNICDB_VECTOR_ANN_QUALITY", ""))
+	return hnswPresetFromANNQuality(ANNQualityFromEnv())
+}
+
+// hnswPresetFromANNQuality maps top-level ANN quality to HNSW-specific
+// defaults. Compressed is parsed at the quality layer and currently maps to
+// fast HNSW defaults until compressed ANN strategy wiring is active.
+func hnswPresetFromANNQuality(quality ANNQuality) HNSWQualityPreset {
 	switch quality {
-	case "fast":
+	case ANNQualityFast:
 		return QualityFast
-	case "accurate":
+	case ANNQualityAccurate:
 		return QualityAccurate
-	case "balanced":
+	case ANNQualityBalanced:
 		return QualityBalanced
-	case "":
+	case ANNQualityCompressed:
 		return QualityFast
 	default:
-		// Unknown preset, default to fast
 		return QualityFast
 	}
 }

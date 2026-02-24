@@ -3,7 +3,6 @@ package search
 import (
 	"context"
 	"log"
-	"os"
 	"sort"
 	"strings"
 
@@ -236,10 +235,6 @@ func (s *Service) selectHybridClusters(ctx context.Context, query []float32, def
 }
 
 func (s *Service) applyBM25SeedHints() {
-	seedMode := strings.TrimSpace(strings.ToLower(os.Getenv("NORNICDB_KMEANS_SEED_MODE")))
-	if seedMode == "none" {
-		return
-	}
 	s.mu.RLock()
 	clusterIndex := s.clusterIndex
 	fulltext := s.fulltextIndex
@@ -250,15 +245,7 @@ func (s *Service) applyBM25SeedHints() {
 	if !clusterIndex.IsClustered() && clusterIndex.Count() == 0 {
 		return
 	}
-	maxTerms := envutil.GetInt("NORNICDB_KMEANS_SEED_MAX_TERMS", 256)
-	if maxTerms < 16 {
-		maxTerms = 16
-	}
-	perTerm := envutil.GetInt("NORNICDB_KMEANS_SEED_DOCS_PER_TERM", 1)
-	if perTerm < 1 {
-		perTerm = 1
-	}
-	ids := fulltext.LexicalSeedDocIDs(maxTerms, perTerm)
+	ids := bm25SeedDocIDs(fulltext)
 	if len(ids) == 0 {
 		return
 	}
