@@ -400,14 +400,14 @@ High-level tradeoff (latest benchmark snapshot, averaged):
 
 ```text
 Dataset size ->      1500      3000      6000      12000
-HNSW latency      ~5.63us   ~5.63us   ~5.81us   ~5.85us
-IVFPQ latency    ~25.5us   ~40.8us   ~44.7us   ~54.4us
+HNSW latency      ~5.81us   ~5.75us   ~5.83us   ~5.64us
+IVFPQ latency    ~23.0us   ~42.6us   ~38.9us   ~48.7us
 ```
 
 ```text
 Dataset size ->        1500      3000      6000      12000
 HNSW heap delta      ~1.56MiB  ~1.57MiB  ~1.57MiB  ~1.58MiB
-IVFPQ heap delta     ~1.81MiB  ~2.33MiB  ~2.33MiB  ~2.33MiB
+IVFPQ heap delta     ~1.57MiB  ~2.08MiB  ~2.08MiB  ~2.08MiB
 ```
 
 Use this profile when memory-scaled ANN operation is more important than lowest-latency single-query performance. For full knobs and operational tuning, see `docs/operations/configuration.md` ("Compressed ANN mode (IVFPQ)").

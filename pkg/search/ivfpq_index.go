@@ -203,12 +203,12 @@ func ivfpqCandidateLimit(k, nprobe, rerankTopK int) int {
 	// Compressed path keeps a tighter rerank window than generic pipeline defaults
 	// to reduce exact re-score IO cost while preserving stable top-k quality.
 	limit := k * 2
-	probeWindow := nprobe * 8
+	probeWindow := nprobe * 6
 	if probeWindow > limit {
 		limit = probeWindow
 	}
-	if limit < 24 {
-		limit = 24
+	if limit < 16 {
+		limit = 16
 	}
 	maxPipelineLimit := calculateCandidateLimit(k)
 	if limit > maxPipelineLimit {

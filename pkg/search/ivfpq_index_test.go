@@ -43,10 +43,10 @@ func TestIVFPQIndex_SearchApprox(t *testing.T) {
 
 func TestIVFPQCandidateLimit_TightWindow(t *testing.T) {
 	// Uses tighter compressed rerank window than generic candidate defaults.
-	require.Equal(t, 128, ivfpqCandidateLimit(10, 16, 200))
-	require.Equal(t, 32, ivfpqCandidateLimit(10, 4, 200))
+	require.Equal(t, 96, ivfpqCandidateLimit(10, 16, 200))
+	require.Equal(t, 24, ivfpqCandidateLimit(10, 4, 200))
 	// Respects rerank cap when explicitly set lower.
 	require.Equal(t, 64, ivfpqCandidateLimit(10, 16, 64))
 	// Still keeps a minimum floor for tiny k/nprobe.
-	require.Equal(t, 24, ivfpqCandidateLimit(1, 1, 0))
+	require.Equal(t, 16, ivfpqCandidateLimit(1, 1, 0))
 }

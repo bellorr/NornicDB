@@ -369,20 +369,20 @@ Query Latency vs Dataset Size (ns/op)
 Scale: 1 block ~= 2,000 ns
 
 N=1500
-HNSW   5,630  |███
-IVFPQ 25,539  |█████████████
+HNSW   5,810  |███
+IVFPQ 22,995  |███████████
 
 N=3000
-HNSW   5,628  |███
-IVFPQ 40,833  |████████████████████
+HNSW   5,748  |███
+IVFPQ 42,643  |█████████████████████
 
 N=6000
-HNSW   5,805  |███
-IVFPQ 44,748  |██████████████████████
+HNSW   5,828  |███
+IVFPQ 38,894  |███████████████████
 
 N=12000
-HNSW   5,849  |███
-IVFPQ 54,432  |███████████████████████████
+HNSW   5,642  |███
+IVFPQ 48,735  |████████████████████████
 ```
 
 Memory tradeoff (current implementation):
@@ -391,10 +391,10 @@ Memory tradeoff (current implementation):
 
 | Dataset size | HNSW heap delta | IVFPQ heap delta |
 |---:|---:|---:|
-| `1500` | `1.56` | `1.81` |
-| `3000` | `1.57` | `2.33` |
-| `6000` | `1.57` | `2.33` |
-| `12000` | `1.58` | `2.33` |
+| `1500` | `1.56` | `1.57` |
+| `3000` | `1.57` | `2.08` |
+| `6000` | `1.57` | `2.08` |
+| `12000` | `1.58` | `2.08` |
 
 ```text
 Query Heap Delta vs Dataset Size (MiB)
@@ -402,25 +402,25 @@ Scale: 1 block ~= 0.25 MiB
 
 N=1500
 HNSW   1.56 MiB |██████
-IVFPQ  1.81 MiB |███████
+IVFPQ  1.57 MiB |██████
 
 N=3000
 HNSW   1.57 MiB |██████
-IVFPQ  2.33 MiB |█████████
+IVFPQ  2.08 MiB |████████
 
 N=6000
 HNSW   1.57 MiB |██████
-IVFPQ  2.33 MiB |█████████
+IVFPQ  2.08 MiB |████████
 
 N=12000
 HNSW   1.58 MiB |██████
-IVFPQ  2.33 MiB |█████████
+IVFPQ  2.08 MiB |████████
 ```
 
 Per-query memory summary:
 
 - HNSW path: ~`1.56-1.59 MiB`
-- Compressed IVFPQ path: ~`1.81-2.40 MiB`
+- Compressed IVFPQ path: ~`1.57-2.08 MiB`
 
 2) **Index-size economics** (how many embeddings fit per node):
 
@@ -440,6 +440,7 @@ Current compressed profile internals (benchmark profile: `dims=32`, `PQ segments
 Interpretation (current state only):
 
 - Compressed ANN currently trades higher query latency for better index memory economics.
+- In current measurements, compressed query memory pressure is now close to HNSW at smaller slices and remains bounded at larger slices.
 - In current measurements, compressed mode supports roughly `3.34x` more embeddings per equivalent in-memory index budget on this benchmark shape.
 - Use compressed mode when your primary objective is ANN scale economics and predictable bounded candidate behavior; use `fast|balanced|accurate` when lowest query latency is the primary objective.
 
