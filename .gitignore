@@ -66,3 +66,4 @@ kmeans-test-data
 nornic_vs_qdrant
 neural/models/
 llama.cpp/
+macos/MenuBarApp/.build

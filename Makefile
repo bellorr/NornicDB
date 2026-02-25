@@ -1074,24 +1074,8 @@ ifeq ($(HOST_OS),darwin)
 	@echo "Architecture: $(HOST_ARCH)"
 	@rm -rf macos/build 2>/dev/null || sudo rm -rf macos/build 2>/dev/null || true
 	@mkdir -p macos/build
-	@cd macos/MenuBarApp && swiftc -o ../build/NornicDB \
-		NornicDBMenuBar.swift \
-		FileIndexer.swift \
-		FileIndexerWindow.swift \
-		FileIndexerSupport.swift \
-		FileIndexerFileBrowserView.swift \
-		AppleMLEmbedder.swift \
-		EmbeddingServer.swift \
-		-framework SwiftUI \
-		-framework AppKit \
-		-framework Vision \
-		-framework NaturalLanguage \
-		-framework Network \
-		-framework UniformTypeIdentifiers \
-		-framework PDFKit \
-		-target $(HOST_ARCH)-apple-macos12.0 \
-		-swift-version 5 \
-		-parse-as-library
+	@cd macos/MenuBarApp && swift build -c release --arch $(HOST_ARCH)
+	@cp macos/MenuBarApp/.build/release/NornicDB macos/build/NornicDB
 	@echo "Creating app bundle..."
 	@mkdir -p macos/build/NornicDB.app/Contents/MacOS
 	@mkdir -p macos/build/NornicDB.app/Contents/Resources

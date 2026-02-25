@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import Foundation
 import Security
+import Yams
 
 private let defaultQwenHeimdallFileName = "qwen3-0.6b-instruct.gguf"
 private let defaultQwenHeimdallDownloadURL = "https://huggingface.co/Qwen/qwen3-0.6b-Instruct-GGUF/resolve/main/qwen3-0.6b-instruct-q4_k_m.gguf"
@@ -869,6 +870,8 @@ class ConfigManager: ObservableObject {
     @Published var useAppleIntelligence: Bool = false
     static let appleEmbeddingPort: UInt16 = 11435
     static let appleEmbeddingDimensions: Int = 512
+    static let appleEmbeddingChunkSize: Int = 512
+    static let localEmbeddingChunkSize: Int = 8192
     /// Get or generate the Apple Intelligence embedding server API key (stored in Keychain)
     /// This is specific to the local Apple ML embedding server, separate from cloud provider API keys.
     static func getAppleIntelligenceAPIKey() -> String {
@@ -948,6 +951,7 @@ class ConfigManager: ObservableObject {
     @Published var embeddingModel: String = ConfigManager.defaultEmbeddingModel
     @Published var searchRerankModel: String = ConfigManager.defaultSearchRerankModel
     @Published var embeddingDimensions: Int = 1024  // Read from config, default 1024 for bge-m3
+    @Published var embeddingChunkSize: Int = ConfigManager.localEmbeddingChunkSize
     @Published var heimdallModel: String = ConfigManager.defaultHeimdallModel
     @Published var availableModels: [String] = []
     
@@ -955,78 +959,80 @@ class ConfigManager: ObservableObject {
     private let configPath = NSString(string: "~/.nornicdb/config.yaml").expandingTildeInPath
     
     // MARK: - YAML Parsing Helpers
-    
-    /// Extract a YAML section's content (everything until the next top-level key)
-    /// This properly handles indented content within a section
-    private func extractYAMLSection(named sectionName: String, from content: String) -> String? {
-        let lines = content.components(separatedBy: .newlines)
-        var inSection = false
-        var sectionLines: [String] = []
-        
-        for line in lines {
-            // Check if this is the start of our target section (no leading whitespace)
-            if line.hasPrefix("\(sectionName):") && !line.hasPrefix(" ") && !line.hasPrefix("\t") {
-                inSection = true
-                continue
-            }
-            
-            // If we're in the section, check if we've hit another top-level key
-            if inSection {
-                // A line that starts with a non-whitespace character and contains ":" is a new section
-                let trimmed = line.trimmingCharacters(in: .whitespaces)
-                if !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.hasPrefix("#") && trimmed.contains(":") {
-                    // We've hit a new top-level section, stop
-                    break
-                }
-                sectionLines.append(line)
-            }
+
+    private typealias YAMLMap = [String: Any]
+
+    private func loadYAMLRoot() -> YAMLMap {
+        guard let content = try? String(contentsOfFile: configPath, encoding: .utf8) else {
+            return [:]
         }
-        
-        return sectionLines.isEmpty ? nil : sectionLines.joined(separator: "\n")
-    }
-    
-    /// Get a boolean value from a YAML section
-    private func getYAMLBool(key: String, from section: String, default defaultValue: Bool = false) -> Bool {
-        // Look for "key: true" or "key: false" within section lines
-        for line in section.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("\(key):") {
-                if trimmed.contains("true") { return true }
-                if trimmed.contains("false") { return false }
+        do {
+            guard let loaded = try Yams.load(yaml: content) else {
+                return [:]
             }
+            return loaded as? YAMLMap ?? [:]
+        } catch {
+            print("⚠️ Failed to parse YAML with Yams: \(error)")
+            return [:]
         }
-        return defaultValue
     }
-    
-    /// Get a string value from a YAML section
-    private func getYAMLString(key: String, from section: String) -> String? {
-        for line in section.components(separatedBy: .newlines) {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("\(key):") {
-                let value = trimmed.dropFirst("\(key):".count).trimmingCharacters(in: .whitespaces)
-                // Remove quotes if present
-                if value.hasPrefix("\"") && value.hasSuffix("\"") {
-                    return String(value.dropFirst().dropLast())
-                }
-                if value.hasPrefix("'") && value.hasSuffix("'") {
-                    return String(value.dropFirst().dropLast())
-                }
-                return value.isEmpty ? nil : value
+
+    private func yamlSection(_ root: YAMLMap, _ key: String) -> YAMLMap {
+        return root[key] as? YAMLMap ?? [:]
+    }
+
+    private func yamlString(_ value: Any?) -> String? {
+        if let s = value as? String {
+            let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let n = value as? NSNumber {
+            return n.stringValue
+        }
+        return nil
+    }
+
+    private func yamlBool(_ value: Any?) -> Bool? {
+        if let b = value as? Bool {
+            return b
+        }
+        if let n = value as? NSNumber {
+            return n.boolValue
+        }
+        if let s = value as? String {
+            let normalized = s.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            if normalized == "true" || normalized == "1" || normalized == "yes" {
+                return true
+            }
+            if normalized == "false" || normalized == "0" || normalized == "no" {
+                return false
             }
         }
         return nil
     }
-    
-    /// Get an integer value from a YAML section
-    private func getYAMLInt(key: String, from section: String) -> Int? {
-        if let stringValue = getYAMLString(key: key, from: section) {
-            return Int(stringValue)
+
+    private func yamlInt(_ value: Any?) -> Int? {
+        if let i = value as? Int {
+            return i
+        }
+        if let n = value as? NSNumber {
+            return n.intValue
+        }
+        if let s = value as? String {
+            return Int(s.trimmingCharacters(in: .whitespacesAndNewlines))
         }
         return nil
     }
     
     private let firstRunPath = NSString(string: "~/.nornicdb/.first_run").expandingTildeInPath
     private let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
+
+    func effectiveEmbeddingChunkSize() -> Int {
+        if useAppleIntelligence {
+            return ConfigManager.appleEmbeddingChunkSize
+        }
+        return max(1, embeddingChunkSize)
+    }
     private let modelsPath = "/usr/local/var/nornicdb/models"
     
     func isFirstRun() -> Bool {
@@ -1056,120 +1062,119 @@ class ConfigManager: ObservableObject {
         // Only try to load encryption password if we expect it to exist
         // (we'll do this after loading config to check if encryption was enabled)
         
-        guard let content = try? String(contentsOfFile: configPath, encoding: .utf8) else {
+        guard FileManager.default.fileExists(atPath: configPath) else {
             print("Could not read config file at: \(configPath)")
             // Even without config file, we may have Keychain secrets from previous install
             return
         }
-        
         print("Loading config from: \(configPath)")
-        
-        // Parse YAML sections properly (each section ends when a new top-level key starts)
-        
+        let root = loadYAMLRoot()
+
         // Load embedding section
-        if let embeddingSection = extractYAMLSection(named: "embedding", from: content) {
-            embeddingsEnabled = getYAMLBool(key: "enabled", from: embeddingSection)
+        let embeddingSection = yamlSection(root, "embedding")
+        if let enabled = yamlBool(embeddingSection["enabled"]) {
+            embeddingsEnabled = enabled
             print("✅ Loaded embeddings enabled: \(embeddingsEnabled)")
-            
-            if let model = getYAMLString(key: "model", from: embeddingSection) {
-                embeddingModel = normalizeModelName(model, fallback: ConfigManager.defaultEmbeddingModel)
-                print("✅ Loaded embedding model: \(embeddingModel)")
-            }
-            
-            // Check if using Apple Intelligence (provider is "openai" with localhost:11435 URL)
-            if let provider = getYAMLString(key: "provider", from: embeddingSection),
-               let url = getYAMLString(key: "url", from: embeddingSection) {
-                useAppleIntelligence = provider == "openai" && url.contains("localhost:\(ConfigManager.appleEmbeddingPort)")
-                print("✅ Loaded use Apple Intelligence: \(useAppleIntelligence)")
-            }
-            
-            // Load embedding dimensions from config
-            if let dims = getYAMLInt(key: "dimensions", from: embeddingSection), dims > 0 {
-                embeddingDimensions = dims
-                print("✅ Loaded embedding dimensions: \(dims)")
-            }
         }
-        
+        if let model = yamlString(embeddingSection["model"]) {
+            embeddingModel = normalizeModelName(model, fallback: ConfigManager.defaultEmbeddingModel)
+            print("✅ Loaded embedding model: \(embeddingModel)")
+        }
+        if let provider = yamlString(embeddingSection["provider"]) {
+            let url = yamlString(embeddingSection["url"]) ?? ""
+            useAppleIntelligence = provider == "openai" && url.contains("localhost:\(ConfigManager.appleEmbeddingPort)")
+            print("✅ Loaded use Apple Intelligence: \(useAppleIntelligence)")
+        }
+        if let dims = yamlInt(embeddingSection["dimensions"]), dims > 0 {
+            embeddingDimensions = dims
+            print("✅ Loaded embedding dimensions: \(dims)")
+        }
+
+        // Load embedding worker section
+        let embeddingWorkerSection = yamlSection(root, "embedding_worker")
+        if let chunkSize = yamlInt(embeddingWorkerSection["chunk_size"]), chunkSize > 0 {
+            embeddingChunkSize = chunkSize
+            print("✅ Loaded embedding chunk size: \(chunkSize)")
+        }
+        // Apple ML provider has a fixed supported chunk size.
+        if useAppleIntelligence {
+            embeddingChunkSize = ConfigManager.appleEmbeddingChunkSize
+        } else if embeddingChunkSize <= 0 {
+            embeddingChunkSize = ConfigManager.localEmbeddingChunkSize
+        }
+
         // Load kmeans section
-        if let kmeansSection = extractYAMLSection(named: "kmeans", from: content) {
-            kmeansEnabled = getYAMLBool(key: "enabled", from: kmeansSection)
+        let kmeansSection = yamlSection(root, "kmeans")
+        if let enabled = yamlBool(kmeansSection["enabled"]) {
+            kmeansEnabled = enabled
             print("✅ Loaded kmeans enabled: \(kmeansEnabled)")
         }
 
         // Load search_rerank section
-        if let searchRerankSection = extractYAMLSection(named: "search_rerank", from: content) {
-            searchRerankEnabled = getYAMLBool(key: "enabled", from: searchRerankSection)
+        let searchRerankSection = yamlSection(root, "search_rerank")
+        if let enabled = yamlBool(searchRerankSection["enabled"]) {
+            searchRerankEnabled = enabled
             print("✅ Loaded search_rerank enabled: \(searchRerankEnabled)")
-            if let model = getYAMLString(key: "model", from: searchRerankSection) {
-                searchRerankModel = normalizeModelName(model, fallback: ConfigManager.defaultSearchRerankModel)
-                print("✅ Loaded search_rerank model: \(searchRerankModel)")
-            }
         }
-        
+        if let model = yamlString(searchRerankSection["model"]) {
+            searchRerankModel = normalizeModelName(model, fallback: ConfigManager.defaultSearchRerankModel)
+            print("✅ Loaded search_rerank model: \(searchRerankModel)")
+        }
+
         // Load auto_tlp section
-        if let autoTLPSection = extractYAMLSection(named: "auto_tlp", from: content) {
-            autoTLPEnabled = getYAMLBool(key: "enabled", from: autoTLPSection)
+        let autoTLPSection = yamlSection(root, "auto_tlp")
+        if let enabled = yamlBool(autoTLPSection["enabled"]) {
+            autoTLPEnabled = enabled
             print("✅ Loaded auto_tlp enabled: \(autoTLPEnabled)")
         }
-        
+
         // Load heimdall section
-        if let heimdallSection = extractYAMLSection(named: "heimdall", from: content) {
-            heimdallEnabled = getYAMLBool(key: "enabled", from: heimdallSection)
+        let heimdallSection = yamlSection(root, "heimdall")
+        if let enabled = yamlBool(heimdallSection["enabled"]) {
+            heimdallEnabled = enabled
             print("✅ Loaded heimdall enabled: \(heimdallEnabled)")
-            
-            if let model = getYAMLString(key: "model", from: heimdallSection) {
-                heimdallModel = normalizeModelName(model, fallback: ConfigManager.defaultHeimdallModel)
-                print("✅ Loaded heimdall model: \(heimdallModel)")
-            }
         }
-        
+        if let model = yamlString(heimdallSection["model"]) {
+            heimdallModel = normalizeModelName(model, fallback: ConfigManager.defaultHeimdallModel)
+            print("✅ Loaded heimdall model: \(heimdallModel)")
+        }
+
         // Load server section
-        if let serverSection = extractYAMLSection(named: "server", from: content) {
-            if let port = getYAMLString(key: "bolt_port", from: serverSection) {
-                boltPortNumber = port
-                print("✅ Loaded bolt_port: \(port)")
-            }
-            if let port = getYAMLString(key: "http_port", from: serverSection) {
-                httpPortNumber = port
-                print("✅ Loaded http_port: \(port)")
-            }
-            if let host = getYAMLString(key: "host", from: serverSection) {
-                hostAddress = host
-                print("✅ Loaded host: \(host)")
-            }
+        let serverSection = yamlSection(root, "server")
+        if let port = yamlString(serverSection["bolt_port"]) {
+            boltPortNumber = port
+            print("✅ Loaded bolt_port: \(port)")
         }
-        
+        if let port = yamlString(serverSection["http_port"]) {
+            httpPortNumber = port
+            print("✅ Loaded http_port: \(port)")
+        }
+        if let host = yamlString(serverSection["host"]) {
+            hostAddress = host
+            print("✅ Loaded host: \(host)")
+        }
+
         // Load auth section
-        if let authSection = extractYAMLSection(named: "auth", from: content) {
-            if let username = getYAMLString(key: "username", from: authSection) {
-                adminUsername = username
-                print("✅ Loaded username: \(username)")
-            }
-            if let password = getYAMLString(key: "password", from: authSection) {
-                adminPassword = password
-                print("✅ Loaded password: [hidden]")
-            }
-            
-            // Load JWT secret from config file ONLY if not already loaded from Keychain
-            if jwtSecret.isEmpty {
-                if let jwt = getYAMLString(key: "jwt_secret", from: authSection),
-                   !jwt.hasPrefix("[stored-in-keychain]"),
-                   !jwt.isEmpty {
-                    jwtSecret = jwt
-                    print("📄 Loaded JWT secret from config (migrating to Keychain)")
-                    _ = KeychainHelper.shared.saveJWTSecret(jwt)
-                }
-            }
+        let authSection = yamlSection(root, "auth")
+        if let username = yamlString(authSection["username"]) {
+            adminUsername = username
+            print("✅ Loaded username: \(username)")
         }
-        
+        if let password = yamlString(authSection["password"]) {
+            adminPassword = password
+            print("✅ Loaded password: [hidden]")
+        }
+        if jwtSecret.isEmpty, let jwt = yamlString(authSection["jwt_secret"]),
+           !jwt.hasPrefix("[stored-in-keychain]"), !jwt.isEmpty {
+            jwtSecret = jwt
+            print("📄 Loaded JWT secret from config (migrating to Keychain)")
+            _ = KeychainHelper.shared.saveJWTSecret(jwt)
+        }
+
         // Load database/encryption settings
-        var configSaysEncryptionEnabled = false
-        var databaseSectionContent: String? = nil
-        if let dbSection = extractYAMLSection(named: "database", from: content) {
-            databaseSectionContent = dbSection
-            configSaysEncryptionEnabled = getYAMLBool(key: "encryption_enabled", from: dbSection)
-            print("✅ Config says encryption enabled: \(configSaysEncryptionEnabled)")
-        }
+        let dbSection = yamlSection(root, "database")
+        let configSaysEncryptionEnabled = yamlBool(dbSection["encryption_enabled"]) ?? false
+        print("✅ Config says encryption enabled: \(configSaysEncryptionEnabled)")
         
         // NOW try to load encryption password from Keychain (only if encryption was/is enabled)
         if configSaysEncryptionEnabled {
@@ -1191,10 +1196,9 @@ class ConfigManager: ObservableObject {
         }
         
         // Load encryption password from config ONLY if not already loaded from Keychain
-        if encryptionPassword.isEmpty && !encryptionKeychainAccessDenied, let dbSection = databaseSectionContent {
-            if let password = getYAMLString(key: "encryption_password", from: dbSection),
-               !password.hasPrefix("[stored-in-keychain]"),
-               !password.isEmpty {
+        if encryptionPassword.isEmpty && !encryptionKeychainAccessDenied {
+            if let password = yamlString(dbSection["encryption_password"]),
+               !password.hasPrefix("[stored-in-keychain]"), !password.isEmpty {
                 encryptionPassword = password
                 encryptionEnabled = true
                 print("📄 Loaded encryption password from config (migrating to Keychain)")
@@ -1222,17 +1226,6 @@ class ConfigManager: ObservableObject {
         heimdallModel = normalizeModelName(heimdallModel, fallback: ConfigManager.defaultHeimdallModel)
     }
     
-    private func extractStringValue(from text: String, after index: String.Index) -> String? {
-        let substring = text[index...]
-        if let lineEnd = substring.firstIndex(of: "\n") {
-            let value = substring[..<lineEnd]
-                .trimmingCharacters(in: .whitespaces)
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
-            return value.isEmpty ? nil : value
-        }
-        return nil
-    }
-    
     func scanModels() {
         // Scan models directory for .gguf files
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: modelsPath) else {
@@ -1257,133 +1250,51 @@ class ConfigManager: ObservableObject {
         return "\(trimmed).gguf"
     }
     
-    private func extractBoolValue(from text: String, after index: String.Index) -> Bool? {
-        let substring = text[index...]
-        if let lineEnd = substring.firstIndex(of: "\n") {
-            let value = substring[..<lineEnd].trimmingCharacters(in: .whitespaces)
-            return value.lowercased() == "true"
-        }
-        return nil
-    }
-    
     func saveConfig() -> Bool {
-        guard var content = try? String(contentsOfFile: configPath, encoding: .utf8) else {
-            return false
-        }
-        
-        // Ensure required sections exist
-        content = ensureSectionExists(in: content, section: "auth", defaultContent: """
-        
-        auth:
-          username: "admin"
-          password: "password"
-          jwt_secret: ""
-        """)
-        
-        content = ensureSectionExists(in: content, section: "database", defaultContent: """
-        
-        database:
-          encryption_enabled: false
-          encryption_password: ""
-        """)
-        
-        content = ensureSectionExists(in: content, section: "embedding", defaultContent: """
-        
-        embedding:
-          enabled: false
-          provider: local
-          model: \(ConfigManager.defaultEmbeddingModel)
-          url: ""
-          dimensions: 1024
-        """)
-        
-        content = ensureSectionExists(in: content, section: "kmeans", defaultContent: """
-        
-        kmeans:
-          enabled: false
-        """)
+        var root = loadYAMLRoot()
 
-        content = ensureSectionExists(in: content, section: "search_rerank", defaultContent: """
-        
-        search_rerank:
-          enabled: false
-          provider: local
-          model: \(ConfigManager.defaultSearchRerankModel)
-          api_url: ""
-          api_key: ""
-        """)
-        
-        content = ensureSectionExists(in: content, section: "auto_tlp", defaultContent: """
-        
-        auto_tlp:
-          enabled: false
-        """)
-        
-        content = ensureSectionExists(in: content, section: "heimdall", defaultContent: """
-        
-        heimdall:
-          enabled: false
-          model: \(ConfigManager.defaultHeimdallModel)
-        """)
-        
-        content = ensureSectionExists(in: content, section: "server", defaultContent: """
-        
-        server:
-          bolt_port: 7687
-          http_port: 7474
-          host: localhost
-        """)
-        
-        // Update each feature setting
-        content = updateYAMLValue(in: content, section: "embedding", key: "enabled", value: embeddingsEnabled)
-        content = updateYAMLValue(in: content, section: "kmeans", key: "enabled", value: kmeansEnabled)
-        content = updateYAMLValue(in: content, section: "search_rerank", key: "enabled", value: searchRerankEnabled)
-        content = updateYAMLStringValue(in: content, section: "search_rerank", key: "provider", value: "local")
-        content = updateYAMLStringValue(
-            in: content,
-            section: "search_rerank",
-            key: "model",
-            value: normalizeModelName(searchRerankModel, fallback: ConfigManager.defaultSearchRerankModel)
-        )
-        content = updateYAMLValue(in: content, section: "auto_tlp", key: "enabled", value: autoTLPEnabled)
-        content = updateYAMLValue(in: content, section: "heimdall", key: "enabled", value: heimdallEnabled)
-        
-        // Update model selections and Apple Intelligence settings
+        var authSection = yamlSection(root, "auth")
+        var databaseSection = yamlSection(root, "database")
+        var embeddingSection = yamlSection(root, "embedding")
+        var embeddingWorkerSection = yamlSection(root, "embedding_worker")
+        var kmeansSection = yamlSection(root, "kmeans")
+        var searchRerankSection = yamlSection(root, "search_rerank")
+        var autoTLPSection = yamlSection(root, "auto_tlp")
+        var heimdallSection = yamlSection(root, "heimdall")
+        var serverSection = yamlSection(root, "server")
+
+        embeddingSection["enabled"] = embeddingsEnabled
+        kmeansSection["enabled"] = kmeansEnabled
+        searchRerankSection["enabled"] = searchRerankEnabled
+        searchRerankSection["provider"] = "local"
+        searchRerankSection["model"] = normalizeModelName(searchRerankModel, fallback: ConfigManager.defaultSearchRerankModel)
+        autoTLPSection["enabled"] = autoTLPEnabled
+        heimdallSection["enabled"] = heimdallEnabled
+
         if useAppleIntelligence {
-            // Configure NornicDB to use Apple Intelligence via local embedding server
-            // Note: Only set base URL - NornicDB adds /v1/embeddings automatically for openai provider
-            content = updateYAMLStringValue(in: content, section: "embedding", key: "provider", value: "openai")
-            content = updateYAMLStringValue(in: content, section: "embedding", key: "url", value: "http://localhost:\(ConfigManager.appleEmbeddingPort)")
-            content = updateYAMLStringValue(in: content, section: "embedding", key: "model", value: "apple-ml-embeddings")
-            content = updateYAMLIntValue(in: content, section: "embedding", key: "dimensions", value: ConfigManager.appleEmbeddingDimensions)
+            embeddingChunkSize = ConfigManager.appleEmbeddingChunkSize
+            embeddingSection["provider"] = "openai"
+            embeddingSection["url"] = "http://localhost:\(ConfigManager.appleEmbeddingPort)"
+            embeddingSection["model"] = "apple-ml-embeddings"
+            embeddingSection["dimensions"] = ConfigManager.appleEmbeddingDimensions
         } else {
-            // Use the selected local model
-            content = updateYAMLStringValue(in: content, section: "embedding", key: "provider", value: "local")
-            content = updateYAMLStringValue(in: content, section: "embedding", key: "url", value: "")
-            content = updateYAMLStringValue(
-                in: content,
-                section: "embedding",
-                key: "model",
-                value: normalizeModelName(embeddingModel, fallback: ConfigManager.defaultEmbeddingModel)
-            )
-            // Use the configured embedding dimensions for the selected model
-            content = updateYAMLIntValue(in: content, section: "embedding", key: "dimensions", value: embeddingDimensions)
+            embeddingSection["provider"] = "local"
+            embeddingSection["url"] = ""
+            embeddingSection["model"] = normalizeModelName(embeddingModel, fallback: ConfigManager.defaultEmbeddingModel)
+            embeddingSection["dimensions"] = embeddingDimensions
         }
-        content = updateYAMLStringValue(
-            in: content,
-            section: "heimdall",
-            key: "model",
-            value: normalizeModelName(heimdallModel, fallback: ConfigManager.defaultHeimdallModel)
-        )
-        
-        // Update server settings
-        content = updateYAMLStringValue(in: content, section: "server", key: "bolt_port", value: boltPortNumber)
-        content = updateYAMLStringValue(in: content, section: "server", key: "http_port", value: httpPortNumber)
-        content = updateYAMLStringValue(in: content, section: "server", key: "host", value: hostAddress)
-        
-        // Update auth settings
-        content = updateYAMLStringValue(in: content, section: "auth", key: "username", value: adminUsername)
-        content = updateYAMLStringValue(in: content, section: "auth", key: "password", value: adminPassword)
+        heimdallSection["model"] = normalizeModelName(heimdallModel, fallback: ConfigManager.defaultHeimdallModel)
+
+        embeddingWorkerSection["chunk_size"] = effectiveEmbeddingChunkSize()
+        let existingOverlap = yamlInt(embeddingWorkerSection["chunk_overlap"]) ?? 50
+        embeddingWorkerSection["chunk_overlap"] = max(0, existingOverlap)
+
+        serverSection["bolt_port"] = boltPortNumber
+        serverSection["http_port"] = httpPortNumber
+        serverSection["host"] = hostAddress
+
+        authSection["username"] = adminUsername
+        authSection["password"] = adminPassword
         
         // Auto-generate JWT secret only if empty, then save to Keychain
         print("💾 Saving JWT secret - current value length: \(jwtSecret.count)")
@@ -1397,17 +1308,17 @@ class ConfigManager: ObservableObject {
         if KeychainHelper.shared.saveJWTSecret(jwtSecret) {
             print("🔐 JWT secret saved to Keychain")
             // Write placeholder to config file indicating it's in Keychain
-            content = updateYAMLStringValue(in: content, section: "auth", key: "jwt_secret", value: "\"[stored-in-keychain]\"")
+            authSection["jwt_secret"] = "[stored-in-keychain]"
         } else {
             // Fallback: save to config file if Keychain fails
             print("⚠️ Keychain save failed, storing JWT in config file")
-            content = updateYAMLStringValue(in: content, section: "auth", key: "jwt_secret", value: jwtSecret)
+            authSection["jwt_secret"] = jwtSecret
         }
         
         // Update encryption settings
         // If Keychain access was denied, force encryption to be disabled
         let effectiveEncryptionEnabled = encryptionEnabled && !encryptionKeychainAccessDenied
-        content = updateYAMLValue(in: content, section: "database", key: "encryption_enabled", value: effectiveEncryptionEnabled)
+        databaseSection["encryption_enabled"] = effectiveEncryptionEnabled
         if effectiveEncryptionEnabled {
             // Auto-generate encryption password if empty
             if encryptionPassword.isEmpty {
@@ -1418,27 +1329,38 @@ class ConfigManager: ObservableObject {
             if KeychainHelper.shared.saveEncryptionPassword(encryptionPassword) {
                 print("🔐 Encryption password saved to Keychain")
                 // Write placeholder to config file indicating it's in Keychain
-                content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: "\"[stored-in-keychain]\"")
+                databaseSection["encryption_password"] = "[stored-in-keychain]"
             } else if KeychainHelper.shared.isEncryptionAccessDenied {
                 // User denied Keychain access - disable encryption for security
                 print("🚫 Keychain access denied - disabling encryption")
                 encryptionEnabled = false
                 encryptionKeychainAccessDenied = true
-                content = updateYAMLValue(in: content, section: "database", key: "encryption_enabled", value: false)
-                content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: "")
+                databaseSection["encryption_enabled"] = false
+                databaseSection["encryption_password"] = ""
             } else {
                 // Fallback: save to config file if Keychain fails for other reasons
                 print("⚠️ Keychain save failed, storing encryption password in config file")
-                content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: encryptionPassword)
+                databaseSection["encryption_password"] = encryptionPassword
             }
         } else {
-            content = updateYAMLStringValue(in: content, section: "database", key: "encryption_password", value: "")
+            databaseSection["encryption_password"] = ""
             // Clear from Keychain if encryption is disabled
             _ = KeychainHelper.shared.deleteEncryptionPassword()
         }
+
+        root["auth"] = authSection
+        root["database"] = databaseSection
+        root["embedding"] = embeddingSection
+        root["embedding_worker"] = embeddingWorkerSection
+        root["kmeans"] = kmeansSection
+        root["search_rerank"] = searchRerankSection
+        root["auto_tlp"] = autoTLPSection
+        root["heimdall"] = heimdallSection
+        root["server"] = serverSection
         
         // Write back
         do {
+            let content = try Yams.dump(object: root)
             try content.write(toFile: configPath, atomically: true, encoding: .utf8)
             
             // Update auto-start if needed
@@ -1470,152 +1392,6 @@ class ConfigManager: ObservableObject {
         }
     }
     
-    private func ensureSectionExists(in content: String, section: String, defaultContent: String) -> String {
-        // Check if section exists
-        let pattern = "^\(section):"
-        if let regex = try? NSRegularExpression(pattern: pattern, options: [.anchorsMatchLines]) {
-            let range = NSRange(content.startIndex..., in: content)
-            if regex.firstMatch(in: content, options: [], range: range) != nil {
-                return content // Section exists
-            }
-        }
-        // Section doesn't exist, append it
-        return content + defaultContent
-    }
-    
-    private func updateYAMLStringValue(in content: String, section: String, key: String, value: String) -> String {
-        let lines = content.components(separatedBy: "\n")
-        var mutable = lines
-        
-        var sectionStart = -1
-        var sectionEnd = lines.count
-        for (i, line) in lines.enumerated() {
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if sectionStart == -1 {
-                if trimmed == "\(section):" || (line.hasPrefix("\(section):") && !line.hasPrefix(" ") && !line.hasPrefix("\t")) {
-                    sectionStart = i
-                }
-                continue
-            }
-            
-            // Found start already; next top-level section marks the end.
-            if !line.isEmpty && !line.hasPrefix(" ") && !line.hasPrefix("\t") && !line.hasPrefix("#") && trimmed.contains(":") {
-                sectionEnd = i
-                break
-            }
-        }
-        
-        guard sectionStart >= 0 else {
-            return content
-        }
-        
-        var updated = false
-        for i in (sectionStart + 1)..<sectionEnd {
-            let trimmed = mutable[i].trimmingCharacters(in: .whitespaces)
-            if trimmed.hasPrefix("\(key):") {
-                mutable[i] = "  \(key): \(value)"
-                updated = true
-                break
-            }
-        }
-        
-        if !updated {
-            mutable.insert("  \(key): \(value)", at: sectionEnd)
-        }
-        
-        return mutable.joined(separator: "\n")
-    }
-    
-    private func updateYAMLIntValue(in content: String, section: String, key: String, value: Int) -> String {
-        var result = content
-        let pattern = "(\(section):(?:[^\n]*\n)*?\\s+\(key):\\s*)(?:\\d+)"
-        
-        if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
-            let range = NSRange(content.startIndex..., in: content)
-            if regex.firstMatch(in: content, options: [], range: range) != nil {
-                let replacement = "$1\(value)"
-                result = regex.stringByReplacingMatches(in: content, options: [], range: range, withTemplate: replacement)
-            } else {
-                // Key doesn't exist, add it to the section
-                result = addKeyToSection(in: content, section: section, key: key, value: "\(value)")
-            }
-        }
-        
-        return result
-    }
-    
-    private func updateYAMLValue(in content: String, section: String, key: String, value: Bool) -> String {
-        var result = content
-        let pattern = "(\(section):(?:[^\n]*\n)*?\\s+\(key):\\s*)(?:true|false)"
-        
-        if let regex = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
-            let range = NSRange(content.startIndex..., in: content)
-            if regex.firstMatch(in: content, options: [], range: range) != nil {
-                let replacement = "$1\(value)"
-                result = regex.stringByReplacingMatches(in: content, options: [], range: range, withTemplate: replacement)
-            } else {
-                // Key doesn't exist, add it to the section
-                result = addKeyToSection(in: content, section: section, key: key, value: "\(value)")
-            }
-        }
-        
-        return result
-    }
-    
-    /// Add a key-value pair to an existing YAML section
-    private func addKeyToSection(in content: String, section: String, key: String, value: String) -> String {
-        let lines = content.components(separatedBy: "\n")
-        var result: [String] = []
-        var foundSectionHeader = false
-        var lastKeyInSectionIndex = -1
-        var inSection = false
-        
-        // First pass: find the section header and the last key in that section
-        for (index, line) in lines.enumerated() {
-            // Look for the exact section header (e.g., "embedding:" at start of line)
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            if trimmed == "\(section):" || line.hasPrefix("\(section):") && !line.hasPrefix(" ") && !line.hasPrefix("\t") {
-                foundSectionHeader = true
-                inSection = true
-                lastKeyInSectionIndex = index // Default to header if no keys
-                continue
-            }
-            
-            if inSection {
-                // If line is indented and has a colon, it's a key in this section
-                let isIndented = line.hasPrefix("  ") || line.hasPrefix("\t")
-                let hasColon = line.contains(":")
-                let isEmpty = line.trimmingCharacters(in: .whitespaces).isEmpty
-                
-                if isIndented && hasColon {
-                    lastKeyInSectionIndex = index
-                }
-                // If we hit a non-indented, non-empty line, we've left the section
-                else if !isEmpty && !isIndented {
-                    inSection = false
-                }
-            }
-        }
-        
-        // If section doesn't exist, don't add orphaned keys
-        if !foundSectionHeader {
-            print("⚠️ Section '\(section)' not found, cannot add key '\(key)'")
-            return content
-        }
-        
-        // Second pass: build result with new key inserted after last key in section
-        for (index, line) in lines.enumerated() {
-            result.append(line)
-            
-            // Insert new key after the last key in the section
-            if index == lastKeyInSectionIndex {
-                result.append("  \(key): \(value)")
-            }
-        }
-        
-        return result.joined(separator: "\n")
-    }
-    
     static func generateRandomSecret() -> String {
         let characters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*"
         return String((0..<32).map { _ in characters.randomElement()! })
@@ -1644,6 +1420,7 @@ struct SettingsView: View {
     @State private var originalHostAddress: String = "localhost"
     @State private var originalEmbeddingModel: String = ConfigManager.defaultEmbeddingModel
     @State private var originalEmbeddingDimensions: Int = 1024
+    @State private var originalEmbeddingChunkSize: Int = ConfigManager.localEmbeddingChunkSize
     @State private var originalSearchRerankModel: String = ConfigManager.defaultSearchRerankModel
     @State private var originalHeimdallModel: String = ConfigManager.defaultHeimdallModel
     @State private var originalAdminUsername: String = "admin"
@@ -1673,6 +1450,7 @@ struct SettingsView: View {
                config.hostAddress != originalHostAddress ||
                config.embeddingModel != originalEmbeddingModel ||
                config.embeddingDimensions != originalEmbeddingDimensions ||
+               config.embeddingChunkSize != originalEmbeddingChunkSize ||
                config.searchRerankModel != originalSearchRerankModel ||
                config.heimdallModel != originalHeimdallModel ||
                config.adminUsername != originalAdminUsername ||
@@ -1777,6 +1555,7 @@ struct SettingsView: View {
         originalHostAddress = config.hostAddress
         originalEmbeddingModel = config.embeddingModel
         originalEmbeddingDimensions = config.embeddingDimensions
+        originalEmbeddingChunkSize = config.embeddingChunkSize
         originalSearchRerankModel = config.searchRerankModel
         originalHeimdallModel = config.heimdallModel
         originalAdminUsername = config.adminUsername
@@ -1908,6 +1687,8 @@ struct SettingsView: View {
                 <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
                 <key>NORNICDB_EMBEDDING_API_KEY</key>
                 <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
+                <key>NORNICDB_EMBED_CHUNK_SIZE</key>
+                <string>\(config.effectiveEmbeddingChunkSize())</string>
                 <key>NORNICDB_SEARCH_MIN_SIMILARITY</key>
                 <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
@@ -2066,6 +1847,38 @@ struct SettingsView: View {
                     }
                     .padding()
                     .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue.opacity(0.1)))
+                }
+
+                if config.embeddingsEnabled {
+                    VStack(alignment: .leading, spacing: 10) {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Embedding Chunk Size")
+                                    .font(.subheadline)
+                                    .fontWeight(.medium)
+                                Text(config.useAppleIntelligence
+                                     ? "Fixed to Apple ML supported maximum"
+                                     : "Controls max tokens per embedding chunk")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Stepper(value: $config.embeddingChunkSize, in: 128...ConfigManager.localEmbeddingChunkSize, step: 64) {
+                                Text("\(config.embeddingChunkSize)")
+                                    .frame(minWidth: 70, alignment: .trailing)
+                            }
+                            .disabled(config.useAppleIntelligence)
+                        }
+                    }
+                    .padding()
+                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.08)))
+                    .onChange(of: config.useAppleIntelligence) { useApple in
+                        if useApple {
+                            config.embeddingChunkSize = ConfigManager.appleEmbeddingChunkSize
+                        } else if config.embeddingChunkSize <= 0 {
+                            config.embeddingChunkSize = ConfigManager.localEmbeddingChunkSize
+                        }
+                    }
                 }
                 
                 FeatureToggle(
@@ -2882,6 +2695,8 @@ struct FirstRunWizard: View {
                                 <string>\(config.useAppleIntelligence ? "\(ConfigManager.appleEmbeddingDimensions)" : "\(config.embeddingDimensions)")</string>
                                 <key>NORNICDB_EMBEDDING_API_KEY</key>
                                 <string>\(config.useAppleIntelligence ? ConfigManager.getAppleIntelligenceAPIKey() : "")</string>
+                                <key>NORNICDB_EMBED_CHUNK_SIZE</key>
+                                <string>\(config.effectiveEmbeddingChunkSize())</string>
                                 <key>NORNICDB_SEARCH_MIN_SIMILARITY</key>
                                 <string>\(config.useAppleIntelligence ? "0" : "0.5")</string>
                                 <key>NORNICDB_KMEANS_CLUSTERING_ENABLED</key>
