@@ -1023,6 +1023,80 @@ class ConfigManager: ObservableObject {
         }
         return nil
     }
+
+    // Normalize app-managed config sections to Go's expected YAML scalar types.
+    // This prevents Yams from persisting values in a shape that breaks Go unmarshal
+    // (e.g. quoted numeric ports as strings).
+    private func normalizeConfigRootForGoSchema(_ root: YAMLMap) -> YAMLMap {
+        var normalized = root
+
+        // server
+        var server = yamlSection(normalized, "server")
+        let boltPort = max(1, yamlInt(server["bolt_port"]) ?? 7687)
+        let httpPort = max(1, yamlInt(server["http_port"]) ?? 7474)
+        server["bolt_port"] = boltPort
+        server["http_port"] = httpPort
+        server["port"] = boltPort // keep alias in sync for compatibility
+        server["host"] = yamlString(server["host"]) ?? "localhost"
+        normalized["server"] = server
+
+        // embedding
+        var embedding = yamlSection(normalized, "embedding")
+        embedding["enabled"] = yamlBool(embedding["enabled"]) ?? false
+        embedding["provider"] = yamlString(embedding["provider"]) ?? "local"
+        embedding["model"] = yamlString(embedding["model"]) ?? ConfigManager.defaultEmbeddingModel
+        embedding["url"] = yamlString(embedding["url"]) ?? ""
+        embedding["dimensions"] = max(1, yamlInt(embedding["dimensions"]) ?? 1024)
+        normalized["embedding"] = embedding
+
+        // embedding_worker
+        var embeddingWorker = yamlSection(normalized, "embedding_worker")
+        embeddingWorker["chunk_size"] = max(1, yamlInt(embeddingWorker["chunk_size"]) ?? ConfigManager.localEmbeddingChunkSize)
+        embeddingWorker["chunk_overlap"] = max(0, yamlInt(embeddingWorker["chunk_overlap"]) ?? 50)
+        normalized["embedding_worker"] = embeddingWorker
+
+        // auth
+        var auth = yamlSection(normalized, "auth")
+        auth["username"] = yamlString(auth["username"]) ?? "admin"
+        auth["password"] = yamlString(auth["password"]) ?? "password"
+        auth["jwt_secret"] = yamlString(auth["jwt_secret"]) ?? "[stored-in-keychain]"
+        normalized["auth"] = auth
+
+        // database
+        var database = yamlSection(normalized, "database")
+        database["encryption_enabled"] = yamlBool(database["encryption_enabled"]) ?? false
+        database["encryption_password"] = yamlString(database["encryption_password"]) ?? ""
+        normalized["database"] = database
+
+        // simple feature sections
+        var kmeans = yamlSection(normalized, "kmeans")
+        kmeans["enabled"] = yamlBool(kmeans["enabled"]) ?? false
+        normalized["kmeans"] = kmeans
+
+        var searchRerank = yamlSection(normalized, "search_rerank")
+        searchRerank["enabled"] = yamlBool(searchRerank["enabled"]) ?? false
+        searchRerank["provider"] = yamlString(searchRerank["provider"]) ?? "local"
+        searchRerank["model"] = yamlString(searchRerank["model"]) ?? ConfigManager.defaultSearchRerankModel
+        normalized["search_rerank"] = searchRerank
+
+        var autoTLP = yamlSection(normalized, "auto_tlp")
+        autoTLP["enabled"] = yamlBool(autoTLP["enabled"]) ?? false
+        normalized["auto_tlp"] = autoTLP
+
+        var heimdall = yamlSection(normalized, "heimdall")
+        heimdall["enabled"] = yamlBool(heimdall["enabled"]) ?? false
+        heimdall["model"] = yamlString(heimdall["model"]) ?? ConfigManager.defaultHeimdallModel
+        normalized["heimdall"] = heimdall
+
+        // Keep storage.path string if present
+        var storage = yamlSection(normalized, "storage")
+        if let path = yamlString(storage["path"]) {
+            storage["path"] = path
+            normalized["storage"] = storage
+        }
+
+        return normalized
+    }
     
     private let firstRunPath = NSString(string: "~/.nornicdb/.first_run").expandingTildeInPath
     private let launchAgentPath = NSString(string: "~/Library/LaunchAgents/com.nornicdb.server.plist").expandingTildeInPath
@@ -1141,11 +1215,17 @@ class ConfigManager: ObservableObject {
 
         // Load server section
         let serverSection = yamlSection(root, "server")
-        if let port = yamlString(serverSection["bolt_port"]) {
+        if let port = yamlInt(serverSection["bolt_port"]), port > 0 {
+            boltPortNumber = "\(port)"
+            print("✅ Loaded bolt_port: \(port)")
+        } else if let port = yamlString(serverSection["bolt_port"]) {
             boltPortNumber = port
             print("✅ Loaded bolt_port: \(port)")
         }
-        if let port = yamlString(serverSection["http_port"]) {
+        if let port = yamlInt(serverSection["http_port"]), port > 0 {
+            httpPortNumber = "\(port)"
+            print("✅ Loaded http_port: \(port)")
+        } else if let port = yamlString(serverSection["http_port"]) {
             httpPortNumber = port
             print("✅ Loaded http_port: \(port)")
         }
@@ -1289,8 +1369,11 @@ class ConfigManager: ObservableObject {
         let existingOverlap = yamlInt(embeddingWorkerSection["chunk_overlap"]) ?? 50
         embeddingWorkerSection["chunk_overlap"] = max(0, existingOverlap)
 
-        serverSection["bolt_port"] = boltPortNumber
-        serverSection["http_port"] = httpPortNumber
+        let normalizedBoltPort = max(1, yamlInt(boltPortNumber) ?? 7687)
+        let normalizedHTTPPort = max(1, yamlInt(httpPortNumber) ?? 7474)
+        serverSection["bolt_port"] = normalizedBoltPort
+        serverSection["http_port"] = normalizedHTTPPort
+        serverSection["port"] = normalizedBoltPort
         serverSection["host"] = hostAddress
 
         authSection["username"] = adminUsername
@@ -1360,7 +1443,8 @@ class ConfigManager: ObservableObject {
         
         // Write back
         do {
-            let content = try Yams.dump(object: root)
+            let normalizedRoot = normalizeConfigRootForGoSchema(root)
+            let content = try Yams.dump(object: normalizedRoot)
             try content.write(toFile: configPath, atomically: true, encoding: .utf8)
             
             // Update auto-start if needed
@@ -1406,6 +1490,7 @@ struct SettingsView: View {
     @State private var showingSaveAlert = false
     @State private var saveSuccess = false
     @State private var selectedTab = 0
+    @State private var hasExplicitEmbeddingProviderSelection = false
     
     // Track original values to detect changes
     @State private var originalEmbeddingsEnabled: Bool = false
@@ -3231,6 +3316,7 @@ struct FirstRunWizard: View {
                         
                         VStack(alignment: .leading, spacing: 12) {
                             Button(action: {
+                                hasExplicitEmbeddingProviderSelection = true
                                 config.useAppleIntelligence = true
                             }) {
                                 HStack(spacing: 12) {
@@ -3278,6 +3364,7 @@ struct FirstRunWizard: View {
                             .buttonStyle(.plain)
                             
                             Button(action: {
+                                hasExplicitEmbeddingProviderSelection = true
                                 config.useAppleIntelligence = false
                             }) {
                                 HStack(spacing: 12) {
@@ -3447,10 +3534,11 @@ struct FirstRunWizard: View {
         }
         .onAppear {
             checkModelFiles()
-            
-            // Default to Apple Intelligence if available for Standard/Advanced presets
-            if AppleMLEmbedder.isAvailable() && (selectedPreset == .standard || selectedPreset == .advanced) {
-                config.useAppleIntelligence = true
+
+            // Default installation behavior: use local GGUF (bge-m3) unless the user
+            // explicitly selects Apple Intelligence in the wizard.
+            if !hasExplicitEmbeddingProviderSelection {
+                config.useAppleIntelligence = false
             }
         }
         .overlay(alignment: .bottom) {

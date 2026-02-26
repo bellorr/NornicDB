@@ -36,6 +36,9 @@ This document summarizes the changes that are **not yet released as a version ta
 - **Cypher and Transaction Semantics**:
   - Continued parser/runtime compatibility hardening for type constraints and permutation-heavy query patterns.
   - Unified explicit transaction lifecycle semantics across HTTP/Bolt paths for consistency.
+- **Performance Baseline Documentation Refresh (Go 1.26)**:
+  - Updated single-concurrency HTTP write benchmark baseline in `docs/performance/single-request-benchmark.md`.
+  - Updated `MaxConcurrentStreams` comparison baseline in `docs/performance/maxconcurrentstreams-comparison.md` with newly re-run 100/250 concurrency results.
 
 ### Fixed
 
@@ -50,6 +53,7 @@ This document summarizes the changes that are **not yet released as a version ta
 - **Compressed ANN scalability**: IVFPQ compressed search path now supports materially larger embedding corpora with reduced RAM pressure.
 - **IVFPQ scoring throughput**: Contiguous code storage + tuned candidate scoring improves cache locality and reduces per-query overhead in compressed paths.
 - **CGO-heavy embedding/generation latency**: Go 1.26 runtime and modern llama.cpp backend changes improve baseline efficiency for local model inference stacks.
+- **HTTP write benchmark baselines refreshed**: Latest single-thread and high-concurrency figures were re-measured and published to keep performance guidance aligned with current runtime and build stack.
 
 ### Security
 
@@ -70,8 +74,9 @@ This document summarizes the changes that are **not yet released as a version ta
 - **Safer production defaults**: Stronger cookie security and WAL path validation reduce common deployment and hardening risks.
 - **Less config fragility on macOS**: Settings changes are now reliably persisted without YAML corruption.
 - **Better correctness under concurrency**: Explicit transactions and async writes now coexist more safely in high-write systems.
+- **More accurate performance guidance**: Published benchmark docs now reflect current Go 1.26-era behavior for both low-concurrency and high-concurrency HTTP write paths.
 
 ### Technical Details
 
-- **Delta since `v1.0.12-preview`**: 17 commits, 107 files changed, +10,073 / -3,884 lines.
+- **Delta since `v1.0.12-preview`**: 19 commits, 130 files changed, +10,305 / -4,063 lines.
 - **Primary focus areas**: compressed ANN (IVFPQ), local LLM runtime upgrades (Go + llama.cpp), storage/WAL correctness, auth hardening, and macOS configuration reliability.
