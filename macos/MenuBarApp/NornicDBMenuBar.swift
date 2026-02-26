@@ -1490,7 +1490,6 @@ struct SettingsView: View {
     @State private var showingSaveAlert = false
     @State private var saveSuccess = false
     @State private var selectedTab = 0
-    @State private var hasExplicitEmbeddingProviderSelection = false
     
     // Track original values to detect changes
     @State private var originalEmbeddingsEnabled: Bool = false
@@ -2537,6 +2536,7 @@ struct FirstRunWizard: View {
     let appDelegate: AppDelegate
     @State private var currentStep = 0
     @State private var selectedPreset: ConfigPreset = .standard  // Default to recommended
+    @State private var hasExplicitEmbeddingProviderSelection = false
     let onComplete: () -> Void
     
     @State private var isDownloadingModels: Bool = false
