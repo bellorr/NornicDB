@@ -68,7 +68,8 @@ IMAGE_CPU_BGE_HEADLESS := $(REGISTRY)/nornicdb-cpu-bge-headless:$(VERSION)
 IMAGE_AMD64_VULKAN := $(REGISTRY)/nornicdb-amd64-vulkan:$(VERSION)
 IMAGE_AMD64_VULKAN_BGE := $(REGISTRY)/nornicdb-amd64-vulkan-bge:$(VERSION)
 IMAGE_AMD64_VULKAN_HEADLESS := $(REGISTRY)/nornicdb-amd64-vulkan-headless:$(VERSION)
-LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:b8157
+LLAMA_VERSION ?= b8157
+LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:$(LLAMA_VERSION)
 
 # Dockerfiles
 DOCKER_DIR := docker
@@ -100,7 +101,7 @@ BGE_RERANKER_URL := https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF/reso
 .PHONY: deploy-cpu-bge deploy-cpu-bge-headless
 .PHONY: deploy-amd64-vulkan deploy-amd64-vulkan-bge deploy-amd64-vulkan-headless
 .PHONY: deploy-all deploy-arm64-all deploy-amd64-all
-.PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda
+.PHONY: build-llama-cuda push-llama-cuda deploy-llama-cuda ensure-llama-cuda
 .PHONY: build build-ui build-binary build-localllm build-headless build-localllm-headless test clean images help macos-menubar macos-install macos-uninstall macos-all macos-clean macos-package macos-package-lite macos-package-full macos-package-all macos-package-signed
 .PHONY: download-models download-bge download-qwen download-bge-reranker check-models
 .PHONY: antlr-generate antlr-clean antlr-test antlr-test-full test-parsers
@@ -278,29 +279,29 @@ build-arm64-metal-headless:
 	@echo "╚══════════════════════════════════════════════════════════════╝"
 	docker build $(DOCKER_BUILD_FLAGS) --platform linux/arm64 --build-arg HEADLESS=true -t $(IMAGE_ARM64_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.arm64-metal .
 
-build-amd64-cuda:
+build-amd64-cuda: ensure-llama-cuda
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64) [BYOM]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 -t $(IMAGE_AMD64) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg LLAMA_CUDA_IMAGE=$(LLAMA_CUDA) -t $(IMAGE_AMD64) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
 
-build-amd64-cuda-bge: download-bge download-bge-reranker
+build-amd64-cuda-bge: ensure-llama-cuda download-bge download-bge-reranker
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64_BGE) [with BGE model]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg EMBED_MODEL=true -t $(IMAGE_AMD64_BGE) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg LLAMA_CUDA_IMAGE=$(LLAMA_CUDA) --build-arg EMBED_MODEL=true -t $(IMAGE_AMD64_BGE) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
 
-build-amd64-cuda-bge-heimdall: download-models
+build-amd64-cuda-bge-heimdall: ensure-llama-cuda download-models
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64_BGE_HEIMDALL) [BGE + Heimdall]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 -t $(IMAGE_AMD64_BGE_HEIMDALL) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda-heimdall .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg LLAMA_CUDA_IMAGE=$(LLAMA_CUDA) -t $(IMAGE_AMD64_BGE_HEIMDALL) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda-heimdall .
 
-build-amd64-cuda-headless:
+build-amd64-cuda-headless: ensure-llama-cuda
 	@echo "╔══════════════════════════════════════════════════════════════╗"
 	@echo "║ Building: $(IMAGE_AMD64_HEADLESS) [headless, no UI]"
 	@echo "╚══════════════════════════════════════════════════════════════╝"
-	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg HEADLESS=true -t $(IMAGE_AMD64_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
+	docker build $(DOCKER_BUILD_FLAGS) --platform linux/amd64 --build-arg LLAMA_CUDA_IMAGE=$(LLAMA_CUDA) --build-arg HEADLESS=true -t $(IMAGE_AMD64_HEADLESS) -f $(DOCKER_DIR)/Dockerfile.amd64-cuda .
 
 build-amd64-cpu:
 	@echo "╔══════════════════════════════════════════════════════════════╗"
@@ -499,6 +500,25 @@ endif
 # ==============================================================================
 # CUDA Prerequisite (one-time build, ~15 min)
 # ==============================================================================
+
+ensure-llama-cuda:
+ifeq ($(HOST_OS),windows)
+	@echo Checking CUDA libs image: $(LLAMA_CUDA)
+	@docker image inspect "$(LLAMA_CUDA)" >NUL 2>&1 && ( \
+		echo Found local image $(LLAMA_CUDA) \
+	) || ( \
+		echo Missing $(LLAMA_CUDA); building one-time prerequisite... && \
+		$(MAKE) build-llama-cuda \
+	)
+else
+	@echo "→ Checking CUDA libs image: $(LLAMA_CUDA)"
+	@if docker image inspect "$(LLAMA_CUDA)" > /dev/null 2>&1; then \
+		echo "✓ Found local image $(LLAMA_CUDA)"; \
+	else \
+		echo "→ Missing $(LLAMA_CUDA); building one-time prerequisite..."; \
+		$(MAKE) build-llama-cuda; \
+	fi
+endif
 
 build-llama-cuda:
 	@echo "╔══════════════════════════════════════════════════════════════╗"
