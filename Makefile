@@ -68,7 +68,7 @@ IMAGE_CPU_BGE_HEADLESS := $(REGISTRY)/nornicdb-cpu-bge-headless:$(VERSION)
 IMAGE_AMD64_VULKAN := $(REGISTRY)/nornicdb-amd64-vulkan:$(VERSION)
 IMAGE_AMD64_VULKAN_BGE := $(REGISTRY)/nornicdb-amd64-vulkan-bge:$(VERSION)
 IMAGE_AMD64_VULKAN_HEADLESS := $(REGISTRY)/nornicdb-amd64-vulkan-headless:$(VERSION)
-LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:b7285
+LLAMA_CUDA := $(REGISTRY)/llama-cuda-libs:b8157
 
 # Dockerfiles
 DOCKER_DIR := docker

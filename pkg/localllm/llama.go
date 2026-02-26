@@ -60,13 +60,9 @@ static int initialized = 0;
 
 void init_backend() {
     if (!initialized) {
-        // Suppress verbose llama.cpp logs (tensor loading, etc.)
-        // Set log level to WARN to suppress INFO/DEBUG messages
-        // Note: This may not be available in all llama.cpp versions
-        #ifdef llama_log_set
-            llama_log_set(LLAMA_LOG_LEVEL_WARN);
-        #endif
-
+        // Keep backend init minimal for API compatibility across llama.cpp versions.
+        // Verbose tensor-load logs are still suppressed via temporary stderr redirect
+        // in load_model() below.
         llama_backend_init();
 
         #ifdef _WIN32
@@ -109,7 +105,7 @@ struct llama_model* load_model(const char* path, int n_gpu_layers) {
     params.use_mmap = 1;
 
     // Device selection - NULL means use all available devices
-    // (new in b7285, explicit for clarity)
+    // (present in modern llama.cpp releases, explicit for clarity)
     params.devices = NULL;
 
     // GPU layer offloading
@@ -176,7 +172,7 @@ int tokenize(struct llama_model* model, const char* text, int text_len, int32_t*
 // Generate embedding with GPU acceleration
 int embed(struct llama_context* ctx, int32_t* tokens, int n_tokens, float* out, int n_embd) {
     // Clear memory before each embedding (not persistent for embeddings)
-    // KV cache API renamed to "memory" in b7285
+    // KV cache API renamed to "memory" in newer llama.cpp releases
     // Second arg (true) clears the data
     llama_memory_clear(llama_get_memory(ctx), 1);
 
@@ -338,7 +334,7 @@ int get_vocab_size(struct llama_model* model) {
 int ctx_is_healthy(struct llama_context* ctx) {
     if (!ctx) return 0;
     // Try to get memory info - if this works, context is alive
-    // Memory API renamed from KV cache in b7285
+    // Memory API renamed from KV cache in newer llama.cpp releases
     llama_memory_t mem = llama_get_memory(ctx);
     return mem != NULL ? 1 : 0;
 }

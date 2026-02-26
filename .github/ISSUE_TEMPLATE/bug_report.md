@@ -25,7 +25,7 @@ What actually happened.
 - **OS**: [e.g., macOS 14.5, Ubuntu 22.04]
 - **Architecture**: [e.g., ARM64, AMD64]
 - **Docker Image**: [e.g., arm64-metal-bge-heimdall:latest, or "built from source"]
-- **Go Version** (if built from source): [e.g., 1.25.5]
+- **Go Version** (if built from source): [e.g., 1.26.0]
 
 ## Cypher Query (if applicable)
 ```cypher

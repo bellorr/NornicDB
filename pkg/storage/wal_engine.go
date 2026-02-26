@@ -30,6 +30,9 @@ import (
 type WALEngine struct {
 	engine Engine
 	wal    *WAL
+	// mutationMu serializes auto-compaction snapshots against in-flight mutating
+	// operations to avoid WAL/engine state skew during snapshot truncation.
+	mutationMu sync.RWMutex
 
 	// Automatic snapshot and compaction
 	snapshotDir      string
@@ -155,6 +158,9 @@ func (w *WALEngine) autoSnapshotLoop() {
 // createSnapshotAndCompact creates a snapshot and truncates the WAL.
 // This is called automatically by the background goroutine.
 func (w *WALEngine) createSnapshotAndCompact() error {
+	w.mutationMu.Lock()
+	defer w.mutationMu.Unlock()
+
 	// Create snapshot from current engine state
 	snapshot, err := w.wal.CreateSnapshot(w.engine)
 	if err != nil {
@@ -286,6 +292,9 @@ func cloneEdgeForWAL(dbName string, edge *Edge) *Edge {
 
 // CreateNode logs then executes node creation.
 func (w *WALEngine) CreateNode(node *Node) (NodeID, error) {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName := w.databaseFromNode(node)
 		if err := w.wal.AppendWithDatabase(OpCreateNode, WALNodeData{Node: cloneNodeForWAL(dbName, node)}, dbName); err != nil {
@@ -297,6 +306,9 @@ func (w *WALEngine) CreateNode(node *Node) (NodeID, error) {
 
 // UpdateNode logs then executes node update.
 func (w *WALEngine) UpdateNode(node *Node) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName := w.databaseFromNode(node)
 		if err := w.wal.AppendWithDatabase(OpUpdateNode, WALNodeData{Node: cloneNodeForWAL(dbName, node)}, dbName); err != nil {
@@ -310,6 +322,9 @@ func (w *WALEngine) UpdateNode(node *Node) error {
 // Uses OpUpdateEmbedding which is safe to skip during WAL recovery
 // since embeddings can be regenerated automatically.
 func (w *WALEngine) UpdateNodeEmbedding(node *Node) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName := w.databaseFromNode(node)
 		if err := w.wal.AppendWithDatabase(OpUpdateEmbedding, WALNodeData{Node: cloneNodeForWAL(dbName, node)}, dbName); err != nil {
@@ -326,6 +341,9 @@ func (w *WALEngine) UpdateNodeEmbedding(node *Node) error {
 
 // DeleteNode logs then executes node deletion.
 func (w *WALEngine) DeleteNode(id NodeID) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName, unprefixedID := w.getDatabaseName(), string(id)
 		if parsedDB, parsedID, ok := ParseDatabasePrefix(string(id)); ok {
@@ -340,6 +358,9 @@ func (w *WALEngine) DeleteNode(id NodeID) error {
 
 // CreateEdge logs then executes edge creation.
 func (w *WALEngine) CreateEdge(edge *Edge) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName, err := w.databaseFromEdge(edge)
 		if err != nil {
@@ -354,6 +375,9 @@ func (w *WALEngine) CreateEdge(edge *Edge) error {
 
 // UpdateEdge logs then executes edge update.
 func (w *WALEngine) UpdateEdge(edge *Edge) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName, err := w.databaseFromEdge(edge)
 		if err != nil {
@@ -368,6 +392,9 @@ func (w *WALEngine) UpdateEdge(edge *Edge) error {
 
 // DeleteEdge logs then executes edge deletion.
 func (w *WALEngine) DeleteEdge(id EdgeID) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName, unprefixedID := w.getDatabaseName(), string(id)
 		if parsedDB, parsedID, ok := ParseDatabasePrefix(string(id)); ok {
@@ -382,6 +409,9 @@ func (w *WALEngine) DeleteEdge(id EdgeID) error {
 
 // BulkCreateNodes logs then executes bulk node creation.
 func (w *WALEngine) BulkCreateNodes(nodes []*Node) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName := w.getDatabaseName()
 		cloned := make([]*Node, 0, len(nodes))
@@ -408,6 +438,9 @@ func (w *WALEngine) BulkCreateNodes(nodes []*Node) error {
 
 // BulkCreateEdges logs then executes bulk edge creation.
 func (w *WALEngine) BulkCreateEdges(edges []*Edge) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		dbName := w.getDatabaseName()
 		cloned := make([]*Edge, 0, len(edges))
@@ -436,6 +469,9 @@ func (w *WALEngine) BulkCreateEdges(edges []*Edge) error {
 
 // BulkDeleteNodes logs then executes bulk node deletion.
 func (w *WALEngine) BulkDeleteNodes(ids []NodeID) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		// Convert to strings for serialization
 		strIDs := make([]string, len(ids))
@@ -461,6 +497,9 @@ func (w *WALEngine) BulkDeleteNodes(ids []NodeID) error {
 
 // BulkDeleteEdges logs then executes bulk edge deletion.
 func (w *WALEngine) BulkDeleteEdges(ids []EdgeID) error {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	if config.IsWALEnabled() {
 		// Convert to strings for serialization
 		strIDs := make([]string, len(ids))
@@ -786,6 +825,9 @@ func (w *WALEngine) StreamNodeChunks(ctx context.Context, chunkSize int, fn func
 
 // DeleteByPrefix delegates to the underlying engine.
 func (w *WALEngine) DeleteByPrefix(prefix string) (nodesDeleted int64, edgesDeleted int64, err error) {
+	w.mutationMu.RLock()
+	defer w.mutationMu.RUnlock()
+
 	return w.engine.DeleteByPrefix(prefix)
 }
 

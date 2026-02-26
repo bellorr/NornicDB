@@ -38,7 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Clone and build llama.cpp for CPU
 ARG LLAMA_BUILD_JOBS=2
-RUN git clone --depth 1 --branch b4782 https://github.com/ggml-org/llama.cpp.git . && \
+RUN git clone --depth 1 --branch b8157 https://github.com/ggml-org/llama.cpp.git . && \
     cmake -B build \
       -DGGML_BACKEND_DL=ON \
       -DGGML_NATIVE=OFF \
@@ -57,7 +57,7 @@ RUN git clone --depth 1 --branch b4782 https://github.com/ggml-org/llama.cpp.git
 # =============================================================================
 # Stage 3: Go build with Vulkan + localllm (CPU)
 # =============================================================================
-FROM golang:1.25-bookworm AS builder
+FROM golang:1.26-bookworm AS builder
 ARG HEADLESS=false
 WORKDIR /build
 
