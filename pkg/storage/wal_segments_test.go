@@ -14,9 +14,9 @@ func TestWALEntriesFromDirWithSegments(t *testing.T) {
 
 	dir := t.TempDir()
 	cfg := &WALConfig{
-		Dir:        dir,
-		SyncMode:   "none",
-		MaxEntries: 2,
+		Dir:         dir,
+		SyncMode:    "none",
+		MaxEntries:  2,
 		MaxFileSize: 0,
 	}
 
@@ -47,4 +47,24 @@ func TestWALEntriesFromDirWithSegments(t *testing.T) {
 	matches, err := FindWALEntriesByTxID(dir, "tx-seg", 0)
 	require.NoError(t, err)
 	require.Len(t, matches, 5)
+}
+
+func TestReadWALEntriesFromDir_RejectsManifestPathTraversal(t *testing.T) {
+	dir := t.TempDir()
+
+	manifest := &WALManifest{
+		Version: walManifestVersion,
+		Segments: []WALSegment{
+			{
+				FirstSeq: 1,
+				LastSeq:  1,
+				Path:     "../wal.log",
+			},
+		},
+	}
+	require.NoError(t, writeWALManifest(dir, manifest))
+
+	_, err := ReadWALEntriesFromDir(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "invalid segment path")
 }

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -54,6 +55,9 @@ type AsyncEngine struct {
 	// These exist in underlying engine and shouldn't be counted as pending creates
 	updateNodes map[NodeID]bool
 	updateEdges map[EdgeID]bool
+	// Baseline snapshots captured when a node update is first queued.
+	// Used to detect stale async updates and rebase onto newer committed state.
+	nodeUpdateBaseline map[NodeID]*Node
 
 	// Label index for fast lookups - maps normalized label to node IDs
 	labelIndex map[string]map[NodeID]bool
@@ -218,25 +222,26 @@ func NewAsyncEngine(engine Engine, config *AsyncEngineConfig) *AsyncEngine {
 	}
 
 	ae := &AsyncEngine{
-		engine:           engine,
-		nodeCache:        make(map[NodeID]*Node),
-		edgeCache:        make(map[EdgeID]*Edge),
-		deleteNodes:      make(map[NodeID]bool),
-		deleteEdges:      make(map[EdgeID]bool),
-		inFlightNodes:    make(map[NodeID]bool),
-		inFlightEdges:    make(map[EdgeID]bool),
-		updateNodes:      make(map[NodeID]bool),
-		updateEdges:      make(map[EdgeID]bool),
-		labelIndex:       make(map[string]map[NodeID]bool),
-		flushInterval:    config.FlushInterval,
-		minFlushInterval: config.MinFlushInterval,
-		maxFlushInterval: config.MaxFlushInterval,
-		targetFlushSize:  config.TargetFlushSize,
-		adaptiveFlush:    config.AdaptiveFlush,
-		maxNodeCacheSize: config.MaxNodeCacheSize,
-		maxEdgeCacheSize: config.MaxEdgeCacheSize,
-		stopChan:         make(chan struct{}),
-		lastFlush:        time.Now(),
+		engine:             engine,
+		nodeCache:          make(map[NodeID]*Node),
+		edgeCache:          make(map[EdgeID]*Edge),
+		deleteNodes:        make(map[NodeID]bool),
+		deleteEdges:        make(map[EdgeID]bool),
+		inFlightNodes:      make(map[NodeID]bool),
+		inFlightEdges:      make(map[EdgeID]bool),
+		updateNodes:        make(map[NodeID]bool),
+		updateEdges:        make(map[EdgeID]bool),
+		nodeUpdateBaseline: make(map[NodeID]*Node),
+		labelIndex:         make(map[string]map[NodeID]bool),
+		flushInterval:      config.FlushInterval,
+		minFlushInterval:   config.MinFlushInterval,
+		maxFlushInterval:   config.MaxFlushInterval,
+		targetFlushSize:    config.TargetFlushSize,
+		adaptiveFlush:      config.AdaptiveFlush,
+		maxNodeCacheSize:   config.MaxNodeCacheSize,
+		maxEdgeCacheSize:   config.MaxEdgeCacheSize,
+		stopChan:           make(chan struct{}),
+		lastFlush:          time.Now(),
 	}
 
 	// Start background flush goroutine
@@ -384,6 +389,12 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 	for k, v := range ae.nodeCache {
 		nodesToWrite[k] = v
 	}
+	nodeBaselines := make(map[NodeID]*Node, len(nodesToWrite))
+	for id := range nodesToWrite {
+		if baseline, ok := ae.nodeUpdateBaseline[id]; ok {
+			nodeBaselines[id] = CopyNode(baseline)
+		}
+	}
 	edgesToWrite := make(map[EdgeID]*Edge, len(ae.edgeCache))
 	for k, v := range ae.edgeCache {
 		edgesToWrite[k] = v
@@ -479,8 +490,9 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 	if len(nodesToWrite) > 0 {
 		for _, node := range nodesToWrite {
 			if !nodesToDelete[node.ID] {
-				// UpdateNode now has upsert behavior - creates if not exists, updates if exists
-				if err := ae.engine.UpdateNode(node); err != nil {
+				// UpdateNode now has upsert behavior - creates if not exists, updates if exists.
+				// If this node was queued as an update, detect staleness and rebase before write.
+				if err := ae.flushNodeWithRebase(node, nodeBaselines[node.ID]); err != nil {
 					// CRITICAL FIX: Track failed node - DON'T remove from cache
 					result.NodesFailed++
 					result.FailedNodeIDs = append(result.FailedNodeIDs, node.ID)
@@ -542,6 +554,7 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 		if successfulNodeWrites[id] && ae.nodeCache[id] == nodesToWrite[id] {
 			delete(ae.nodeCache, id)
 			delete(ae.updateNodes, id) // Clear update flag
+			delete(ae.nodeUpdateBaseline, id)
 		}
 		// Always clear in-flight marker for this batch (success or fail)
 		delete(ae.inFlightNodes, id)
@@ -557,6 +570,7 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 	for id := range nodesToDelete {
 		if successfulNodeDeletes[id] && ae.deleteNodes[id] {
 			delete(ae.deleteNodes, id)
+			delete(ae.nodeUpdateBaseline, id)
 		}
 	}
 	for id := range edgesToDelete {
@@ -567,6 +581,102 @@ func (ae *AsyncEngine) FlushWithResult() FlushResult {
 	ae.mu.Unlock()
 
 	return result
+}
+
+const asyncNodeRebaseMaxAttempts = 3
+
+func (ae *AsyncEngine) flushNodeWithRebase(pending, baseline *Node) error {
+	if pending == nil {
+		return ErrInvalidData
+	}
+	if baseline == nil {
+		return ae.engine.UpdateNode(pending)
+	}
+
+	candidate := CopyNode(pending)
+	baselineSnapshot := CopyNode(baseline)
+
+	for attempt := 0; attempt < asyncNodeRebaseMaxAttempts; attempt++ {
+		latest, err := ae.engine.GetNode(candidate.ID)
+		if err == nil && !nodesEquivalentForAsyncRebase(latest, baselineSnapshot) {
+			// Underlying row changed since async queue accepted this update.
+			// Rebase async intent onto latest committed state.
+			candidate = rebaseNodeUpdate(baselineSnapshot, pending, latest)
+			baselineSnapshot = CopyNode(latest)
+		}
+
+		if err := ae.engine.UpdateNode(candidate); err != nil {
+			if attempt == asyncNodeRebaseMaxAttempts-1 {
+				return err
+			}
+			continue
+		}
+		return nil
+	}
+
+	return fmt.Errorf("failed to apply async node update for %s after %d attempts", pending.ID, asyncNodeRebaseMaxAttempts)
+}
+
+func nodesEquivalentForAsyncRebase(a, b *Node) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return reflect.DeepEqual(a.Labels, b.Labels) &&
+		reflect.DeepEqual(a.Properties, b.Properties) &&
+		reflect.DeepEqual(a.NamedEmbeddings, b.NamedEmbeddings) &&
+		reflect.DeepEqual(a.ChunkEmbeddings, b.ChunkEmbeddings) &&
+		reflect.DeepEqual(a.EmbedMeta, b.EmbedMeta)
+}
+
+func rebaseNodeUpdate(base, pending, latest *Node) *Node {
+	if pending == nil {
+		return CopyNode(latest)
+	}
+	if latest == nil || base == nil {
+		return CopyNode(pending)
+	}
+
+	rebased := CopyNode(latest)
+	if rebased.Properties == nil {
+		rebased.Properties = make(map[string]any)
+	}
+
+	if !reflect.DeepEqual(base.Labels, pending.Labels) {
+		rebased.Labels = append([]string(nil), pending.Labels...)
+	}
+
+	baseProps := base.Properties
+	if baseProps == nil {
+		baseProps = map[string]any{}
+	}
+	pendingProps := pending.Properties
+	if pendingProps == nil {
+		pendingProps = map[string]any{}
+	}
+
+	for key, pendingValue := range pendingProps {
+		baseValue, existedInBase := baseProps[key]
+		if !existedInBase || !reflect.DeepEqual(baseValue, pendingValue) {
+			rebased.Properties[key] = pendingValue
+		}
+	}
+	for key := range baseProps {
+		if _, existsInPending := pendingProps[key]; !existsInPending {
+			delete(rebased.Properties, key)
+		}
+	}
+
+	if !reflect.DeepEqual(base.NamedEmbeddings, pending.NamedEmbeddings) {
+		rebased.NamedEmbeddings = CopyNode(pending).NamedEmbeddings
+	}
+	if !reflect.DeepEqual(base.ChunkEmbeddings, pending.ChunkEmbeddings) {
+		rebased.ChunkEmbeddings = CopyNode(pending).ChunkEmbeddings
+	}
+	if !reflect.DeepEqual(base.EmbedMeta, pending.EmbedMeta) {
+		rebased.EmbedMeta = CopyNode(pending).EmbedMeta
+	}
+
+	return rebased
 }
 
 // GetEngine returns the underlying storage engine.
@@ -621,6 +731,7 @@ func (ae *AsyncEngine) CreateNode(node *Node) (NodeID, error) {
 	}
 
 	ae.nodeCache[node.ID] = node
+	delete(ae.nodeUpdateBaseline, node.ID)
 
 	// Update label index
 	for _, label := range node.Labels {
@@ -647,8 +758,25 @@ func (ae *AsyncEngine) UpdateNode(node *Node) error {
 		return err
 	}
 
+	var baseline *Node
+	ae.mu.RLock()
+	_, alreadyQueued := ae.nodeCache[node.ID]
+	_, hasBaseline := ae.nodeUpdateBaseline[node.ID]
+	ae.mu.RUnlock()
+	if !alreadyQueued && !hasBaseline {
+		if existing, err := ae.engine.GetNode(node.ID); err == nil {
+			baseline = CopyNode(existing)
+		}
+	}
+
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
+
+	if _, exists := ae.nodeUpdateBaseline[node.ID]; !exists {
+		if _, existsInCache := ae.nodeCache[node.ID]; !existsInCache {
+			ae.nodeUpdateBaseline[node.ID] = baseline
+		}
+	}
 
 	ae.nodeCache[node.ID] = node
 	ae.pendingWrites++
@@ -733,6 +861,7 @@ func (ae *AsyncEngine) DeleteNode(id NodeID) error {
 			}
 			// Remove from cache
 			delete(ae.nodeCache, id)
+			delete(ae.nodeUpdateBaseline, id)
 
 			// CRITICAL FIX: If node is in-flight, the flush will still write it
 			// to the underlying engine, so we must also mark it for deletion

@@ -68,7 +68,7 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		Value:    tokenResp.AccessToken,
 		Path:     "/",
 		HttpOnly: true,                 // Prevent XSS attacks
-		Secure:   r.TLS != nil,         // Secure only over HTTPS
+		Secure:   isHTTPSRequest(r),    // Secure over direct TLS or trusted proxy TLS
 		SameSite: http.SameSiteLaxMode, // Lax allows normal navigation, prevents CSRF on POST
 		MaxAge:   86400 * 7,            // 7 days
 	})
@@ -83,6 +83,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Value:    "",
 		Path:     "/",
 		HttpOnly: true,
+		Secure:   isHTTPSRequest(r),
 		MaxAge:   -1, // Delete cookie
 	})
 
@@ -255,10 +256,8 @@ func (s *Server) handleAuthConfig(w http.ResponseWriter, r *http.Request) {
 // getBaseURL returns the base URL for the server from the request
 func (s *Server) getBaseURL(r *http.Request) string {
 	scheme := "http"
-	if r.TLS != nil {
+	if isHTTPSRequest(r) {
 		scheme = "https"
-	} else if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
-		scheme = forwardedProto
 	}
 
 	host := r.Host
@@ -275,6 +274,24 @@ func (s *Server) getBaseURL(r *http.Request) string {
 	}
 
 	return fmt.Sprintf("%s://%s%s", scheme, host, basePath)
+}
+
+func isHTTPSRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if r.TLS != nil {
+		return true
+	}
+
+	// Support TLS termination behind reverse proxies.
+	// X-Forwarded-Proto can be a comma-separated list; use first hop.
+	forwardedProto := r.Header.Get("X-Forwarded-Proto")
+	if forwardedProto == "" {
+		return false
+	}
+	firstProto := strings.TrimSpace(strings.Split(forwardedProto, ",")[0])
+	return strings.EqualFold(firstProto, "https")
 }
 
 // handleOAuthRedirect initiates the OAuth 2.0 authorization flow
@@ -354,7 +371,7 @@ func (s *Server) handleOAuthCallback(w http.ResponseWriter, r *http.Request) {
 		Value:    tokenResponse.AccessToken,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   isHTTPSRequest(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   86400 * 7, // 7 days
 	})

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -22,7 +23,7 @@ type WALSegment struct {
 
 // WALManifest indexes all sealed WAL segments.
 type WALManifest struct {
-	Version  int         `json:"version"`
+	Version  int          `json:"version"`
 	Segments []WALSegment `json:"segments"`
 }
 
@@ -150,6 +151,35 @@ func parseSegmentFilename(name string) (uint64, uint64, bool) {
 	return first, last, true
 }
 
+func resolveWALSegmentPath(walDir, segmentName string) (string, error) {
+	if segmentName == "" {
+		return "", fmt.Errorf("wal: empty segment path in manifest")
+	}
+	if filepath.IsAbs(segmentName) {
+		return "", fmt.Errorf("wal: invalid absolute segment path in manifest: %q", segmentName)
+	}
+
+	cleanName := filepath.Clean(segmentName)
+	if cleanName == "." || cleanName == ".." {
+		return "", fmt.Errorf("wal: invalid segment path in manifest: %q", segmentName)
+	}
+	// Segments are single files directly under the segments dir; disallow nested paths.
+	if filepath.Base(cleanName) != cleanName || strings.Contains(cleanName, string(filepath.Separator)) {
+		return "", fmt.Errorf("wal: invalid segment path in manifest: %q", segmentName)
+	}
+
+	segmentDir := walSegmentsDir(walDir)
+	segmentPath := filepath.Join(segmentDir, cleanName)
+	rel, err := filepath.Rel(segmentDir, segmentPath)
+	if err != nil {
+		return "", fmt.Errorf("wal: resolve segment path %q: %w", segmentName, err)
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("wal: segment path escapes segments directory: %q", segmentName)
+	}
+	return segmentPath, nil
+}
+
 // ReadWALEntriesFromDir reads WAL entries across all segments and the active WAL file.
 func ReadWALEntriesFromDir(walDir string) ([]WALEntry, error) {
 	manifest, err := loadWALManifest(walDir)
@@ -165,7 +195,10 @@ func ReadWALEntriesFromDir(walDir string) ([]WALEntry, error) {
 
 	var entries []WALEntry
 	for _, segment := range manifest.Segments {
-		segmentPath := filepath.Join(walSegmentsDir(walDir), segment.Path)
+		segmentPath, err := resolveWALSegmentPath(walDir, segment.Path)
+		if err != nil {
+			return nil, err
+		}
 		segmentEntries, err := ReadWALEntries(segmentPath)
 		if err != nil {
 			return nil, err
@@ -245,4 +278,3 @@ func FindWALEntriesByTxID(walDir, txID string, maxEntries int) ([]WALEntry, erro
 
 	return matches, nil
 }
-
