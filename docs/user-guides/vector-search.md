@@ -382,8 +382,8 @@ Tuning knobs:
 
 ```bash
 # Use GPU brute-force when N is in this range (defaults shown)
-export NORNICDB_VECTOR_GPU_BRUTE_MIN_N=20000
-export NORNICDB_VECTOR_GPU_BRUTE_MAX_N=250000
+export NORNICDB_VECTOR_GPU_BRUTE_MIN_N=5000
+export NORNICDB_VECTOR_GPU_BRUTE_MAX_N=15000
 ```
 
 ### Compressed ANN profile (`quality=compressed`)

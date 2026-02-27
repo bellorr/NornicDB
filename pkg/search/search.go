@@ -512,6 +512,30 @@ type Service struct {
 	// resultCache caches Search() results by query+options (same semantics as Cypher query cache).
 	// All call paths (HTTP search, Cypher, etc.) benefit. Invalidated on IndexNode/RemoveNode.
 	resultCache *searchResultCache
+
+	strategyTransitionMu         sync.Mutex
+	strategyTransitionInProgress bool
+	strategyTransitionPending    strategyMode
+	strategyTransitionTimer      *time.Timer
+	strategyTransitionSeq        uint64
+	strategyTransitionDeltas     []strategyDeltaMutation
+	strategyTransitionStarts     uint64
+}
+
+type strategyMode int
+
+const (
+	strategyModeUnknown strategyMode = iota
+	strategyModeBruteCPU
+	strategyModeBruteGPU
+	strategyModeHNSW
+)
+
+type strategyDeltaMutation struct {
+	seq uint64
+	id  string
+	vec []float32
+	add bool
 }
 
 // BuildProgress reports in-progress indexing state for UI/ops visibility.
@@ -1768,23 +1792,30 @@ func (s *Service) IndexNode(node *storage.Node) error {
 	s.maybeAutoSetVectorDimensions(firstVectorDimensions(node))
 
 	s.indexMu.Lock()
-	defer s.indexMu.Unlock()
-	return s.indexNodeLocked(node, false)
+	err := s.indexNodeLocked(node, false)
+	s.indexMu.Unlock()
+	if err == nil && !s.buildInProgress.Load() {
+		s.scheduleStrategyTransitionCheck()
+	}
+	return err
 }
 
 // addVectorLocked adds a vector to the active store (vectorFileStore if set, else vectorIndex).
 // Caller holds s.indexMu.
 func (s *Service) addVectorLocked(id string, vec []float32) error {
+	var err error
 	if s.vectorFileStore != nil {
 		if s.resumeVectorBuild && s.vectorFileStore.Has(id) {
 			return nil
 		}
-		return s.vectorFileStore.Add(id, vec)
+		err = s.vectorFileStore.Add(id, vec)
+	} else if s.vectorIndex != nil {
+		err = s.vectorIndex.Add(id, vec)
 	}
-	if s.vectorIndex != nil {
-		return s.vectorIndex.Add(id, vec)
+	if err == nil {
+		s.appendStrategyDelta(id, vec, true)
 	}
-	return nil
+	return err
 }
 
 // allowLiveHNSWUpdatesLocked reports whether per-node live HNSW mutations should run.
@@ -1852,6 +1883,7 @@ func (s *Service) removeVectorLocked(id string) {
 	if s.vectorFileStore != nil {
 		s.vectorFileStore.Remove(id)
 	}
+	s.appendStrategyDelta(id, nil, false)
 }
 
 // ensureBuildVectorFileStore creates vectorFileStore when building with vectorIndexPath so vectors go to disk.
@@ -2175,9 +2207,11 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 		}
 	}
 	s.indexMu.Lock()
-	defer s.indexMu.Unlock()
-
 	s.removeNodeLocked(string(nodeID))
+	s.indexMu.Unlock()
+	if !s.buildInProgress.Load() {
+		s.scheduleStrategyTransitionCheck()
+	}
 
 	return nil
 }
@@ -3195,6 +3229,393 @@ func (s *Service) getOrCreateVectorPipeline(ctx context.Context) (*VectorSearchP
 
 	s.vectorPipeline = NewVectorSearchPipeline(strategy.candidateGen, exactScorer)
 	return s.vectorPipeline, nil
+}
+
+func (s *Service) currentPipelineStrategy() strategyMode {
+	s.pipelineMu.RLock()
+	p := s.vectorPipeline
+	s.pipelineMu.RUnlock()
+	if p == nil {
+		return strategyModeUnknown
+	}
+	switch p.candidateGen.(type) {
+	case *GPUBruteForceCandidateGen:
+		return strategyModeBruteGPU
+	case *BruteForceCandidateGen, *FileStoreBruteForceCandidateGen:
+		return strategyModeBruteCPU
+	case *HNSWCandidateGen:
+		return strategyModeHNSW
+	default:
+		return strategyModeUnknown
+	}
+}
+
+func (s *Service) desiredRuntimeStrategy(vectorCount int) strategyMode {
+	gpuEnabled := s.gpuManager != nil && s.gpuManager.IsEnabled()
+	gpuMinN := envutil.GetInt("NORNICDB_VECTOR_GPU_BRUTE_MIN_N", 5000)
+	gpuMaxN := envutil.GetInt("NORNICDB_VECTOR_GPU_BRUTE_MAX_N", 15000)
+	if gpuEnabled && vectorCount >= gpuMinN && vectorCount <= gpuMaxN {
+		return strategyModeBruteGPU
+	}
+	if vectorCount < NSmallMax {
+		return strategyModeBruteCPU
+	}
+	return strategyModeHNSW
+}
+
+func (s *Service) snapshotStrategyInputs() (int, *VectorIndex, *VectorFileStore) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.embeddingCountLocked(), s.vectorIndex, s.vectorFileStore
+}
+
+func (s *Service) scheduleStrategyTransitionCheck() {
+	if s.buildInProgress.Load() {
+		return
+	}
+	vectorCount, _, _ := s.snapshotStrategyInputs()
+	current := s.currentPipelineStrategy()
+	if current == strategyModeUnknown {
+		return
+	}
+	desired := s.desiredRuntimeStrategy(vectorCount)
+	if desired == current {
+		return
+	}
+	if (current == strategyModeBruteCPU || current == strategyModeBruteGPU) &&
+		(desired == strategyModeBruteCPU || desired == strategyModeBruteGPU) {
+		if s.switchBruteStrategy(desired) {
+			log.Printf("🔍 Runtime strategy switch: %s -> %s (N=%d)", current.String(), desired.String(), vectorCount)
+		}
+		return
+	}
+	s.scheduleDebouncedStrategyTransition(desired)
+}
+
+func (s *Service) scheduleDebouncedStrategyTransition(target strategyMode) {
+	const debounceDelay = 2 * time.Second
+	s.strategyTransitionMu.Lock()
+	defer s.strategyTransitionMu.Unlock()
+	s.strategyTransitionPending = target
+	if s.strategyTransitionInProgress {
+		return
+	}
+	if s.strategyTransitionTimer != nil {
+		_ = s.strategyTransitionTimer.Stop()
+	}
+	s.strategyTransitionTimer = time.AfterFunc(debounceDelay, func() {
+		s.launchScheduledStrategyTransition()
+	})
+}
+
+func (s *Service) launchScheduledStrategyTransition() {
+	s.strategyTransitionMu.Lock()
+	if s.strategyTransitionInProgress {
+		s.strategyTransitionMu.Unlock()
+		return
+	}
+	target := s.strategyTransitionPending
+	s.strategyTransitionPending = strategyModeUnknown
+	s.strategyTransitionInProgress = true
+	s.strategyTransitionStarts++
+	s.strategyTransitionDeltas = s.strategyTransitionDeltas[:0]
+	s.strategyTransitionMu.Unlock()
+
+	go s.runStrategyTransition(target)
+}
+
+func (s *Service) runStrategyTransition(target strategyMode) {
+	defer func() {
+		s.strategyTransitionMu.Lock()
+		s.strategyTransitionInProgress = false
+		next := s.strategyTransitionPending
+		s.strategyTransitionMu.Unlock()
+		if next != strategyModeUnknown {
+			s.scheduleDebouncedStrategyTransition(next)
+		}
+	}()
+
+	vectorCount, vi, vfs := s.snapshotStrategyInputs()
+	current := s.currentPipelineStrategy()
+	if current == strategyModeUnknown || current == target {
+		return
+	}
+
+	var (
+		targetHNSW *HNSWIndex
+		err        error
+	)
+	if target == strategyModeHNSW {
+		dim := s.VectorIndexDimensions()
+		targetHNSW, err = s.buildHNSWForTransition(context.Background(), dim, vi, vfs)
+		if err != nil {
+			log.Printf("⚠️ Runtime strategy transition build failed: %v", err)
+			return
+		}
+	}
+
+	s.replayTransitionDeltas(targetHNSW, target, 0)
+	s.indexMu.Lock()
+	lastSeq := s.replayTransitionDeltas(targetHNSW, target, 0)
+	s.applyTransitionSwapLocked(target, targetHNSW, vi, vfs)
+	for {
+		nextSeq := s.replayTransitionDeltas(targetHNSW, target, lastSeq)
+		if nextSeq == lastSeq {
+			break
+		}
+		lastSeq = nextSeq
+	}
+	s.clearTransitionDeltaLogLocked(lastSeq)
+	s.indexMu.Unlock()
+	log.Printf("🔍 Runtime strategy switch complete: %s -> %s (N=%d)", current.String(), target.String(), vectorCount)
+}
+
+func (s *Service) applyTransitionSwapLocked(target strategyMode, targetHNSW *HNSWIndex, vi *VectorIndex, vfs *VectorFileStore) {
+	if target == strategyModeHNSW {
+		s.hnswMu.Lock()
+		old := s.hnswIndex
+		s.hnswIndex = targetHNSW
+		s.hnswMu.Unlock()
+		if old != nil && old != targetHNSW {
+			old.Clear()
+		}
+	} else {
+		s.hnswMu.Lock()
+		old := s.hnswIndex
+		s.hnswIndex = nil
+		s.hnswMu.Unlock()
+		if old != nil {
+			old.Clear()
+		}
+	}
+	if target == strategyModeBruteGPU {
+		_ = s.ensureGPUIndexSynced(vi, vfs)
+	}
+	p := s.buildPipelineForMode(target, vi, vfs)
+	s.pipelineMu.Lock()
+	s.vectorPipeline = p
+	s.pipelineMu.Unlock()
+}
+
+func (s *Service) buildPipelineForMode(mode strategyMode, vi *VectorIndex, vfs *VectorFileStore) *VectorSearchPipeline {
+	switch mode {
+	case strategyModeBruteGPU:
+		return NewVectorSearchPipeline(NewGPUBruteForceCandidateGen(s.gpuEmbeddingIndex), &IdentityExactScorer{})
+	case strategyModeBruteCPU:
+		if vfs != nil {
+			return NewVectorSearchPipeline(NewFileStoreBruteForceCandidateGen(vfs), NewCPUExactScorer(vfs))
+		}
+		return NewVectorSearchPipeline(NewBruteForceCandidateGen(vi), NewCPUExactScorer(vi))
+	case strategyModeHNSW:
+		s.hnswMu.RLock()
+		idx := s.hnswIndex
+		s.hnswMu.RUnlock()
+		if idx != nil {
+			if vfs != nil {
+				return NewVectorSearchPipeline(NewHNSWCandidateGen(idx), NewCPUExactScorer(vfs))
+			}
+			return NewVectorSearchPipeline(NewHNSWCandidateGen(idx), NewCPUExactScorer(vi))
+		}
+	}
+	return nil
+}
+
+func (s *Service) switchBruteStrategy(target strategyMode) bool {
+	vectorCount, vi, vfs := s.snapshotStrategyInputs()
+	current := s.currentPipelineStrategy()
+	if current == target || (current != strategyModeBruteCPU && current != strategyModeBruteGPU) {
+		return false
+	}
+	s.indexMu.Lock()
+	defer s.indexMu.Unlock()
+	if target == strategyModeBruteGPU {
+		if err := s.ensureGPUIndexSynced(vi, vfs); err != nil {
+			log.Printf("⚠️ Runtime CPU->GPU brute switch skipped: %v", err)
+			return false
+		}
+	}
+	s.hnswMu.Lock()
+	if s.hnswIndex != nil {
+		s.hnswIndex.Clear()
+		s.hnswIndex = nil
+	}
+	s.hnswMu.Unlock()
+	p := s.buildPipelineForMode(target, vi, vfs)
+	s.pipelineMu.Lock()
+	s.vectorPipeline = p
+	s.pipelineMu.Unlock()
+	log.Printf("🔍 Runtime brute strategy switch: %s -> %s (N=%d)", current.String(), target.String(), vectorCount)
+	return true
+}
+
+func (s *Service) buildHNSWForTransition(ctx context.Context, dimensions int, vi *VectorIndex, vfs *VectorFileStore) (*HNSWIndex, error) {
+	config := HNSWConfigFromEnv()
+	built := NewHNSWIndex(dimensions, config)
+	if vfs != nil && vfs.Count() > 0 {
+		if err := vfs.IterateChunked(10000, func(ids []string, vecs [][]float32) error {
+			for i := range ids {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				default:
+				}
+				if err := built.Add(ids[i], vecs[i]); err != nil {
+					return err
+				}
+			}
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		return built, nil
+	}
+	if vi == nil {
+		return nil, fmt.Errorf("vector index unavailable")
+	}
+	vi.mu.RLock()
+	defer vi.mu.RUnlock()
+	for id, vec := range vi.vectors {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+		if err := built.Add(id, vec); err != nil {
+			return nil, err
+		}
+	}
+	return built, nil
+}
+
+func (s *Service) ensureGPUIndexSynced(vi *VectorIndex, vfs *VectorFileStore) error {
+	if s.gpuManager == nil || !s.gpuManager.IsEnabled() {
+		return fmt.Errorf("gpu not enabled")
+	}
+	if s.gpuEmbeddingIndex != nil {
+		return nil
+	}
+	dim := s.VectorIndexDimensions()
+	if dim <= 0 {
+		return fmt.Errorf("invalid vector dimensions")
+	}
+	cfg := gpu.DefaultEmbeddingIndexConfig(dim)
+	cfg.GPUEnabled = true
+	cfg.AutoSync = true
+	cfg.BatchThreshold = 1000
+	gi := gpu.NewEmbeddingIndex(s.gpuManager, cfg)
+
+	if vfs != nil && vfs.Count() > 0 {
+		if err := vfs.IterateChunked(10000, func(ids []string, vecs [][]float32) error {
+			return gi.AddBatch(ids, vecs)
+		}); err != nil {
+			return err
+		}
+	} else if vi != nil {
+		vi.mu.RLock()
+		ids := make([]string, 0, len(vi.vectors))
+		vecs := make([][]float32, 0, len(vi.vectors))
+		for id, vec := range vi.vectors {
+			if len(vec) == 0 {
+				continue
+			}
+			ids = append(ids, id)
+			vecs = append(vecs, vec)
+		}
+		vi.mu.RUnlock()
+		if err := gi.AddBatch(ids, vecs); err != nil {
+			return err
+		}
+	}
+	if err := gi.SyncToGPU(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.gpuEmbeddingIndex = gi
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *Service) replayTransitionDeltas(targetHNSW *HNSWIndex, mode strategyMode, after uint64) uint64 {
+	s.strategyTransitionMu.Lock()
+	deltas := make([]strategyDeltaMutation, 0, len(s.strategyTransitionDeltas))
+	for _, d := range s.strategyTransitionDeltas {
+		if d.seq > after {
+			deltas = append(deltas, d)
+		}
+	}
+	s.strategyTransitionMu.Unlock()
+	last := after
+	for _, d := range deltas {
+		if mode == strategyModeHNSW && targetHNSW != nil {
+			if d.add {
+				_ = targetHNSW.Update(d.id, d.vec)
+			} else {
+				targetHNSW.Remove(d.id)
+			}
+		} else if mode == strategyModeBruteGPU {
+			s.mu.RLock()
+			gi := s.gpuEmbeddingIndex
+			s.mu.RUnlock()
+			if gi != nil {
+				if d.add {
+					_ = gi.Add(d.id, d.vec)
+				} else {
+					_ = gi.Remove(d.id)
+				}
+			}
+		}
+		last = d.seq
+	}
+	return last
+}
+
+func (s *Service) clearTransitionDeltaLogLocked(applied uint64) {
+	s.strategyTransitionMu.Lock()
+	if applied == 0 || len(s.strategyTransitionDeltas) == 0 {
+		s.strategyTransitionDeltas = s.strategyTransitionDeltas[:0]
+		s.strategyTransitionMu.Unlock()
+		return
+	}
+	dst := s.strategyTransitionDeltas[:0]
+	for _, d := range s.strategyTransitionDeltas {
+		if d.seq > applied {
+			dst = append(dst, d)
+		}
+	}
+	s.strategyTransitionDeltas = dst
+	s.strategyTransitionMu.Unlock()
+}
+
+func (s *Service) appendStrategyDelta(id string, vec []float32, add bool) {
+	s.strategyTransitionMu.Lock()
+	defer s.strategyTransitionMu.Unlock()
+	if !s.strategyTransitionInProgress {
+		return
+	}
+	s.strategyTransitionSeq++
+	delta := strategyDeltaMutation{
+		seq: s.strategyTransitionSeq,
+		id:  id,
+		add: add,
+	}
+	if add && len(vec) > 0 {
+		delta.vec = make([]float32, len(vec))
+		copy(delta.vec, vec)
+	}
+	s.strategyTransitionDeltas = append(s.strategyTransitionDeltas, delta)
+}
+
+func (m strategyMode) String() string {
+	switch m {
+	case strategyModeBruteCPU:
+		return "CPU brute-force"
+	case strategyModeBruteGPU:
+		return "GPU brute-force"
+	case strategyModeHNSW:
+		return "HNSW"
+	default:
+		return "unknown"
+	}
 }
 
 type exactScorerPolicy string

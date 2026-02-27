@@ -265,6 +265,14 @@ database:
 
 Vector search chooses a strategy automatically based on dataset size and features (GPU, clustering). All thresholds and HNSW parameters are configurable via environment variables.
 
+Runtime transition behavior:
+
+- Strategy checks run on index mutations (`IndexNode` / `RemoveNode`).
+- The service switches among `CPU brute-force`, `GPU brute-force`, and `global HNSW` using threshold crossings.
+- Brute-force CPU/GPU switches do not rebuild ANN graphs.
+- Brute-force/HNSW transitions run with debounced scheduling and background build/swap so query serving continues.
+- Writes during transition are replayed before cutover to keep the target index current.
+
 **Strategy selection (order of precedence):**
 
 1. **GPU brute-force** – when GPU is enabled and vector count is in `[NORNICDB_VECTOR_GPU_BRUTE_MIN_N, NORNICDB_VECTOR_GPU_BRUTE_MAX_N]`.

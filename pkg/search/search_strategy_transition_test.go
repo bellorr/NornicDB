@@ -1,0 +1,175 @@
+package search
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/orneryd/nornicdb/pkg/gpu"
+	"github.com/orneryd/nornicdb/pkg/storage"
+	"github.com/stretchr/testify/require"
+)
+
+func testVec4(i int) []float32 {
+	return []float32{
+		float32((i%7)+1) / 7.0,
+		float32((i%11)+1) / 11.0,
+		float32((i%13)+1) / 13.0,
+		float32((i%17)+1) / 17.0,
+	}
+}
+
+func indexTestNode(t *testing.T, svc *Service, id string, vec []float32) {
+	t.Helper()
+	node := &storage.Node{
+		ID:              storage.NodeID(id),
+		Labels:          []string{"Doc"},
+		ChunkEmbeddings: [][]float32{vec},
+		Properties: map[string]any{
+			"content": id,
+		},
+	}
+	_, err := svc.engine.CreateNode(node)
+	require.NoError(t, err)
+	require.NoError(t, svc.IndexNode(node))
+}
+
+func waitForStrategy(t *testing.T, svc *Service, want strategyMode, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if svc.currentPipelineStrategy() == want {
+			svc.strategyTransitionMu.Lock()
+			inProgress := svc.strategyTransitionInProgress
+			svc.strategyTransitionMu.Unlock()
+			if !inProgress {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	require.Equal(t, want, svc.currentPipelineStrategy())
+}
+
+func TestRuntimeStrategyTransition_ThresholdCrossDebouncedSingleFlight(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
+	require.NotNil(t, svc)
+
+	_, err := svc.getOrCreateVectorPipeline(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
+
+	for i := 0; i < NSmallMax-5; i++ {
+		indexTestNode(t, svc, fmt.Sprintf("pre-%d", i), testVec4(i))
+	}
+	require.Equal(t, NSmallMax-5, svc.EmbeddingCount())
+
+	for i := 0; i < 16; i++ {
+		indexTestNode(t, svc, fmt.Sprintf("burst-%d", i), testVec4(10000+i))
+	}
+
+	waitForStrategy(t, svc, strategyModeHNSW, 45*time.Second)
+
+	svc.strategyTransitionMu.Lock()
+	starts := svc.strategyTransitionStarts
+	svc.strategyTransitionMu.Unlock()
+	require.Equal(t, uint64(1), starts)
+}
+
+func TestRuntimeStrategyTransition_DeltaReplayPreservesWritesDuringBuild(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
+	require.NotNil(t, svc)
+
+	_, err := svc.getOrCreateVectorPipeline(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, strategyModeBruteCPU, svc.currentPipelineStrategy())
+
+	for i := 0; i < NSmallMax-2; i++ {
+		indexTestNode(t, svc, fmt.Sprintf("seed-%d", i), testVec4(i))
+	}
+
+	indexTestNode(t, svc, "cross-1", []float32{1, 0, 0, 0})
+	indexTestNode(t, svc, "cross-2", []float32{0, 1, 0, 0})
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		svc.strategyTransitionMu.Lock()
+		inProgress := svc.strategyTransitionInProgress
+		svc.strategyTransitionMu.Unlock()
+		if inProgress {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	indexTestNode(t, svc, "late-node", []float32{0, 1, 0, 0})
+
+	waitForStrategy(t, svc, strategyModeHNSW, 45*time.Second)
+
+	opts := DefaultSearchOptions()
+	opts.Limit = 20
+	resp, err := svc.vectorSearchOnly(context.Background(), []float32{0, 1, 0, 0}, opts)
+	require.NoError(t, err)
+	found := false
+	for _, r := range resp.Results {
+		if string(r.NodeID) == "late-node" {
+			found = true
+			break
+		}
+	}
+	require.True(t, found, "late-node must be searchable after transition replay")
+}
+
+func TestRuntimeStrategyTransition_HNSWToBruteClearsIndexMemory(t *testing.T) {
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
+	require.NotNil(t, svc)
+
+	_, err := svc.getOrCreateVectorPipeline(context.Background())
+	require.NoError(t, err)
+
+	for i := 0; i < NSmallMax+16; i++ {
+		indexTestNode(t, svc, fmt.Sprintf("node-%d", i), testVec4(i))
+	}
+	waitForStrategy(t, svc, strategyModeHNSW, 45*time.Second)
+	require.NotNil(t, svc.hnswIndex)
+
+	for i := 0; i < 64; i++ {
+		require.NoError(t, svc.RemoveNode(storage.NodeID(fmt.Sprintf("node-%d", i))))
+	}
+	waitForStrategy(t, svc, strategyModeBruteCPU, 45*time.Second)
+
+	svc.hnswMu.RLock()
+	defer svc.hnswMu.RUnlock()
+	require.Nil(t, svc.hnswIndex)
+}
+
+func TestRuntimeStrategyTransition_CPUToGPUBruteNoRebuild(t *testing.T) {
+	cfg := gpu.DefaultConfig()
+	cfg.Enabled = true
+	cfg.FallbackOnError = true
+	manager, err := gpu.NewManager(cfg)
+	require.NoError(t, err)
+	if !manager.IsEnabled() {
+		t.Skip("GPU not available in this environment")
+	}
+
+	engine := newNamespacedEngine(t)
+	svc := NewServiceWithDimensions(engine, 4)
+	svc.SetGPUManager(manager)
+
+	_, err = svc.getOrCreateVectorPipeline(context.Background())
+	require.NoError(t, err)
+
+	for i := 0; i < 6000; i++ {
+		indexTestNode(t, svc, fmt.Sprintf("gpu-node-%d", i), testVec4(i))
+	}
+
+	waitForStrategy(t, svc, strategyModeBruteGPU, 45*time.Second)
+	svc.hnswMu.RLock()
+	defer svc.hnswMu.RUnlock()
+	require.Nil(t, svc.hnswIndex)
+}
