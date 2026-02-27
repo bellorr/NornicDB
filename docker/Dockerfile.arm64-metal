@@ -65,9 +65,8 @@ WORKDIR /build
 
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential && rm -rf /var/lib/apt/lists/*
 
-# Copy llama artifacts
+# Copy llama static library (before COPY . . for better layer caching)
 COPY --from=llama /out/libllama_combined.a /build/lib/llama/libllama_linux_arm64.a
-COPY --from=llama /out/*.h /build/lib/llama/
 
 # Go dependencies
 COPY go.mod go.sum ./
@@ -76,6 +75,11 @@ RUN go mod download
 # Source + UI (only copy UI dist if not headless)
 COPY . .
 COPY --from=ui /ui/dist ./ui/dist
+
+# Overwrite repo headers with ones matching LLAMA_VERSION (must be AFTER COPY . .)
+# COPY . . would otherwise replace these with the stale headers committed to the repo,
+# causing a struct size mismatch between the compiled library and the CGo bindings.
+COPY --from=llama /out/*.h /build/lib/llama/
 
 # Build (with or without UI based on HEADLESS arg)
 # NOTE: Cannot use -static linking because Go plugins require dynamic linking
