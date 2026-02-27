@@ -43,6 +43,19 @@ NornicDB automatically discovers and manages relationships in your data, weaving
 - **Built for AI-native workloads**: vector search, memory decay, and auto-relationships are first-class features.
 - **Hardware-accelerated execution**: Metal/CUDA/Vulkan pathways for high-throughput graph + semantic workloads.
 - **Operational flexibility**: full images (models included), BYOM images, and headless API-only deployments.
+- **Canonical graph ledger support**: versioned facts, temporal validity, as-of reads, queryable txlog, and receipts for audit-oriented systems.
+
+### What Recent Deep-Dives Show
+
+- **Hybrid execution model (streaming fast paths + general engine)**: NornicDB uses shape-specialized streaming executors for common traversal/aggregation patterns while retaining a general Cypher path for coverage and correctness.
+- **Runtime parser mode switching**: the default `nornic` mode minimizes hot-path overhead, while `antlr` mode prioritizes strict parsing and diagnostics when debugging/query validation matters.
+- **Measured parser-path deltas on benchmark suites**: internal Northwind comparisons show large overhead differences on certain query shapes when full parse-tree paths are used, which is why default production mode is optimized for lower overhead.
+- **HNSW build acceleration from insertion-order optimization**: BM25-seeded insertion order reduced a 1M embedding build from ~27 minutes to ~10 minutes (~2.7x) in published tests by reducing traversal waste during construction, without changing core quality knobs.
+- **Shared seed strategy across indexing stages**: the same lexical seed extraction supports HNSW insertion ordering and improves k-means centroid initialization spread for vector pipeline efficiency.
+
+Read more:
+- [Cypher parser modes and execution trade-offs](docs/architecture/cypher-parser-modes.md)
+- [How we sped up HNSW construction 2.7x](https://dev.to/orneryd/how-i-sped-up-hnsw-construction-27x-2jhn)
 
 ## Performance Snapshot
 
