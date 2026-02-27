@@ -9,6 +9,7 @@
 - **[Hybrid Search (RRF)](hybrid-search.md)** - Combine vector + BM25 search
 - **[Canonical Graph + Mutation Log](canonical-graph-ledger.md)** - Build a canonical truth store with constraints, temporal validity, receipts, and a WAL-backed mutation log
 - **[Qdrant gRPC Endpoint](qdrant-grpc.md)** - Use Qdrant SDKs against NornicDB
+- **[NornicSearch gRPC (Additive Client)](nornic-search-grpc.md)** - Add Nornic `SearchText` alongside Qdrant drivers
 - **[Transactions](transactions.md)** - ACID guarantees and transaction management
 - **[Clustering](clustering.md)** - High availability and replication
 - **[Heimdall AI Assistant](heimdall-ai-assistant.md)** - Built-in AI for natural language database interaction

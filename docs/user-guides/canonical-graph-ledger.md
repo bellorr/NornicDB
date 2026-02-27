@@ -20,6 +20,29 @@ Everything here works **as‑is** with current NornicDB features.
 
 ---
 
+## Where This Pattern Is Useful
+
+The canonical graph ledger pattern is especially useful when you need both **graph intelligence** and **auditability**:
+
+- **Financial systems**: track rate/risk/collateral fact versions with non-overlapping validity windows and reconstruct state "as of" a regulator-requested timestamp.
+- **Compliance and RegTech**: model KYC/AML assertions as immutable fact versions, keep actor/tx provenance, and prove mutation history with WAL-backed receipts.
+- **Audit platforms**: correlate graph-level mutation events to WAL sequence ranges and receipt hashes for investigation and reconciliation workflows.
+- **AI governance**: store model-produced assertions (`asserted_by=model:vX`) and human overrides as separate versions, then explain who changed what and when.
+- **Data lineage systems**: preserve derivation chains and temporal validity so downstream reports can be replayed against historical truth states.
+
+### Graph-RAG / RAG Pipeline Simplification
+
+Canonical graph ledger modeling also simplifies LLM retrieval pipelines:
+
+- Keep **facts, relationships, vector embeddings, and provenance** in one database.
+- Run **hybrid retrieval** (vector + keyword) and **graph traversal** without moving data across separate vector and graph stores.
+- Apply **as-of temporal reads** to answer time-bounded prompts ("what was true last quarter?").
+- Return **audit context** (tx_id, WAL range, receipt hash) with retrieved facts for high-trust inference paths.
+
+This reduces ETL glue code and lowers the risk of retrieval/lineage drift between systems.
+
+---
+
 ## Prerequisites
 
 - **Persistent storage** (Badger) — schema and constraints persist across restarts.

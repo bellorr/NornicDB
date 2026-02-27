@@ -14,12 +14,15 @@
   <a href="https://github.com/orneryd/NornicDB"><img src="https://img.shields.io/badge/github-orneryd%2FNornicDB-blue?logo=github" alt="GitHub"></a>
   <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
-  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.21-00ADD8?logo=go" alt="Go Version"></a>
+  <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.26-00ADD8?logo=go" alt="Go Version"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="License"></a>
 </p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
+  <a href="#what-problem-does-this-solve">Problem</a> •
+  <a href="#why-nornicdb-is-different">Why Different</a> •
+  <a href="#performance-snapshot">Benchmarks</a> •
   <a href="#features">Features</a> •
   <a href="#docker-images">Docker</a> •
   <a href="#documentation">Docs</a> •
@@ -28,125 +31,50 @@
 
 ---
 
-## 🐳 Get Started in 30 Seconds
-
-```bash
-# Apple Silicon (M1/M2/M3) with bge-m3 embedding model + heimdall
-docker pull timothyswt/nornicdb-arm64-metal-bge-heimdall:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal-bge-heimdall
-
-
-# Apple Silicon (M1/M2/M3) with bge-m3 embedding model
-docker pull timothyswt/nornicdb-arm64-metal-bge:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal-bge
-
-# Apple Silicon (M1/M2/M3) BYOM
-docker pull timothyswt/nornicdb-arm64-metal:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-metal
-
-# Apple Silicon (M1/M2/M3) BYOM + no UI 
-docker pull timothyswt/nornicdb-arm64-metal-headless:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-arm64-headless
-
-# NVIDIA GPU (Windows/Linux) with bge-m3 embedding model + heimdall
-docker pull timothyswt/nornicdb-amd64-cuda-bge-heimdall:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cuda-bge-heimdall
-
-# NVIDIA GPU (Windows/Linux) with bge-m3 embedding model
-docker pull timothyswt/nornicdb-amd64-cuda-bge:latest
-docker run --gpus all -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cuda-bge
-
-# NVIDIA GPU (Windows/Linux) BYOM
-docker pull timothyswt/nornicdb-amd64-cuda:latest
-docker run --gpus all -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cuda
-
-# CPU Only (Windows/Linux) BYOM
-docker pull timothyswt/nornicdb-amd64-cpu:latest
-docker run -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cpu
-
-# CPU Only (Windows/Linux) BYOM + no UI
-docker pull timothyswt/nornicdb-amd64-cpu-headless:latest
-docker run -d --gpus all -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-cpu-headless
-
-docker pull timothyswt/nornicdb-amd64-vulkan:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-vulkan:latest
-
-docker pull timothyswt/nornicdb-amd64-vulkan-bge:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-vulkan-bge:latest
-
-docker pull timothyswt/nornicdb-amd64-vulkan-headless:latest
-docker run --gpus all -d -p 7474:7474 -p 7687:7687 -v nornicdb-data:/data \
-  timothyswt/nornicdb-amd64-vulkan-headless:latest
-```
-
-**Open [http://localhost:7474](http://localhost:7474)** — Admin UI with AI assistant ready to query your data.
-
-
-# Build It Yourself! — NornicDB
-
-Below are copy-pastable commands and prerequisites to build NornicDB for the supported targets (Docker images, local binaries, cross-compiles and Raspberry Pi). These instructions reflect the `Makefile` targets in this repository.
-
----
-
-## Prerequisites
-
-- Go 1.23+ (for builds and cross-compilation)
-- Docker (for image builds)
-- curl (for model downloads)
-- GNU make
-- For localllm / BGE (local embeddings): a working `llama.cpp` build — see `scripts/build-llama.sh`
-- For CUDA builds on Linux/Windows: NVIDIA drivers + CUDA Toolkit (12.x recommended)
-- For Vulkan builds on Linux: Vulkan runtime & drivers for your GPU (AMD/NVIDIA/Intel)
-- On macOS (Apple Silicon): Docker + `--platform linux/arm64` is used for arm64 images (Metal GPU acceleration implemented in the image)
-- Optional: `gh` CLI if you want to create GitHub releases
-
-Model files:
-- BGE: `models/bge-m3.gguf` (Makefile target `make download-bge` will download it)
-- Qwen: `models/qwen3-0.6b-instruct.gguf` (Makefile target `make download-qwen` will download it)
-
----
-
-## Common Make flags
-- Force no cache: `NO_CACHE=1`
-- Set registry (default `timothyswt`): `REGISTRY=yourdockerid`
-- Set tag version (default `latest`): `VERSION=1.0.6`
-
-
-
-# [DIY INSTRUCTIONS](DIY.md)
-
-
----
-
-## What is NornicDB?
+## What Problem Does This Solve?
 
 NornicDB is a high-performance graph database designed for AI agents and knowledge systems. It speaks Neo4j's language (Bolt protocol + Cypher) so you can switch with zero code changes, while adding intelligent features that traditional databases lack.
 
 NornicDB automatically discovers and manages relationships in your data, weaving connections that let meaning emerge from your knowledge graph.
+
+## Why NornicDB Is Different
+
+- **Neo4j-compatible by default**: Bolt + Cypher support for existing drivers and applications.
+- **Built for AI-native workloads**: vector search, memory decay, and auto-relationships are first-class features.
+- **Hardware-accelerated execution**: Metal/CUDA/Vulkan pathways for high-throughput graph + semantic workloads.
+- **Operational flexibility**: full images (models included), BYOM images, and headless API-only deployments.
+
+## Performance Snapshot
+
+**LDBC Social Network Benchmark** (M3 Max, 64GB):
+
+| Query Type                    | NornicDB      | Neo4j       | Speedup |
+| ----------------------------- | ------------- | ----------- | ------- |
+| **Message content lookup**    | 6,389 ops/sec | 518 ops/sec | **12x** |
+| **Recent messages (friends)** | 2,769 ops/sec | 108 ops/sec | **25x** |
+| **Avg friends per city**      | 4,713 ops/sec | 91 ops/sec  | **52x** |
+| **Tag co-occurrence**         | 2,076 ops/sec | 65 ops/sec  | **32x** |
+
+> See [full benchmark results](docs/performance/benchmarks-vs-neo4j.md) for complete methodology and additional workloads.
 
 ## Quick Start
 
 ### Docker (Recommended)
 
 ```bash
-# Ready to go - includes embedding model
+# Apple Silicon (includes bge-m3 embedding model)
 docker run -d --name nornicdb \
   -p 7474:7474 -p 7687:7687 \
   -v nornicdb-data:/data \
   timothyswt/nornicdb-arm64-metal-bge:latest  # Apple Silicon
   # timothyswt/nornicdb-amd64-cuda-bge:latest  # NVIDIA GPU
 ```
+
+Open [http://localhost:7474](http://localhost:7474) for the admin UI.
+
+Need a different image/profile (Heimdall, BYOM, CPU-only, Vulkan, headless)?
+- [Docker image quick reference](docs/getting-started/image-quick-reference.md)
+- [Docker images section](#docker-images)
 
 ### From Source
 
@@ -169,6 +97,12 @@ with driver.session() as session:
     session.run("CREATE (n:Memory {content: 'Hello NornicDB'})")
 ```
 
+## Build It Yourself
+
+Detailed local build, cross-compile, and packaging instructions:
+- [DIY instructions](DIY.md)
+- [Building section](#building)
+
 ## Features
 
 ### 🔌 Neo4j Compatible
@@ -178,6 +112,7 @@ Drop-in replacement for Neo4j. Your existing code works unchanged.
 - **Bolt Protocol** — Use official Neo4j drivers
 - **Cypher Queries** — Full query language support
 - **Schema Management** — Constraints, indexes, vector indexes
+- **Qdrant gRPC API Compatible** — Works with Qdrant-style gRPC vector workflows
 
 ### 🧠 Intelligent Memory
 
@@ -284,6 +219,65 @@ curl -X POST http://localhost:7474/nornicdb/search \
   -H "Content-Type: application/json" \
   -d '{"query": "machine learning", "limit": 10}'
 ```
+
+**Option 4: GraphQL API (Hybrid Search)**
+
+Use GraphQL for the same hybrid retrieval via `search(query, options)`:
+
+```bash
+curl -X POST http://localhost:7474/graphql \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "query Search { search(query: \"machine learning\", options: { limit: 10, method: HYBRID }) { totalCount executionTimeMs results { score rrfScore foundBy node { id labels } } } }"
+  }'
+```
+
+**Option 5: gRPC API (Qdrant-Compatible Search)**
+
+Use existing Qdrant gRPC clients against NornicDB (`:6334` by default):
+
+```python
+from qdrant_client import QdrantClient
+
+client = QdrantClient(host="127.0.0.1", grpc_port=6334, prefer_grpc=True)
+results = client.search(
+    collection_name="my_vectors",
+    query_vector=[1.0] * 128,
+    limit=10,
+)
+print([r.id for r in results])
+```
+
+String search is also available using existing Qdrant gRPC driver semantics via `Points.Query` with `Document.text`:
+
+```python
+from qdrant_client import QdrantClient, models
+
+client = QdrantClient(host="127.0.0.1", grpc_port=6334, prefer_grpc=True)
+resp = client.query_points(
+    collection_name="my_vectors",
+    query=models.Document(text="machine learning"),
+    limit=10,
+)
+```
+
+NornicDB also exposes an additive native RPC (`NornicSearch/SearchText`) on the same endpoint:
+
+```go
+conn, _ := grpc.Dial("127.0.0.1:6334", grpc.WithTransportCredentials(insecure.NewCredentials()))
+defer conn.Close()
+
+client := nornicpb.NewNornicSearchClient(conn)
+resp, _ := client.SearchText(ctx, &nornicpb.SearchTextRequest{
+    Query: "machine learning",
+    Limit: 10,
+})
+_ = resp
+```
+
+> Prerequisite: add the Nornic proto-generated client alongside your existing Qdrant driver usage. See `docs/user-guides/nornic-search-grpc.md`.
+>
+> Enable with `NORNICDB_QDRANT_GRPC_ENABLED=true`. See `docs/user-guides/qdrant-grpc.md` for setup and Qdrant compatibility notes.
 
 ### 🤖 Heimdall AI Assistant
 
@@ -396,28 +390,31 @@ docker build --build-arg HEADLESS=true -f docker/Dockerfile.arm64-metal .
 server:
   bolt_port: 7687
   http_port: 7474
-  data_dir: ./data
+  host: localhost
 
-embeddings:
+database:
+  data_dir: ./data
+  async_writes_enabled: true
+  async_flush_interval: 50ms
+  async_max_node_cache_size: 50000
+  async_max_edge_cache_size: 100000
+
+embedding:
+  enabled: true
   provider: local # or ollama, openai
-  model: bge-m3
+  model: bge-m3.gguf
+  url: ""
   dimensions: 1024
 
-decay:
-  enabled: true
-  recalculate_interval: 1h
+embedding_worker:
+  chunk_size: 8192
+  chunk_overlap: 50
 
-auto_links:
-  enabled: true
-  similarity_threshold: 0.82
-
-# === Async Write Settings ===
-# These control the async write-behind cache for better throughput
-async_writes:
-  enabled: true                    # Enable async writes (default: true)
-  flush_interval: 50ms            # How often to flush pending writes
-  max_node_cache_size: 50000      # Max nodes to buffer before forcing flush
-  max_edge_cache_size: 100000     # Max edges to buffer before forcing flush
+memory:
+  decay_enabled: true
+  decay_interval: 1h
+  auto_links_enabled: true
+  auto_links_similarity_threshold: 0.82
 ```
 
 ## Use Cases
@@ -425,14 +422,21 @@ async_writes:
 - **AI Agent Memory** — Persistent, queryable memory for LLM agents
 - **Knowledge Graphs** — Auto-organizing knowledge bases
 - **RAG Systems** — Vector + graph retrieval in one database
+- **Graph-RAG for LLM Inference** — Simplify retrieval pipelines by combining graph traversal, hybrid search, and provenance in one engine
 - **Session Context** — Decaying conversation history
 - **Research Tools** — Connect papers, notes, and insights
+- **Canonical Truth Stores** — Versioned facts, temporal validity, and append-only mutation history in a graph model
+- **Financial Systems** — Loan/risk state reconstruction with as-of reads and audit receipts
+- **Compliance & RegTech** — KYC/AML state changes, policy/rule versioning, and non-overlapping validity enforcement
+- **Audit Platforms** — Correlate graph mutations to WAL sequence ranges and receipt hashes
+- **AI Governance & Lineage** — Track model assertions, overrides, and fact provenance over time
 
 ## Documentation
 
 | Guide                                                                      | Description                    |
 | -------------------------------------------------------------------------- | ------------------------------ |
 | [Getting Started](docs/getting-started/README.md)                          | Installation & quick start     |
+| [Docker Image Quick Reference](docs/getting-started/image-quick-reference.md) | Full runtime image matrix   |
 | [API Reference](docs/api-reference/README.md)                              | Cypher functions & procedures  |
 | [User Guides](docs/user-guides/README.md)                                  | Complete examples & patterns   |
 | [Performance](docs/performance/README.md)                                  | Benchmarks vs Neo4j            |
@@ -443,16 +447,17 @@ async_writes:
 
 ## Comparison
 
-| Feature            | Neo4j    | NornicDB   |
-| ------------------ | -------- | ---------- |
-| Protocol           | Bolt ✓   | Bolt ✓     |
-| Query Language     | Cypher ✓ | Cypher ✓   |
-| Memory Decay       | Manual   | Automatic  |
-| Auto-Relationships | No       | Built-in   |
-| Vector Search      | Plugin   | Native     |
-| GPU Acceleration   | No       | Metal/CUDA |
-| Embedded Mode      | No       | Yes        |
-| License            | GPL      | MIT        |
+| Platform | Category | Query Language Support (and protocol) | Native Vector Search | Canonical Graph + Temporal Ledger Pattern | Queryable Mutation Log + Receipts | Embedded/Self-Hosted Focus |
+| -------- | -------- | -------------------------------------- | -------------------- | ------------------------------------------ | ------------------------------- | -------------------------- |
+| **NornicDB** | Graph + Vector + Canonical Ledger | **Cypher via Bolt**; also HTTP/GraphQL and gRPC (Qdrant-compatible + NornicSearch) | **Yes** | **Yes** | **Yes** | **Yes** |
+| Neo4j | Graph DB | Cypher via Bolt/HTTP | Yes | Partial (manual modeling) | Partial (logs exist, not first-class receipts model) | Server-first |
+| Memgraph | Graph DB | openCypher via Bolt/HTTP | Partial/varies by setup | Partial (manual) | Partial (manual/integration) | Server-first |
+| TigerGraph | Graph analytics DB | GSQL via REST++/native endpoints | Partial/extension-driven | Partial (manual) | Partial (manual/integration) | Server-first |
+| Qdrant | Vector DB | Qdrant query/filter API via gRPC/REST | Yes | No (not graph-native) | No | Server-first |
+| Weaviate | Vector DB | GraphQL + REST APIs | Yes | Partial (knowledge graph features, not Cypher property graph) | No | Server-first |
+| Amazon QLDB | Ledger DB | PartiQL via AWS API/SDK | No | Partial (ledger + temporal history, not graph-native) | Yes (ledger-native) | Managed service |
+
+> Snapshot is capability-oriented and high-level; exact behavior depends on edition/configuration and workload design.
 
 ## Building
 
@@ -512,16 +517,26 @@ make cross-all             # All platforms
 
 ## Roadmap
 
+### Completed
+
 - [x] Neo4j Bolt protocol
 - [x] Cypher query engine (52 functions)
 - [x] Memory decay system
 - [x] GPU acceleration (Metal, CUDA)
 - [x] Vector & full-text search
-- [X] Auto-relationship engine
-- [X] HNSW vector index
+- [x] Auto-relationship engine
+- [x] HNSW vector index
 - [x] Metadata/Property Indexing
 - [x] SIMD Implementation
 - [x] Clustering support
+
+### Planned (from `docs/plans`)
+
+- [ ] Hybrid retrieval Phase 1: adaptive vector/BM25 execution order, cost-aware switching, and query telemetry (`docs/plans/scaling-search.md`)
+- [ ] Distributed fabric Phase 1-2: QueryGateway, remote transport, shard routing, and distributed dispatch (`docs/plans/sharding.md`)
+- [ ] Distributed transactions and vector search across shards (Fabric Phases 3-4) (`docs/plans/sharding.md`)
+- [ ] Cluster admin APIs + UI/protocol integration for shard management (Fabric Phases 5-6) (`docs/plans/sharding.md`)
+- [ ] GDPR compliance hardening: user-data detection, relationship export/delete/anonymization, and audit-log coverage (`docs/plans/gdpr-compliance-fixes.md`)
 
 ## Contributors
 

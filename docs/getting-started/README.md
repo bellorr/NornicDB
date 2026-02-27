@@ -6,6 +6,7 @@ Welcome to NornicDB! This guide will get you up and running in 5 minutes.
 
 - **[Installation Guide](installation.md)** - Install NornicDB on your system
 - **[Quick Start](quick-start.md)** - Docker setup and first queries
+- **[Docker Image Quick Reference](image-quick-reference.md)** - Full image command matrix by platform/profile
 - **[First Queries](first-queries.md)** - Learn basic Cypher queries
 - **[Docker Deployment](docker-deployment.md)** - Production Docker setup
 
