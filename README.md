@@ -12,6 +12,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/version-1.0.0-success" alt="Version 1.0.0">
   <a href="https://github.com/orneryd/NornicDB"><img src="https://img.shields.io/badge/github-orneryd%2FNornicDB-blue?logo=github" alt="GitHub"></a>
+  <a href="https://github.com/orneryd/NornicDB/stargazers"><img src="https://img.shields.io/github/stars/orneryd/NornicDB?style=flat&logo=github" alt="GitHub Stars"></a>
   <a href="https://hub.docker.com/u/timothyswt"><img src="https://img.shields.io/badge/docker-ready-blue?logo=docker" alt="Docker"></a>
   <a href="https://neo4j.com/"><img src="https://img.shields.io/badge/neo4j-compatible-008CC1?logo=neo4j" alt="Neo4j Compatible"></a>
   <a href="https://go.dev/"><img src="https://img.shields.io/badge/go-%3E%3D1.26-00ADD8?logo=go" alt="Go Version"></a>
@@ -20,6 +21,7 @@
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> •
+  <a href="#why-switch-from-neo4j">Why Switch</a> •
   <a href="#what-problem-does-this-solve">Problem</a> •
   <a href="#why-nornicdb-is-different">Why Different</a> •
   <a href="#performance-snapshot">Benchmarks</a> •
@@ -110,6 +112,22 @@ with driver.session() as session:
     session.run("CREATE (n:Memory {content: 'Hello NornicDB'})")
 ```
 
+## Why Switch from Neo4j?
+
+- **12x-52x faster** on published LDBC workloads (same hardware comparisons).
+- **Native graph + vector** in one engine (no separate vector sidecar required).
+- **GPU acceleration paths** (Metal/CUDA/Vulkan) for semantic + graph workloads.
+- **Drop-in compatibility** via Bolt + Cypher for existing applications.
+- **Canonical graph ledger model** for temporal validity, as-of reads, and audit-oriented mutation tracking.
+
+## Why Switch from Qdrant?
+
+- **Graph + vector in one engine**: combine semantic retrieval with native graph traversal and Cypher queries.
+- **Qdrant gRPC compatibility preserved**: keep Qdrant-style gRPC workflows while adding graph-native capabilities.
+- **Hybrid retrieval built in**: vector + BM25 fusion and optional reranking in the same query pipeline.
+- **Canonical truth modeling**: versioned facts, temporal validity windows, and as-of reads for governance-heavy use cases.
+- **Protocol flexibility**: use REST, GraphQL, Bolt/Cypher, Qdrant-compatible gRPC, and additive Nornic gRPC on one platform.
+
 ## Build It Yourself
 
 Detailed local build, cross-compile, and packaging instructions:
@@ -152,80 +170,21 @@ NornicDB weaves connections automatically:
 - **Temporal Proximity** — Same-session nodes associate
 - **Transitive Inference** — A→B + B→C suggests A→C
 
-### ⚡ Performance
-
-**LDBC Social Network Benchmark** (M3 Max, 64GB):
-
-| Query Type                    | NornicDB      | Neo4j       | Speedup |
-| ----------------------------- | ------------- | ----------- | ------- |
-| **Message content lookup**    | 6,389 ops/sec | 518 ops/sec | **12x** |
-| **Recent messages (friends)** | 2,769 ops/sec | 108 ops/sec | **25x** |
-| **Avg friends per city**      | 4,713 ops/sec | 91 ops/sec  | **52x** |
-| **Tag co-occurrence**         | 2,076 ops/sec | 65 ops/sec  | **32x** |
-
-**Northwind Benchmark** (M3 Max vs Neo4j, same hardware):
-
-| Operation        | NornicDB      | Neo4j         | Speedup  |
-| ---------------- | ------------- | ------------- | -------- |
-| **Index lookup** | 7,623 ops/sec | 2,143 ops/sec | **3.6x** |
-| **Count nodes**  | 5,253 ops/sec | 798 ops/sec   | **6.6x** |
-| **Write: node**  | 5,578 ops/sec | 1,690 ops/sec | **3.3x** |
-| **Write: edge**  | 6,626 ops/sec | 1,611 ops/sec | **4.1x** |
-
-**Cross-Platform (CUDA on Windows i9-9900KF + RTX 2080 Ti):**
-
-| Operation                 | Throughput    |
-| ------------------------- | ------------- |
-| **Orders by customer**    | 4,252 ops/sec |
-| **Products out of stock** | 4,174 ops/sec |
-| **Find category**         | 4,071 ops/sec |
-
-**Additional advantages:**
-
-- **Memory footprint**: 100-500 MB vs 1-4 GB for Neo4j
-- **Cold start**: <1s vs 10-30s for Neo4j
-
-> See [full benchmark results](docs/performance/benchmarks-vs-neo4j.md) for detailed comparisons.
-
 ### 🎯 Vector Search
 
-Native semantic search with GPU acceleration. NornicDB automatically indexes all node embeddings - no manual index creation required.
+Native semantic search with GPU acceleration and hybrid retrieval support.
 
-> 📖 **Deep Dive:** See [Vector Search Guide](docs/user-guides/vector-search.md) for internal index architecture, user-defined indexes, and the embedding lookup order.
+> 📖 Deep dive: [Vector Search Guide](docs/user-guides/vector-search.md) and [Qdrant gRPC Endpoint](docs/user-guides/qdrant-grpc.md).
 
-**Option 1: Vector Array (Neo4j Compatible)**
-
-Provide your own embeddings - works identically to Neo4j:
+**Cypher (Neo4j-compatible):**
 
 ```cypher
-// Query with a pre-computed embedding vector
-CALL db.index.vector.queryNodes(
-  'embeddings',            // Index name (created via createNodeIndex)
-  10,                      // Number of results
-  [0.1, 0.2, 0.3, ...]     // Your query vector
-) YIELD node, score
+CALL db.index.vector.queryNodes('embeddings', 10, 'machine learning guide')
+YIELD node, score
 RETURN node.content, score
 ```
 
-**Option 2: String Query (NornicDB Enhanced)**
-
-Let NornicDB handle embedding generation automatically:
-
-```cypher
-// Query with natural language - NornicDB generates the embedding
-CALL db.index.vector.queryNodes(
-  'embeddings',              // Index name
-  10,                        // Number of results
-  'machine learning guide'   // Natural language query (auto-embedded)
-) YIELD node, score
-RETURN node.content, score
-```
-
-> 💡 **Note:** String queries require an embedder to be configured. When enabled, NornicDB automatically generates embeddings server-side using the configured model (Ollama, OpenAI, or local GGUF).
-
-**Option 3: REST API (Hybrid Search)**
-
-Use the REST endpoint for combined vector + BM25 search:
+**Hybrid search (REST):**
 
 ```bash
 curl -X POST http://localhost:7474/nornicdb/search \
@@ -233,64 +192,11 @@ curl -X POST http://localhost:7474/nornicdb/search \
   -d '{"query": "machine learning", "limit": 10}'
 ```
 
-**Option 4: GraphQL API (Hybrid Search)**
-
-Use GraphQL for the same hybrid retrieval via `search(query, options)`:
-
-```bash
-curl -X POST http://localhost:7474/graphql \
-  -H "Content-Type: application/json" \
-  -d '{
-    "query": "query Search { search(query: \"machine learning\", options: { limit: 10, method: HYBRID }) { totalCount executionTimeMs results { score rrfScore foundBy node { id labels } } } }"
-  }'
-```
-
-**Option 5: gRPC API (Qdrant-Compatible Search)**
-
-Use existing Qdrant gRPC clients against NornicDB (`:6334` by default):
-
-```python
-from qdrant_client import QdrantClient
-
-client = QdrantClient(host="127.0.0.1", grpc_port=6334, prefer_grpc=True)
-results = client.search(
-    collection_name="my_vectors",
-    query_vector=[1.0] * 128,
-    limit=10,
-)
-print([r.id for r in results])
-```
-
-String search is also available using existing Qdrant gRPC driver semantics via `Points.Query` with `Document.text`:
-
-```python
-from qdrant_client import QdrantClient, models
-
-client = QdrantClient(host="127.0.0.1", grpc_port=6334, prefer_grpc=True)
-resp = client.query_points(
-    collection_name="my_vectors",
-    query=models.Document(text="machine learning"),
-    limit=10,
-)
-```
-
-NornicDB also exposes an additive native RPC (`NornicSearch/SearchText`) on the same endpoint:
-
-```go
-conn, _ := grpc.Dial("127.0.0.1:6334", grpc.WithTransportCredentials(insecure.NewCredentials()))
-defer conn.Close()
-
-client := nornicpb.NewNornicSearchClient(conn)
-resp, _ := client.SearchText(ctx, &nornicpb.SearchTextRequest{
-    Query: "machine learning",
-    Limit: 10,
-})
-_ = resp
-```
-
-> Prerequisite: add the Nornic proto-generated client alongside your existing Qdrant driver usage. See `docs/user-guides/nornic-search-grpc.md`.
->
-> Enable with `NORNICDB_QDRANT_GRPC_ENABLED=true`. See `docs/user-guides/qdrant-grpc.md` for setup and Qdrant compatibility notes.
+More API entry points:
+- **GraphQL** hybrid search: `POST /graphql` with `search(query, options)`
+- **gRPC** (Qdrant-compatible): `Points.Search` / `Points.Query(Document.text)`
+- **Nornic native gRPC**: `NornicSearch/SearchText` (additive client)
+- See `docs/user-guides/nornic-search-grpc.md` for additive proto setup without forking Qdrant drivers.
 
 ### 🤖 Heimdall AI Assistant
 
