@@ -1794,9 +1794,6 @@ func (s *Service) IndexNode(node *storage.Node) error {
 	s.indexMu.Lock()
 	err := s.indexNodeLocked(node, false)
 	s.indexMu.Unlock()
-	if err == nil && !s.buildInProgress.Load() {
-		s.scheduleStrategyTransitionCheck()
-	}
 	return err
 }
 
@@ -2209,9 +2206,6 @@ func (s *Service) RemoveNode(nodeID storage.NodeID) error {
 	s.indexMu.Lock()
 	s.removeNodeLocked(string(nodeID))
 	s.indexMu.Unlock()
-	if !s.buildInProgress.Load() {
-		s.scheduleStrategyTransitionCheck()
-	}
 
 	return nil
 }
@@ -3270,26 +3264,7 @@ func (s *Service) snapshotStrategyInputs() (int, *VectorIndex, *VectorFileStore)
 }
 
 func (s *Service) scheduleStrategyTransitionCheck() {
-	if s.buildInProgress.Load() {
-		return
-	}
-	vectorCount, _, _ := s.snapshotStrategyInputs()
-	current := s.currentPipelineStrategy()
-	if current == strategyModeUnknown {
-		return
-	}
-	desired := s.desiredRuntimeStrategy(vectorCount)
-	if desired == current {
-		return
-	}
-	if (current == strategyModeBruteCPU || current == strategyModeBruteGPU) &&
-		(desired == strategyModeBruteCPU || desired == strategyModeBruteGPU) {
-		if s.switchBruteStrategy(desired) {
-			log.Printf("🔍 Runtime strategy switch: %s -> %s (N=%d)", current.String(), desired.String(), vectorCount)
-		}
-		return
-	}
-	s.scheduleDebouncedStrategyTransition(desired)
+	return
 }
 
 func (s *Service) scheduleDebouncedStrategyTransition(target strategyMode) {
