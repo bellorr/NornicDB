@@ -790,10 +790,15 @@ func (e *StorageExecutor) tryAsyncCreateNodeBatch(ctx context.Context, cypher st
 	if !strings.HasPrefix(upper, "CREATE") {
 		return nil, nil, false
 	}
-	// System commands (CREATE DATABASE / COMPOSITE DATABASE / ALIAS) must not be handled here
+	// System commands and schema commands must not be handled here — route to executeSchemaCommand instead
 	if findMultiWordKeywordIndex(cypher, "CREATE", "DATABASE") == 0 ||
 		findMultiWordKeywordIndex(cypher, "CREATE", "COMPOSITE DATABASE") == 0 ||
-		findMultiWordKeywordIndex(cypher, "CREATE", "ALIAS") == 0 {
+		findMultiWordKeywordIndex(cypher, "CREATE", "ALIAS") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "CONSTRAINT") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "INDEX") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "FULLTEXT") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "VECTOR") == 0 ||
+		findMultiWordKeywordIndex(cypher, "CREATE", "RANGE") == 0 {
 		return nil, nil, false
 	}
 	for _, keyword := range []string{
